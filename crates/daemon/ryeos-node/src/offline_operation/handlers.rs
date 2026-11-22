@@ -580,11 +580,26 @@ fn trust_scope(
     if !kinds.is_empty() {
         scope.kinds = kinds.to_vec();
     }
-    scope.projects = projects.to_vec();
+    scope.projects = trust_scope_projects(projects)?;
     scope
         .validate()
         .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))?;
     Ok(scope)
+}
+
+/// Parse project scope entries: `fp:<owner>/<name>` or `own:<name>`. A path
+/// is refused: it is not a project scope.
+fn trust_scope_projects(
+    projects: &[String],
+) -> Result<Vec<ryeos_engine::trust::ProjectScopeEntry>> {
+    projects
+        .iter()
+        .map(|project| {
+            project
+                .parse()
+                .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))
+        })
+        .collect()
 }
 
 fn validate_trust_scope_lists(
@@ -622,7 +637,7 @@ impl TrustScopeArguments {
                 })
                 .collect::<Result<_>>()?,
             kinds: self.kinds.clone(),
-            projects: self.projects.clone(),
+            projects: trust_scope_projects(&self.projects)?,
         };
         scope
             .validate()
@@ -708,7 +723,7 @@ pub(super) fn trust_scope_change(ctx: &HandlerContext<'_>) -> Result<Value> {
             })
             .collect::<Result<_>>()?,
         kinds: arguments.kinds,
-        projects: arguments.projects,
+        projects: trust_scope_projects(&arguments.projects)?,
     };
     run_trust_change(
         ctx,

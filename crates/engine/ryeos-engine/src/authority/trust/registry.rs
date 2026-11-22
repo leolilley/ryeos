@@ -26,6 +26,8 @@ use crate::contracts::ItemSpace;
 
 /// Schema identifier of one signer record.
 pub const SIGNER_RECORD_SCHEMA: &str = "ryeos/trust-signer/v2";
+/// The previous record schema, whose project entries were paths.
+pub const SIGNER_RECORD_SCHEMA_V1: &str = "ryeos/trust-signer/v1";
 /// Schema identifier of one key event.
 pub const TRUST_EVENT_SCHEMA: &str = "ryeos/trust-event/v1";
 /// Schema identifier of a succession statement.
@@ -738,7 +740,17 @@ pub fn parse_signer_record(
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
-    if schema != SIGNER_RECORD_SCHEMA {
+    // A v1 record with no project entries means exactly what a v2 one does
+    // (unscoped), so it reads unchanged. A v1 record that lists project entries
+    // names paths, which are no longer a scope: it is refused by name until
+    // the operator re-scopes it.
+    let v1_without_projects = schema == SIGNER_RECORD_SCHEMA_V1
+        && value
+            .get("scope")
+            .and_then(|scope| scope.get("projects"))
+            .and_then(|projects| projects.as_sequence())
+            .is_none_or(|projects| projects.is_empty());
+    if schema != SIGNER_RECORD_SCHEMA && !v1_without_projects {
         return Err(TrustError::RecordSchemaUnsupported {
             path: path.to_path_buf(),
             seen: schema,
