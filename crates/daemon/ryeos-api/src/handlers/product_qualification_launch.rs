@@ -802,6 +802,7 @@ pub const CONTENT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
                 state,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(Into::into)
