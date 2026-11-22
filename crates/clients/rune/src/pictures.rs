@@ -16,9 +16,11 @@ use rune::{Image, ImageCache};
 use ryeos_client_base::art::is_art_hash;
 
 /// Largest picture the daemon serves; the transport refuses a longer body.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const MAX_PICTURE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The route path of one picture, `None` for anything that is not a hash.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn art_path(sha256: &str) -> Option<String> {
     is_art_hash(sha256).then(|| format!("/ui/art/{sha256}"))
 }
