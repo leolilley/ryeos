@@ -8381,6 +8381,7 @@ fn verify_candidate_evaluation_testimony(
         _ => false,
     };
     if stable_project_identity != source_project_identity
+        || evaluator.project_authority.signer_project() != source.project_authority.signer_project()
         || evaluator_base != candidate_snapshot_hash
         || evaluator_snapshot != candidate_snapshot_hash
         || !binding_matches
@@ -8953,6 +8954,8 @@ fn verify_candidate_integration_terminal(
             && current_operational_generation == source_candidate
     );
     if integration_project_identity != source_project_identity
+        || integration.project_authority.signer_project()
+            != source.project_authority.signer_project()
         || integration_display_path != source_display_path
         || integration_base != base_snapshot_hash
         || integration_snapshot != source_candidate
@@ -9962,6 +9965,7 @@ async fn qualify_candidate(
         _ => false,
     };
     if stable_project_identity != source_project_identity
+        || evaluator.project_authority.signer_project() != source.project_authority.signer_project()
         || evaluator_base != &req.candidate_snapshot_hash
         || evaluator_snapshot != &req.candidate_snapshot_hash
         || !binding_matches
