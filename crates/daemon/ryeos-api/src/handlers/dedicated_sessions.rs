@@ -5397,6 +5397,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                     .transpose()?
                     .unwrap_or(false);
                 if allowance_was_exported {
+                    // Finish the exact writer cut, then fall through and
+                    // redrive target adoption in this same pass.
                     recover_exported_source_writer_cut(
                         state,
                         &latest_job,
@@ -5404,15 +5406,19 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         &mut progress,
                     )
                     .await?;
-                    recovered += 1;
+                } else {
+                    if recover_pre_cut_source_handoff_abort(
+                        state,
+                        &latest_job,
+                        &operation,
+                        &progress,
+                    )
+                    .await?
+                    {
+                        recovered += 1;
+                    }
                     continue;
                 }
-                if recover_pre_cut_source_handoff_abort(state, &latest_job, &operation, &progress)
-                    .await?
-                {
-                    recovered += 1;
-                }
-                continue;
             }
             let (Some(placement_hash), Some(writer_hash), Some(target_head_hash)) = (
                 progress.placement_attestation_hash.clone(),
