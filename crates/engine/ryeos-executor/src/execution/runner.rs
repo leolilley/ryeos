@@ -1914,22 +1914,15 @@ fn post_execution_foldback(
             else {
                 unreachable!("advance-head branch is guarded by the publication variant")
             };
-            let project_str = project_path.to_str().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cannot advance fold-back HEAD for non-UTF-8 project identity {}",
-                    project_path.display()
-                )
-            })?;
-            let canonical_project =
-                crate::execution::project_source::canonical_project_ref(project_str)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let project_hash = lillux::cas::sha256_hex(canonical_project.as_bytes());
+            // The sealed ref is the only head this fold-back may advance; it
+            // is never rebuilt. It must still be the acting principal's own.
+            let sealed = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
+                .context("sealed terminal publication ref")?;
             let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)
                 .context("derive fold-back principal storage identity")?;
-            let expected_head_ref = format!("projects/{principal_key}/{project_hash}/head");
-            if head_ref != &expected_head_ref {
+            if sealed.owner_key() != principal_key {
                 anyhow::bail!(
-                    "sealed terminal publication ref changed before fold-back: expected {expected_head_ref:?}, got {head_ref:?}"
+                    "sealed terminal publication ref {head_ref:?} is not the acting principal's own head"
                 );
             }
             Some((head_ref, expected_hash))

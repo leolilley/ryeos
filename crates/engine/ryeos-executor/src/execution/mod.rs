@@ -2020,25 +2020,8 @@ fn advance_head_to_frozen_runtime_result(
     expected_hash: &str,
     generation: &ryeos_state::objects::WorkspaceGenerationPair,
 ) -> Result<()> {
-    let mut components = head_ref.split('/');
-    let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-    ) else {
-        anyhow::bail!("managed runtime advance-head authority has a non-canonical ref");
-    };
-    let canonical_component = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    if !canonical_component(principal_key) || !canonical_component(project_hash) {
-        anyhow::bail!("managed runtime advance-head authority has a non-canonical identity");
-    }
+    let head = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
+        .context("managed runtime advance-head authority has a non-canonical ref")?;
 
     let authority = pinned_state_authority(state)?;
     let cas_guard = authority.acquire_shared_guard()?;
@@ -2053,8 +2036,7 @@ fn advance_head_to_frozen_runtime_result(
         .advance_project_head_ref_owned(
             thread_id,
             launch_owner,
-            principal_key,
-            project_hash,
+            &head,
             &generation.snapshot_hash,
             expected_hash,
             &signer,
