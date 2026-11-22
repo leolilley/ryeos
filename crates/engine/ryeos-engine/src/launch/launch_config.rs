@@ -1832,6 +1832,43 @@ composer: handler:ryeos/core/identity
     }
 
     #[test]
+    fn launch_config_roots_leave_a_live_launch_judged_on_its_own_root() {
+        let config = scoped_config();
+        let project = tempfile::tempdir().unwrap();
+        let own = project.path().canonicalize().unwrap();
+        std::fs::create_dir_all(own.join(".ai/config")).unwrap();
+        std::fs::write(own.join(".ai/config/scoped.yaml"), &config.document).unwrap();
+        let store = scoped_store(&config, &own);
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let plain = crate::engine::Engine::new(
+            crate::kind_registry::KindRegistry::empty(),
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        );
+        let with_node_config = plain
+            .clone()
+            .with_node_config_root(PathBuf::from("/not-opened/node-config"));
+        for engine in [&plain, &with_node_config] {
+            for logical in [Some(own.clone()), None] {
+                let roots = engine
+                    .launch_config_roots(&project_roots(&own).with_logical_project_root(logical));
+                assert!(
+                    load_launch_config_snapshots_with_proof(
+                        &declarations(),
+                        &roots,
+                        &parsers,
+                        &parsers,
+                        &config.kinds,
+                        &store,
+                        &store,
+                    )
+                    .is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_live_project_config_is_judged_on_its_own_root() {
         let config = scoped_config();
         let project = tempfile::tempdir().unwrap();
