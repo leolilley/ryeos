@@ -46,6 +46,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             )
         })?;
     let app_root = state.config.runtime_root();
+    // The remote reports the project owner it resolves for the outbound key
+    // later remote operations use by default (as the caller, under its
+    // delegation). It is recorded here and asserted on every head read or
+    // advance; a remote that cannot report one is refused, never bound
+    // without an owner.
+    let remote_owner =
+        crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?
+            .project_owner()
+            .await?;
 
     let request_digest = lillux::cas::canonical_json(&serde_json::json!({
         "remote": req.remote,
@@ -53,6 +62,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "project_name": project_name,
         "remote_project": req.remote_project,
         "sync_scope": req.sync_scope,
+        "remote_owner": remote_owner,
     }))
     .ok()
     .map(|canonical| lillux::cas::sha256_hex(canonical.as_bytes()));
@@ -60,6 +70,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         project_name: project_name.clone(),
         remote_project_path: req.remote_project.clone(),
         sync_scope: req.sync_scope,
+        remote_owner: remote_owner.clone(),
     };
     config::rewrite_project_bindings(
         app_root.as_path(),
@@ -78,6 +89,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "project_name": project_name,
         "remote_project_path": req.remote_project,
         "sync_scope": req.sync_scope,
+        "remote_owner": remote_owner,
     }))
 }
 

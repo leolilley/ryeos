@@ -166,6 +166,7 @@ pub async fn handle(
         project_path_for_ref = binding.remote_project_path.clone();
     }
     let project_name = config::push_project_name(binding.as_ref(), &abs_project_path)?;
+    let remote_owner = binding.as_ref().map(|binding| binding.remote_owner.clone());
 
     match scope {
         ProjectSyncScope::AiOnly => {
@@ -196,6 +197,7 @@ pub async fn handle(
                 &abs_project_path,
                 &project_name,
                 &remote_ignore,
+                remote_owner.as_ref(),
             )
             .await?;
             Ok(serde_json::json!({
@@ -246,6 +248,7 @@ pub async fn handle(
                 &abs_project_path,
                 &project_name,
                 &remote_ignore,
+                remote_owner.as_ref(),
             )
             .await?;
             Ok(serde_json::json!({

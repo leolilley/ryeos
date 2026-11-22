@@ -102,3 +102,121 @@ pub fn head_advancer(
 ) -> Result<HeadAdvancer> {
     head_advancer_in(&state.engine.trust_store, key, head_owner)
 }
+
+/// Refuse unless the owner this node resolves for `key` is exactly
+/// `expected` (when a caller asserted one). A remote client sends the owner
+/// it recorded at bind; this compares, before anything is read or advanced,
+/// and never uses the assertion as the owner or to select one.
+pub fn require_expected_owner_in(
+    trust: &TrustStore,
+    key: &str,
+    expected: Option<&PrincipalId>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let resolved = owner_for_in(trust, key)?;
+    if &resolved.principal != expected {
+        return Err(anyhow!(
+            "remote_owner_changed: this node resolves key {key} to project owner {} but the \
+             caller expected {expected}; the key was rotated, re-delegated or re-pinned since \
+             the project was bound. Re-bind it with `ryeos remote bind-project` after checking \
+             why",
+            resolved.principal
+        ));
+    }
+    Ok(())
+}
+
+/// [`require_expected_owner_in`] against the running node's registry.
+pub fn require_expected_owner(
+    state: &crate::state::AppState,
+    key: &str,
+    expected: Option<&PrincipalId>,
+) -> Result<()> {
+    require_expected_owner_in(&state.engine.trust_store, key, expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::crypto::SigningKey;
+    use ryeos_engine::trust::{
+        SignerRecord, SignerRole, SignerScope, SignerStatus, TrustEvent, TrustEventKind,
+        compute_fingerprint,
+    };
+
+    fn record(key: &SigningKey, status: SignerStatus) -> SignerRecord {
+        SignerRecord::new(
+            &key.verifying_key(),
+            "owner-test",
+            SignerRole::ProjectAuthor,
+            SignerScope::authoring_default(),
+            status,
+        )
+    }
+
+    fn solo(fingerprint: &str) -> PrincipalId {
+        ryeos_engine::trust::SuccessionGraph::default()
+            .ownership_of(fingerprint)
+            .unwrap()
+            .principal
+    }
+
+    #[test]
+    fn expected_owner_is_compared_with_the_resolver_never_adopted() {
+        let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let root = SigningKey::from_bytes(&[2u8; 32]);
+        let successor = SigningKey::from_bytes(&[3u8; 32]);
+        let root_fp = compute_fingerprint(&root.verifying_key());
+        let successor_fp = compute_fingerprint(&successor.verifying_key());
+        let succeeded = TrustEvent {
+            schema: "x".into(),
+            seq: 1,
+            previous: None,
+            kind: TrustEventKind::Succeeded,
+            signer: successor_fp.clone(),
+            record_digest: String::new(),
+            request_digest: String::new(),
+            operator: String::new(),
+            predecessor: Some(root_fp.clone()),
+        };
+        let trust = TrustStore::from_registry(
+            node,
+            vec![
+                record(&root, SignerStatus::Retired),
+                record(&successor, SignerStatus::Active),
+            ],
+        )
+        .unwrap()
+        .with_succession_chain(std::slice::from_ref(&succeeded));
+
+        // No assertion: nothing is compared.
+        require_expected_owner_in(&trust, &successor_fp, None).unwrap();
+        // The rotated successor still acts for the root's principal.
+        require_expected_owner_in(&trust, &successor_fp, Some(&solo(&root_fp))).unwrap();
+        // The successor's own solo principal is not what it resolves to.
+        let refused = require_expected_owner_in(&trust, &successor_fp, Some(&solo(&successor_fp)))
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").starts_with("remote_owner_changed"),
+            "{refused:#}"
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_succession_matches_only_its_own_principal() {
+        let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let key = SigningKey::from_bytes(&[4u8; 32]);
+        let fp = compute_fingerprint(&key.verifying_key());
+        let trust =
+            TrustStore::from_registry(node, vec![record(&key, SignerStatus::Active)]).unwrap();
+        require_expected_owner_in(&trust, &fp, Some(&solo(&fp))).unwrap();
+        let other: PrincipalId = format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
+        let refused = require_expected_owner_in(&trust, &fp, Some(&other)).unwrap_err();
+        assert!(
+            format!("{refused:#}").starts_with("remote_owner_changed"),
+            "{refused:#}"
+        );
+    }
+}

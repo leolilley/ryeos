@@ -116,6 +116,11 @@ struct Operation {
     /// The bound project name, sealed at admission; the pushed head on the
     /// target is the operator's head under it.
     project_name: ryeos_state::project_identity::ProjectName,
+    /// The project owner the binding recorded at bind, sealed with the
+    /// project name. Replays assert this exact owner on every head push and
+    /// launch; the remote compares it with its own resolver and refuses
+    /// `remote_owner_changed`. It is never used as the owner.
+    remote_owner: ryeos_state::principal_id::PrincipalId,
     admitted_source_snapshot_hash: String,
     source_snapshot_hash: String,
     workflow_ref: String,
@@ -504,7 +509,7 @@ pub async fn start(
         &admitted_source_snapshot_hash,
         req.source_snapshot_hash.as_deref(),
     )?;
-    let (resolved_local_path, remote, target_project_path, project_name) =
+    let (resolved_local_path, remote, target_project_path, project_name, remote_owner) =
         resolve_route(&state, &req.remote, Path::new(&local_project_path))?;
     if resolved_local_path != local_project_path {
         bail!("recorded workflow project identity changed during route resolution");
@@ -533,6 +538,7 @@ pub async fn start(
         local_project_path,
         target_project_path,
         project_name,
+        remote_owner,
         admitted_source_snapshot_hash,
         source_snapshot_hash,
         workflow_ref: req.workflow_ref,
@@ -824,6 +830,7 @@ async fn drive_operation(
                 &operation.source_snapshot_hash,
                 &operation.target_project_path,
                 &operation.project_name,
+                Some(&operation.remote_owner),
             )
             .await?;
             progress.pushed = true;
@@ -858,6 +865,7 @@ async fn drive_operation(
                     &execution_policy,
                     &operation.target_launch_id,
                     LAUNCH_CONTACT_TIMEOUT,
+                    Some(&operation.remote_owner),
                 )
                 .await?;
             response
@@ -1167,6 +1175,7 @@ async fn inspect_target_readiness(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             STATUS_TIMEOUT,
+            None,
         )
         .await
         .context("inspect target runtime readiness")?;
@@ -1335,6 +1344,7 @@ async fn adopt_contacted_launch(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             STATUS_TIMEOUT,
+            None,
         )
         .await
     {
@@ -1433,6 +1443,7 @@ async fn verify_target_launch(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             STATUS_TIMEOUT,
+            None,
         )
         .await
         .context("verify accepted target launch coordinate")?;
@@ -1779,6 +1790,7 @@ fn resolve_route(
     RemoteConfig,
     String,
     ryeos_state::project_identity::ProjectName,
+    ryeos_state::principal_id::PrincipalId,
 )> {
     let canonical = config::canonical_local_project_path(project)?;
     let local = config::local_project_identity(&canonical)?.to_owned();
@@ -1793,6 +1805,7 @@ fn resolve_route(
         loaded.config,
         binding.remote_project_path,
         binding.project_name,
+        binding.remote_owner,
     ))
 }
 
@@ -1840,7 +1853,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         &operation.operator_fingerprint,
         &operation.delegation_digest,
     )?;
-    let (_, remote, target, project_name) = resolve_route(
+    let (_, remote, target, project_name, remote_owner) = resolve_route(
         state,
         &operation.remote,
         Path::new(&operation.local_project_path),
@@ -1851,6 +1864,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         || remote.signing_key != operation.target_signing_key
         || target != operation.target_project_path
         || project_name != operation.project_name
+        || remote_owner != operation.remote_owner
     {
         bail!("remote-worker workflow route authority changed");
     }
@@ -4262,6 +4276,7 @@ mod tests {
             local_project_path: "/source".into(),
             target_project_path: "/target".into(),
             project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            remote_owner: format!("pid:v1:{}", "c".repeat(64)).parse().unwrap(),
             admitted_source_snapshot_hash: "d".repeat(64),
             source_snapshot_hash: "d".repeat(64),
             workflow_ref: "config:development/remote-worker".into(),

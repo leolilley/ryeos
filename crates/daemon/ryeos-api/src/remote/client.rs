@@ -664,6 +664,19 @@ impl RemoteClient {
         Ok(config)
     }
 
+    /// Add the owner a bound project recorded (`expected_owner`) to a request
+    /// body. The remote compares it with its own resolver and refuses
+    /// `remote_owner_changed`; it is never used as the owner.
+    fn with_expected_owner(
+        mut body: Value,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
+    ) -> Value {
+        if let Some(owner) = expected_owner {
+            body["expected_owner"] = Value::String(owner.to_string());
+        }
+        body
+    }
+
     /// POST /objects/has (authenticated).
     ///
     /// Object and blob digests stay typed throughout the protocol. A digest in
@@ -735,19 +748,23 @@ impl RemoteClient {
         project: &ryeos_state::project_identity::PushedProject,
         blobs: &[BlobUpload],
         objects: &[Value],
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<ObjectsPutResponse> {
         // Server expects objects as [{ "value": {...} }, ...]
         let wrapped_objects: Vec<Value> = objects
             .iter()
             .map(|obj| serde_json::json!({ "value": obj }))
             .collect();
-        let body = serde_json::json!({
-            "staging_id": staging_id,
-            "project": project,
-            "blobs": blobs,
-            "blob_chunks": [],
-            "objects": wrapped_objects,
-        });
+        let body = Self::with_expected_owner(
+            serde_json::json!({
+                "staging_id": staging_id,
+                "project": project,
+                "blobs": blobs,
+                "blob_chunks": [],
+                "objects": wrapped_objects,
+            }),
+            expected_owner,
+        );
         let resp = self.signed_post("/objects/put", &body).await?;
         Ok(ObjectsPutResponse {
             staging_id: resp["staging_id"]
@@ -786,6 +803,7 @@ impl RemoteClient {
         project: &ryeos_state::project_identity::PushedProject,
         blobs: &[BlobUpload],
         objects: &[RawObjectUpload],
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<ObjectsPutResponse> {
         #[derive(serde::Serialize)]
         struct RawEntry<'a> {
@@ -795,6 +813,8 @@ impl RemoteClient {
         struct Request<'a> {
             staging_id: Option<&'a str>,
             project: &'a ryeos_state::project_identity::PushedProject,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expected_owner: Option<&'a ryeos_state::principal_id::PrincipalId>,
             blobs: &'a [BlobUpload],
             blob_chunks: &'static [BlobChunkUpload],
             objects: Vec<RawEntry<'a>>,
@@ -802,6 +822,7 @@ impl RemoteClient {
         let request = Request {
             staging_id,
             project,
+            expected_owner,
             blobs,
             blob_chunks: &[],
             objects: objects
@@ -856,14 +877,18 @@ impl RemoteClient {
         staging_id: &str,
         project: &ryeos_state::project_identity::PushedProject,
         chunk: &BlobChunkUpload,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<ObjectsPutResponse> {
-        let body = serde_json::json!({
-            "staging_id": staging_id,
-            "project": project,
-            "blobs": [],
-            "blob_chunks": [chunk],
-            "objects": [],
-        });
+        let body = Self::with_expected_owner(
+            serde_json::json!({
+                "staging_id": staging_id,
+                "project": project,
+                "blobs": [],
+                "blob_chunks": [chunk],
+                "objects": [],
+            }),
+            expected_owner,
+        );
         let resp = self.signed_post("/objects/put", &body).await?;
         Ok(ObjectsPutResponse {
             staging_id: resp["staging_id"]
@@ -1597,6 +1622,37 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /project/owner (authenticated): the project owner the remote's
+    /// ownership resolver gives this client's key. A remote without the
+    /// endpoint, or a grant without its scope, is `remote_owner_unreported`.
+    pub async fn project_owner(&self) -> Result<ryeos_state::principal_id::PrincipalId> {
+        let response = self
+            .signed_post("/project/owner", &serde_json::json!({}))
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "remote_owner_unreported: the remote did not report the project owner it \
+                     resolves for this node ({error:#}). Upgrade the remote to a build with \
+                     /project/owner and grant this principal \
+                     ryeos.execute.service.project/owner"
+                )
+            })?;
+        if response.get("schema").and_then(Value::as_u64) != Some(1) {
+            anyhow::bail!(
+                "remote_owner_unreported: the remote's /project/owner response has no schema 1"
+            );
+        }
+        let owner = response
+            .get("owner")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("remote_owner_unreported: the remote reported no owner")
+            })?;
+        owner
+            .parse()
+            .map_err(|error| anyhow::anyhow!("remote_owner_unreported: {error:#}"))
+    }
+
     /// POST /push-head (authenticated).
     pub async fn push_head(
         &self,
@@ -1604,13 +1660,17 @@ impl RemoteClient {
         snapshot_hash: &str,
         staging_id: &str,
         expected_previous_hash: Option<&str>,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
-        let mut body = serde_json::json!({
-            "project": project,
-            "snapshot_hash": snapshot_hash,
-            "staging_id": staging_id,
-            "expected_previous_hash": expected_previous_hash,
-        });
+        let mut body = Self::with_expected_owner(
+            serde_json::json!({
+                "project": project,
+                "snapshot_hash": snapshot_hash,
+                "staging_id": staging_id,
+                "expected_previous_hash": expected_previous_hash,
+            }),
+            expected_owner,
+        );
         if let Some(origin_site_id) = self.required_forwarding_origin_site_id.as_deref() {
             body["required_origin_site_id"] = Value::String(origin_site_id.to_owned());
         }
@@ -1624,13 +1684,17 @@ impl RemoteClient {
         project_name: &ryeos_state::project_identity::ProjectName,
         snapshot_hash: &str,
         expected_deployed_hash: Option<&str>,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
-        let body = serde_json::json!({
-            "project_path": project_path,
-            "project_name": project_name,
-            "snapshot_hash": snapshot_hash,
-            "expected_deployed_hash": expected_deployed_hash,
-        });
+        let body = Self::with_expected_owner(
+            serde_json::json!({
+                "project_path": project_path,
+                "project_name": project_name,
+                "snapshot_hash": snapshot_hash,
+                "expected_deployed_hash": expected_deployed_hash,
+            }),
+            expected_owner,
+        );
         self.signed_post("/project/apply-snapshot", &body).await
     }
 
@@ -1667,19 +1731,23 @@ impl RemoteClient {
         parameters: &Value,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
         launch_id: Option<&str>,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
         let path = remote_execute_path(&execution_policy.response, launch_id)?;
         ryeos_state::external_content::products::composition::validate_product_selection_inputs(
             product_selections,
         )?;
-        let mut body = serde_json::json!({
-            "item_ref": item_ref,
-            "ref_bindings": ref_bindings,
-            "product_selections": product_selections,
-            "project_path": project_path,
-            "parameters": parameters,
-            "execution_policy": execution_policy,
-        });
+        let mut body = Self::with_expected_owner(
+            serde_json::json!({
+                "item_ref": item_ref,
+                "ref_bindings": ref_bindings,
+                "product_selections": product_selections,
+                "project_path": project_path,
+                "parameters": parameters,
+                "execution_policy": execution_policy,
+            }),
+            expected_owner,
+        );
         if let Some(origin_site_id) = self.required_forwarding_origin_site_id.as_deref() {
             body["required_origin_site_id"] = Value::String(origin_site_id.to_owned());
         }
@@ -1709,6 +1777,7 @@ impl RemoteClient {
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
         launch_id: &str,
         total_timeout: lillux::time::Duration,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
         if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted {
             anyhow::bail!("bounded accepted execution requires accepted response mode");
@@ -1723,6 +1792,7 @@ impl RemoteClient {
                 parameters,
                 execution_policy,
                 Some(launch_id),
+                expected_owner,
             ),
         )
         .await
@@ -1745,6 +1815,7 @@ impl RemoteClient {
         project_path: Option<&str>,
         parameters: &Value,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
         if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Wait {
             anyhow::bail!("typed remote service result requires wait-mode execution");
@@ -1758,6 +1829,7 @@ impl RemoteClient {
                 parameters,
                 execution_policy,
                 None,
+                expected_owner,
             )
             .await?;
         extract_remote_wait_result(response)
@@ -1775,6 +1847,7 @@ impl RemoteClient {
         parameters: &Value,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
         total_timeout: lillux::time::Duration,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<Value> {
         tokio::time::timeout(
             total_timeout,
@@ -1784,6 +1857,7 @@ impl RemoteClient {
                 project_path,
                 parameters,
                 execution_policy,
+                expected_owner,
             ),
         )
         .await
@@ -1813,17 +1887,21 @@ impl RemoteClient {
         parameters: &Value,
         call: Option<&ryeos_engine::method_call::MethodCall>,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> Result<RemoteExecuteResponse> {
-        let mut body = serde_json::json!({
-            "item_ref": item_ref,
-            "ref_bindings": ref_bindings,
-            "project_path": project_path,
-            "parameters": parameters,
-            "execution_policy": execution_policy,
-            // The remote signs its result for this exact request; the
-            // caller refuses an unsigned result.
-            "attest_result": true,
-        });
+        let mut body = Self::with_expected_owner(
+            serde_json::json!({
+                "item_ref": item_ref,
+                "ref_bindings": ref_bindings,
+                "project_path": project_path,
+                "parameters": parameters,
+                "execution_policy": execution_policy,
+                // The remote signs its result for this exact request; the
+                // caller refuses an unsigned result.
+                "attest_result": true,
+            }),
+            expected_owner,
+        );
         // Forward the `call` block only when it carries intent.
         if let Some(call) = call.filter(|c| !c.is_empty()) {
             body["call"] = serde_json::to_value(call)
@@ -4928,6 +5006,8 @@ mod tests {
             }
         ]))
         .unwrap();
+        let bound_owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "e".repeat(64)).parse().unwrap();
         for (response, launch_id) in [
             (ExecutionResponse::Wait, None),
             (
@@ -4945,6 +5025,7 @@ mod tests {
                     &serde_json::json!({}),
                     &policy,
                     launch_id,
+                    Some(&bound_owner),
                 )
                 .await
                 .unwrap();
@@ -4959,6 +5040,7 @@ mod tests {
             );
             assert_eq!(request.launch_id.as_deref(), launch_id);
             assert_eq!(request.execution_policy, policy);
+            assert_eq!(request.expected_owner.as_ref(), Some(&bound_owner));
         }
         server.abort();
     }
@@ -4995,6 +5077,7 @@ mod tests {
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
                 timeout,
+                None,
             )
             .await
             .unwrap_err();
@@ -5012,6 +5095,7 @@ mod tests {
                 ),
                 "L-0123456789abcdef0123456789abcdef",
                 timeout,
+                None,
             )
             .await
             .unwrap_err();
@@ -5047,6 +5131,7 @@ mod tests {
     fn test_read_root() -> ReadRoot {
         ReadRoot::ProjectHead {
             project: ryeos_state::project_identity::PushedProject::NoProject,
+            expected_owner: None,
         }
     }
 

@@ -86,6 +86,12 @@ pub struct RemoteProjectBinding {
     /// Sync/execution scope for this binding.
     #[serde(default)]
     pub sync_scope: ProjectSyncScope,
+    /// The project owner the remote reported for this node's outbound key
+    /// when the project was bound. Every head read or advance on the remote
+    /// asserts it (`expected_owner`), and the remote refuses
+    /// `remote_owner_changed` when its resolver now says otherwise. Never
+    /// used as the owner itself.
+    pub remote_owner: ryeos_state::principal_id::PrincipalId,
 }
 
 /// Named remote configuration.
@@ -427,6 +433,9 @@ pub struct ResolvedProjectBinding {
     pub project_name: ryeos_state::project_identity::ProjectName,
     pub remote_project_path: String,
     pub sync_scope: ProjectSyncScope,
+    /// The owner the remote reported at bind; sent as `expected_owner` on
+    /// every head read or advance.
+    pub remote_owner: ryeos_state::principal_id::PrincipalId,
 }
 
 /// Directory holding the node-signed remote pin records.
@@ -810,6 +819,7 @@ pub fn resolve_project_binding(
         project_name: binding.project_name.clone(),
         remote_project_path: binding.remote_project_path.clone(),
         sync_scope: binding.sync_scope,
+        remote_owner: binding.remote_owner.clone(),
     })
 }
 
@@ -1287,6 +1297,7 @@ mod tests {
                 identity.clone(),
                 RemoteProjectBinding {
                     project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                    remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                     remote_project_path: "/srv/project".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },
@@ -1607,6 +1618,7 @@ mod tests {
                 identity.clone(),
                 RemoteProjectBinding {
                     project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                    remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                     remote_project_path: "/srv/p".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },

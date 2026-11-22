@@ -124,6 +124,7 @@ fn remote_config(
                     local,
                 )?
                 .context("the bound local checkout declares a project name")?,
+                remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 remote_project_path: target.display().to_string(),
                 sync_scope: ryeos_api::remote::config::ProjectSyncScope::FullProject,
             },

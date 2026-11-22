@@ -71,6 +71,11 @@ struct ReconciliationOperation {
     /// The bound project name, sealed at admission. The remote head is the
     /// operator's head under it on the remote node.
     project_name: ryeos_state::project_identity::ProjectName,
+    /// The project owner the binding recorded at bind, sealed with the
+    /// project name. Every remote read and head advance of this operation
+    /// asserts it (`expected_owner`); the remote compares it with its own
+    /// resolver and refuses `remote_owner_changed`. Never used as the owner.
+    remote_owner: ryeos_state::principal_id::PrincipalId,
     /// The configured operator's local head ref, sealed at admission and
     /// parsed back; never re-derived from the path or the name.
     local_head_ref: String,
@@ -260,6 +265,7 @@ impl ReconciliationOperation {
             "local_project_path": self.local_project_path,
             "remote_project_path": self.remote_project_path,
             "project_name": self.project_name,
+            "remote_owner": self.remote_owner,
             "local_head_ref": self.local_head_ref,
             "operator_fingerprint": self.operator_fingerprint,
             "delegation_digest": self.delegation_digest,
@@ -283,7 +289,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     validate_hash("expected remote HEAD", &req.expected_remote_head)?;
     let operator_fingerprint =
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
-    let (local_project_path, remote, remote_project_path, project_name) =
+    let (local_project_path, remote, remote_project_path, project_name, remote_owner) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
     let operator_owner = ryeos_app::project_owner::owner_principal(&state, &operator_fingerprint)?;
     let local_head_ref =
@@ -303,6 +309,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         local_project_path,
         remote_project_path,
         project_name,
+        remote_owner,
         local_head_ref,
         operator_fingerprint,
         delegation_digest,
@@ -524,7 +531,13 @@ async fn run_attempt(
     )
     .map_err(AttemptFailure::permanent)?;
     let upload_session = operator_client
-        .objects_put(None, &operation.remote_project(), &[], &[])
+        .objects_put(
+            None,
+            &operation.remote_project(),
+            &[],
+            &[],
+            Some(&operation.remote_owner),
+        )
         .await
         .map_err(AttemptFailure::retryable)?;
     progress.latest_remote_staging_id = Some(upload_session.staging_id.clone());
@@ -591,6 +604,7 @@ async fn run_attempt(
         &merge_hash,
         &operation.project_name,
         upload_session,
+        Some(&operation.remote_owner),
     )
     .await
     .map_err(AttemptFailure::retryable)?;
@@ -657,6 +671,7 @@ async fn ensure_remote_generation_local(
         .objects_closure_get(
             &crate::objects_read_scope::ReadRoot::ProjectHead {
                 project: operation.remote_project(),
+                expected_owner: Some(operation.remote_owner.clone()),
             },
             std::slice::from_ref(&operation.expected_remote_head),
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
@@ -982,6 +997,7 @@ fn resolve_initial_route(
     RemoteConfig,
     String,
     ryeos_state::project_identity::ProjectName,
+    ryeos_state::principal_id::PrincipalId,
 )> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
@@ -996,6 +1012,7 @@ fn resolve_initial_route(
         loaded.config,
         binding.remote_project_path,
         binding.project_name,
+        binding.remote_owner,
     ))
 }
 
@@ -1026,6 +1043,7 @@ fn validate_current_route_and_authority(
     if binding.sync_scope != ProjectSyncScope::FullProject
         || binding.remote_project_path != operation.remote_project_path
         || binding.project_name != operation.project_name
+        || binding.remote_owner != operation.remote_owner
     {
         bail!("durable project-head reconciliation route changed");
     }
@@ -1346,6 +1364,7 @@ mod tests {
             local_project_path: "/project".to_owned(),
             remote_project_path: "/remote/project".to_owned(),
             project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            remote_owner: format!("pid:v1:{}", "5".repeat(64)).parse().unwrap(),
             local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
                 &format!("pid:v1:{}", "4".repeat(64)).parse().unwrap(),
                 &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),

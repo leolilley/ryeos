@@ -3110,6 +3110,7 @@ async fn handoff_preflight(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+            None,
         )
         .await
         .map_err(|error| {
@@ -3862,8 +3863,7 @@ async fn handoff(
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
-            )
+                WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT, None)
             .await
             .map_err(|error| {
                 crate::remote::client::map_remote_call_error(error, "target placement preparation")
@@ -4157,6 +4157,7 @@ async fn handoff(
                         ryeos_app::execution_policy::ExecutionResponse::Wait,
                     ),
                     WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                    None,
                 )
                 .await
                 .map_err(|error| {
@@ -4573,6 +4574,7 @@ async fn resume_committed_handoff_locked(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                None,
             )
             .await
             .map_err(|error| {
@@ -5443,6 +5445,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                             ryeos_app::execution_policy::ExecutionResponse::Wait,
                         ),
                         WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                        None,
                     )
                     .await
                     .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
@@ -5836,6 +5839,7 @@ async fn recover_pre_cut_source_handoff_abort(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                None,
             )
             .await
             .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;

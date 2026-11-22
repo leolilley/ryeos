@@ -39,6 +39,12 @@ pub struct Request {
     /// this name). The snapshot must declare the same name.
     pub project_name: ryeos_state::project_identity::ProjectName,
     pub snapshot_hash: String,
+    /// The project owner the caller recorded when it bound this project. It
+    /// is compared with the owner this node resolves for the caller's key and
+    /// refused as `remote_owner_changed` on a difference; it is never used as
+    /// the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
     /// Exact deployed HEAD observed before the request. Mandatory and nullable.
     pub expected_deployed_hash: ExplicitExpectedDeployedHash,
 }
@@ -277,6 +283,11 @@ impl ApplyJournal {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &ctx.fingerprint,
+        req.expected_owner.as_ref(),
+    )?;
 
     // Entry log: proves the request reached this handler (vs. being absorbed
     // by a dispatcher 404 / wrong route) and records who is applying what.

@@ -29,6 +29,12 @@ pub struct Request {
     pub project: ryeos_state::project_identity::PushedProject,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
+    /// The project owner the caller recorded when it bound this project. It
+    /// is compared with the owner this node resolves for the caller's key and
+    /// refused as `remote_owner_changed` on a difference; it is never used as
+    /// the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
     /// Exact principal HEAD observed when the server minted `staging_id`.
     /// The field is mandatory and nullable for a first publication.
     pub expected_previous_hash: ExplicitExpectedHash,
@@ -42,6 +48,11 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity used for principal-scoped storage — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &ctx.fingerprint,
+        req.expected_owner.as_ref(),
+    )?;
     ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         req.required_origin_site_id.as_deref(),
         ctx.authorized_key_class,

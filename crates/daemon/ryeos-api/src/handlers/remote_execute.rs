@@ -155,6 +155,7 @@ pub async fn handle(
     // Resolve the project binding if one exists; one that exists must
     // resolve, including its name check.
     let mut project_name = None;
+    let mut remote_owner = None;
     if let Some(proj_path) = abs_project_path.as_ref() {
         let binding = match loaded_remote.as_ref() {
             Some(loaded) => config::existing_project_binding(loaded, proj_path)
@@ -175,6 +176,7 @@ pub async fn handle(
                 }
             }
         }
+        remote_owner = binding.as_ref().map(|binding| binding.remote_owner.clone());
         project_name = Some(
             config::push_project_name(binding.as_ref(), proj_path)
                 .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
@@ -233,6 +235,7 @@ pub async fn handle(
             source_snapshot_hash: None,
             remote_project_path: &project_path_for_ref,
             project_name: project_name.as_ref(),
+            remote_owner: remote_owner.as_ref(),
             parameters: req.parameters.clone(),
             execution_policy: &execution_policy,
             acting_principal: &ctx.fingerprint,

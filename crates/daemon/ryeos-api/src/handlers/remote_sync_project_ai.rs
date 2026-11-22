@@ -77,6 +77,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &binding.local_project_path,
         &binding.project_name,
         &remote_ignore,
+        Some(&binding.remote_owner),
     )
     .await?;
 
@@ -86,6 +87,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &binding.project_name,
             &push.snapshot_hash,
             expected_deployed_hash.as_deref(),
+            Some(&binding.remote_owner),
         )
         .await
         .map_err(|e| {

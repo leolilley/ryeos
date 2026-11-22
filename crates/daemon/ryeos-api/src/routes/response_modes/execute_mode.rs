@@ -102,6 +102,12 @@ pub struct ExecuteRequest {
     /// and refuses an unsigned result.
     #[serde(default)]
     pub attest_result: bool,
+    /// The project owner the caller recorded when it bound a remote project.
+    /// It is compared with the owner this node resolves for the caller's key
+    /// before any current-head admission resolves anything, and refused as
+    /// `remote_owner_changed` on a difference; it is never used as the owner.
+    #[serde(default)]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
 }
 
 impl ExecuteRequest {
@@ -1401,6 +1407,12 @@ async fn admit_execution_with_publication(
         )
         .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
     let caller_principal_id = principal.fingerprint.clone();
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &caller_principal_id,
+        request.expected_owner.as_ref(),
+    )
+    .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
     let caller_scopes = principal.scopes.clone();
     request
         .execution_policy
@@ -2416,6 +2428,7 @@ async fn admit_execution_with_publication(
                 source_snapshot_hash: project_ctx.snapshot_hash.as_deref(),
                 remote_project_path: &plan.remote_project_path,
                 project_name: plan.project_name.as_ref(),
+                remote_owner: plan.remote_owner.as_ref(),
                 parameters: request.parameters.clone(),
                 execution_policy: &destination_policy,
                 acting_principal: &caller_principal_id,
@@ -2667,6 +2680,9 @@ struct TargetSiteForwardPlan {
     remote_project_path: String,
     /// The bound project name; `None` only for a projectless forward.
     project_name: Option<ryeos_state::project_identity::ProjectName>,
+    /// The owner the binding recorded at bind; asserted to the remote as
+    /// `expected_owner`. `None` only for a projectless forward.
+    remote_owner: Option<ryeos_state::principal_id::PrincipalId>,
 }
 
 fn plan_target_site_forward(
@@ -2728,40 +2744,42 @@ fn plan_target_site_forward(
         config_key: loaded_remote.config.name.clone(),
     };
 
-    let (local_project_path, remote_project_path, project_name) = if no_project_requested {
-        (None, NO_PROJECT_SENTINEL.to_string(), None)
-    } else {
-        let binding = crate::remote::config::resolve_loaded_project_binding(
-            &loaded_remote,
-            effective_project_path,
-        )
-        .map_err(|e| {
-            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
-                target_site_id: target_site_id.to_string(),
-                detail: format!(
-                    "project binding for '{}' is required for target-site forwarding: {e:#}",
-                    effective_project_path.display()
-                ),
+    let (local_project_path, remote_project_path, project_name, remote_owner) =
+        if no_project_requested {
+            (None, NO_PROJECT_SENTINEL.to_string(), None, None)
+        } else {
+            let binding = crate::remote::config::resolve_loaded_project_binding(
+                &loaded_remote,
+                effective_project_path,
+            )
+            .map_err(|e| {
+                ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+                    target_site_id: target_site_id.to_string(),
+                    detail: format!(
+                        "project binding for '{}' is required for target-site forwarding: {e:#}",
+                        effective_project_path.display()
+                    ),
+                }
+            })?;
+
+            if binding.sync_scope != ProjectSyncScope::FullProject {
+                return Err(target_site_unsupported(
+                    target_site_id,
+                    format!(
+                        "binding for '{}' has sync_scope {:?}; target-site forwarding requires full_project",
+                        binding.local_project_path.display(),
+                        binding.sync_scope
+                    ),
+                ));
             }
-        })?;
 
-        if binding.sync_scope != ProjectSyncScope::FullProject {
-            return Err(target_site_unsupported(
-                target_site_id,
-                format!(
-                    "binding for '{}' has sync_scope {:?}; target-site forwarding requires full_project",
-                    binding.local_project_path.display(),
-                    binding.sync_scope
-                ),
-            ));
-        }
-
-        (
-            Some(binding.local_project_path),
-            binding.remote_project_path,
-            Some(binding.project_name),
-        )
-    };
+            (
+                Some(binding.local_project_path),
+                binding.remote_project_path,
+                Some(binding.project_name),
+                Some(binding.remote_owner),
+            )
+        };
 
     Ok(TargetSitePlan::Remote(Box::new(TargetSiteForwardPlan {
         target_site_id: target_site_id.to_string(),
@@ -2769,6 +2787,7 @@ fn plan_target_site_forward(
         local_project_path,
         remote_project_path,
         project_name,
+        remote_owner,
     })))
 }
 
@@ -4018,6 +4037,7 @@ mod tests {
             debug_raw: false,
             state_root: None,
             attest_result: false,
+            expected_owner: None,
         }
     }
 
@@ -4298,6 +4318,7 @@ mod tests {
             local_key,
             crate::remote::config::RemoteProjectBinding {
                 project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::AiOnly,
             },
@@ -4341,6 +4362,7 @@ mod tests {
             local_key,
             crate::remote::config::RemoteProjectBinding {
                 project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::FullProject,
             },

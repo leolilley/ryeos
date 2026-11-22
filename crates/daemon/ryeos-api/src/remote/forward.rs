@@ -62,6 +62,12 @@ pub struct RemoteForwardRequest<'a> {
     /// The bound project name the pushed head is keyed by. `None` only for
     /// --no-project mode, which pushes the caller's no-project head.
     pub project_name: Option<&'a ryeos_state::project_identity::ProjectName>,
+    /// The project owner the binding recorded at bind. Sent as
+    /// `expected_owner` on every head push and on the execute call; the
+    /// remote compares it with its own resolver and refuses
+    /// `remote_owner_changed`. Never used as the owner. `None` only without a
+    /// binding (--no-project mode).
+    pub remote_owner: Option<&'a ryeos_state::principal_id::PrincipalId>,
     /// Parameters for the item.
     pub parameters: Value,
     /// Exact execution contract to present to the destination node. Routing
@@ -460,6 +466,7 @@ pub async fn execute_unary_forward(
             snapshot_hash,
             req.remote_project_path,
             required_project_name(req.project_name)?,
+            req.remote_owner,
         )
         .await
         .map_err(|e| {
@@ -494,6 +501,7 @@ pub async fn execute_unary_forward(
             proj_path,
             required_project_name(req.project_name)?,
             req.remote_ignore,
+            req.remote_owner,
         )
         .await
         .map_err(|e| {
@@ -527,7 +535,7 @@ pub async fn execute_unary_forward(
                 .ignore_matcher
                 .union(req.remote_ignore)
                 .map_err(|error| RemoteForwardError::PushFailed(format!("{error:#}")))?;
-            match push_no_project(&authority, client, &transfer_ignore).await {
+            match push_no_project(&authority, client, &transfer_ignore, req.remote_owner).await {
                 Ok(value) => value,
                 Err(err) => {
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -618,6 +626,7 @@ pub async fn execute_unary_forward(
             &req.parameters,
             req.call,
             &destination_policy,
+            req.remote_owner,
         )
         .await
     {
@@ -956,6 +965,7 @@ async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult, RemoteForwardError> {
     use crate::remote::push::{
         collect_snapshot_upload_hashes, finish_staged_roots, upload_missing,
@@ -986,7 +996,7 @@ async fn push_no_project(
         };
 
         let upload_session = client
-            .objects_put(None, &PushedProject::NoProject, &[], &[])
+            .objects_put(None, &PushedProject::NoProject, &[], &[], expected_owner)
             .await?;
 
         let snapshot = ryeos_state::objects::ProjectSnapshot {
@@ -1028,6 +1038,7 @@ async fn push_no_project(
             &snapshot_hash,
             &PushedProject::NoProject,
             upload_session,
+            expected_owner,
         )
         .await?;
 
@@ -1037,6 +1048,7 @@ async fn push_no_project(
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 

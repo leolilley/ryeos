@@ -566,6 +566,7 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
         RemoteProjectBinding {
             project_name: ryeos_state::project_identity::ProjectName::new("stale-remote-project")
                 .unwrap(),
+            remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
             remote_project_path: "/srv/project".to_string(),
             sync_scope: ProjectSyncScope::FullProject,
         },

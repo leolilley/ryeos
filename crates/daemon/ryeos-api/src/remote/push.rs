@@ -46,6 +46,7 @@ pub async fn push_snapshot_generation(
     snapshot_hash: &str,
     project_path_for_ref: &str,
     project_name: &ryeos_state::project_identity::ProjectName,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
     let project = ryeos_state::project_identity::PushedProject::Named {
         name: project_name.clone(),
@@ -96,7 +97,9 @@ pub async fn push_snapshot_generation(
                 blobs_skipped: 0,
             });
         }
-        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
+        let upload_session = client
+            .objects_put(None, &project, &[], &[], expected_owner)
+            .await?;
         let upload_closure = collect_snapshot_upload_hashes(
             &local_cas,
             snapshot_hash,
@@ -117,6 +120,7 @@ pub async fn push_snapshot_generation(
             snapshot_hash,
             &project,
             upload_session,
+            expected_owner,
         )
         .await?;
         client
@@ -125,6 +129,7 @@ pub async fn push_snapshot_generation(
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -156,6 +161,7 @@ pub async fn push_descendant_snapshot_with_session(
     snapshot_hash: &str,
     project_name: &ryeos_state::project_identity::ProjectName,
     upload_session: ObjectsPutResponse,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
     let project = ryeos_state::project_identity::PushedProject::Named {
         name: project_name.clone(),
@@ -229,6 +235,7 @@ pub async fn push_descendant_snapshot_with_session(
             snapshot_hash,
             &project,
             upload_session,
+            expected_owner,
         )
         .await?;
         client
@@ -237,6 +244,7 @@ pub async fn push_descendant_snapshot_with_session(
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
         Ok(PushResult {
@@ -271,6 +279,7 @@ pub async fn push_project_ai_only(
     local_project_path: &Path,
     project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
     let project = ryeos_state::project_identity::PushedProject::Named {
         name: project_name.clone(),
@@ -323,7 +332,9 @@ pub async fn push_project_ai_only(
         }
         project_root.ensure_path_binding()?;
 
-        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
+        let upload_session = client
+            .objects_put(None, &project, &[], &[], expected_owner)
+            .await?;
 
         let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
@@ -368,6 +379,7 @@ pub async fn push_project_ai_only(
             &snapshot_hash,
             &project,
             upload_session,
+            expected_owner,
         )
         .await?;
 
@@ -377,6 +389,7 @@ pub async fn push_project_ai_only(
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -416,6 +429,7 @@ pub async fn push_project(
     project_path: &Path,
     project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
     let project = ryeos_state::project_identity::PushedProject::Named {
         name: project_name.clone(),
@@ -468,7 +482,9 @@ pub async fn push_project(
         }
         project_root.ensure_path_binding()?;
 
-        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
+        let upload_session = client
+            .objects_put(None, &project, &[], &[], expected_owner)
+            .await?;
 
         let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
@@ -512,6 +528,7 @@ pub async fn push_project(
             &snapshot_hash,
             &project,
             upload_session,
+            expected_owner,
         )
         .await?;
 
@@ -521,6 +538,7 @@ pub async fn push_project(
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -610,6 +628,7 @@ pub(crate) async fn upload_missing(
     publication_root_hash: &str,
     project: &ryeos_state::project_identity::PushedProject,
     upload_session: ObjectsPutResponse,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<StagedUploadResult> {
     if !upload_closure
         .object_hashes
@@ -626,6 +645,7 @@ pub(crate) async fn upload_missing(
     // write deduplicates. Nothing outside the pusher's own head is revealed.
     let read_root = crate::objects_read_scope::ReadRoot::ProjectHead {
         project: project.clone(),
+        expected_owner: expected_owner.cloned(),
     };
     let has_resp = client
         .objects_has(
@@ -721,7 +741,7 @@ pub(crate) async fn upload_missing(
                 blob_index += 1;
             }
             let response = client
-                .objects_put(Some(&staging_id), project, &batch, &[])
+                .objects_put(Some(&staging_id), project, &batch, &[], expected_owner)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.blob_hashes, &expected, "blob")?;
@@ -746,7 +766,7 @@ pub(crate) async fn upload_missing(
                 data: base64::engine::general_purpose::STANDARD.encode(&buffer[..read]),
             };
             let response = client
-                .objects_put_blob_chunk(&staging_id, project, &chunk)
+                .objects_put_blob_chunk(&staging_id, project, &chunk, expected_owner)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
@@ -791,6 +811,7 @@ pub(crate) async fn upload_missing(
                 project,
                 &object_batch,
                 expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
             object_batch.clear();
@@ -812,6 +833,7 @@ pub(crate) async fn upload_missing(
             project,
             &object_batch,
             expected_previous_hash.as_deref(),
+            expected_owner,
         )
         .await?;
     }
@@ -895,13 +917,14 @@ async fn send_raw_object_batch(
     project: &ryeos_state::project_identity::PushedProject,
     batch: &[RawObjectUpload],
     expected_previous_hash: Option<&str>,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<()> {
     let expected = batch
         .iter()
         .map(|entry| entry.hash.clone())
         .collect::<Vec<_>>();
     let response = client
-        .objects_put_raw(Some(staging_id), project, &[], batch)
+        .objects_put_raw(Some(staging_id), project, &[], batch, expected_owner)
         .await?;
     validate_upload_session(&response, staging_id, expected_previous_hash)?;
     validate_upload_response(&response.blob_hashes, &[], "blob")?;

@@ -89,6 +89,7 @@ pub mod objects_stage_chunk;
 pub mod offline_operations;
 pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
+pub mod project_owner;
 pub mod project_snapshot_status;
 pub mod project_status;
 pub mod push_head;
@@ -205,6 +206,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
+    project_owner::DESCRIPTOR,
     project_status::DESCRIPTOR,
     project_snapshot_status::DESCRIPTOR,
     launch_cancel::DESCRIPTOR,

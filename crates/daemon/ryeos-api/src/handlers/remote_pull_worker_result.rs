@@ -65,6 +65,11 @@ struct PullIntent {
     target_project_path: String,
     /// The bound project name, sealed at admission.
     project_name: ryeos_state::project_identity::ProjectName,
+    /// The project owner the binding recorded at bind, sealed with the
+    /// project name so a replay refuses a binding that now names another
+    /// remote owner. The target's candidate-result service is projectless, so
+    /// nothing here is asserted to the remote; it is never used as the owner.
+    remote_owner: ryeos_state::principal_id::PrincipalId,
     /// The delegator's local head ref, sealed at admission and parsed back;
     /// never re-derived from the path or the name.
     local_head_ref: String,
@@ -255,7 +260,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .map_err(|error| anyhow::anyhow!(error))
         .context("hosted worker-result chain root is not canonical")?;
     let delegator_fingerprint = crate::remote::client::delegator_fingerprint(&ctx)?;
-    let (local_project_path, remote, target_project_path, project_name) =
+    let (local_project_path, remote, target_project_path, project_name, remote_owner) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
     let delegator_owner =
         ryeos_app::project_owner::owner_principal(&state, &delegator_fingerprint)?;
@@ -277,6 +282,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         local_project_path,
         target_project_path,
         project_name,
+        remote_owner,
         local_head_ref,
         delegator_fingerprint,
         delegation_digest,
@@ -546,6 +552,7 @@ pub(crate) async fn query_candidate_result_with_client(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             lillux::time::Duration::from_secs(30),
+            None,
         )
         .await
         .context("query exact terminal hosted candidate")?;
@@ -641,6 +648,7 @@ fn resolve_initial_route(
     RemoteConfig,
     String,
     ryeos_state::project_identity::ProjectName,
+    ryeos_state::principal_id::PrincipalId,
 )> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
@@ -655,6 +663,7 @@ fn resolve_initial_route(
         loaded.config,
         binding.remote_project_path,
         binding.project_name,
+        binding.remote_owner,
     ))
 }
 
@@ -685,6 +694,7 @@ fn resolve_current_route(state: &AppState, intent: &PullIntent) -> Result<Remote
         || binding.sync_scope != ProjectSyncScope::FullProject
         || binding.remote_project_path != intent.target_project_path
         || binding.project_name != intent.project_name
+        || binding.remote_owner != intent.remote_owner
     {
         bail!("durable hosted worker-result pull project route changed");
     }
@@ -916,6 +926,7 @@ mod tests {
             local_project_path: "/source/project".to_owned(),
             target_project_path: "/target/project".to_owned(),
             project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            remote_owner: format!("pid:v1:{}", "c".repeat(64)).parse().unwrap(),
             local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
                 &format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),

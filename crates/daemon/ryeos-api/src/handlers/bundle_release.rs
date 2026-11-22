@@ -2183,6 +2183,7 @@ async fn remote_catalog_call(
             &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
+            None,
         )
         .await
 }

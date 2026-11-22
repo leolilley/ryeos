@@ -51,6 +51,12 @@ pub struct Request {
     pub staging_id: Option<String>,
     /// The caller's head this upload publishes.
     pub project: ryeos_state::project_identity::PushedProject,
+    /// The project owner the caller recorded when it bound this project. It
+    /// is compared with the owner this node resolves for the caller's key and
+    /// refused as `remote_owner_changed` on a difference; it is never used as
+    /// the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
     #[serde(default)]
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
@@ -345,6 +351,11 @@ fn validate_typed_request_limits(req: &Request) -> anyhow::Result<()> {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified()
         .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &ctx.fingerprint,
+        req.expected_owner.as_ref(),
+    )?;
     validate_typed_request_limits(&req)?;
     let authority = state
         .state_store
