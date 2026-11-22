@@ -450,7 +450,7 @@ impl RemoteClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             audience: audience.to_string(),
-            http: reqwest::Client::builder()
+            http: ryeos_http_egress::client_builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 // Signed requests must never auto-follow redirects: a
                 // 301/302/303 can downgrade a POST to GET, but the signature is
