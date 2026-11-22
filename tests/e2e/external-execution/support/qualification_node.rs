@@ -550,11 +550,18 @@ pub fn bind_typed_manifests_to_tool(
     use std::collections::BTreeMap as Manifests;
 
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(tool_ref).unwrap();
-    let roots = state.engine.resolution_roots(None);
+    let roots = state.engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,

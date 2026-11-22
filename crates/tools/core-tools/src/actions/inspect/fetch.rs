@@ -58,7 +58,13 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
     };
 
     let plan_ctx = PlanContext {
-        logical_project_root: None,
+        logical_project: if project_path.is_some() {
+            ryeos_engine::contracts::LogicalProject::MaterializedLive
+        } else {
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            )
+        },
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "inspect-tool".to_string(),
             scopes: vec!["bundle.read".to_string()],

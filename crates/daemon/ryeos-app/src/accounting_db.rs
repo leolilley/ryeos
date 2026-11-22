@@ -1091,6 +1091,22 @@ pub struct ReserveArgs<'a> {
     pub root_chain_id: &'a str,
     pub audit_chain_root_id: &'a str,
     pub now_ms: i64,
+    /// The resumed runtime's offer to retry this coordinate if a restart cut
+    /// it. Consulted only when a predecessor generation's attempt at the same
+    /// coordinate was fenced while issued; absent or refused, that coordinate
+    /// stays an unknown outcome.
+    pub restart_retry: Option<RestartRetryOffer<'a>>,
+}
+
+/// A resumed runtime's retry decision for the coordinate it is preparing,
+/// with the verdict of the sealed launch authority already applied by the
+/// caller (transport and unknown-outcome ceiling).
+#[derive(Debug, Clone, Copy)]
+pub struct RestartRetryOffer<'a> {
+    pub decision: &'a ProviderRetryDecision,
+    /// Why the sealed launch authority refuses another contact, or `None`
+    /// when it admits one.
+    pub refusal: Option<&'a str>,
 }
 
 /// Outcome of a reservation request.
@@ -1182,8 +1198,11 @@ impl std::fmt::Display for ProviderOutcomeUnknown {
             formatter,
             "the provider outcome is unknown because the node restarted during the call \
              (attempt coordinate {}/{}/{} was {} under predecessor launch generation {}); the \
-             attempt was charged its reserved maximum and this turn cannot be resumed. \
-             Resuming after a restart is not supported for any directive yet",
+             attempt was charged its reserved maximum and this turn was not resumed. A directive \
+             that declares `provider_contact: repeatable` is resumed after a restart only on a \
+             remote provider route that is on the accounting ledger, with an \
+             `unknown_outcome_retry` policy that names `mid_stream` and a failed attempt number \
+             still within its `max_retries`; this turn did not meet that",
             self.thread_id,
             self.turn,
             self.attempt_number,
@@ -6731,13 +6750,69 @@ impl AccountingDb {
                         }
                         return Ok(ReserveOutcome::RetryAdvanced { advance });
                     }
+                    // A predecessor closed by the owner-generation fence while
+                    // it was issued was cut by a restart: its answer was never
+                    // recorded and no process observed the failure. Only the
+                    // resumed runtime can say whether its signed policy admits
+                    // a retry, and only the sealed launch authority bounds how
+                    // many contacts may follow, so the advancement is stored
+                    // here, at resume, from the runtime's offer.
+                    let cut_by_restart = predecessor.state
+                        == AttemptBudgetState::ChargedReservedMaximum
+                        && predecessor.reconciliation_reason.as_deref()
+                            == Some(ReconciliationReason::OwnerGenerationFenced.as_str());
+                    let mut detail = if cut_by_restart {
+                        "fenced while issued, with no recorded answer or retry advancement"
+                            .to_owned()
+                    } else {
+                        "settled under that generation without a retry advancement".to_owned()
+                    };
+                    if cut_by_restart && let Some(offer) = args.restart_retry {
+                        match offer.refusal {
+                            None => {
+                                let decision = offer.decision;
+                                if decision.turn != args.turn
+                                    || decision.failed_attempt_number != args.attempt_number
+                                {
+                                    bail!(
+                                        "restart retry decision names {}/{} but the reserve names {}/{}",
+                                        decision.turn,
+                                        decision.failed_attempt_number,
+                                        args.turn,
+                                        args.attempt_number
+                                    );
+                                }
+                                let advance = ProviderRetryAdvance::build(
+                                    predecessor.attempt_id.clone(),
+                                    predecessor.request_hash.clone(),
+                                    args.provider_coordinate_key.to_owned(),
+                                    decision.clone(),
+                                    args.now_ms,
+                                )
+                                .map_err(|error| anyhow::anyhow!(error))?;
+                                self.insert_operation(
+                                    conn,
+                                    &predecessor.attempt_id,
+                                    "retry_advance",
+                                    1,
+                                    advance.decision_digest.as_str(),
+                                    &serde_json::to_string(&advance)
+                                        .context("encode provider retry advancement")?,
+                                )?;
+                                return Ok(ReserveOutcome::RetryAdvanced { advance });
+                            }
+                            Some(refusal) => {
+                                detail =
+                                    format!("{detail}; retry after the restart refused: {refusal}");
+                            }
+                        }
+                    }
                     return Err(anyhow::Error::new(ProviderOutcomeUnknown {
                         thread_id: args.thread_id.to_owned(),
                         turn: args.turn,
                         attempt_number: args.attempt_number,
                         predecessor_generation: predecessor.launch_generation.clone(),
-                        detail: "settled under that generation without a retry advancement"
-                            .to_owned(),
+                        detail,
                     }));
                 }
                 state => {
@@ -13415,6 +13490,7 @@ mod tests {
             root_chain_id: "root-chain",
             audit_chain_root_id: "audit-chain",
             now_ms,
+            restart_retry: None,
         })
     }
 
@@ -15619,8 +15695,9 @@ mod tests {
             reserve(&db, THREAD, "G-resumed", 2, 1, "h2", &authority, EXEC, None).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("is unknown"), "{message}");
+        assert!(message.contains("this turn was not resumed"), "{message}");
         assert!(
-            message.contains("Resuming after a restart is not supported"),
+            message.contains("provider_contact: repeatable"),
             "{message}"
         );
         assert_eq!(
@@ -15628,6 +15705,303 @@ mod tests {
             Some("provider_attempt_outcome_unknown")
         );
         assert_amounts(&db, EXEC, "execution", "0.5", "0.5");
+        assert_healthy_verify(&db);
+    }
+
+    fn mid_stream_decision(turn: u32, failed_attempt_number: u32) -> ProviderRetryDecision {
+        let mut decision = retry_decision(turn, failed_attempt_number);
+        decision.reason = ryeos_accounting::ProviderRetryReason::MidStream {
+            live_output_events_emitted: 3,
+        };
+        decision
+    }
+
+    /// Reserve the way a resumed runtime does: offering its retry decision for
+    /// the coordinate it is preparing.
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_offering(
+        db: &AccountingDb,
+        generation: &str,
+        turn: u32,
+        attempt_number: u32,
+        request_hash: &str,
+        authority: &ProviderAccountingAuthority,
+        offer: Option<RestartRetryOffer<'_>>,
+        now_ms: i64,
+    ) -> Result<ReserveOutcome> {
+        let bound = bound_for(authority);
+        db.reserve_provider_attempt(ReserveArgs {
+            thread_id: THREAD,
+            launch_generation: generation,
+            turn,
+            attempt_number,
+            request_hash,
+            provider_coordinate_key: PROVIDER_COORDINATE_KEY,
+            config_hash: "cfg",
+            verified_bound: &bound,
+            authority,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            now_ms,
+            restart_retry: offer,
+        })
+    }
+
+    /// An attempt issued under `GENERATION` and cut by a restart: the resumed
+    /// generation's gate open fences it.
+    fn restart_cut_attempt(
+        db: &AccountingDb,
+        authority: &ProviderAccountingAuthority,
+        request_hash: &str,
+    ) -> String {
+        birth(db, EXEC, None, Some("10"));
+        open_gate(db, THREAD, GENERATION, EXEC);
+        let attempt_id = reserved_id(
+            &reserve(
+                db,
+                THREAD,
+                GENERATION,
+                1,
+                1,
+                request_hash,
+                authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+        );
+        issue(db, &attempt_id, request_hash).unwrap();
+        open_gate(db, THREAD, "G-resumed", EXEC);
+        attempt_id
+    }
+
+    #[test]
+    fn a_restart_cut_attempt_stores_the_offered_retry_advancement_once() {
+        let (_dir, db) = setup();
+        let authority = reported_authority("a", "0.5", 9, false);
+        let request_hash = lillux::sha256_hex(b"attempt-one");
+        let attempt_id = restart_cut_attempt(&db, &authority, &request_hash);
+        let record = db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, AttemptBudgetState::ChargedReservedMaximum);
+        assert_eq!(record.retry_advance, None);
+
+        let decision = mid_stream_decision(1, 1);
+        let offer = RestartRetryOffer {
+            decision: &decision,
+            refusal: None,
+        };
+        let ReserveOutcome::RetryAdvanced { advance } = reserve_offering(
+            &db,
+            "G-resumed",
+            1,
+            1,
+            &request_hash,
+            &authority,
+            Some(offer),
+            NOW + 100,
+        )
+        .unwrap() else {
+            panic!("an admitted offer for a restart-cut attempt stores its advancement");
+        };
+        assert_eq!(advance.decision, decision);
+        assert_eq!(advance.prior_attempt_id, attempt_id);
+        assert_eq!(advance.not_before_ms, NOW + 100 + 250);
+        let record = db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.retry_advance, Some(advance.clone()));
+        // The abandoned attempt keeps its conservative charge.
+        assert_amounts(&db, EXEC, "execution", "0.5", "0");
+
+        // A replay, even with no offer, returns the stored advancement
+        // unchanged: the not-before time is not extended.
+        assert_eq!(
+            reserve_offering(
+                &db,
+                "G-resumed",
+                1,
+                1,
+                &request_hash,
+                &authority,
+                None,
+                NOW + 9_000,
+            )
+            .unwrap(),
+            ReserveOutcome::RetryAdvanced {
+                advance: advance.clone()
+            }
+        );
+
+        // The named successor is held until the stored deadline, then reserved.
+        let successor_hash = lillux::sha256_hex(b"attempt-two");
+        assert!(matches!(
+            reserve_offering(
+                &db,
+                "G-resumed",
+                1,
+                2,
+                &successor_hash,
+                &authority,
+                None,
+                advance.not_before_ms - 1,
+            )
+            .unwrap(),
+            ReserveOutcome::RetryNotBefore { .. }
+        ));
+        assert!(matches!(
+            reserve_offering(
+                &db,
+                "G-resumed",
+                1,
+                2,
+                &successor_hash,
+                &authority,
+                None,
+                advance.not_before_ms,
+            )
+            .unwrap(),
+            ReserveOutcome::Reserved { .. }
+        ));
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn a_restart_cut_attempt_without_an_admitted_offer_stays_an_unknown_outcome() {
+        let (_dir, db) = setup();
+        let authority = reported_authority("a", "0.5", 9, false);
+        let request_hash = lillux::sha256_hex(b"attempt-one");
+        let attempt_id = restart_cut_attempt(&db, &authority, &request_hash);
+        let decision = mid_stream_decision(1, 1);
+
+        // No offer (a directive that is not repeatable never makes one).
+        let error = reserve_offering(
+            &db,
+            "G-resumed",
+            1,
+            1,
+            &request_hash,
+            &authority,
+            None,
+            NOW + 100,
+        )
+        .unwrap_err();
+        let refusal = ProviderOutcomeUnknown::find(&error).expect("typed refusal");
+        assert!(
+            refusal.detail.contains("fenced while issued"),
+            "{}",
+            refusal.detail
+        );
+
+        // The sealed authority's verdict: a local worker, or a spent ceiling.
+        for why in [
+            "provider retry after an unknown outcome is refused: the transport does not admit repeated contact",
+            "provider retry after an unknown outcome is refused: failed attempt 1 exceeds the sealed ceiling 0",
+        ] {
+            let offer = RestartRetryOffer {
+                decision: &decision,
+                refusal: Some(why),
+            };
+            let error = reserve_offering(
+                &db,
+                "G-resumed",
+                1,
+                1,
+                &request_hash,
+                &authority,
+                Some(offer),
+                NOW + 100,
+            )
+            .unwrap_err();
+            let refusal = ProviderOutcomeUnknown::find(&error).expect("typed refusal");
+            assert!(refusal.detail.contains(why), "{}", refusal.detail);
+        }
+        let record = db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.retry_advance, None, "a refusal stores nothing");
+
+        // An offer that names another coordinate is a defect, not a retry.
+        let wrong = mid_stream_decision(1, 2);
+        let error = reserve_offering(
+            &db,
+            "G-resumed",
+            1,
+            1,
+            &request_hash,
+            &authority,
+            Some(RestartRetryOffer {
+                decision: &wrong,
+                refusal: None,
+            }),
+            NOW + 100,
+        )
+        .unwrap_err();
+        assert!(ProviderOutcomeUnknown::find(&error).is_none(), "{error:#}");
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn an_offer_never_reopens_an_attempt_that_settled_before_the_restart() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let request_hash = lillux::sha256_hex(b"attempt-one");
+        let attempt_id = reserved_id(
+            &reserve(
+                &db,
+                THREAD,
+                GENERATION,
+                1,
+                1,
+                &request_hash,
+                &authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+        );
+        issue(&db, &attempt_id, &request_hash).unwrap();
+        // The attempt settled in process as a failure with no advancement.
+        settle(
+            &db,
+            &attempt_id,
+            &request_hash,
+            SpendAccounting::Unavailable {
+                diagnostic: "failed".to_string(),
+            },
+            &authority,
+        )
+        .unwrap();
+        open_gate(&db, THREAD, "G-resumed", EXEC);
+        let decision = mid_stream_decision(1, 1);
+        let error = reserve_offering(
+            &db,
+            "G-resumed",
+            1,
+            1,
+            &request_hash,
+            &authority,
+            Some(RestartRetryOffer {
+                decision: &decision,
+                refusal: None,
+            }),
+            NOW + 100,
+        )
+        .unwrap_err();
+        let refusal = ProviderOutcomeUnknown::find(&error).expect("typed refusal");
+        assert!(
+            refusal.detail.contains("settled under that generation"),
+            "{}",
+            refusal.detail
+        );
         assert_healthy_verify(&db);
     }
 

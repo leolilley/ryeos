@@ -21,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::LogicalProject;
 use ryeos_engine::kind_registry::LaunchAugmentationDecl;
 use ryeos_engine::resolution::ResolutionOutput;
 use serde_json::{Value, json};
@@ -123,9 +124,13 @@ pub async fn run(
         ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
     ))
     .then_some(project_path);
-    let engine_roots = engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(provenance.logical_project_root(&plan_ctx.current_site_id));
+    let engine_roots = engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        LogicalProject::from_optional(
+            provenance.logical_project_root(&plan_ctx.current_site_id),
+            &subject_authority,
+        ),
+    );
     let node_config_root = engine.node_config_root();
     let resolution_materialization =
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(

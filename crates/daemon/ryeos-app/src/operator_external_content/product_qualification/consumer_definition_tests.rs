@@ -230,7 +230,12 @@ product_qualification_policy:
                 &state.engine,
                 "worker",
                 &mut worker,
-                &state.engine.resolution_roots(None),
+                &state.engine.resolution_roots(
+                    None,
+                    ryeos_engine::contracts::LogicalProject::Absent(
+                        ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                    ),
+                ),
                 &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
                 None,
                 &mut publication,

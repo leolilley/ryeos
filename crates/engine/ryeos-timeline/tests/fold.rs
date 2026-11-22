@@ -1057,6 +1057,42 @@ fn a_provider_retry_marker_names_the_reason_and_any_superseded_output() {
 }
 
 #[test]
+fn a_restart_cut_provider_retry_says_its_output_was_lost_not_that_there_was_none() {
+    let def = definition();
+    // The failure digest every restart-cut retry decision carries.
+    let restart_cut = "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384";
+    let retry = |digest: &str| {
+        ev(
+            1,
+            "2026-11-18T00:00:00Z",
+            "T-1",
+            "provider_retry",
+            json!({
+                "turn": 1,
+                "attempt": 1,
+                "backoff_ms": 100,
+                "supersedes": {"turn": 1, "attempt": 1, "output_events": 0},
+                "retry_advance": {"decision": {
+                    "reason": {"kind": "mid_stream"},
+                    "failure_digest": digest,
+                }},
+            }),
+        )
+    };
+    let text =
+        |digest: &str| serde_json::to_string(&fold(&[retry(digest)], &def).unwrap()).unwrap();
+    let lost = text(restart_cut);
+    assert!(
+        lost.contains("provider retry, attempt 1 · output lost at restart: mid_stream"),
+        "{lost}"
+    );
+    // An in-process retry with a zero count is a real zero and stays plain.
+    let plain = text(&"ab".repeat(32));
+    assert!(!plain.contains("output lost at restart"), "{plain}");
+    assert!(plain.contains("provider retry, attempt 1"), "{plain}");
+}
+
+#[test]
 fn a_turn_cut_at_the_output_limit_draws_a_marker() {
     let def = definition();
     let cut = ev(

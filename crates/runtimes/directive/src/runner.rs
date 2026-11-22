@@ -830,6 +830,11 @@ pub struct Runner {
     consecutive_length_turns: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
+    /// The provider turn a restart cut. Set on resume of an unfinished
+    /// provider turn; each attempt prepared in that turn offers the daemon the
+    /// retry the signed policy would admit, in case the restart cut that very
+    /// attempt.
+    restart_cut_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
     /// The compaction policy, from the signed runtime config.
     compaction: CompactionConfig,
@@ -1475,6 +1480,13 @@ pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
     })
 }
 
+/// The text whose digest is the `failure_digest` of every retry decision made
+/// for an attempt a restart cut. No process observed that failure, so the
+/// digest is this constant rather than a digest of an error; a reader that
+/// sees it knows the dead attempt's output count is unknown, not zero. The
+/// shipped timeline projection compares against the digest's hex.
+const RESTART_CUT_FAILURE_MARKER: &str = "ryeos.provider-retry.owner-restart-cut.v1";
+
 /// Schema string sealed into every retry-policy digest. A recorded digest of
 /// an older schema cannot be re-derived under the current policy, so recovery
 /// refuses it with a typed reason.
@@ -1899,6 +1911,7 @@ impl Runner {
             consecutive_length_turns: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
+            restart_cut_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
             compaction: CompactionConfig::default(),
             compaction_memo: None,
@@ -2052,6 +2065,7 @@ impl Runner {
         runner.resume_owed_siblings = owed_siblings;
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
+        runner.restart_cut_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.loop_warned = loop_warned;
@@ -2626,7 +2640,10 @@ impl Runner {
         } else if self.resume_active_provider_turn.is_some() && ledger_authority.is_none() {
             State::Errored {
                 error: "provider_attempt_outcome_unknown: an unfinished provider turn has no \
-                        daemon-owned attempt ledger; native recovery refuses a second contact"
+                        daemon-owned attempt ledger, so a restart cannot be proven to have cut \
+                        the call and native recovery refuses a second contact; a route that is \
+                        priced or declared explicitly free is on the ledger and lets a \
+                        `provider_contact: repeatable` directive resume"
                     .to_string(),
             }
         } else if let Some(trigger) = self.resume_summary_trigger.take() {
@@ -6310,6 +6327,7 @@ impl Runner {
                 prepared.requested_output_ceiling,
             )?,
             verified_bound: verified,
+            restart_retry: self.restart_retry_offer(turn, attempt_number)?,
         };
         let response = self.prepare_with_recovery(&prepare_params).await?;
         let (attempt_id, request_hash, coordinate, response_authority_digest, execution_budget_id) =
@@ -6441,6 +6459,54 @@ impl Runner {
                 ledger.attempt_id
             ),
         }
+    }
+
+    /// The retry this runtime would authorize for `attempt_number` of `turn`
+    /// if a restart cut the call, offered to the daemon when preparing an
+    /// attempt of a turn the restart interrupted. A restart is a stream cut:
+    /// the request may have reached the provider and the answer was lost, so
+    /// the reason is `mid_stream`. The signed policy gates it
+    /// like any in-process unknown-outcome retry, and the daemon applies the
+    /// sealed ceiling and transport; with no offer a cut attempt stays an
+    /// unknown outcome. The decision is a pure function of the record and the
+    /// policy, so a re-sent prepare carries the identical offer.
+    fn restart_retry_offer(
+        &self,
+        turn: u32,
+        attempt_number: u32,
+    ) -> anyhow::Result<Option<ProviderRetryDecision>> {
+        if self.restart_cut_turn != Some(turn) {
+            return Ok(None);
+        }
+        // Stream fragments are live-only and never reach the durable record,
+        // so a resumed process cannot know how many the dead attempt
+        // published; zero is the most the record can attest. A reader voids
+        // the fragments of a retried turn by position, not by this count.
+        let reason = ProviderRetryReason::MidStream {
+            live_output_events_emitted: 0,
+        };
+        let Some(delay) = retry_delay_for_reason(&reason, attempt_number, &self.execution) else {
+            return Ok(None);
+        };
+        let decision = ProviderRetryDecision {
+            turn,
+            failed_attempt_number: attempt_number,
+            next_attempt_number: attempt_number
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("provider retry attempt coordinate overflow"))?,
+            backoff_ms: u64::try_from(delay.as_millis())
+                .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
+            reason,
+            failure_digest: HexDigest::new(lillux::sha256_hex(
+                RESTART_CUT_FAILURE_MARKER.as_bytes(),
+            ))
+            .map_err(|error| anyhow::anyhow!("restart retry failure digest: {error}"))?,
+            retry_policy_digest: retry_policy_digest(&self.execution)?,
+        };
+        decision
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(Some(decision))
     }
 
     /// Prepare replay-or-reservation with bounded exact retry. The daemon owns
@@ -10508,6 +10574,111 @@ mod tests {
         assert_eq!(mock.recorded("reserve").len(), 1);
         assert_eq!(mock.recorded("mark_issued").len(), 1);
         assert!(mock.recorded("release_unissued").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_offers_the_daemon_the_restart_retry_its_policy_admits() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        runner.restart_cut_turn = Some(4);
+        let prepared = test_prepared();
+
+        // Within the policy: a mid-stream decision carrying the true fragment
+        // count, bound to the attempt's coordinate and the exact policy.
+        let offer = runner.restart_retry_offer(4, 2).unwrap().expect("offer");
+        assert_eq!(offer.turn, 4);
+        assert_eq!(offer.failed_attempt_number, 2);
+        assert_eq!(offer.next_attempt_number, 3);
+        assert_eq!(
+            offer.reason,
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 0
+            }
+        );
+        assert_eq!(
+            offer.retry_policy_digest,
+            retry_policy_digest(&runner.execution).unwrap()
+        );
+        assert_eq!(
+            retry_supersedes(&offer),
+            json!({"turn": 4, "attempt": 2, "output_events": 0})
+        );
+        // Readers recognise a restart-cut decision by this exact digest.
+        assert_eq!(
+            offer.failure_digest.as_str(),
+            "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384"
+        );
+        // The decision is deterministic, so a re-sent prepare offers the same.
+        assert_eq!(
+            runner.restart_retry_offer(4, 2).unwrap(),
+            Some(offer.clone())
+        );
+        // The runtime would accept the daemon's stored copy of it.
+        let advance = ProviderRetryAdvance::build(
+            "A-1".to_string(),
+            lillux::sha256_hex(b"request"),
+            lillux::sha256_hex(b"coordinate"),
+            offer.clone(),
+            1_000,
+        )
+        .unwrap();
+        runner.validate_retry_advance(&advance, 4, 2).unwrap();
+
+        // Past the policy's attempt bound, in another turn, or with a policy
+        // that does not name the class: no offer, so the cut stays unknown.
+        assert_eq!(runner.restart_retry_offer(4, 3).unwrap(), None);
+        assert_eq!(runner.restart_retry_offer(5, 1).unwrap(), None);
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+        runner.execution = retry_cfg();
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+
+        // The offer rides on the prepare the runtime sends.
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                4,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        let reserves = mock.recorded("reserve");
+        assert_eq!(reserves.len(), 1);
+        assert_eq!(
+            reserves[0]["restart_retry"]["reason"],
+            json!({"kind": "mid_stream", "live_output_events_emitted": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uninterrupted_turn_offers_no_restart_retry() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(mock.recorded("reserve")[0].get("restart_retry").is_none());
     }
 
     #[tokio::test]

@@ -218,7 +218,7 @@ async fn run_entry(
     let site_id = state.threads.site_id().to_string();
     let origin_site_id = ctx.execution_origin(&site_id);
     let plan_ctx = PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),

@@ -770,7 +770,7 @@ fn resolve_dispatch_hop_with_verified(
                 let effective = ctx
                     .engine
                     .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                        logical_project_root: item.resolved.logical_project_root.clone(),
+                        logical_project: item.resolved.logical_project.clone(),
                         item_ref: current_ref.clone(),
                         expected_kind: Some(schema_kind.clone()),
                         project_root: item.resolved.materialized_project_root.clone(),
@@ -1201,13 +1201,11 @@ fn project_corpus(
         &ctx.plan_ctx.subject_resolution_authority,
         request.project_path,
     );
-    let engine_roots = ctx
-        .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            ctx.plan_ctx
-                .effective_logical_project_root(resolution_project_root),
-        );
+    let engine_roots = ctx.engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        ctx.plan_ctx
+            .effective_logical_project(resolution_project_root),
+    );
     if ctx
         .plan_ctx
         .subject_resolution_authority
@@ -1938,13 +1936,11 @@ pub(crate) async fn dispatch_method(
         &ctx.plan_ctx.subject_resolution_authority,
         request.project_path,
     );
-    let engine_roots = ctx
-        .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            ctx.plan_ctx
-                .effective_logical_project_root(resolution_project_root),
-        );
+    let engine_roots = ctx.engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        ctx.plan_ctx
+            .effective_logical_project(resolution_project_root),
+    );
 
     // Payload projection (single-root resolution+trust / corpus build) is
     // deferred via `project_method_payload`: for `validate_only` it runs
@@ -4820,13 +4816,11 @@ pub async fn prepare_admitted_launch_contract(
     // execution input generation nor a projectless workspace may become a
     // project-definition overlay.
     let resolution_project_root = root_admission.resolution_workspace();
-    let roots = ctx
-        .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            ctx.plan_ctx
-                .effective_logical_project_root(resolution_project_root),
-        );
+    let roots = ctx.engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        ctx.plan_ctx
+            .effective_logical_project(resolution_project_root),
+    );
     let request_snapshot = match root_admission.admitted_request_snapshot() {
         Some(admitted) => ctx
             .engine
@@ -5075,13 +5069,11 @@ fn prepare_launch_contract_with_cache(
     };
     let resolution_project_root =
         resolution_project_root(&ctx.plan_ctx.subject_resolution_authority, project_path);
-    let roots = ctx
-        .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            ctx.plan_ctx
-                .effective_logical_project_root(resolution_project_root),
-        );
+    let roots = ctx.engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        ctx.plan_ctx
+            .effective_logical_project(resolution_project_root),
+    );
     let request_snapshot = ctx
         .engine
         .effective_request_snapshot(
@@ -6755,7 +6747,9 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             None,
-            None,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         );
     }
@@ -6771,7 +6765,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
                 executor_ref,
                 &subject.kind,
                 project_root,
-                subject.logical_project_root.clone(),
+                subject.logical_project.clone(),
                 authority,
             )
         }
@@ -6780,7 +6774,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             execution_project_root.map(Path::to_path_buf),
-            subject.logical_project_root.clone(),
+            subject.logical_project.clone(),
             &subject.subject_resolution_authority,
         ),
     }
@@ -7371,7 +7365,7 @@ metadata:
 
     fn test_plan_context(project_path: PathBuf) -> ryeos_engine::contracts::PlanContext {
         ryeos_engine::contracts::PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),
@@ -7430,7 +7424,9 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx: ryeos_engine::contracts::PlanContext {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                    None, &authority,
+                ),
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
                         fingerprint: "fp:test".into(),
@@ -7462,7 +7458,9 @@ metadata:
         let canonical_ref = CanonicalRef::parse("service:example/status").unwrap();
         VerifiedItem {
             resolved: ResolvedItem {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                    None, &authority,
+                ),
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind.clone(),
                 source_path,
@@ -7791,7 +7789,7 @@ metadata:
                 .expect("signed tool fixture has a signature header");
         let canonical_ref = CanonicalRef::parse(item_ref).unwrap();
         let resolved_item = ResolvedItem {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             canonical_ref: canonical_ref.clone(),
             kind: canonical_ref.kind.clone(),
             source_path,
@@ -9211,7 +9209,7 @@ runtime_authority:
     fn resolve_dispatch_hop_enumerates_kinds_when_schema_absent() {
         let engine = build_test_engine();
         let plan_ctx = ryeos_engine::contracts::PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),
