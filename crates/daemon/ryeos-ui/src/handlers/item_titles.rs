@@ -320,6 +320,7 @@ mod tests {
         let trust = TrustSummary {
             class: "trusted".into(),
             signer: Some("fp".into()),
+            reason: None,
         };
         assert!(is_trusted(Some(&trust)));
         let config = shipped();
@@ -334,6 +335,7 @@ mod tests {
             let trust = TrustSummary {
                 class: class.into(),
                 signer: None,
+                reason: None,
             };
             assert!(!is_trusted(Some(&trust)), "{class}");
         }

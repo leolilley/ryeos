@@ -79,6 +79,11 @@ pub struct TrustSummary {
     /// Ed25519 signer fingerprint (SHA-256 hex of verifying key), if signed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer: Option<String>,
+    /// Why a project item is not trusted when the class alone would
+    /// mislead: the session states no project identity, so no scoped signer
+    /// can be judged for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -898,6 +903,7 @@ pub(crate) fn classify_trust_of_source(
         return Some(TrustSummary {
             class: "unknown".into(),
             signer: None,
+            reason: None,
         });
     };
 
@@ -905,6 +911,7 @@ pub(crate) fn classify_trust_of_source(
         return Some(TrustSummary {
             class: "unsigned".into(),
             signer: None,
+            reason: None,
         });
     };
 
@@ -917,9 +924,19 @@ pub(crate) fn classify_trust_of_source(
         Err(_) => "untrusted",
     };
 
+    let reason = (class == "untrusted"
+        && space == ItemSpace::Project
+        && matches!(
+            project,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered
+            )
+        ))
+    .then(|| "no project identity for this session".to_owned());
     Some(TrustSummary {
         class: class.into(),
         signer,
+        reason,
     })
 }
 

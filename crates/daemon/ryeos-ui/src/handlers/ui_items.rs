@@ -641,6 +641,7 @@ mod tests {
             Some(TrustSummary {
                 class: "trusted".into(),
                 signer: Some("fp".into()),
+                reason: None,
             }),
             Some("Mine"),
         );
