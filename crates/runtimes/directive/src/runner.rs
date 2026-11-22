@@ -1120,6 +1120,20 @@ fn retry_backoff(
     retry_classification(err, attempt, execution).map(|(delay, _)| delay)
 }
 
+/// The admitted part of [`classify_retry`], for tests that only care whether a
+/// failure is retried and why.
+#[cfg(test)]
+fn retry_classification(
+    err: &anyhow::Error,
+    attempt: u32,
+    execution: &ExecutionConfig,
+) -> Option<(std::time::Duration, ProviderRetryReason)> {
+    match classify_retry(err, attempt, execution) {
+        RetryClassification::Admitted { delay, reason, .. } => Some((delay, reason)),
+        RetryClassification::Denied(_) => None,
+    }
+}
+
 /// A request the provider refused that the entry's `request_rejections` rows
 /// name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1147,15 +1161,59 @@ fn request_rejection(provider: &ProviderConfig, error: &anyhow::Error) -> Option
     })
 }
 
-fn retry_classification(
+/// Why a provider failure is not retried, when the policy had something typed
+/// to say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDenial {
+    /// Not retryable under the policy (class, status, budget).
+    NotAdmitted,
+    /// The provider's `Retry-After` asks for longer than the signed cap
+    /// `execution.retry_after_max_ms`. The run fails rather than sleeping past
+    /// the cap.
+    RetryAfterExceedsCap { asked_ms: u64, cap_ms: u64 },
+}
+
+impl RetryDenial {
+    /// The typed failure prefix for a denial that carries one.
+    fn typed_failure(&self) -> Option<String> {
+        match self {
+            Self::NotAdmitted => None,
+            Self::RetryAfterExceedsCap { asked_ms, cap_ms } => Some(format!(
+                "provider_retry_after_exceeds_cap: the provider asked to wait {asked_ms}ms \
+                 (Retry-After) and execution.retry_after_max_ms is {cap_ms}ms, so the request \
+                 is not retried"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetryClassification {
+    Admitted {
+        delay: std::time::Duration,
+        reason: ProviderRetryReason,
+        /// The `Retry-After` the delay honoured; `None` when the response
+        /// carried none or the policy ignores it.
+        retry_after_ms: Option<u64>,
+    },
+    Denied(RetryDenial),
+}
+
+fn classify_retry(
     err: &anyhow::Error,
     attempt: u32,
     execution: &ExecutionConfig,
-) -> Option<(std::time::Duration, ProviderRetryReason)> {
+) -> RetryClassification {
     use crate::provider_adapter::ProviderStreamError;
 
+    let mut header_ms = None;
     let reason = match err.downcast_ref::<ProviderStreamError>() {
-        Some(ProviderStreamError::Status { code, .. }) => {
+        Some(ProviderStreamError::Status {
+            code,
+            retry_after_ms,
+            ..
+        }) => {
+            header_ms = *retry_after_ms;
             ProviderRetryReason::Status { code: *code }
         }
         Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
@@ -1171,9 +1229,44 @@ fn retry_classification(
             live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
                 .unwrap_or(u64::MAX),
         },
-        None => return None,
+        None => return RetryClassification::Denied(RetryDenial::NotAdmitted),
     };
-    retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
+    // A policy that ignores the header (cap 0) never sees it, so the recorded
+    // decision and the delay derive from the same inputs.
+    let header_ms = header_ms.filter(|_| execution.retry_after_max_ms != 0);
+    let Some(failed_attempt_number) = attempt.checked_add(1) else {
+        return RetryClassification::Denied(RetryDenial::NotAdmitted);
+    };
+    match retry_delay_for_reason(&reason, failed_attempt_number, header_ms, execution) {
+        Ok(delay) => RetryClassification::Admitted {
+            delay,
+            reason,
+            retry_after_ms: header_ms,
+        },
+        Err(denial) => RetryClassification::Denied(denial),
+    }
+}
+
+/// The launch-time statement for a route whose retries cannot take effect:
+/// `execution.retries` allows them but the route has no daemon ledger
+/// authority to make a retry durable.
+fn provider_retries_unavailable_statement(retries: u32, ledger_route: bool) -> Option<String> {
+    (retries > 0 && !ledger_route).then(|| {
+        format!(
+            "provider retries unavailable: no ledger authority (execution.retries is {retries}, but this route cannot record a retry durably, so a retryable provider failure ends the run)"
+        )
+    })
+}
+
+/// When a retry that waits `delay` from `now_ms` would not finish before the
+/// run's hard stop, the time the run has left; `None` when it fits.
+fn retry_wait_outruns_run_deadline(
+    clock: &crate::run_clock::RunClock,
+    now_ms: i64,
+    delay: std::time::Duration,
+) -> Option<u64> {
+    let wait_ms = i64::try_from(delay.as_millis()).unwrap_or(i64::MAX);
+    (now_ms.saturating_add(wait_ms) >= clock.hard_stop_at_ms()).then(|| clock.remaining_ms(now_ms))
 }
 
 fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
@@ -1185,14 +1278,24 @@ fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
     )
 }
 
+/// The wait before the retry of a failed attempt, or why there is none.
+///
+/// The wait is the exponential backoff, raised to the provider's `Retry-After`
+/// (`retry_after_ms`, only meaningful for a status reason) so the retry is never
+/// earlier than the provider asked. An ask above `execution.retry_after_max_ms`
+/// is refused with [`RetryDenial::RetryAfterExceedsCap`]; a cap of `0` ignores
+/// the header.
 fn retry_delay_for_reason(
     reason: &ProviderRetryReason,
     failed_attempt_number: u32,
+    retry_after_ms: Option<u64>,
     execution: &ExecutionConfig,
-) -> Option<std::time::Duration> {
-    let attempt = failed_attempt_number.checked_sub(1)?;
+) -> Result<std::time::Duration, RetryDenial> {
+    let attempt = failed_attempt_number
+        .checked_sub(1)
+        .ok_or(RetryDenial::NotAdmitted)?;
     if attempt >= execution.retries {
-        return None;
+        return Err(RetryDenial::NotAdmitted);
     }
     let admitted = match reason {
         ProviderRetryReason::Status { code } => {
@@ -1217,14 +1320,27 @@ fn retry_delay_for_reason(
         ),
     };
     if !admitted {
-        return None;
+        return Err(RetryDenial::NotAdmitted);
     }
     let factor = 1u64 << attempt.min(16);
-    let delay_ms = execution
+    let backoff_ms = execution
         .backoff_base_ms
         .saturating_mul(factor)
         .min(execution.backoff_max_ms);
-    Some(lillux::time::Duration::from_millis(delay_ms))
+    let asked_ms = retry_after_ms
+        .filter(|_| matches!(reason, ProviderRetryReason::Status { .. }))
+        .filter(|_| execution.retry_after_max_ms != 0);
+    let delay_ms = match asked_ms {
+        Some(asked_ms) if asked_ms > execution.retry_after_max_ms => {
+            return Err(RetryDenial::RetryAfterExceedsCap {
+                asked_ms,
+                cap_ms: execution.retry_after_max_ms,
+            });
+        }
+        Some(asked_ms) => backoff_ms.max(asked_ms),
+        None => backoff_ms,
+    };
+    Ok(lillux::time::Duration::from_millis(delay_ms))
 }
 
 /// Whether closing the failed attempt before a retry must see valid usage.
@@ -1270,9 +1386,21 @@ pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
     })
 }
 
-fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
+/// Schema string sealed into every retry-policy digest. A recorded digest of
+/// an older schema cannot be re-derived under the current policy, so recovery
+/// refuses it with a typed reason.
+const RETRY_POLICY_DIGEST_SCHEMA: &str = "ryeos.directive.provider-retry-policy.v3";
+
+/// The digest schema before `retry_after_max_ms` joined the policy. The
+/// provider retry policy digest moved to v3 inside the epoch-143 cut, which
+/// clears in-flight threads; a v2-recorded digest met anyway is a typed refusal.
+const RETRY_POLICY_DIGEST_SCHEMA_V2: &str = "ryeos.directive.provider-retry-policy.v2";
+
+/// What the retired v2 schema would have digested for this policy. Used only to
+/// recognise a v2-recorded digest so recovery can refuse it by name.
+fn retry_policy_digest_v2(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
-        "schema": "ryeos.directive.provider-retry-policy.v2",
+        "schema": RETRY_POLICY_DIGEST_SCHEMA_V2,
         "retries": execution.retries,
         "retry_status_codes": execution.retry_status_codes,
         "never_retry": execution.never_retry,
@@ -1286,11 +1414,47 @@ fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest>
         .map_err(|error| anyhow::anyhow!("provider retry policy digest: {error}"))
 }
 
+/// A recorded decision is valid only under the exact policy it was admitted
+/// under. A digest of the retired v2 schema is refused by name: the policy it
+/// sealed cannot be re-derived, and it is never silently re-read as v3.
+fn check_recorded_retry_policy_digest(
+    recorded: &HexDigest,
+    execution: &ExecutionConfig,
+) -> anyhow::Result<()> {
+    if *recorded == retry_policy_digest(execution)? {
+        return Ok(());
+    }
+    if *recorded == retry_policy_digest_v2(execution)? {
+        anyhow::bail!(
+            "provider_retry_policy_digest_retired: the retry advancement was recorded under the retired retry-policy digest schema (v2) and cannot be re-derived under the current policy"
+        );
+    }
+    anyhow::bail!("provider retry advancement was admitted under a different execution policy")
+}
+
+fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
+    let value = json!({
+        "schema": RETRY_POLICY_DIGEST_SCHEMA,
+        "retries": execution.retries,
+        "retry_status_codes": execution.retry_status_codes,
+        "never_retry": execution.never_retry,
+        "backoff_base_ms": execution.backoff_base_ms,
+        "backoff_max_ms": execution.backoff_max_ms,
+        "retry_after_max_ms": execution.retry_after_max_ms,
+        "unknown_outcome_retry": execution.unknown_outcome_retry,
+        "accounting": execution.accounting,
+    });
+    let canonical = lillux::canonical_json(&value)?;
+    HexDigest::new(lillux::sha256_hex(canonical.as_bytes()))
+        .map_err(|error| anyhow::anyhow!("provider retry policy digest: {error}"))
+}
+
 fn provider_retry_decision(
     turn: u32,
     failed_attempt_number: u32,
     delay: std::time::Duration,
     reason: ProviderRetryReason,
+    retry_after_ms: Option<u64>,
     error: &anyhow::Error,
     execution: &ExecutionConfig,
 ) -> anyhow::Result<ProviderRetryDecision> {
@@ -1306,6 +1470,7 @@ fn provider_retry_decision(
         failure_digest: HexDigest::new(lillux::sha256_hex(format!("{error:#}").as_bytes()))
             .map_err(|digest_error| anyhow::anyhow!("provider failure digest: {digest_error}"))?,
         retry_policy_digest: retry_policy_digest(execution)?,
+        retry_after_ms,
     };
     decision
         .validate()
@@ -2061,6 +2226,29 @@ impl Runner {
         // `tracing::warn!` still fires every turn for log visibility.
         let mut provider_default_pricing_logged = false;
         let mut cost_untracked_warned = false;
+        // Retries are refused on a route without daemon ledger authority, but
+        // only when a failure happens. Say so at launch so a configured retry
+        // allowance is not mistaken for an effective one.
+        if let Some(statement) = provider_retries_unavailable_statement(
+            self.execution.retries,
+            ledger_authority.is_some(),
+        ) {
+            warnings.push(statement.clone());
+            record_callback_warning(
+                &mut warnings,
+                "provider_retries_unavailable",
+                self.callback
+                    .append_runtime_event(
+                        RuntimeEventType::Observation,
+                        json!({
+                            "kind": "directive.provider_retries_unavailable",
+                            "statement": statement,
+                            "retries": self.execution.retries,
+                        }),
+                    )
+                    .await,
+            );
+        }
 
         loop {
             state = match state {
@@ -2390,6 +2578,10 @@ impl Runner {
                         turn_replayed_from = replayed
                             .as_ref()
                             .map(|(record_hash, _)| record_hash.clone());
+                        // A retry the policy or the run clock refused, as the
+                        // typed failure that ends the run in place of the
+                        // bare provider error.
+                        let mut retry_refusal: Option<String> = None;
                         let (call, durable_retry_advance, prepared_retry) = if let Some((
                             record_hash,
                             response,
@@ -2462,13 +2654,45 @@ impl Runner {
                                 // A refusal the entry names is final: it is
                                 // never retried, whatever the retry status
                                 // codes say.
-                                if let Some((delay, reason)) =
-                                    retry_classification(error, attempt, &self.execution).filter(
-                                        |_| {
-                                            request_rejection(&self.provider_config, error)
-                                                .is_none()
-                                        },
-                                    )
+                                let classification =
+                                    if request_rejection(&self.provider_config, error).is_some() {
+                                        RetryClassification::Denied(RetryDenial::NotAdmitted)
+                                    } else {
+                                        classify_retry(error, attempt, &self.execution)
+                                    };
+                                let classification = match classification {
+                                    RetryClassification::Admitted { delay, .. } => {
+                                        let outruns_deadline =
+                                            self.harness.run_clock().and_then(|clock| {
+                                                retry_wait_outruns_run_deadline(
+                                                    &clock,
+                                                    lillux::time::timestamp_millis(),
+                                                    delay,
+                                                )
+                                            });
+                                        match outruns_deadline {
+                                            Some(remaining_ms) => {
+                                                retry_refusal = Some(format!(
+                                                    "provider_retry_exceeds_run_deadline: the retry would wait {}ms and the run has {remaining_ms}ms before its hard stop, so the request is not retried",
+                                                    delay.as_millis()
+                                                ));
+                                                RetryClassification::Denied(
+                                                    RetryDenial::NotAdmitted,
+                                                )
+                                            }
+                                            None => classification,
+                                        }
+                                    }
+                                    RetryClassification::Denied(denial) => {
+                                        retry_refusal = denial.typed_failure();
+                                        RetryClassification::Denied(denial)
+                                    }
+                                };
+                                if let RetryClassification::Admitted {
+                                    delay,
+                                    reason,
+                                    retry_after_ms,
+                                } = classification
                                 {
                                     let usage_required = retry_requires_attempt_usage(
                                         &reason,
@@ -2527,6 +2751,7 @@ impl Runner {
                                         attempt_number,
                                         delay,
                                         reason,
+                                        retry_after_ms,
                                         error,
                                         &self.execution,
                                     )?)
@@ -2630,6 +2855,11 @@ impl Runner {
                         match call {
                             Err(e) => {
                                 let Some(decision) = prepared_retry else {
+                                    if let Some(refusal) = retry_refusal {
+                                        break Err(anyhow::anyhow!(
+                                            "{refusal}; original error: {e:#}"
+                                        ));
+                                    }
                                     if provider_outcome_is_uncertain(&e) {
                                         break Err(anyhow::anyhow!(
                                             "provider_outcome_uncertain: the provider may have accepted the issued request and this failure was not retried; a retry after an unknown outcome needs the directive to declare `provider_contact: repeatable` on a remote provider route and `execution.unknown_outcome_retry` to name this failure class within its first max_retries attempts (sealed ceiling {}); original error: {e:#}",
@@ -5562,18 +5792,19 @@ impl Runner {
                 "provider retry advancement contradicts active turn {turn} attempt {failed_attempt_number}"
             );
         }
-        let policy_digest = retry_policy_digest(&self.execution)?;
-        if advance.decision.retry_policy_digest != policy_digest {
+        check_recorded_retry_policy_digest(&advance.decision.retry_policy_digest, &self.execution)?;
+        if advance.decision.retry_after_ms.is_some() && self.execution.retry_after_max_ms == 0 {
             anyhow::bail!(
-                "provider retry advancement was admitted under a different execution policy"
+                "provider retry advancement records a Retry-After the execution policy ignores"
             );
         }
         let expected_delay = retry_delay_for_reason(
             &advance.decision.reason,
             failed_attempt_number,
+            advance.decision.retry_after_ms,
             &self.execution,
         )
-        .ok_or_else(|| {
+        .map_err(|_| {
             anyhow::anyhow!("provider retry advancement is forbidden by the exact execution policy")
         })?;
         if u64::try_from(expected_delay.as_millis()).ok() != Some(advance.decision.backoff_ms) {
@@ -7509,6 +7740,7 @@ mod tests {
             code,
             detail: format!("provider returned {code}: {body}"),
             body: body.to_string(),
+            retry_after_ms: None,
         })
     }
 
@@ -7577,6 +7809,7 @@ mod tests {
             code,
             detail: format!("provider returned {code}"),
             body: String::new(),
+            retry_after_ms: None,
         })
     }
 
@@ -7762,14 +7995,248 @@ mod tests {
         let reason = ProviderRetryReason::MidStream {
             live_output_events_emitted: 1,
         };
-        assert!(retry_delay_for_reason(&reason, 2, &cfg).is_some());
-        assert!(retry_delay_for_reason(&reason, 3, &cfg).is_none());
+        assert!(retry_delay_for_reason(&reason, 2, None, &cfg).is_ok());
+        assert!(retry_delay_for_reason(&reason, 3, None, &cfg).is_err());
         let narrowed = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
-        assert!(retry_delay_for_reason(&reason, 1, &narrowed).is_none());
+        assert!(retry_delay_for_reason(&reason, 1, None, &narrowed).is_err());
         assert_ne!(
             retry_policy_digest(&cfg).unwrap(),
             retry_policy_digest(&narrowed).unwrap()
         );
+    }
+
+    fn status_err_with_retry_after(code: u16, retry_after_ms: Option<u64>) -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code,
+            detail: format!("provider returned {code}"),
+            body: String::new(),
+            retry_after_ms,
+        })
+    }
+
+    #[test]
+    fn retry_after_raises_the_delay_never_lowers_it() {
+        use std::time::Duration;
+        let cfg = retry_cfg(); // base 1000, cap 60000
+        let reason = ProviderRetryReason::Status { code: 429 };
+        // Backoff for the first retry is 1000: a smaller ask changes nothing,
+        // a larger one wins, an ask equal to the cap is honoured.
+        for (asked, expected) in [
+            (None, 1_000),
+            (Some(0), 1_000),
+            (Some(400), 1_000),
+            (Some(1_000), 1_000),
+            (Some(4_500), 4_500),
+            (Some(60_000), 60_000),
+        ] {
+            assert_eq!(
+                retry_delay_for_reason(&reason, 1, asked, &cfg),
+                Ok(Duration::from_millis(expected)),
+                "{asked:?}"
+            );
+        }
+        // A later attempt's larger backoff beats a small ask.
+        assert_eq!(
+            retry_delay_for_reason(&reason, 2, Some(1_500), &cfg),
+            Ok(Duration::from_millis(2_000))
+        );
+    }
+
+    #[test]
+    fn retry_after_over_the_cap_is_a_typed_denial() {
+        let cfg = ExecutionConfig {
+            retry_after_max_ms: 5_000,
+            ..retry_cfg()
+        };
+        let reason = ProviderRetryReason::Status { code: 429 };
+        assert_eq!(
+            retry_delay_for_reason(&reason, 1, Some(5_001), &cfg),
+            Err(RetryDenial::RetryAfterExceedsCap {
+                asked_ms: 5_001,
+                cap_ms: 5_000
+            })
+        );
+        let typed = RetryDenial::RetryAfterExceedsCap {
+            asked_ms: 5_001,
+            cap_ms: 5_000,
+        }
+        .typed_failure()
+        .unwrap();
+        assert!(
+            typed.starts_with("provider_retry_after_exceeds_cap:"),
+            "{typed}"
+        );
+        assert!(typed.contains("5001") && typed.contains("5000"), "{typed}");
+        assert_eq!(RetryDenial::NotAdmitted.typed_failure(), None);
+        // The classifier carries the denial for a status that is otherwise
+        // retryable, and records nothing for a status that is not.
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(429, Some(9_000)), 0, &cfg),
+            RetryClassification::Denied(RetryDenial::RetryAfterExceedsCap {
+                asked_ms: 9_000,
+                cap_ms: 5_000
+            })
+        );
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(418, Some(9_000)), 0, &cfg),
+            RetryClassification::Denied(RetryDenial::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_zero_cap_ignores_the_header_and_records_none() {
+        use std::time::Duration;
+        let cfg = ExecutionConfig {
+            retry_after_max_ms: 0,
+            ..retry_cfg()
+        };
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(429, Some(900_000)), 0, &cfg),
+            RetryClassification::Admitted {
+                delay: Duration::from_millis(1_000),
+                reason: ProviderRetryReason::Status { code: 429 },
+                retry_after_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_admitted_classification_carries_the_honoured_header() {
+        use std::time::Duration;
+        assert_eq!(
+            classify_retry(
+                &status_err_with_retry_after(503, Some(7_000)),
+                0,
+                &retry_cfg()
+            ),
+            RetryClassification::Admitted {
+                delay: Duration::from_millis(7_000),
+                reason: ProviderRetryReason::Status { code: 503 },
+                retry_after_ms: Some(7_000),
+            }
+        );
+    }
+
+    #[test]
+    fn a_header_on_a_non_status_reason_is_never_applied() {
+        let cfg = retry_cfg();
+        let reason = ProviderRetryReason::Send {
+            connect_phase: true,
+        };
+        assert_eq!(
+            retry_delay_for_reason(&reason, 1, Some(50_000), &cfg),
+            Ok(std::time::Duration::from_millis(1_000))
+        );
+    }
+
+    #[test]
+    fn the_policy_digest_covers_retry_after_max_ms_and_is_v3() {
+        let a = retry_cfg();
+        let b = ExecutionConfig {
+            retry_after_max_ms: a.retry_after_max_ms + 1,
+            ..retry_cfg()
+        };
+        assert_ne!(
+            retry_policy_digest(&a).unwrap(),
+            retry_policy_digest(&b).unwrap()
+        );
+        assert_eq!(
+            RETRY_POLICY_DIGEST_SCHEMA,
+            "ryeos.directive.provider-retry-policy.v3"
+        );
+        assert_ne!(
+            retry_policy_digest(&a).unwrap(),
+            retry_policy_digest_v2(&a).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_v2_recorded_digest_is_refused_by_name_and_a_stranger_is_a_policy_mismatch() {
+        let cfg = retry_cfg();
+        check_recorded_retry_policy_digest(&retry_policy_digest(&cfg).unwrap(), &cfg).unwrap();
+        let retired =
+            check_recorded_retry_policy_digest(&retry_policy_digest_v2(&cfg).unwrap(), &cfg)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            retired.starts_with("provider_retry_policy_digest_retired:"),
+            "{retired}"
+        );
+        let stranger = HexDigest::new(lillux::sha256_hex(b"something else")).unwrap();
+        let mismatch = check_recorded_retry_policy_digest(&stranger, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatch.contains("different execution policy"),
+            "{mismatch}"
+        );
+    }
+
+    #[test]
+    fn a_decision_records_the_header_and_its_delay_matches_policy() {
+        let cfg = retry_cfg();
+        let error = status_err_with_retry_after(429, Some(4_000));
+        let RetryClassification::Admitted {
+            delay,
+            reason,
+            retry_after_ms,
+        } = classify_retry(&error, 0, &cfg)
+        else {
+            panic!("admitted");
+        };
+        let decision =
+            provider_retry_decision(1, 1, delay, reason, retry_after_ms, &error, &cfg).unwrap();
+        assert_eq!(decision.backoff_ms, 4_000);
+        assert_eq!(decision.retry_after_ms, Some(4_000));
+        // What recovery recomputes from the recorded header equals the record.
+        assert_eq!(
+            retry_delay_for_reason(&decision.reason, 1, decision.retry_after_ms, &cfg),
+            Ok(std::time::Duration::from_millis(decision.backoff_ms))
+        );
+        // A tampered delay no longer equals the recomputation.
+        assert_ne!(
+            retry_delay_for_reason(&decision.reason, 1, Some(9_000), &cfg),
+            Ok(std::time::Duration::from_millis(decision.backoff_ms))
+        );
+    }
+
+    #[test]
+    fn a_wait_past_the_hard_stop_is_refused_and_one_inside_it_is_not() {
+        use ryeos_runtime::envelope::{DeadlineLimits, HardLimits};
+        let limits = HardLimits {
+            deadline: DeadlineLimits {
+                reserve_seconds: 10,
+                hold_back_ms: 0,
+                at_ms: Some(100_000),
+            },
+            ..HardLimits::default()
+        };
+        let clock = crate::run_clock::RunClock::from_limits(&limits).expect("a run clock");
+        // The hard stop is at 90_000.
+        let now = 50_000;
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_millis(39_999)),
+            None
+        );
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_millis(40_000)),
+            Some(40_000)
+        );
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_secs(600)),
+            Some(40_000)
+        );
+    }
+
+    #[test]
+    fn a_ledgerless_route_with_retries_says_so_at_launch() {
+        let statement = provider_retries_unavailable_statement(2, false).expect("a statement");
+        assert!(
+            statement.starts_with("provider retries unavailable: no ledger authority"),
+            "{statement}"
+        );
+        assert_eq!(provider_retries_unavailable_statement(0, false), None);
+        assert_eq!(provider_retries_unavailable_statement(2, true), None);
     }
 
     #[test]
