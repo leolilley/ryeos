@@ -80,9 +80,11 @@ pub enum ProjectSource {
     /// Execute against the live filesystem project path.
     #[default]
     LiveFs,
-    /// Resolve the acting principal's HEAD ref for the project
-    /// and checkout from CAS.
-    PushedHead,
+    /// Resolve the acting principal's own HEAD for `project` and check it
+    /// out from CAS. The owner is always the acting principal.
+    PushedHead {
+        project: ryeos_state::project_identity::PushedProject,
+    },
     /// Execute from one explicitly selected immutable project snapshot.
     Snapshot { hash: String },
     /// Explicitly capture the complete live project at admission, then execute
@@ -162,8 +164,7 @@ pub struct ResolvedProjectContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCurrentHeadDestination {
-    pub principal_key: String,
-    pub project_hash: String,
+    pub head: ryeos_state::project_identity::ProjectHeadKey,
     pub expected_hash: String,
 }
 
@@ -186,7 +187,8 @@ impl ResolvedProjectContext {
         Ok(Self {
             effective_path: borrowed_dir,
             original_path,
-            source: ProjectSource::PushedHead,
+            // A borrowed callback context selects no head of its own.
+            source: ProjectSource::LiveFs,
             snapshot_hash: None,
             current_head_destination: None,
             pinned_materialization: None,
@@ -233,13 +235,13 @@ pub fn resolve_project_context(
             ));
         }
         (
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject,
             Some(realization),
         ) => Some(realization),
         (
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject,
             None,
@@ -270,30 +272,20 @@ pub fn resolve_project_context(
                 captured_generation: None,
             }
         }
-        ProjectSource::PushedHead => {
+        ProjectSource::PushedHead { project } => {
             let authority = crate::execution::pinned_state_authority(state)?;
             let cas_mutation_guard = authority.acquire_shared_guard()?;
             authority.ensure_guard(&cas_mutation_guard)?;
-            // HEAD lookup MUST use the same canonical ref string as
-            // push_head used when writing the ref. canonical_project_ref
-            // is the single source of truth — it canonicalizes via
-            // std::fs::canonicalize (matching push_head) and bypasses
-            // only for NO_PROJECT_SENTINEL.
-            let project_path = project_path.to_str().ok_or_else(|| {
-                ProjectSourceError::Other(
-                    "project_path is not valid UTF-8 and cannot be used as a project identity"
-                        .into(),
-                )
-            })?;
-            let project_str = canonical_project_ref(project_path)?;
-            let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
-            let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
-
+            // The acting principal's own head for the named project: the
+            // owner is never request input, and the path is only a label.
+            let head = project
+                .head_key(principal_id)
+                .map_err(|error| ProjectSourceError::Other(format!("{error:#}")))?;
             let snap_hash = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?
+                .with_state_db(|db| db.read_project_head(&head))?
                 .ok_or_else(|| ProjectSourceError::PushFirst {
-                    project_path: project_str.to_string(),
+                    project_path: project.to_string(),
                 })?;
 
             let mut context =
@@ -304,13 +296,12 @@ pub fn resolve_project_context(
                     snapshot_hash: &snap_hash,
                     original_path: Some(original_path),
                     checkout_id,
-                    source: ProjectSource::PushedHead,
+                    source: source.clone(),
                     captured_generation: None,
                     realization: pinned_realization.expect("validated pinned realization"),
                 })?;
             context.current_head_destination = Some(ResolvedCurrentHeadDestination {
-                principal_key: principal_key.to_owned(),
-                project_hash,
+                head,
                 expected_hash: snap_hash,
             });
             context
@@ -391,7 +382,11 @@ pub fn resolve_pinned_snapshot_context(
         snapshot_hash,
         original_path: Some(original_path),
         checkout_id,
-        source: ProjectSource::PushedHead,
+        // A resumed generation is exactly its pinned snapshot; the head it
+        // was selected from is not re-read.
+        source: ProjectSource::Snapshot {
+            hash: snapshot_hash.to_owned(),
+        },
         captured_generation: None,
         realization,
     })
@@ -1352,7 +1347,7 @@ mod canonical_project_ref_tests {
 
         assert_eq!(ctx.effective_path, tmp.path());
         assert_eq!(ctx.original_path, PathBuf::from("/original"));
-        assert!(matches!(ctx.source, ProjectSource::PushedHead));
+        assert!(matches!(ctx.source, ProjectSource::LiveFs));
         assert!(ctx.snapshot_hash.is_none());
         assert!(ctx.temp_dir.is_none());
         assert!(prepared_product_subject(Some(&ctx)).is_err());
