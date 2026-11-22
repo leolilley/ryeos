@@ -5,6 +5,7 @@
 //! full-width selection) one indent level deeper.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsRowVm, RyeOsSectionVm};
 
@@ -17,7 +18,7 @@ use super::super::theme::{
 
 /// Rows sit two cells in from the section header so the fold glyph column
 /// stays clear of content.
-const ROW_INDENT: usize = 2;
+const ROW_INDENT: usize = LAYOUT.cells.section_indent;
 
 pub fn draw_sections(
     surface: &mut TextSurface,

@@ -115,6 +115,104 @@ class Classifier(unittest.TestCase):
         self.assertEqual(self.run_classify(root)[0], "full")
 
 
+class TouchedPackages(unittest.TestCase):
+    """Which cargo packages a merge gate must test for a branch."""
+
+    BASE_FILES = {
+        "Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/bin/daemon"]\nexclude = ["crates/clients/rune"]\n',
+        "crates/a/Cargo.toml": '[package]\nname = "pkg-a"\nversion = "0"\n',
+        "crates/a/src/lib.rs": "pub fn f() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert!(true);\n    }\n}\n",
+        "crates/a/src/other.rs": "pub fn g() -> u8 {\n    1\n}\n",
+        "crates/bin/daemon/Cargo.toml": '[package]\nname = "ryeosd"\nversion = "0"\n',
+        "crates/bin/daemon/src/main.rs": "fn main() {}\n",
+        "crates/bin/daemon/tests/one_e2e.rs": "// e2e\n",
+        "crates/clients/rune/Cargo.toml": '[workspace]\n\n[package]\nname = "rune-client"\nversion = "0"\n',
+        "crates/clients/rune/src/lib.rs": "pub fn r() {}\n",
+        "docs/readme.md": "x",
+    }
+
+    def packages(self, changed: dict[str, str], rule: str = "narrow") -> list[dict]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        for name, text in self.BASE_FILES.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "--allow-empty", "-m", "change")
+        base = classify_mod.git(str(root), "merge-base", "HEAD", "origin/next").decode().strip()
+        paths = sorted(
+            n for n in classify_mod.git(str(root), "diff", "--name-only", "-z", base, "HEAD").decode().split("\0") if n
+        )
+        return classify_mod.touched_packages(str(root), base, paths, rule)
+
+    def names(self, found: list[dict]) -> list[str]:
+        return [entry["package"] for entry in found]
+
+    def test_tests_dir_file_maps_to_its_crate(self):
+        found = self.packages({"crates/a/tests/new_replay.rs": "#[test] fn t() {}\n"})
+        self.assertEqual(found, [{"package": "pkg-a", "manifest": None, "args": []}])
+
+    def test_cfg_test_hunk_maps_to_its_crate(self):
+        lib = self.BASE_FILES["crates/a/src/lib.rs"].replace("assert!(true);", "assert!(1 == 1);")
+        self.assertEqual(self.names(self.packages({"crates/a/src/lib.rs": lib})), ["pkg-a"])
+
+    def test_added_test_function_in_test_module_maps(self):
+        lib = self.BASE_FILES["crates/a/src/lib.rs"].replace(
+            "    }\n}\n", "    }\n\n    #[test]\n    fn u() {}\n}\n"
+        )
+        self.assertEqual(self.names(self.packages({"crates/a/src/lib.rs": lib})), ["pkg-a"])
+
+    def test_non_test_src_change_maps_to_none_under_narrow_rule(self):
+        lib = self.BASE_FILES["crates/a/src/lib.rs"].replace("pub fn f() {}", "pub fn f() { let _ = 1; }")
+        self.assertEqual(self.packages({"crates/a/src/lib.rs": lib, "crates/a/src/other.rs": "pub fn g() -> u8 { 2 }\n"}), [])
+
+    def test_non_test_src_change_maps_under_wide_rule(self):
+        found = self.packages({"crates/a/src/other.rs": "pub fn g() -> u8 { 2 }\n"}, rule="wide")
+        self.assertEqual(self.names(found), ["pkg-a"])
+
+    def test_rune_workspace_file_carries_its_manifest(self):
+        found = self.packages({"crates/clients/rune/tests/snap.rs": "#[test] fn t() {}\n"})
+        self.assertEqual(
+            found,
+            [{"package": "rune-client", "manifest": "crates/clients/rune/Cargo.toml", "args": []}],
+        )
+
+    def test_docs_only_change_maps_to_none(self):
+        changed = {"docs/readme.md": "y", "crates/a/NOTES.md": "z"}
+        self.assertEqual(self.packages(changed, rule="narrow"), [])
+        self.assertEqual(self.packages(changed, rule="wide"), [])
+
+    def test_daemon_e2e_is_limited(self):
+        narrow = self.packages({"crates/bin/daemon/tests/one_e2e.rs": "// changed\n"})
+        self.assertEqual(
+            narrow[0]["args"], ["--test", "one_e2e", "--lib", "--bins", "--no-tests=pass"]
+        )
+        wide = self.packages({"crates/bin/daemon/src/main.rs": "fn main() { }\n"}, rule="wide")
+        self.assertEqual(wide[0]["args"], ["--lib", "--bins", "--no-tests=pass"])
+
+    def test_daemon_shared_test_helper_runs_whole_package(self):
+        found = self.packages({"crates/bin/daemon/tests/common/mod.rs": "// helper\n"})
+        self.assertEqual(found[0]["args"], [])
+
+    def test_cfg_test_text_in_a_string_is_not_test_code(self):
+        other = 'pub fn g() -> &\'static str {\n    "#[cfg(test)] mod tests { x }"\n}\n'
+        self.assertEqual(self.packages({"crates/a/src/other.rs": other}), [])
+
+    def test_cli_fault_prints_error_not_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            done = subprocess.run(
+                ["python3", "-I", str(CLASSIFY), "--root", tmp], capture_output=True, text=True
+            )
+        self.assertIn("test_packages=ERROR", done.stdout.splitlines())
+
+
 class Digest(unittest.TestCase):
     def repo(self) -> Path:
         tmp = tempfile.TemporaryDirectory()

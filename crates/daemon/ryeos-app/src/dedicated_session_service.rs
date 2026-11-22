@@ -6787,45 +6787,93 @@ pub fn finish_terminal_credential_cleanup(
     Ok(())
 }
 
-/// Every dedicated-session state with whether root-stop retirement
-/// ([`abort_session_for_root_stop`]) may run before a stopped runtime's
-/// workspace capture without destroying anything the capture's caller still
-/// needs. The list must equal the schema's state set exactly (a test pins it),
-/// so a new state cannot exist without being classified here.
-///
-/// `true` only for states with no candidate to cancel, which fall through to
-/// the worker-retirement path: `admitted` and `binding` (no turn has run, so
-/// no candidate exists), `idle`, `turn_running` and `awaiting_approval` (a live
-/// worker, no candidate yet), `recovering` and `outcome_unknown` (settled as
-/// unattached or retired), and `draining` (the worker is shutting down before
-/// any freeze begins). `freezing`, `frozen`, `verifying`, `qualifying`,
-/// `publish_ready` and `discarding` hold or build a candidate that retirement
-/// cancels; `publishing` is refused by retirement; `terminal` has no worker
-/// left to retire.
-pub const DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE: [(&str, bool); 16] = [
-    ("admitted", true),
-    ("binding", true),
-    ("idle", true),
-    ("turn_running", true),
-    ("awaiting_approval", true),
-    ("recovering", true),
-    ("outcome_unknown", true),
-    ("draining", true),
-    ("freezing", false),
-    ("frozen", false),
-    ("verifying", false),
-    ("qualifying", false),
-    ("publish_ready", false),
-    ("publishing", false),
-    ("discarding", false),
-    ("terminal", false),
+/// What a restart does with the root thread of a dedicated session in a given
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRootResume {
+    /// The session is running or recoverable: the root may be resumed or
+    /// relaunched under its ordinary budget.
+    Resume,
+    /// The session holds or builds a candidate (freeze, verification,
+    /// qualification, publication, discard): the root is left exactly as it
+    /// is. No resume budget is spent and the chain head does not move.
+    Hold,
+    /// The session already settled: its worker is gone and its root can only
+    /// be finalised.
+    Finalise,
+}
+
+/// Stable typed reason recorded when a restart holds a root because its
+/// dedicated session holds or builds a candidate.
+pub const DEDICATED_SESSION_HOLDS_CANDIDATE: &str = "dedicated_session_holds_candidate";
+
+/// How the session-state-keyed decisions treat one dedicated-session state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionStatePolicy {
+    pub state: &'static str,
+    /// Owner-drop retirement may cancel the session before a candidate is
+    /// captured. States that hold or build a candidate (`freezing`, `frozen`,
+    /// `verifying`, `qualifying`, `publish_ready`, `discarding`) are retired
+    /// only through the candidate path; `publishing` is refused by
+    /// retirement; `terminal` has no worker left to retire.
+    pub retires_before_capture: bool,
+    pub root_resume: SessionRootResume,
+}
+
+const fn session_policy(
+    state: &'static str,
+    retires_before_capture: bool,
+    root_resume: SessionRootResume,
+) -> SessionStatePolicy {
+    SessionStatePolicy {
+        state,
+        retires_before_capture,
+        root_resume,
+    }
+}
+
+/// One row per dedicated-session state, pinned to the runtime schema's state
+/// set by a test. Every state-keyed decision reads this table.
+pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
+    session_policy("admitted", true, SessionRootResume::Resume),
+    session_policy("binding", true, SessionRootResume::Resume),
+    session_policy("idle", true, SessionRootResume::Resume),
+    session_policy("turn_running", true, SessionRootResume::Resume),
+    session_policy("awaiting_approval", true, SessionRootResume::Resume),
+    session_policy("recovering", true, SessionRootResume::Resume),
+    session_policy("outcome_unknown", true, SessionRootResume::Resume),
+    session_policy("draining", true, SessionRootResume::Resume),
+    session_policy("freezing", false, SessionRootResume::Hold),
+    session_policy("frozen", false, SessionRootResume::Hold),
+    session_policy("verifying", false, SessionRootResume::Hold),
+    session_policy("qualifying", false, SessionRootResume::Hold),
+    session_policy("publish_ready", false, SessionRootResume::Hold),
+    session_policy("publishing", false, SessionRootResume::Hold),
+    session_policy("discarding", false, SessionRootResume::Hold),
+    session_policy("terminal", false, SessionRootResume::Finalise),
 ];
+
+fn session_state_policy(session_state: &str) -> Option<&'static SessionStatePolicy> {
+    SESSION_STATE_POLICY
+        .iter()
+        .find(|policy| policy.state == session_state)
+}
 
 /// Positive allow-list: an unknown state is never retired early.
 pub fn session_state_retires_before_capture(session_state: &str) -> bool {
-    DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE
-        .iter()
-        .any(|(state, retires)| *retires && *state == session_state)
+    session_state_policy(session_state).is_some_and(|policy| policy.retires_before_capture)
+}
+
+/// What a restart does with a root whose dedicated session is in
+/// `session_state`. A thread with no dedicated session resumes as before; an
+/// unknown state is held, never resumed.
+pub fn session_root_resume(session_state: Option<&str>) -> SessionRootResume {
+    match session_state {
+        None => SessionRootResume::Resume,
+        Some(state) => {
+            session_state_policy(state).map_or(SessionRootResume::Hold, |policy| policy.root_resume)
+        }
+    }
 }
 
 /// Node-owned owner-drop cancellation path used by the root execution guard.
