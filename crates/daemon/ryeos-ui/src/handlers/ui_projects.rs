@@ -2269,24 +2269,22 @@ mod tests {
             added_at: "2026-11-22T00:00:00Z".into(),
             tags: Vec::new(),
         };
-        owner
-            .write_yaml(
-                &owner.paths().projects_config(),
-                &ProjectsFile {
-                    version: PROJECTS_VERSION,
-                    projects: vec![row("owned-by-other", "/srv/other")],
-                },
-            )
-            .unwrap();
-        caller
-            .write_yaml(
-                &caller.paths().projects_config(),
-                &ProjectsFile {
-                    version: PROJECTS_VERSION,
-                    projects: vec![row("mine", "/srv/mine")],
-                },
-            )
-            .unwrap();
+        ryeos_app::principal::write_yaml_atomic(
+            &owner.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("owned-by-other", "/srv/other")],
+            },
+        )
+        .unwrap();
+        ryeos_app::principal::write_yaml_atomic(
+            &caller.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("mine", "/srv/mine")],
+            },
+        )
+        .unwrap();
 
         let found = registered_project(caller.load_projects().unwrap(), "mine").unwrap();
         assert_eq!(found.root, "/srv/mine");

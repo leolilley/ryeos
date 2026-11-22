@@ -84,7 +84,7 @@ fn operator_signs_view(
             item: &ChainItem::parse(VIEW_REF).expect("view chain item"),
             file_ext: ".yaml",
             before: before.as_deref(),
-            after: Some(&after),
+            after: Some(std::str::from_utf8(&after).expect("signed item is text")),
             provenance: std::collections::BTreeMap::from([(
                 "action".to_owned(),
                 "sign".to_owned(),
