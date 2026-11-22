@@ -705,6 +705,14 @@ pub(crate) async fn execute_protected_qualification(
         "recipe_ref": recipe_ref,
     }))?;
     let release_project_identity = source_generation.project_identity().to_path_buf();
+    // The gate checks the SOURCE snapshot (the launcher's own head), while the
+    // verifier qualifies the overlay snapshot materialized below: the source
+    // plus signed recipe Config. That split is sound because the only files
+    // the overlay adds or replaces are the signed build recipe and, on a
+    // capture lane, the signed capture recipe, both issued by the publisher
+    // authority for this release; below, before any verifier is launched, the
+    // overlay's resolved recipe must equal the publisher-authorized raw digest
+    // and verify as trusted. Every other byte of the overlay is the gated head.
     let release_head_source = super::product_qualification_launch::ReleaseHeadSource {
         project_path: release_project_identity.clone(),
         head_snapshot_hash: source_generation.source_snapshot_hash().to_owned(),

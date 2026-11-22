@@ -1134,6 +1134,125 @@ mod tests {
         );
     }
 
+    /// Stores `files` (relative path -> bytes) as one AI-only project
+    /// snapshot in the fixture's CAS and returns its hash.
+    fn store_ai_only_snapshot(state: &AppState, files: &[(&str, &[u8])]) -> String {
+        use ryeos_state::objects::{
+            project_file::ProjectFile, project_snapshot::ProjectSnapshot, project_tree::ProjectTree,
+        };
+        let source = tempfile::tempdir().unwrap();
+        for (relative, bytes) in files {
+            let path = source.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let pinned = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let no_node_patterns =
+            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            })
+            .unwrap();
+        let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+            &pinned,
+            &no_node_patterns,
+            ryeos_state::project_sync::ProjectSyncScope::AiOnly,
+        )
+        .unwrap();
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let mut tree = BTreeMap::new();
+        for (relative, bytes) in files {
+            let blob_hash = cas.store_blob(bytes).unwrap();
+            let file = ProjectFile {
+                blob_hash,
+                size: u64::try_from(bytes.len()).unwrap(),
+                normalized_mode: ProjectFile::REGULAR_MODE,
+            };
+            tree.insert(
+                (*relative).to_owned(),
+                cas.store_object(&file.to_value()).unwrap(),
+            );
+        }
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: cas
+                .store_object(&ProjectTree { files: tree }.to_value())
+                .unwrap(),
+            effective_policy_hash: cas.store_object(&policy.to_value()).unwrap(),
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: lillux::time::iso8601_now(),
+            source: "push".to_owned(),
+        };
+        cas.store_object(&snapshot.to_value()).unwrap()
+    }
+
+    /// The stated project path is a real host path, but a pinned
+    /// qualification resolves only the snapshot: a file present in the live
+    /// checkout at that path and absent from the snapshot never appears in
+    /// the effective root, and the effective root is not the checkout.
+    #[tokio::test]
+    async fn a_stated_project_path_is_a_label_and_the_live_checkout_is_never_resolved() {
+        let fixture = gate_fixture();
+        let in_snapshot = ".ai/config/qlr/in-snapshot.yaml";
+        let live_only = ".ai/config/qlr/live-only.yaml";
+        let snapshot =
+            store_ai_only_snapshot(&fixture.state, &[(in_snapshot, b"snapshot: true\n")]);
+        write_head(
+            &fixture.state,
+            &fixture.operator_principal,
+            &fixture.project,
+            &snapshot,
+        );
+        for relative in [in_snapshot, live_only] {
+            let path = fixture.project.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"live: true\n").unwrap();
+        }
+        let stated = state_pinned_qualification_logical_project(
+            &fixture.state,
+            &fixture.operator,
+            &fixture.project,
+            &snapshot,
+        )
+        .unwrap();
+        let context = resolve_project_context_off_thread(ResolveProjectContextRequest {
+            state: fixture.state.as_ref().clone(),
+            source: ProjectSource::Snapshot {
+                hash: snapshot.clone(),
+            },
+            project_path: stated.clone(),
+            principal_id: fixture.operator_principal.clone(),
+            checkout_id: "qualification-label-test".to_owned(),
+            pinned_realization: Some(
+                ryeos_executor::execution::project_source::PinnedContextRealization::ReadOnly,
+            ),
+            normalization: ProjectRootNormalization::Preserve,
+            launch_timings: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(context.original_path, stated);
+        assert_eq!(context.snapshot_hash.as_deref(), Some(snapshot.as_str()));
+        let effective = context.effective_path.canonicalize().unwrap();
+        assert!(
+            !effective.starts_with(&stated) && !stated.starts_with(&effective),
+            "the effective root {} must not be the live checkout {}",
+            effective.display(),
+            stated.display()
+        );
+        assert_eq!(
+            std::fs::read(effective.join(in_snapshot)).unwrap(),
+            b"snapshot: true\n",
+            "the snapshot's bytes win over the live checkout's"
+        );
+        assert!(
+            !effective.join(live_only).exists(),
+            "a live-only file must never appear in the pinned root"
+        );
+    }
+
     #[tokio::test]
     async fn release_source_runs_the_gate_under_the_launching_principal() {
         let fixture = gate_fixture();
