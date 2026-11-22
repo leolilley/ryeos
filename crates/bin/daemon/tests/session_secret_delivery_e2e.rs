@@ -1191,14 +1191,6 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
             .context("the launched session has no worker epoch")?;
         store.settle_worker_process(&worker, &chain_root_id, epoch, "reaped", "lease ended")?;
         store.fail_dedicated_session_start(&chain_root_id, &worker, epoch, "lease ended", true)?;
-        // A real worker's binding outlives the failed start; its reaped
-        // settlement is what releases the session from it.
-        if store
-            .dedicated_session(&chain_root_id)?
-            .is_some_and(|session| session.worker_instance_id.is_some())
-        {
-            store.fence_abandoned_worker_process(&worker, &chain_root_id, epoch, "reaped")?;
-        }
     }
     daemon.respawn_with(|_| {}).await?;
 
@@ -1246,9 +1238,19 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
     let session = store
         .dedicated_session(&chain_root_id)?
         .context("the session was lost")?;
+    // A settled session keeps the id of a worker whose process row the node
+    // retains as evidence (the store clears it only when no row remains); what
+    // must hold is that the retained worker is settled dead and reaped.
+    let retained_worker_settled = match session.worker_instance_id.as_deref() {
+        None => true,
+        Some(worker) => store.worker_process(worker)?.is_none_or(|row| {
+            row.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+                && row.cleanup_state == "reaped"
+        }),
+    };
     anyhow::ensure!(
-        session.state == "terminal" && session.worker_instance_id.is_none(),
-        "the ended session did not stay terminal: {session:?}"
+        session.state == "terminal" && retained_worker_settled,
+        "the ended session did not stay terminal with its worker settled: {session:?}"
     );
     Ok(())
 }
