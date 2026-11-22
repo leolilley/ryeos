@@ -20,6 +20,7 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
 
     // A live project beside the node, never its app root.
     let project_dir = tempfile::tempdir()?;
+    std::fs::create_dir(project_dir.path().join(".ai"))?;
     let project = project_dir.path().canonicalize()?.display().to_string();
     let (status, body) = harness
         .post_execute(
@@ -87,6 +88,7 @@ async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()>
 
     // A live project beside the node, never its app root.
     let project_dir = tempfile::tempdir()?;
+    std::fs::create_dir(project_dir.path().join(".ai"))?;
     let project = project_dir.path().canonicalize()?.display().to_string();
     // bundle.list ships in core and takes no params — must succeed.
     let (status, body) = harness
@@ -114,6 +116,7 @@ async fn system_routes_reports_routes_and_bundles() -> anyhow::Result<()> {
 
     // A live project beside the node, never its app root.
     let project_dir = tempfile::tempdir()?;
+    std::fs::create_dir(project_dir.path().join(".ai"))?;
     let project = project_dir.path().canonicalize()?.display().to_string();
     let (status, body) = harness
         .post_execute("service:system/routes", &project, serde_json::json!({}))
