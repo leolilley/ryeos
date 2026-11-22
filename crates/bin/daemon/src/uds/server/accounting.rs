@@ -2246,6 +2246,7 @@ mod tests {
             environment: _,
             capability_ceiling,
             child_policy,
+            signer_project: _,
         } = root.clone()
         else {
             panic!("hosted workflow admits a live project authority");

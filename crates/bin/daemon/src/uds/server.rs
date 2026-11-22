@@ -2286,6 +2286,9 @@ mod tests {
             },
             capability_ceiling: Vec::new(),
             child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+            ),
         };
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_path,

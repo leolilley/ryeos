@@ -1171,11 +1171,11 @@ async fn prepare_external_worker_program_and_binding(
 ) -> AdmittedExternalCandidateProgram {
     let roots = engine.resolution_roots(
         Some(project_root.to_path_buf()),
-        ryeos_engine::contracts::LogicalProject::from_optional(None, subject),
+        ryeos_engine::contracts::unestablished_project(subject),
     );
     let mut resolution = engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, subject),
+            logical_project: ryeos_engine::contracts::unestablished_project(subject),
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "worker:test/external-candidate",
             )
@@ -2005,7 +2005,7 @@ fn dispatch_pinned_public_worker(
                 let scopes = vec!["*".to_owned()];
                 let site = state.threads.site_id().to_owned();
                 let plan_ctx = ryeos_engine::contracts::PlanContext {
-                    logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, &provenance.subject_resolution_authority()),
+                    logical_project: ryeos_engine::contracts::unestablished_project(&provenance.subject_resolution_authority()),
                     requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                         ryeos_engine::contracts::Principal {
                             fingerprint: principal.clone(),
@@ -4731,8 +4731,7 @@ async fn run_production_tls_candidate(
         let scopes = vec!["*".to_owned()];
         let principal = format!("fp:{}", state.identity.fingerprint());
         let plan_ctx = ryeos_engine::contracts::PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
+            logical_project: ryeos_engine::contracts::unestablished_project(
                 &provenance.subject_resolution_authority(),
             ),
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -5331,6 +5330,14 @@ async fn run_production_tls_candidate(
             "W-external-composed-controller",
         )
         .unwrap();
+    // The candidate's integration and publication key the owner's head by the
+    // name the source checkout declares.
+    std::fs::create_dir_all(workspace_project.join(".ai")).unwrap();
+    std::fs::write(
+        workspace_project.join(".ai/project.yaml"),
+        "schema: 1\nname: composed-controller\n",
+    )
+    .unwrap();
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: admitted guest, preparing candidate session");
     }
@@ -6114,19 +6121,22 @@ async fn evaluate_integrate_and_publish_candidate(
         "candidate C must pass the ordinary closure/base validator"
     );
 
-    let principal_key = ryeos_state::refs::principal_storage_key(&service_owner).unwrap();
-    let project_hash = ryeos_state::refs::deployed_project_key(
-        source_display_path
-            .to_str()
-            .expect("source display path is UTF-8"),
-    );
+    // The owner's head of the source checkout, under the name it declares.
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &service_owner,
+        &ryeos_state::project_identity::ProjectDeclaration::declared_name(Path::new(
+            source_display_path,
+        ))
+        .unwrap()
+        .expect("the source checkout declares its project name"),
+    )
+    .unwrap();
     let state_authority = state.state_store.pinned_state_authority().unwrap();
     let guard = state_authority.acquire_shared_guard().unwrap();
     state
         .state_store
         .write_project_head_ref(
-            principal_key,
-            &project_hash,
+            &head_key,
             base_snapshot_hash,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
@@ -6403,8 +6413,7 @@ async fn evaluate_integrate_and_publish_candidate(
         state
             .state_store
             .advance_project_head_ref(
-                principal_key,
-                &project_hash,
+                &head_key,
                 &competing_snapshot_hash,
                 base_snapshot_hash,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
@@ -6438,7 +6447,7 @@ async fn evaluate_integrate_and_publish_candidate(
         assert_eq!(
             state
                 .state_store
-                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
+                .with_state_db(|db| db.read_project_head(&head_key))
                 .unwrap()
                 .as_deref(),
             Some(competing_snapshot_hash.as_str()),
@@ -6480,7 +6489,7 @@ async fn evaluate_integrate_and_publish_candidate(
     assert_eq!(
         state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
+            .with_state_db(|db| db.read_project_head(&head_key))
             .unwrap()
             .as_deref(),
         Some(integrated_snapshot_hash.as_str()),
