@@ -2204,6 +2204,19 @@ mod contained_identity_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A reaped child's pid answers neither `/proc/<pid>/stat` nor
+    /// `/proc/<pid>/status`; both reads report absence, never a procfs error.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_pid_is_absent_from_procfs_reads() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let error = super::linux::read_process_stat(pid).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(super::linux::thread_group_of(pid).is_none());
+    }
+
     #[test]
     fn fixed_process_digest_matches_canonical_protocol() {
         use sha2::Digest;
