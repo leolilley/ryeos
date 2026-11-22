@@ -284,6 +284,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     );
 
     let project_path = canonical_existing_project_path(&req.project_path)?;
+    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
+        &project_path,
+        &state.config.app_root,
+    )
+    .map_err(|refusal| ryeos_app::handler_error::HandlerError::Forbidden(refusal.to_string()))?;
     let canonical_project_path = project_path
         .to_str()
         .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?

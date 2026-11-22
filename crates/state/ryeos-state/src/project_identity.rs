@@ -1,0 +1,330 @@
+//! Owner+name project identity and the project's own name declaration.
+//!
+//! A project is identified by the principal that owns it and a name:
+//! `fp:<64 lowercase hex>/<name>`. The name comes from the project tree's
+//! `.ai/project.yaml`; that declaration is a claim, never trust. The owner is
+//! never read from the tree: it is the authenticated launcher of a registered
+//! live checkout, or the principal whose head key a pushed head was found
+//! under. These types carry no authority on their own; nothing here decides
+//! whether a signer is admitted.
+
+use std::fmt;
+use std::path::Path;
+use std::str::FromStr;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+/// Relative path of a project's name declaration inside its root.
+pub const PROJECT_DECLARATION_PATH: &str = ".ai/project.yaml";
+
+/// The only declaration schema this node reads.
+pub const PROJECT_DECLARATION_SCHEMA: u32 = 1;
+
+/// Upper bound on a declaration's size; the document holds two short fields.
+pub const MAX_PROJECT_DECLARATION_BYTES: u64 = 4 * 1024;
+
+const MAX_PROJECT_NAME_LEN: usize = 64;
+
+/// A project name: `[a-z0-9][a-z0-9._-]{0,63}`.
+///
+/// No `/` or `:` can appear, so `fp:<owner>/<name>` always splits at the
+/// first `/` without ambiguity, and a name is always one path component.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProjectName(String);
+
+impl ProjectName {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_project_name(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn validate_project_name(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_PROJECT_NAME_LEN {
+        bail!(
+            "project name must be 1 to {MAX_PROJECT_NAME_LEN} characters: {:?}",
+            value
+        );
+    }
+    let mut bytes = value.bytes();
+    let first = bytes.next().expect("non-empty name");
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        bail!("project name must start with a lowercase letter or digit: {value:?}");
+    }
+    if let Some(bad) = bytes.find(|byte| {
+        !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-'))
+    }) {
+        bail!(
+            "project name may contain only lowercase letters, digits, '.', '_' and '-': {value:?} has {:?}",
+            char::from(bad)
+        );
+    }
+    Ok(())
+}
+
+impl TryFrom<String> for ProjectName {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<ProjectName> for String {
+    fn from(value: ProjectName) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for ProjectName {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for ProjectName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// A project's identity: the owning principal and the project name.
+/// Displayed and serialized as `fp:<64 lowercase hex>/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProjectIdentity {
+    owner: String,
+    name: ProjectName,
+}
+
+impl ProjectIdentity {
+    /// `owner` must be exactly `fp:<64 lowercase hex>`; no normalization.
+    pub fn new(owner: impl Into<String>, name: ProjectName) -> Result<Self> {
+        let owner = owner.into();
+        crate::refs::principal_storage_key(&owner)
+            .with_context(|| format!("project owner {owner:?}"))?;
+        Ok(Self { owner, name })
+    }
+
+    /// The owning principal, `fp:<64 lowercase hex>`.
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn name(&self) -> &ProjectName {
+        &self.name
+    }
+}
+
+impl FromStr for ProjectIdentity {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (owner, name) = value
+            .split_once('/')
+            .with_context(|| format!("project identity must be fp:<owner>/<name>: {value:?}"))?;
+        Self::new(owner, ProjectName::new(name)?)
+    }
+}
+
+impl TryFrom<String> for ProjectIdentity {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        value.parse()
+    }
+}
+
+impl From<ProjectIdentity> for String {
+    fn from(value: ProjectIdentity) -> Self {
+        value.to_string()
+    }
+}
+
+impl fmt::Display for ProjectIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.owner, self.name)
+    }
+}
+
+/// A project tree's `.ai/project.yaml`: the name the tree claims. Unsigned on
+/// purpose: a signature is not bound to a location, so a copied tree would
+/// carry a valid one. Trust comes from registration or a head key, never from
+/// this file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDeclaration {
+    pub schema: u32,
+    pub name: ProjectName,
+}
+
+impl ProjectDeclaration {
+    /// Parse and validate declaration bytes.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_PROJECT_DECLARATION_BYTES {
+            bail!(
+                "{PROJECT_DECLARATION_PATH} is larger than {MAX_PROJECT_DECLARATION_BYTES} bytes"
+            );
+        }
+        let declaration: Self = serde_yaml::from_slice(bytes)
+            .with_context(|| format!("decode {PROJECT_DECLARATION_PATH}"))?;
+        if declaration.schema != PROJECT_DECLARATION_SCHEMA {
+            bail!(
+                "{PROJECT_DECLARATION_PATH} schema {} is not supported (expected {PROJECT_DECLARATION_SCHEMA})",
+                declaration.schema
+            );
+        }
+        Ok(declaration)
+    }
+
+    /// Read the declaration under a pinned project root without following
+    /// symlinks. `Ok(None)` when the root declares no name.
+    pub fn read(root: &lillux::PinnedDirectory) -> Result<Option<Self>> {
+        let Some(file) = root
+            .open_pinned_regular_descendant(Path::new(PROJECT_DECLARATION_PATH), false)
+            .with_context(|| format!("open {PROJECT_DECLARATION_PATH}"))?
+        else {
+            return Ok(None);
+        };
+        let observation = file.observation()?;
+        let bytes = file.read_stable_bounded(&observation, MAX_PROJECT_DECLARATION_BYTES)?;
+        Self::parse(&bytes).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OWNER: &str = "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn project_names_follow_the_rule() {
+        for good in ["a", "ryeos-next", "demo.v2", "a_b", "0", &"a".repeat(64)] {
+            ProjectName::new(good).unwrap_or_else(|error| panic!("{good:?}: {error}"));
+        }
+        for bad in [
+            "",
+            &"a".repeat(65),
+            "Ryeos",
+            "-lead",
+            ".hidden",
+            "_x",
+            "a/b",
+            "a:b",
+            "a b",
+            "ü",
+            "a\nb",
+        ] {
+            assert!(ProjectName::new(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn identity_round_trips_through_its_string_form() {
+        let identity =
+            ProjectIdentity::new(OWNER, ProjectName::new("ryeos-next").unwrap()).unwrap();
+        let text = identity.to_string();
+        assert_eq!(text, format!("{OWNER}/ryeos-next"));
+        assert_eq!(text.parse::<ProjectIdentity>().unwrap(), identity);
+        let json = serde_json::to_string(&identity).unwrap();
+        assert_eq!(json, format!("\"{OWNER}/ryeos-next\""));
+        assert_eq!(
+            serde_json::from_str::<ProjectIdentity>(&json).unwrap(),
+            identity
+        );
+        assert_eq!(identity.owner(), OWNER);
+        assert_eq!(identity.name().as_str(), "ryeos-next");
+    }
+
+    #[test]
+    fn identity_refuses_malformed_owners_and_names() {
+        for bad in [
+            "ryeos-next",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/x",
+            "fp:0123/x",
+            "fp:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef/x",
+            &format!("{OWNER}/"),
+            &format!("{OWNER}/a/b"),
+            &format!("{OWNER}/Bad"),
+            OWNER,
+        ] {
+            assert!(
+                bad.parse::<ProjectIdentity>().is_err(),
+                "{bad:?} must be refused"
+            );
+            assert!(serde_json::from_str::<ProjectIdentity>(&format!("{bad:?}")).is_err());
+        }
+    }
+
+    #[test]
+    fn declarations_parse_strictly() {
+        let declaration = ProjectDeclaration::parse(b"schema: 1\nname: ryeos-next\n").unwrap();
+        assert_eq!(declaration.name.as_str(), "ryeos-next");
+        for bad in [
+            &b"schema: 2\nname: x\n"[..],
+            b"name: x\n",
+            b"schema: 1\n",
+            b"schema: 1\nname: X\n",
+            b"schema: 1\nname: x\nowner: fp:abc\n",
+            b"- not a map\n",
+        ] {
+            assert!(
+                ProjectDeclaration::parse(bad).is_err(),
+                "{:?} must be refused",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        let oversized = format!("schema: 1\nname: x\n# {}\n", "a".repeat(4096));
+        assert!(ProjectDeclaration::parse(oversized.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn declarations_are_read_from_a_pinned_root_without_following_links() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert_eq!(ProjectDeclaration::read(&pinned).unwrap(), None);
+
+        std::fs::create_dir(root.path().join(".ai")).unwrap();
+        assert_eq!(ProjectDeclaration::read(&pinned).unwrap(), None);
+
+        std::fs::write(
+            root.path().join(PROJECT_DECLARATION_PATH),
+            "schema: 1\nname: demo\n",
+        )
+        .unwrap();
+        let read = ProjectDeclaration::read(&pinned).unwrap().unwrap();
+        assert_eq!(read.name.as_str(), "demo");
+
+        // A declaration reached through a symlink is never read.
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(
+            elsewhere.path().join("project.yaml"),
+            "schema: 1\nname: other\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.path().join(PROJECT_DECLARATION_PATH)).unwrap();
+        let target = elsewhere.path().join("project.yaml");
+        lillux::PinnedDirectory::open(&root.path().join(".ai"))
+            .unwrap()
+            .unwrap()
+            .create_symlink(
+                std::ffi::OsStr::new("project.yaml"),
+                target.to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+        assert!(
+            !matches!(ProjectDeclaration::read(&pinned), Ok(Some(_))),
+            "a symlinked declaration must never be read"
+        );
+    }
+}

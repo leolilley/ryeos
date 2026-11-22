@@ -63,6 +63,11 @@ pub async fn handle(
             project_path.display()
         )));
     }
+    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
+        &project_path,
+        &state.config.app_root,
+    )
+    .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
 
     let canonical =
         ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T10:47:08Z:d2458fd00eae8ff3f613e084d4ce2ba662848e667458dc2f6324350a0f9c2f39:NB2u1SGQCaQu9cwotwCGq/r1BEjsIVlbJfmRrDlmYvaTgI9AhxHl+B+4ppFOjbM09bYJQbhopWdqnGFQWOw2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T15:50:37Z:45b9993dda5757f73a71a02697a806f8aa6cbc751681c6484e0e2aa555121769:wVI37xMSSI90q2VzbSBFD2MOXzhaDTrNk/9BlY7ViTasz6Bazs6PHOpwn/XoMa/grkoBV4aFkXq+YYuR/PDGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -398,3 +398,8 @@ This means:
    - Permission caps set
 5. **Run** — LLM loop with tool dispatch (up to `limits.turns`)
 6. **Complete** — result captured, thread finalized
+
+A reply that writes a tool call as text is not a result when the provider entry
+declares `malformed_replies` (see the model provider guide): the runtime takes a
+corrected turn, and fails with `malformed_reply_retries_exhausted` when the
+corrections run out.

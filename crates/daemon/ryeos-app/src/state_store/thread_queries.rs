@@ -285,6 +285,10 @@ impl StateStore {
                     spend: usage.spend_usd,
                     provider: facets.get("cost.provider").cloned(),
                     basis: facets.get("cost.basis").cloned(),
+                    usage_status: ryeos_engine::launch_envelope_types::UsageStatus::from_facet(
+                        facets.get("cost.usage_status").map(String::as_str),
+                    )
+                    .context("decode authoritative final cost usage_status")?,
                     metadata,
                 })
             })

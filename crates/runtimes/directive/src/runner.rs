@@ -361,6 +361,11 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
      response at its declared/native output limit; this is \
      distinct from a RyeOS-local output byte limit";
 
+/// Code that starts the failure text of a run whose malformed replies the
+/// provider's signed policy could not correct. The text goes on to name the
+/// marker the last reply matched.
+const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -828,6 +833,9 @@ pub struct Runner {
     /// Derived from the record on resume; non-zero means the latest recorded
     /// turn ended at the limit.
     consecutive_length_turns: u32,
+    /// Malformed replies in a row that were corrected. Derived from the
+    /// record on resume.
+    consecutive_malformed_replies: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     /// The provider turn a restart cut. Set on resume of an unfinished
@@ -1372,6 +1380,53 @@ fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Usage status a failed provider attempt leaves on the run's cost. A timeout,
+/// a stream cut or an unknown outcome after the request was issued may have
+/// consumed usage the run never saw or only saw in part, so the figure is
+/// partial; an error carrying a usage frame is the same (that frame may not be
+/// final). A failure before contact consumed nothing and claims nothing.
+fn failed_attempt_usage_status(
+    error: &anyhow::Error,
+) -> Option<ryeos_runtime::envelope::UsageStatus> {
+    (provider_outcome_is_uncertain(error) || carried_usage_from_error(error).is_some())
+        .then_some(ryeos_runtime::envelope::UsageStatus::Partial)
+}
+
+/// Usage status one settled provider turn contributes to the run's cost.
+/// A turn the provider reported no usable usage for is unavailable (tokens
+/// were not settled as zero and the spend is unknown), or partial when only a
+/// provider-reported spend survived; a turn with tokens but no computable
+/// price is unavailable, never a measured zero. A replayed turn consumed
+/// nothing and claims complete.
+fn settled_turn_usage_status(
+    usage_valid: bool,
+    spend_only_settled: bool,
+    replayed: bool,
+    pricing: &PricingSource,
+    tokens: u64,
+) -> ryeos_runtime::envelope::UsageStatus {
+    use ryeos_runtime::envelope::UsageStatus;
+    if replayed {
+        return UsageStatus::Complete;
+    }
+    if !usage_valid {
+        return if spend_only_settled {
+            UsageStatus::Partial
+        } else {
+            UsageStatus::Unavailable
+        };
+    }
+    if matches!(
+        pricing,
+        PricingSource::Unpriced | PricingSource::ByokUntracked
+    ) && tokens != 0
+    {
+        UsageStatus::Unavailable
+    } else {
+        UsageStatus::Complete
+    }
+}
+
 /// The wait before the retry of a failed attempt, or why there is none.
 ///
 /// The wait is the exponential backoff, raised to the provider's `Retry-After`
@@ -1909,6 +1964,7 @@ impl Runner {
             resume_owed_siblings: Vec::new(),
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
+            consecutive_malformed_replies: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             restart_cut_turn: None,
@@ -1957,6 +2013,7 @@ impl Runner {
             output_tokens,
             total_usd: spend_usd,
             basis: None,
+            usage_status: Default::default(),
         }
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
@@ -1978,6 +2035,7 @@ impl Runner {
         let guard_prefix = resume.guard_prefix.clone();
         let guard_history = resume.guard_history;
         let trailing_length_turns = resume.trailing_length_turns;
+        let trailing_malformed_replies = resume.trailing_malformed_replies;
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
         let refused_code = resume.refused_code.clone();
@@ -2088,6 +2146,7 @@ impl Runner {
         runner.start_over_ceiling = start_over_ceiling;
         runner.refused_code = refused_code;
         runner.resume_summary_trigger = resume_summary_trigger;
+        runner.consecutive_malformed_replies = trailing_malformed_replies;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -3404,6 +3463,9 @@ impl Runner {
                         };
                         match call {
                             Err(e) => {
+                                if let Some(status) = failed_attempt_usage_status(&e) {
+                                    self.budget.note_usage_status(status);
+                                }
                                 let Some(decision) = prepared_retry else {
                                     if let Some(refusal) = retry_refusal {
                                         break Err(anyhow::anyhow!(
@@ -3661,6 +3723,13 @@ impl Runner {
                                 }
                             };
                             let usd = cost.usd;
+                            self.budget.note_usage_status(settled_turn_usage_status(
+                                valid_usage.is_some(),
+                                settled_spend_only,
+                                turn_replayed_from.is_some(),
+                                &cost.source,
+                                input_tok.saturating_add(output_tok),
+                            ));
                             // §2: an operator auditing spend must be able to tell
                             // "free" from "untracked", and know when a model's
                             // cost came from provider-default rates rather than a
@@ -3957,6 +4026,10 @@ impl Runner {
                             State::Streaming { events }
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Cancelled { attempt: cut }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
                             if let Err(error) = self
                                 .settle_available_attempt_accounting(
                                     turn,
@@ -3982,6 +4055,10 @@ impl Runner {
                             events,
                             attempt: cut,
                         }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
                             // A live interrupt that cuts a compaction's summary
                             // call ends the compaction: the partial summary is
                             // not a conversation turn.
@@ -4200,6 +4277,9 @@ impl Runner {
                                                          {turn}: model `{}` has no usable price",
                                                         self.model_name
                                                     ));
+                                                    self.budget.note_usage_status(
+                                                        ryeos_runtime::envelope::UsageStatus::Unavailable,
+                                                    );
                                                 }
                                                 self
                                                     .settle_provider_usage(
@@ -4507,6 +4587,7 @@ impl Runner {
                     match last {
                         Some(msg) => {
                             if msg.has_tool_calls() {
+                                self.consecutive_malformed_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -4547,6 +4628,7 @@ impl Runner {
                                     }
                                 }
                             } else if self.consecutive_length_turns > 0 {
+                                self.consecutive_malformed_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -4580,7 +4662,68 @@ impl Runner {
                                         error: OUTPUT_LIMIT_ERROR.to_string(),
                                     },
                                 }
+                            } else if let Some((marker, policy)) = self
+                                .provider_config
+                                .malformed_replies
+                                .as_ref()
+                                .and_then(|policy| {
+                                    policy
+                                        .first_marker_in(&msg.joined_text())
+                                        .map(|marker| (marker.to_string(), policy.clone()))
+                                })
+                            {
+                                // A reply with no structured tool call whose
+                                // text holds a marker is malformed: the model
+                                // wrote a call as text. Invariant: text that
+                                // looks like a tool call is never parsed or
+                                // executed, so a malformed reply runs no tool.
+                                // The reply is dropped from the conversation,
+                                // the policy's message takes its place, and
+                                // another turn is taken within the policy's
+                                // bound and the turn limit. Otherwise the run
+                                // fails, and the reply is never the result.
+                                let streak = self.consecutive_malformed_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    matched_marker = %marker,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is malformed"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::malformed_reply_kind(
+                                            turn, streak,
+                                        ),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical malformed_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_malformed_replies = streak;
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{MALFORMED_REPLY_ERROR_CODE}: the provider's reply held the marker {marker:?} and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
+                                self.consecutive_malformed_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -6245,6 +6388,7 @@ impl Runner {
             output_tokens,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         };
         let mut proposed_cost = self.budget.cost();
         proposed_cost
@@ -7215,6 +7359,7 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
         output_tokens: 0,
         total_usd: usd,
         basis: None,
+        usage_status: Default::default(),
     }
 }
 
@@ -7911,6 +8056,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7993,6 +8139,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8051,6 +8198,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8108,6 +8256,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -8180,6 +8329,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -8357,6 +8507,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8434,6 +8585,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8508,6 +8660,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8566,6 +8719,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -9804,6 +9958,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {
@@ -11290,5 +11445,89 @@ mod frame_refusal_tests {
             assert!(recorder.events.lock().unwrap().is_empty());
             assert!(recorder.finalized.lock().unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_status_producer_tests {
+    use super::*;
+    use ryeos_runtime::envelope::UsageStatus;
+
+    #[test]
+    fn a_turn_with_no_usable_usage_is_unavailable() {
+        let status = settled_turn_usage_status(false, false, false, &PricingSource::PerModel, 0);
+        assert_eq!(status, UsageStatus::Unavailable);
+    }
+
+    #[test]
+    fn a_turn_with_only_a_reported_spend_is_partial() {
+        let status =
+            settled_turn_usage_status(false, true, false, &PricingSource::ProviderReported, 0);
+        assert_eq!(status, UsageStatus::Partial);
+    }
+
+    #[test]
+    fn tokens_without_a_computable_price_are_unavailable_not_zero() {
+        for pricing in [PricingSource::Unpriced, PricingSource::ByokUntracked] {
+            assert_eq!(
+                settled_turn_usage_status(true, false, false, &pricing, 12),
+                UsageStatus::Unavailable
+            );
+        }
+        // No tokens consumed: nothing is missing.
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::Unpriced, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_measured_priced_or_replayed_turn_is_complete() {
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::PerModel, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::ExplicitlyFree, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(false, false, true, &PricingSource::PerModel, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_cut_timeout_or_unknown_outcome_leaves_usage_partial() {
+        let timeout = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "read timed out".to_string(),
+        });
+        assert_eq!(
+            failed_attempt_usage_status(&timeout),
+            Some(UsageStatus::Partial)
+        );
+        let cut = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+            Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 0,
+                accepted_bytes: 0,
+                accepted_output_events: 0,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: None,
+                detail: "reset".to_string(),
+            }),
+        ));
+        assert_eq!(
+            failed_attempt_usage_status(&cut),
+            Some(UsageStatus::Partial)
+        );
+        // A refusal before contact consumed nothing.
+        let status = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code: 429,
+            detail: "rate limited".to_string(),
+            body: String::new(),
+        });
+        assert_eq!(failed_attempt_usage_status(&status), None);
     }
 }

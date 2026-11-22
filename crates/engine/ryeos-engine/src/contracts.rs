@@ -3316,8 +3316,49 @@ pub struct FinalCost {
     /// must never be summed across a thread tree.
     #[serde(default)]
     pub basis: Option<String>,
+    /// Mirrors `RuntimeCost::usage_status`; serialized only when not
+    /// `complete`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::launch_envelope_types::UsageStatus::is_complete"
+    )]
+    pub usage_status: crate::launch_envelope_types::UsageStatus,
     #[serde(default)]
     pub metadata: Option<Value>,
+}
+
+impl FinalCost {
+    /// The one conversion from a runtime-reported cost: every field the two
+    /// types share is copied here so a new shared field cannot be dropped at
+    /// one hand-written site.
+    pub fn from_runtime(
+        cost: &crate::launch_envelope_types::RuntimeCost,
+        turns: u32,
+        provider: Option<String>,
+        metadata: Option<Value>,
+    ) -> Self {
+        Self {
+            turns,
+            input_tokens: cost.input_tokens,
+            output_tokens: cost.output_tokens,
+            spend: cost.total_usd,
+            provider,
+            basis: cost.basis.clone(),
+            usage_status: cost.usage_status,
+            metadata,
+        }
+    }
+
+    /// The one conversion back to the runtime cost shape.
+    pub fn to_runtime(&self) -> crate::launch_envelope_types::RuntimeCost {
+        crate::launch_envelope_types::RuntimeCost {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_usd: self.spend,
+            basis: self.basis.clone(),
+            usage_status: self.usage_status,
+        }
+    }
 }
 
 #[cfg(test)]
