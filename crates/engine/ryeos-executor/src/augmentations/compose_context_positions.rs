@@ -21,7 +21,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::contracts::LogicalProject;
 use ryeos_engine::kind_registry::LaunchAugmentationDecl;
 use ryeos_engine::resolution::ResolutionOutput;
 use serde_json::{Value, json};

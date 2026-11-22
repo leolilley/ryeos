@@ -2014,7 +2014,6 @@ impl SealedRootExecutionRequest {
             },
         };
         let mut rebound_plan_context = request.plan_context.clone();
-        let site_id = rebound_plan_context.current_site_id.clone();
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
