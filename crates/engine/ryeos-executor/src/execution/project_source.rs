@@ -738,7 +738,7 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let effective_logical_project = plan_context.effective_logical_project(project_root.as_deref());
+    let effective_logical_project = plan_context.signer_project().clone();
     let roots = engine.resolution_roots(project_root.clone(), effective_logical_project.clone());
     let project_authority = project_context
         .as_ref()

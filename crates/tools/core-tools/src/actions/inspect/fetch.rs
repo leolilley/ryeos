@@ -59,7 +59,7 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
 
     let plan_ctx = PlanContext {
         logical_project: if project_path.is_some() {
-            ryeos_engine::contracts::LogicalProject::MaterializedLive
+            ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered)
         } else {
             ryeos_engine::contracts::LogicalProject::Absent(
                 ryeos_engine::contracts::LogicalProjectAbsence::Projectless,

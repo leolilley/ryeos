@@ -396,7 +396,7 @@ fn authoritative_runtime_authority_ai_dir(
         &ryeos_engine::trust::SignerContext::new(
             resolved_item.source_space,
             &resolved_item.kind,
-            resolved_item.materialized_project_root.as_deref(),
+            &resolved_item.logical_project,
         ),
     )
     .map_err(|err| {

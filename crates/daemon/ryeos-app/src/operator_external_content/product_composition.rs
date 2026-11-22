@@ -1274,7 +1274,7 @@ mod tests {
         let loose = ResolutionRoots::from_flat(
             Some("/loose/project/.ai".into()),
             vec![],
-            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
         );
         assert!(
             relationship_resolution_request(&loose, &cow, "config:example/relationships").is_err()

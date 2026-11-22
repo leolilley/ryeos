@@ -1556,7 +1556,7 @@ async fn load_runtime_config_snapshot_cached(
     let trusted_signers = state
         .engine
         .node_trust_store
-        .launch_signer_entries(request_trust, engine_roots.signer_project_root());
+        .launch_signer_entries(request_trust, engine_roots.signer_project());
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1923,7 +1923,7 @@ async fn runtime_config_snapshot_is_valid(
         &state
             .engine
             .node_trust_store
-            .launch_signer_entries(request_trust, engine_roots.signer_project_root()),
+            .launch_signer_entries(request_trust, engine_roots.signer_project()),
         Some(materialization),
     )
     .await

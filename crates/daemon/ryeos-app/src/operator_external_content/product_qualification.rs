@@ -4897,7 +4897,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // refusal here.
     let roots = request_engine.resolution_roots(
         project_root.clone(),
-        plan_context.effective_logical_project(project_root.as_deref()),
+        plan_context.signer_project().clone(),
     );
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.

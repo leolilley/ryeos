@@ -1200,6 +1200,7 @@ impl ExecutionProjectAuthority {
                 environment,
                 capability_ceiling,
                 child_policy,
+                signer_project,
             } => {
                 if live_access.access != LiveProjectAccess::ReadWrite {
                     anyhow::bail!(
@@ -1217,6 +1218,7 @@ impl ExecutionProjectAuthority {
                     environment,
                     capability_ceiling,
                     child_policy,
+                    signer_project,
                 }
             }
             Self::PinnedGeneration { .. } => anyhow::bail!(

@@ -78,7 +78,10 @@ pub struct VerifiedLoader {
     /// project as the node knows it. It differs from `project_root` when the
     /// loader reads a pinned or COW checkout. Defaults to `project_root`,
     /// which is correct for a live project.
-    logical_project_root: Option<PathBuf>,
+    /// The identity project-space signatures are judged against. A loader
+    /// built from a launch's signer list judges scoped signers already
+    /// resolved for the launch, so it needs none.
+    logical_project: ryeos_engine::contracts::LogicalProject,
     project_config_enabled: bool,
     node_config_root: Option<PathBuf>,
     bundle_roots: Vec<PathBuf>,
@@ -430,7 +433,7 @@ impl VerifiedLoader {
     ) -> SignerContext<'a> {
         match root_class {
             ConfigCandidateRootClass::Project => {
-                SignerContext::project(kind, self.logical_project_root.as_deref())
+                SignerContext::project(kind, &self.logical_project)
             }
             ConfigCandidateRootClass::Node => SignerContext::node(kind),
             ConfigCandidateRootClass::Bundle => SignerContext::bundle(kind),
@@ -466,7 +469,9 @@ impl VerifiedLoader {
     ) -> Result<Self> {
         let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
-            logical_project_root: Some(project_root.clone()),
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
             project_root,
             project_config_enabled: true,
             node_config_root,
@@ -486,7 +491,9 @@ impl VerifiedLoader {
         let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
             project_root: node_config_root.clone().unwrap_or_default(),
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             project_config_enabled: false,
             node_config_root,
             bundle_roots,
@@ -507,18 +514,15 @@ impl VerifiedLoader {
         self,
         roots: &ryeos_engine::item_resolution::ResolutionRoots,
     ) -> Self {
-        use ryeos_engine::contracts::LogicalProject;
-        let logical = match &roots.logical_project {
-            LogicalProject::Stated(path) => Some(path.clone()),
-            LogicalProject::MaterializedLive => Some(self.project_root.clone()),
-            LogicalProject::Absent(_) => None,
-        };
-        self.with_logical_project_root(logical)
+        self.with_logical_project(roots.signer_project().clone())
     }
 
     /// As [`Self::with_logical_project_of`] with an explicit value.
-    pub fn with_logical_project_root(mut self, logical_project_root: Option<PathBuf>) -> Self {
-        self.logical_project_root = logical_project_root;
+    pub fn with_logical_project(
+        mut self,
+        logical_project: ryeos_engine::contracts::LogicalProject,
+    ) -> Self {
+        self.logical_project = logical_project;
         self
     }
 
@@ -1585,29 +1589,26 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_matches_the_logical_project_not_the_checkout() {
+    fn project_scope_matches_the_stated_identity_never_the_checkout() {
         let key = SigningKey::from_bytes(&[53u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        // The loader reads a materialized checkout; the registered project
-        // the signer is scoped to is a different path.
         let checkout = tmp.path().join("checkout");
-        let logical = tmp.path().join("registered-project");
         create_file(
             &checkout,
             ".ai/config/scoped.yaml",
             &lillux::signature::sign_content("name: scoped\n", &key, "#", None),
         );
+        let owner = format!("fp:{}", "c".repeat(64));
         let signers = vec![signer_entry(
             &key,
             SignerScope {
                 spaces: vec![SignerSpace::Project],
                 kinds: vec!["*".to_string()],
-                projects: vec![logical.to_string_lossy().into_owned()],
+                projects: vec![format!("{owner}/demo").parse().unwrap()],
             },
         )];
 
-        // Without a stated logical project the checkout path is judged, which
-        // is not the scoped project: the signer is out of scope.
+        // Without a stated identity the checkout is never judged as one.
         let by_checkout = VerifiedLoader::new(checkout.clone(), vec![], &signers).unwrap();
         assert!(
             by_checkout
@@ -1615,22 +1616,26 @@ mod tests {
                 .is_err()
         );
 
-        // Stating the logical project admits the signer.
-        let by_logical = VerifiedLoader::new(checkout.clone(), vec![], &signers)
+        // Stating the scoped identity admits the signer.
+        let by_identity = VerifiedLoader::new(checkout.clone(), vec![], &signers)
             .unwrap()
-            .with_logical_project_root(Some(logical.clone()));
-        let loaded = by_logical
+            .with_logical_project(ryeos_engine::contracts::LogicalProject::Stated(
+                format!("{owner}/demo").parse().unwrap(),
+            ));
+        let loaded = by_identity
             .load_config_strict_signed_with_proof::<serde_yaml::Value>("scoped")
             .unwrap()
             .unwrap();
         assert_eq!(loaded.value["name"], "scoped");
 
-        // An unknown logical project admits nothing a project scope names.
-        let unknown = VerifiedLoader::new(checkout, vec![], &signers)
+        // Another owner's project of the same name admits nothing.
+        let other = VerifiedLoader::new(checkout, vec![], &signers)
             .unwrap()
-            .with_logical_project_root(None);
+            .with_logical_project(ryeos_engine::contracts::LogicalProject::Stated(
+                format!("fp:{}/demo", "d".repeat(64)).parse().unwrap(),
+            ));
         assert!(
-            unknown
+            other
                 .load_config_strict_signed_with_proof::<serde_yaml::Value>("scoped")
                 .is_err()
         );

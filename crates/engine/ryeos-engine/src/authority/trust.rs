@@ -564,6 +564,30 @@ impl TrustStore {
         logical_project: &LogicalProject,
     ) -> Vec<TrustedSignerEntry> {
         let mut entries = self.signer_entries();
+        // Scoped entries are judged here, against the identity the launch
+        // sealed, so a runtime that never sees that identity judges the same:
+        // a scope naming this launch's project is unscoped for the launch, and
+        // one that does not loses project space.
+        let identity = logical_project.identity();
+        entries.retain_mut(|entry| {
+            if entry.scope.projects.is_empty()
+                || !entry.scope.spaces.contains(&SignerSpace::Project)
+            {
+                return true;
+            }
+            let named = identity.is_some_and(|identity| {
+                entry
+                    .scope
+                    .projects
+                    .iter()
+                    .any(|project| project.names(identity, &entry.fingerprint))
+            });
+            entry.scope.projects.clear();
+            if !named {
+                entry.scope.spaces.retain(|space| *space != SignerSpace::Project);
+            }
+            !entry.scope.spaces.is_empty()
+        });
         let Some(snapshot) = frozen.launch_endorsements(logical_project) else {
             return entries;
         };
@@ -799,17 +823,21 @@ impl TrustStore {
         if context.space != SignerSpace::Project {
             return false;
         }
-        // Endorsements name a project by its owner+name identity; an absent
-        // identity is never endorsed.
+        // A store rebuilt from a launch judges only that launch's project,
+        // whose identity the daemon sealed into the frozen snapshot.
+        if let Some(launch) = &self.launch_endorsements {
+            return self.endorsements.current().covers(
+                &launch.project,
+                context.kind,
+                content_digest,
+                lillux::time::unix_secs_now(),
+            );
+        }
+        // Otherwise endorsements name a project by its owner+name identity;
+        // an absent identity is never endorsed.
         let Some(identity) = context.project.identity() else {
             return false;
         };
-        // A launch's frozen snapshot fixes the project it decides for.
-        if let Some(launch) = &self.launch_endorsements {
-            if launch.project != *identity {
-                return false;
-            }
-        }
         self.endorsements.current().covers(
             identity,
             context.kind,

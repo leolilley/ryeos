@@ -125,7 +125,10 @@ impl AppSchedulerContext {
                     environment: &self.0.provider_env,
                     principal: spec.execution.principal_id(),
                 },
-            )?;
+            )?
+            // The identity was sealed when the schedule bound; it is carried,
+            // never re-derived here.
+            .with_signer_project(authority.signer_project())?;
         if &expected != authority {
             bail!(
                 "persisted scheduler project authority disagrees with the signed execution policy"
@@ -357,6 +360,16 @@ impl SchedulerContext for AppSchedulerContext {
                         environment: &self.0.provider_env,
                         principal: spec.execution.principal_id(),
                     },
+                )?
+                .with_signer_project(
+                    ryeos_api::routes::response_modes::execute_mode::admission_signer_project(
+                        &self.0,
+                        &spec.execution.policy,
+                        Some(&canonical),
+                        None,
+                        spec.execution.principal_id(),
+                        &handler_context.scopes,
+                    )?,
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -409,6 +422,16 @@ impl SchedulerContext for AppSchedulerContext {
                             environment: &state.provider_env,
                             principal: execution.principal_id(),
                         },
+                    )?
+                    .with_signer_project(
+                        ryeos_api::routes::response_modes::execute_mode::admission_signer_project(
+                            &state,
+                            &execution.policy,
+                            Some(&context.original_path),
+                            context.current_head_destination.as_ref(),
+                            execution.principal_id(),
+                            &handler_context.scopes,
+                        )?,
                     )?;
                     ryeos_api::routes::response_modes::execute_mode::authorize_terminal_publication(
                         &execution.policy,

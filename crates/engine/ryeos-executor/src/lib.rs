@@ -352,7 +352,7 @@ pub mod test_support {
         )?;
         let roots = state.engine.resolution_roots(
             Some(project_root.to_path_buf()),
-            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
         );
         // Product selection is over the exact pre-selection consumer D0,
         // including its admitted source closure. Derive that projection on a

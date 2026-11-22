@@ -679,6 +679,14 @@ pub fn resolve_execution_contract_with_posture(
             principal: acting_principal,
         },
     )?;
+    let authority = authority.with_signer_project(admission_signer_project(
+        state,
+        policy,
+        (!no_project_requested).then_some(project_ctx.original_path.as_path()),
+        project_ctx.current_head_destination.as_ref(),
+        acting_principal,
+        caller_scopes,
+    )?)?;
     let authority = if posture.is_host_direct() {
         authority.into_unconfined_host()?
     } else {
@@ -957,6 +965,69 @@ pub(crate) fn map_project_source_error(
             DispatchError::ProjectSource(error.to_string())
         }
     }
+}
+
+/// The project identity an execution states, established once at admission
+/// and sealed into its authority; nothing re-derives it on resume.
+///
+/// - A live run states the identity the acting principal registered for the
+///   checkout (and only when it holds live write).
+/// - A current-head run states the acting principal's own identity for the
+///   head it was admitted from: the lookup read exactly that owner and name,
+///   and the snapshot is that head.
+/// - A run of a named snapshot, a no-project head, or a projectless run
+///   states none.
+pub fn admission_signer_project(
+    state: &ryeos_app::state::AppState,
+    policy: &ExecutionPolicy,
+    live_root: Option<&Path>,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
+    acting_principal: &str,
+    caller_scopes: &[String],
+) -> anyhow::Result<ryeos_engine::contracts::LogicalProject> {
+    use ryeos_engine::contracts::{LogicalProject, LogicalProjectAbsence};
+    Ok(match &policy.project {
+        ProjectExecutionPolicy::Projectless => {
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless)
+        }
+        ProjectExecutionPolicy::LiveDirect { .. }
+        | ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            ..
+        } => match live_root {
+            Some(root) => ryeos_app::project_registry::live_logical_project(
+                state,
+                acting_principal,
+                caller_scopes,
+                root,
+            ),
+            None => LogicalProject::Absent(LogicalProjectAbsence::NotRegistered),
+        },
+        ProjectExecutionPolicy::Pinned {
+            source:
+                PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::Named { name },
+                },
+            ..
+        } => {
+            let destination = current_head_destination.ok_or_else(|| {
+                anyhow::anyhow!("a current-head run was admitted without its head lookup")
+            })?;
+            let identity = ryeos_state::project_identity::ProjectIdentity::new(
+                acting_principal.to_owned(),
+                name.clone(),
+            )?;
+            if ryeos_state::project_identity::ProjectHeadKey::for_project(&identity)
+                != destination.head
+            {
+                anyhow::bail!("the admitted head is not the acting principal's head for {identity}");
+            }
+            LogicalProject::Stated(identity)
+        }
+        ProjectExecutionPolicy::Pinned { .. } => {
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated)
+        }
+    })
 }
 
 pub fn authorize_terminal_publication(
