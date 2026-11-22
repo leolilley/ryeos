@@ -6238,13 +6238,12 @@ impl StateDb {
     /// snapshot hash, or `None` if no HEAD exists.
     pub fn read_project_head(
         &self,
-        principal_key: &str,
-        project_hash: &str,
+        key: &crate::project_identity::ProjectHeadKey,
     ) -> anyhow::Result<Option<String>> {
         Ok(crate::refs::read_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            principal_key,
-            project_hash,
+            key.owner_key(),
+            key.name_hash(),
             self.trust_store.as_ref(),
         )?
         .map(|head| head.target_hash))
@@ -6253,8 +6252,7 @@ impl StateDb {
     /// Write a principal-scoped project head ref.
     pub fn write_project_head_ref(
         &self,
-        principal_key: &str,
-        project_hash: &str,
+        key: &crate::project_identity::ProjectHeadKey,
         project_snapshot_hash: &str,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
@@ -6263,13 +6261,13 @@ impl StateDb {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
-            principal_key,
-            project_hash,
+            key.owner_key(),
+            key.name_hash(),
         )?;
         crate::refs::write_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            principal_key,
-            project_hash,
+            key.owner_key(),
+            key.name_hash(),
             project_snapshot_hash,
             signer,
             self.trust_store.as_ref(),
@@ -6284,8 +6282,7 @@ impl StateDb {
     /// reached the ref.
     pub fn advance_project_head_ref(
         &self,
-        principal_key: &str,
-        project_hash: &str,
+        key: &crate::project_identity::ProjectHeadKey,
         new_snapshot_hash: &str,
         expected_current_hash: &str,
         signer: &dyn Signer,
@@ -6298,14 +6295,14 @@ impl StateDb {
             .map_err(|error| ProjectHeadAdvanceRefusal::Untrusted(format!("{error:#}")))?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
-            principal_key,
-            project_hash,
+            key.owner_key(),
+            key.name_hash(),
         )
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
         crate::refs::advance_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            principal_key,
-            project_hash,
+            key.owner_key(),
+            key.name_hash(),
             new_snapshot_hash,
             expected_current_hash,
             signer,
@@ -9722,15 +9719,17 @@ mod tests {
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
         let principal_id = format!("fp:{}", signer.fingerprint());
-        let principal_key = crate::refs::principal_storage_key(&principal_id).unwrap();
-        let principal_project_hash = "a".repeat(64);
+        let head_key = crate::project_identity::ProjectHeadKey::owned_by(
+            &principal_id,
+            &crate::project_identity::ProjectName::new("demo").unwrap(),
+        )
+        .unwrap();
         let deployed_project_hash = "b".repeat(64);
         let principal_snapshot_hash = "c".repeat(64);
         let deployed_snapshot_hash = "d".repeat(64);
 
         db.write_project_head_ref(
-            principal_key,
-            &principal_project_hash,
+            &head_key,
             &principal_snapshot_hash,
             &signer,
             &guard,
@@ -9754,7 +9753,7 @@ mod tests {
             2
         );
         assert!(
-            db.read_project_head(principal_key, &principal_project_hash)
+            db.read_project_head(&head_key)
                 .unwrap()
                 .is_none()
         );

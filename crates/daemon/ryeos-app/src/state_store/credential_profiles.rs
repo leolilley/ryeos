@@ -96,7 +96,10 @@ impl StateStore {
         let g = self.lock()?;
         let current = g
             .state_db
-            .read_project_head(reservation.project_principal_key, reservation.project_hash)?;
+            .read_project_head(&ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                reservation.project_principal_key,
+                reservation.project_hash,
+            )?)?;
         if current.as_deref() != Some(reservation.target_project_head_hash) {
             bail!("target project HEAD changed before handoff reservation");
         }

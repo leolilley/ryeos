@@ -771,10 +771,10 @@ pub enum DurableCasPublicationKey {
 }
 
 impl DurableCasPublicationKey {
-    pub fn project_head(principal_key: &str, project_hash: &str) -> Result<Self> {
+    pub fn project_head(head: &crate::project_identity::ProjectHeadKey) -> Result<Self> {
         let key = Self::ProjectHead {
-            principal_key: principal_key.to_string(),
-            project_hash: project_hash.to_string(),
+            principal_key: head.owner_key().to_string(),
+            project_hash: head.name_hash().to_string(),
         };
         key.validate()?;
         Ok(key)

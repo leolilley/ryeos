@@ -54,8 +54,12 @@ struct SnapshotContext<'a> {
     state: &'a AppState,
     ignore_matcher: &'a crate::ignore::IgnoreMatcher,
     project_path: PathBuf,
+    /// Key of the node-level deployed ref for this checkout path.
     project_hash: String,
     principal_key: String,
+    /// The caller's head under the name the tree declares; `None` when the
+    /// tree declares no name, so it has no principal head.
+    head_key: Option<ryeos_state::project_identity::ProjectHeadKey>,
     authority: ryeos_state::PinnedStateAuthority,
     cas: CasStore,
 }
@@ -159,6 +163,7 @@ impl RuntimeProjectSnapshotService {
             project_hash: ryeos_state::refs::deployed_project_key(canonical),
             principal_key: ryeos_state::refs::principal_storage_key(&thread_auth.acting_principal)?
                 .to_owned(),
+            head_key: declared_head_key(&thread_auth.acting_principal, &project_path)?,
             authority,
             cas,
             project_path,
@@ -209,6 +214,7 @@ pub fn local_operator_status(
         ignore_matcher: state.ignore_matcher.as_ref(),
         project_hash: ryeos_state::refs::deployed_project_key(canonical),
         principal_key: ryeos_state::refs::principal_storage_key(&caller.fingerprint)?.to_owned(),
+        head_key: declared_head_key(&caller.fingerprint, &project_path)?,
         project_path,
         authority,
         cas,
@@ -229,10 +235,24 @@ pub fn local_operator_status(
     )
 }
 
+/// The head `principal_id` owns under the name the tree at `project_path`
+/// declares. The owner is the authenticated caller, never the tree.
+fn declared_head_key(
+    principal_id: &str,
+    project_path: &Path,
+) -> Result<Option<ryeos_state::project_identity::ProjectHeadKey>> {
+    ryeos_state::project_identity::ProjectDeclaration::declared_name(project_path)?
+        .map(|name| ryeos_state::project_identity::ProjectHeadKey::owned_by(principal_id, &name))
+        .transpose()
+}
+
 fn heads(ctx: &SnapshotContext<'_>) -> Result<(Option<String>, Option<String>)> {
     let read = |db: &ryeos_state::StateDb| {
         Ok((
-            db.read_project_head(&ctx.principal_key, &ctx.project_hash)?,
+            match &ctx.head_key {
+                Some(key) => db.read_project_head(key)?,
+                None => None,
+            },
             db.read_deployed_project_ref(&ctx.project_hash)?
                 .map(|head| head.target_hash),
         ))
@@ -459,24 +479,29 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
     let signer = NodeIdentitySigner::from_identity(&state.identity);
+    let head_key = ctx.head_key.as_ref().ok_or_else(|| {
+        anyhow!(
+            "project_undeclared: snapshot create needs {} to declare its name in {}",
+            ctx.project_path.display(),
+            ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+        )
+    })?;
     let locked_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&ctx.principal_key, &ctx.project_hash))?;
+        .with_state_db(|db| db.read_project_head(head_key))?;
     if locked_head != initial_head {
         bail!("project head changed while creating snapshot; rerun snapshot create");
     }
     match initial_head.as_deref() {
         Some(current) => state.state_store.advance_project_head_ref(
-            &ctx.principal_key,
-            &ctx.project_hash,
+            head_key,
             &snapshot_hash,
             current,
             &signer,
             &guard,
         ),
         None => state.state_store.write_project_head_ref(
-            &ctx.principal_key,
-            &ctx.project_hash,
+            head_key,
             &snapshot_hash,
             &signer,
             &guard,

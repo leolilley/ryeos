@@ -156,6 +156,96 @@ impl fmt::Display for ProjectIdentity {
     }
 }
 
+/// Where a pushed project head lives: the owner's storage key and the
+/// sha256 of the project name, `projects/<owner hex>/<sha256(name)>/head`.
+///
+/// The name hash is only ever computed from a [`ProjectName`], so a head
+/// cannot be keyed by a path or any other caller string. The owner must come
+/// from the authenticated principal or from a head key the node found, never
+/// from request input. [`ProjectHeadKey::from_sealed`] exists only to carry
+/// coordinates read back from a sealed record or the ref tree, which were
+/// themselves built by one of the name constructors.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectHeadKey {
+    owner_key: String,
+    name_hash: String,
+}
+
+impl ProjectHeadKey {
+    /// The head of `identity`.
+    pub fn for_project(identity: &ProjectIdentity) -> Self {
+        Self::owned_by(identity.owner(), identity.name())
+            .expect("a project identity's owner is a valid principal")
+    }
+
+    /// The head `principal_id` owns under `name`. `principal_id` must be
+    /// exactly `fp:<64 lowercase hex>`.
+    pub fn owned_by(principal_id: &str, name: &ProjectName) -> Result<Self> {
+        let owner_key = crate::refs::principal_storage_key(principal_id)?.to_owned();
+        Ok(Self {
+            owner_key,
+            name_hash: lillux::cas::sha256_hex(name.as_str().as_bytes()),
+        })
+    }
+
+    /// Coordinates read back from a sealed record or a found head key.
+    pub fn from_sealed(owner_key: &str, name_hash: &str) -> Result<Self> {
+        for (label, value) in [("owner key", owner_key), ("project name hash", name_hash)] {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                bail!("project head {label} must be 64 lowercase hex characters: {value:?}");
+            }
+        }
+        Ok(Self {
+            owner_key: owner_key.to_owned(),
+            name_hash: name_hash.to_owned(),
+        })
+    }
+
+    /// The owner's raw fingerprint hex (no `fp:` prefix).
+    pub fn owner_key(&self) -> &str {
+        &self.owner_key
+    }
+
+    /// The owning principal, `fp:<64 lowercase hex>`.
+    pub fn owner_principal(&self) -> String {
+        format!("fp:{}", self.owner_key)
+    }
+
+    /// sha256 of the project name, lowercase hex.
+    pub fn name_hash(&self) -> &str {
+        &self.name_hash
+    }
+
+    /// The key of a sealed ref path, which must be exactly
+    /// `projects/<owner hex>/<name hash>/head`. The coordinates carry no
+    /// path or name; nothing recovers either from them.
+    pub fn parse_ref_path(ref_path: &str) -> Result<Self> {
+        let mut components = ref_path.split('/');
+        match (
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+        ) {
+            (Some("projects"), Some(owner), Some(name_hash), Some("head"), None) => {
+                Self::from_sealed(owner, name_hash)
+            }
+            _ => bail!("not a project head ref path: {ref_path:?}"),
+        }
+    }
+
+    /// The ref path, `projects/<owner hex>/<name hash>/head`.
+    pub fn ref_path(&self) -> String {
+        crate::refs::project_head_ref_path(&self.owner_key, &self.name_hash)
+            .expect("validated project head coordinates")
+    }
+}
+
 /// A project tree's `.ai/project.yaml`: the name the tree claims. Unsigned on
 /// purpose: a signature is not bound to a location, so a copied tree would
 /// carry a valid one. Trust comes from registration or a head key, never from
@@ -199,11 +289,44 @@ impl ProjectDeclaration {
         let bytes = file.read_stable_bounded(&observation, MAX_PROJECT_DECLARATION_BYTES)?;
         Self::parse(&bytes).map(Some)
     }
+
+    /// The name declared by the project tree at `root`, an existing
+    /// directory. `Ok(None)` when it declares none.
+    pub fn declared_name(root: &Path) -> Result<Option<ProjectName>> {
+        let pinned = lillux::PinnedDirectory::open(root)?
+            .with_context(|| format!("project root {} is not a directory", root.display()))?;
+        Ok(Self::read(&pinned)
+            .with_context(|| format!("read the project declaration of {}", root.display()))?
+            .map(|declaration| declaration.name))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_head_key_is_the_owner_and_the_name_hash_and_round_trips_its_ref_path() {
+        let name = ProjectName::new("demo").unwrap();
+        let key = ProjectHeadKey::owned_by(OWNER, &name).unwrap();
+        assert_eq!(key.owner_principal(), OWNER);
+        assert_eq!(key.name_hash(), lillux::cas::sha256_hex(b"demo"));
+        assert_eq!(
+            key.ref_path(),
+            format!("projects/{}/{}/head", &OWNER[3..], key.name_hash())
+        );
+        assert_eq!(ProjectHeadKey::parse_ref_path(&key.ref_path()).unwrap(), key);
+        let identity = ProjectIdentity::new(OWNER, name).unwrap();
+        assert_eq!(ProjectHeadKey::for_project(&identity), key);
+        for bad in [
+            "projects/a/b/head".to_owned(),
+            format!("{}/extra", key.ref_path()),
+            format!("chains/{}/{}/head", &OWNER[3..], key.name_hash()),
+        ] {
+            assert!(ProjectHeadKey::parse_ref_path(&bad).is_err(), "{bad}");
+        }
+        assert!(ProjectHeadKey::owned_by("fp:short", &ProjectName::new("demo").unwrap()).is_err());
+    }
 
     const OWNER: &str = "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

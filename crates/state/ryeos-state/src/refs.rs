@@ -797,7 +797,11 @@ fn validate_single_ref_component(label: &str, value: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-fn project_head_ref_path(principal_key: &str, project_hash: &str) -> anyhow::Result<String> {
+/// The only place a project head ref path is formatted.
+pub(crate) fn project_head_ref_path(
+    principal_key: &str,
+    project_hash: &str,
+) -> anyhow::Result<String> {
     validate_single_ref_component("project principal key", principal_key)?;
     validate_single_ref_component("project hash", project_hash)?;
     Ok(format!("projects/{principal_key}/{project_hash}/head"))
@@ -1023,6 +1027,13 @@ pub struct VerifiedProjectHead {
     pub principal_key: String,
     pub project_hash: String,
     pub signed_ref: SignedRef,
+}
+
+impl VerifiedProjectHead {
+    /// The head key this ref was found under.
+    pub fn key(&self) -> anyhow::Result<crate::project_identity::ProjectHeadKey> {
+        crate::project_identity::ProjectHeadKey::from_sealed(&self.principal_key, &self.project_hash)
+    }
 }
 
 fn read_verified_closed_head_directory(

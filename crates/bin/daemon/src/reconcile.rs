@@ -656,36 +656,21 @@ fn interrupted_head_advance(
         snapshot_hash: workspace.frozen_snapshot_hash?,
         output_capture_hash: workspace.frozen_output_capture_hash,
     };
-    let observed = advance_head_ref_coordinates(head_ref).and_then(|(principal, project)| {
-        state
-            .state_store
-            .with_state_db(|db| db.read_project_head(principal, project))
-            .ok()
-            .flatten()
-    });
+    let observed = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
+        .ok()
+        .and_then(|key| {
+            state
+                .state_store
+                .with_state_db(|db| db.read_project_head(&key))
+                .ok()
+                .flatten()
+        });
     let (outcome_code, payload) = ryeos_executor::execution::interrupted_head_advance_outcome(
         expected_hash,
         observed.as_deref(),
         &generation,
     );
     Some((outcome_code, payload, generation))
-}
-
-/// The principal and project of a canonical `projects/<principal>/<project>/head`.
-fn advance_head_ref_coordinates(head_ref: &str) -> Option<(&str, &str)> {
-    let mut components = head_ref.split('/');
-    match (
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-    ) {
-        (Some("projects"), Some(principal), Some(project), Some("head"), None) => {
-            Some((principal, project))
-        }
-        _ => None,
-    }
 }
 
 fn has_in_process_handler_driver(thread: &ThreadDetail) -> bool {
@@ -4848,19 +4833,6 @@ mod tests {
         assert_eq!(spawned("T-p2"), 1);
     }
 
-    #[test]
-    fn advance_head_ref_coordinates_accept_only_the_canonical_project_head() {
-        let principal = "a".repeat(64);
-        let project = "b".repeat(64);
-        let head_ref = format!("projects/{principal}/{project}/head");
-        assert_eq!(
-            advance_head_ref_coordinates(&head_ref),
-            Some((principal.as_str(), project.as_str()))
-        );
-        assert!(advance_head_ref_coordinates("projects/a/b").is_none());
-        assert!(advance_head_ref_coordinates("projects/a/b/head/extra").is_none());
-        assert!(advance_head_ref_coordinates("chains/a/b/head").is_none());
-    }
     use ryeos_app::launch_metadata::ResumeContext;
     use ryeos_engine::contracts::{
         EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal, ProjectContext,
