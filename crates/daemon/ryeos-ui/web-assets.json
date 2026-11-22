@@ -1,7 +1,7 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
   "ui_binding_revision": "ryeos.ui.binding.v17",
-  "source_digest": "afb61c0031e2907ee1f54faf06a9da13fc90cde2b4d989c6c5e16dec083f7e0d",
+  "source_digest": "f7af4ab6b56899d2b71878bc3ad5f9e56b7fb7a4e256700a9037fe3902c8c188",
   "assets": [
     {
       "route": "/ui",
