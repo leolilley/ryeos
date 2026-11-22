@@ -164,7 +164,7 @@ fn stream_fragments(events: &[(String, String, Value)]) -> usize {
 const HOLD: &str = "  - delay_ms: 600000\n    text: \"never delivered\"\n";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restart_during_an_issued_attempt_is_retried_and_voids_the_dead_output() {
+async fn a_restart_during_a_streaming_attempt_is_retried_with_no_fragments_on_the_record() {
     // The first attempt streams a few fragments and then stalls; the node is
     // killed while it is held. The retry is the second step.
     let script = "steps:\n  - text: \"a long answer that is cut off part way\"\n    stream: { text_chunk_bytes: 4 }\n    stall: { after_chunks: 5, ms: 600000 }\n  - text: \"done after the restart\"\n";
@@ -181,15 +181,11 @@ async fn a_restart_during_an_issued_attempt_is_retried_and_voids_the_dead_output
     .expect("start rig");
     let id = launch(&rig).await;
 
-    // Hold the kill until the fragments are on the record.
-    let until = Instant::now() + Duration::from_secs(60);
-    while stream_fragments(&chain_event_list(&rig.h, &id).await) == 0 {
-        assert!(Instant::now() < until, "no fragment was recorded");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Let the stream deliver its fragments before the kill.
+    wait_issued(&rig, 1).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let recorded = stream_fragments(&chain_event_list(&rig.h, &id).await);
-    eprintln!("EVIDENCE fragments recorded before the kill: {recorded}");
+    eprintln!("EVIDENCE stream fragments on the durable record before the kill: {recorded}");
     cut_and_restart(&mut rig, 1).await;
 
     let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
@@ -209,18 +205,13 @@ async fn a_restart_during_an_issued_attempt_is_retried_and_voids_the_dead_output
         retry["retry_advance"]["decision"]["reason"]["kind"], "mid_stream",
         "{retry}"
     );
-    assert_eq!(
-        retry["supersedes"]["output_events"].as_u64(),
-        Some(recorded as u64),
-        "the retry voids exactly the fragments the dead attempt left: {retry}"
-    );
+    // Fragments are live-only, so the record the resumed run reads holds
+    // none and the decision can only attest zero.
+    assert_eq!(recorded, 0, "stream fragments never reach the record");
+    assert_eq!(retry["supersedes"]["output_events"], 0, "{retry}");
     eprintln!(
         "EVIDENCE provider_retry supersedes: {}",
         retry["supersedes"]
-    );
-    assert!(
-        recorded > 0,
-        "the node keeps stream fragments, so the count is not trivially zero"
     );
 
     rig.h.kill_daemon().await.expect("stop the node");

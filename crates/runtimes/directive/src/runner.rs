@@ -704,18 +704,12 @@ pub struct Runner {
     consecutive_length_turns: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
-    /// The provider turn a restart cut, with the live fragments its latest
-    /// attempt had published. Set on resume of an unfinished provider turn;
-    /// each attempt prepared in that turn offers the daemon the retry the
-    /// signed policy would admit, in case the restart cut that very attempt.
-    restart_cut_turn: Option<RestartCutTurn>,
+    /// The provider turn a restart cut. Set on resume of an unfinished
+    /// provider turn; each attempt prepared in that turn offers the daemon the
+    /// retry the signed policy would admit, in case the restart cut that very
+    /// attempt.
+    restart_cut_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RestartCutTurn {
-    turn: u32,
-    live_fragments: u64,
 }
 
 struct RunGuard {
@@ -1556,7 +1550,6 @@ impl Runner {
         let started_tool_occurrences = resume.started_tool_occurrences;
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
-        let active_turn_live_fragments = resume.active_turn_live_fragments;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
         let wrap_up_delivered = resume.deadline_wrap_up_delivered;
         let trailing_length_turns = resume.trailing_length_turns;
@@ -1637,10 +1630,7 @@ impl Runner {
         runner.resume_owed_siblings = owed_siblings;
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
-        runner.restart_cut_turn = resume_active_provider_turn.map(|turn| RestartCutTurn {
-            turn,
-            live_fragments: active_turn_live_fragments,
-        });
+        runner.restart_cut_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.consecutive_length_turns = trailing_length_turns;
@@ -5162,8 +5152,7 @@ impl Runner {
     /// if a restart cut the call, offered to the daemon when preparing an
     /// attempt of a turn the restart interrupted. A restart is a stream cut:
     /// the request may have reached the provider and the answer was lost, so
-    /// the reason is `mid_stream` carrying the fragments the dead attempt
-    /// published (a reader voids exactly those). The signed policy gates it
+    /// the reason is `mid_stream`. The signed policy gates it
     /// like any in-process unknown-outcome retry, and the daemon applies the
     /// sealed ceiling and transport; with no offer a cut attempt stays an
     /// unknown outcome. The decision is a pure function of the record and the
@@ -5173,11 +5162,15 @@ impl Runner {
         turn: u32,
         attempt_number: u32,
     ) -> anyhow::Result<Option<ProviderRetryDecision>> {
-        let Some(cut) = self.restart_cut_turn.filter(|cut| cut.turn == turn) else {
+        if self.restart_cut_turn != Some(turn) {
             return Ok(None);
-        };
+        }
+        // Stream fragments are live-only and never reach the durable record,
+        // so a resumed process cannot know how many the dead attempt
+        // published; zero is the most the record can attest. A reader voids
+        // the fragments of a retried turn by position, not by this count.
         let reason = ProviderRetryReason::MidStream {
-            live_output_events_emitted: cut.live_fragments,
+            live_output_events_emitted: 0,
         };
         let Some(delay) = retry_delay_for_reason(&reason, attempt_number, &self.execution) else {
             return Ok(None);
@@ -8430,10 +8423,7 @@ mod tests {
         let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
         let mut runner = ledger_runner(mock.clone());
         runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
-        runner.restart_cut_turn = Some(RestartCutTurn {
-            turn: 4,
-            live_fragments: 7,
-        });
+        runner.restart_cut_turn = Some(4);
         let prepared = test_prepared();
 
         // Within the policy: a mid-stream decision carrying the true fragment
@@ -8445,7 +8435,7 @@ mod tests {
         assert_eq!(
             offer.reason,
             ProviderRetryReason::MidStream {
-                live_output_events_emitted: 7
+                live_output_events_emitted: 0
             }
         );
         assert_eq!(
@@ -8454,7 +8444,7 @@ mod tests {
         );
         assert_eq!(
             retry_supersedes(&offer),
-            json!({"turn": 4, "attempt": 2, "output_events": 7})
+            json!({"turn": 4, "attempt": 2, "output_events": 0})
         );
         // The decision is deterministic, so a re-sent prepare offers the same.
         assert_eq!(
@@ -8500,7 +8490,7 @@ mod tests {
         assert_eq!(reserves.len(), 1);
         assert_eq!(
             reserves[0]["restart_retry"]["reason"],
-            json!({"kind": "mid_stream", "live_output_events_emitted": 7})
+            json!({"kind": "mid_stream", "live_output_events_emitted": 0})
         );
     }
 
