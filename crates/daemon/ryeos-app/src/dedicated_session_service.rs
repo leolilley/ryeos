@@ -6945,6 +6945,11 @@ pub enum SessionSettleGround {
 pub enum SessionLocalSettle {
     /// The session is terminal and its credential lock released.
     Settled,
+    /// The root was finalised while the session's worker was not proved gone,
+    /// and the worker's retirement was not proved either: the worker row is
+    /// fenced as unproved and the session and its credential lock stay held
+    /// for the paths that own an unproved worker.
+    WorkerFenced,
     /// Nothing was changed; the reason names the unmet precondition.
     Skipped(&'static str),
 }
@@ -6954,7 +6959,12 @@ pub enum SessionLocalSettle {
 /// credential lock is released in the same runtime-database transaction as the
 /// transition, through the writer that already carries the CAS guards. A
 /// session that recorded a worker scope or trusted holding is left to the
-/// holding-proof paths, as is one whose worker is not proved dead and reaped.
+/// holding-proof paths. A session whose worker is not proved dead and reaped is
+/// left to the worker fence, except on the `RootFinalized` ground: nothing
+/// will drive that session's worker again, so a running or recoverable session
+/// has its worker retired by its recorded process identity (no provider I/O)
+/// and, on a proved reap, is settled; an unproved reap fences the worker and
+/// keeps the credential lock. Candidate-holding states are never touched.
 pub fn settle_session_without_worker(
     state: &AppState,
     placement_thread_id: &str,
@@ -6994,6 +7004,18 @@ pub fn settle_session_without_worker(
             finish_terminal_credential_cleanup(state, &session)?;
         }
         return Ok(SessionLocalSettle::Settled);
+    }
+    if ground == SessionSettleGround::RootFinalized
+        && session_state_policy(&session.state)
+            .is_some_and(|policy| policy.worker_fence_moves_session)
+        && let (Some(worker_id), Some(epoch)) = (
+            session.worker_instance_id.as_deref(),
+            session.worker_boot_epoch,
+        )
+        && let Some(worker) = state.state_store.worker_process(worker_id)?
+        && !(worker.state == WorkerProcessState::Dead && worker.cleanup_state == "reaped")
+    {
+        return retire_worker_of_finalized_root(state, &session, &worker, epoch, reason);
     }
     if !session_state_policy(&session.state).is_some_and(|policy| policy.settles_without_worker) {
         return Ok(SessionLocalSettle::Skipped("state_not_settleable"));
@@ -7045,6 +7067,46 @@ pub fn settle_session_without_worker(
         }
         _ => return Ok(SessionLocalSettle::Skipped("partial_worker_identity")),
     }
+    Ok(SessionLocalSettle::Settled)
+}
+
+/// Retire the live worker of a session whose root reconcile finalised, then
+/// settle the session. The caller holds the credential-profile operation lock.
+/// Reuses [`retire_worker_process`]; an unproved reap fences the worker row
+/// (unless an earlier fence already did) and keeps the credential lock.
+fn retire_worker_of_finalized_root(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker: &WorkerProcessRecord,
+    epoch: u64,
+    reason: &str,
+) -> Result<SessionLocalSettle> {
+    let cleanup_state = retire_worker_process(state, &session.placement_thread_id, worker)?;
+    if cleanup_state != "reaped" {
+        if worker.state != WorkerProcessState::Dead {
+            state.state_store.fence_abandoned_worker_process(
+                &worker.worker_instance_id,
+                &session.placement_thread_id,
+                epoch,
+                cleanup_state,
+            )?;
+        }
+        return Ok(SessionLocalSettle::WorkerFenced);
+    }
+    state.state_store.settle_worker_process(
+        &worker.worker_instance_id,
+        &session.placement_thread_id,
+        epoch,
+        "reaped",
+        reason,
+    )?;
+    state.state_store.terminalize_dedicated_session(
+        &session.placement_thread_id,
+        &worker.worker_instance_id,
+        epoch,
+        reason,
+    )?;
+    finish_terminal_credential_cleanup(state, session)?;
     Ok(SessionLocalSettle::Settled)
 }
 
