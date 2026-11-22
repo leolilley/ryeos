@@ -1068,6 +1068,26 @@ async fn a_rebound_surface_is_accepted_by_history_dispatch_and_detach() {
     let frames = history(&chain, &seat).await;
     let replay = fold(&chain, &pid, &frames);
     let bounds = replay.binding_descriptors()[&from.binding_attachment_id].binding_request_bounds;
+    // Fan-out: a revision of an item the attachment names reaches this
+    // session's bus as exactly one hint, and the public descriptor names the
+    // item, so the seat will revise it.
+    let named = old.public_descriptor(bounds).named_items;
+    assert!(!named.is_empty());
+    let mut bus = ui.session_bus.subscribe(&chain.session_id);
+    let told = ryeos_ui::item_hints::ItemHintFanout::new().publish(
+        &ui,
+        &ryeos_app::item_revised::ItemRevised {
+            project: None,
+            item_ref: named[0].clone(),
+            digest: Some("ab".repeat(32)),
+            revision: 1,
+            change_set: Some("cs".into()),
+        },
+    );
+    assert!(told.contains(&chain.session_id));
+    let hint = bus.try_recv().expect("the hint reached the session bus");
+    assert_eq!(hint.event_type, "item.hint");
+    assert_eq!(hint.payload["item_ref"], named[0]);
     let public = |coordinate: &BindingAttachmentCoordinate| Ui {
         binding_attachment_id: coordinate.binding_attachment_id.clone(),
         binding_generation: coordinate.binding_generation,
