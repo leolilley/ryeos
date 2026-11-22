@@ -1151,6 +1151,50 @@ pub struct SettleOutcome {
     pub retry_advance: Option<ProviderRetryAdvance>,
 }
 
+/// A provider attempt coordinate that an earlier launch generation already
+/// issued, with no recorded answer and no retry advancement: whether the
+/// provider acted on the request is unknown, so contacting it again is
+/// refused. The daemon reports it as the typed code
+/// [`ryeos_accounting::PROVIDER_OUTCOME_UNKNOWN_CODE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOutcomeUnknown {
+    pub thread_id: String,
+    pub turn: u32,
+    pub attempt_number: u32,
+    pub predecessor_generation: String,
+    pub detail: String,
+}
+
+impl ProviderOutcomeUnknown {
+    pub fn code(&self) -> &'static str {
+        ryeos_accounting::PROVIDER_OUTCOME_UNKNOWN_CODE
+    }
+
+    /// The refusal in `error`'s cause chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+impl std::fmt::Display for ProviderOutcomeUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the provider outcome is unknown because the node restarted during the call \
+             (attempt coordinate {}/{}/{} was {} under predecessor launch generation {}); the \
+             attempt was charged its reserved maximum and this turn cannot be resumed. \
+             Resuming after a restart is not supported for any directive yet",
+            self.thread_id,
+            self.turn,
+            self.attempt_number,
+            self.detail,
+            self.predecessor_generation
+        )
+    }
+}
+
+impl std::error::Error for ProviderOutcomeUnknown {}
+
 /// Outcome of fencing a launch generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FenceOutcome {
@@ -6687,23 +6731,26 @@ impl AccountingDb {
                         }
                         return Ok(ReserveOutcome::RetryAdvanced { advance });
                     }
-                    bail!(
-                        "provider attempt coordinate {}/{}/{} settled under predecessor launch generation {} without a retry advancement; its external outcome is unknown for retry authority and provider contact is refused",
-                        args.thread_id,
-                        args.turn,
-                        args.attempt_number,
-                        predecessor.launch_generation
-                    );
+                    return Err(anyhow::Error::new(ProviderOutcomeUnknown {
+                        thread_id: args.thread_id.to_owned(),
+                        turn: args.turn,
+                        attempt_number: args.attempt_number,
+                        predecessor_generation: predecessor.launch_generation.clone(),
+                        detail: "settled under that generation without a retry advancement"
+                            .to_owned(),
+                    }));
                 }
                 state => {
-                    bail!(
-                        "provider attempt coordinate {}/{}/{} is retained in state {} under predecessor launch generation {}; no completed provider replay is available, so external outcome is unknown and provider contact is refused",
-                        args.thread_id,
-                        args.turn,
-                        args.attempt_number,
-                        state.as_str(),
-                        predecessor.launch_generation
-                    );
+                    return Err(anyhow::Error::new(ProviderOutcomeUnknown {
+                        thread_id: args.thread_id.to_owned(),
+                        turn: args.turn,
+                        attempt_number: args.attempt_number,
+                        predecessor_generation: predecessor.launch_generation.clone(),
+                        detail: format!(
+                            "retained in state {} with no completed provider replay",
+                            state.as_str()
+                        ),
+                    }));
                 }
             }
         }
@@ -15570,8 +15617,15 @@ mod tests {
         let error =
             reserve(&db, THREAD, "G-resumed", 2, 1, "h2", &authority, EXEC, None).unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("external outcome is unknown"), "{message}");
-        assert!(message.contains("provider contact is refused"), "{message}");
+        assert!(message.contains("is unknown"), "{message}");
+        assert!(
+            message.contains("Resuming after a restart is not supported"),
+            "{message}"
+        );
+        assert_eq!(
+            ProviderOutcomeUnknown::find(&error).map(ProviderOutcomeUnknown::code),
+            Some("provider_attempt_outcome_unknown")
+        );
         assert_amounts(&db, EXEC, "execution", "0.5", "0.5");
         assert_healthy_verify(&db);
     }
