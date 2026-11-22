@@ -305,7 +305,10 @@ impl RenderedToolResult {
                 truncated_reason: self.truncated_reason.map(str::to_string),
                 duplicate_of: self.duplicate_of.clone(),
                 dropped_images: self.dropped.clone(),
-                spill: self.spilled.as_ref().map(|spilled| spilled.stored.record.clone()),
+                spill: self
+                    .spilled
+                    .as_ref()
+                    .map(|spilled| spilled.stored.record.clone()),
             },
         }
     }
@@ -4968,11 +4971,8 @@ impl Runner {
             if reason == SPILL_MEDIA_TYPE_NOT_ADMITTED {
                 self.spill_mode = crate::result_guard::SpillMode::Disabled(reason);
             }
-            rendered = rendered.without_spill(
-                reason,
-                &mut self.result_guard,
-                &self.execution.tool_output,
-            );
+            rendered =
+                rendered.without_spill(reason, &mut self.result_guard, &self.execution.tool_output);
             payload = rendered.payload(&operation_id, &call_id);
             emitted = self
                 .callback
@@ -6336,7 +6336,14 @@ mod tests {
         let mut guard = ResultGuard::new();
         // Over the guard's ceiling: the text is cut, the note is not.
         let big = "x".repeat(150 * 1024);
-        let first = RenderedToolResult::from_settled("t", 1, settled(big.clone()), &mut guard, &crate::directive::ToolOutputConfig::default(), crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON));
+        let first = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big.clone()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(first.truncated);
         assert_eq!(first.truncated_reason, Some("result_guard"));
         assert!(
@@ -6347,12 +6354,26 @@ mod tests {
         assert!(first.content.contains("[...truncated at 100KB]"));
         // The same text again collapses to the duplicate marker, and the note
         // still follows it.
-        let second = RenderedToolResult::from_settled("t", 1, settled(big), &mut guard, &crate::directive::ToolOutputConfig::default(), crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON));
+        let second = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(second.duplicate_of.is_some());
         assert!(second.content.starts_with("[duplicate result omitted"));
         assert!(second.content.ends_with(&format!("\n{note}")));
         // The drop is recorded in its own field, not as a truncation.
-        let small = RenderedToolResult::from_settled("t", 1, settled("hi".into()), &mut guard, &crate::directive::ToolOutputConfig::default(), crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON));
+        let small = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled("hi".into()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(!small.truncated);
         assert_eq!(small.truncated_reason, None);
         let payload = small.payload(&"a".repeat(64), "call-1");
@@ -6380,8 +6401,14 @@ mod tests {
             images: Vec::new(),
             dropped: vec![(2, crate::tool_images::IMAGE_OVERSIZE)],
         };
-        let mut rendered =
-            RenderedToolResult::from_settled("t", 1, settled, &mut ResultGuard::new(), &crate::directive::ToolOutputConfig::default(), crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON));
+        let mut rendered = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled,
+            &mut ResultGuard::new(),
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         // Positions 1 and 3 were admitted around the dropped second image.
         rendered.images = vec![image(1), image(3)];
         let dropped = rendered.without_images(crate::tool_images::IMAGE_LIMIT);

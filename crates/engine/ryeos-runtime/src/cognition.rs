@@ -377,7 +377,9 @@ impl ToolResultPayload {
             if !self.guard.truncated
                 || self.guard.truncated_reason.as_deref() != Some(TOOL_RESULT_SPILLED)
             {
-                bail!("a spilled tool result must be truncated with reason `{TOOL_RESULT_SPILLED}`");
+                bail!(
+                    "a spilled tool result must be truncated with reason `{TOOL_RESULT_SPILLED}`"
+                );
             }
             if self.guard.duplicate_of.is_some() {
                 bail!("a spilled tool result cannot be a duplicate");
@@ -656,7 +658,12 @@ mod tests {
         impossible.guard.spill.as_mut().unwrap().stored_bytes = 10_000;
         assert!(impossible.validate().is_err());
         let mut preview_too_big = spilled_result();
-        preview_too_big.guard.spill.as_mut().unwrap().preview_head_bytes = 9000;
+        preview_too_big
+            .guard
+            .spill
+            .as_mut()
+            .unwrap()
+            .preview_head_bytes = 9000;
         assert!(preview_too_big.validate().is_err());
     }
 

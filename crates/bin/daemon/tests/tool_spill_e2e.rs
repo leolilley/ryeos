@@ -43,7 +43,11 @@ async fn an_oversize_tool_result_is_stored_and_the_model_sees_a_partial_preview(
     let tool = history.last().expect("last message");
     assert_eq!(tool["role"], "tool");
     let text = tool["content"].as_str().expect("tool text");
-    assert!(text.starts_with("[tool result partial: "), "{}", &text[..120]);
+    assert!(
+        text.starts_with("[tool result partial: "),
+        "{}",
+        &text[..120]
+    );
     assert!(
         text.lines()
             .next()
@@ -69,5 +73,8 @@ async fn an_oversize_tool_result_is_stored_and_the_model_sees_a_partial_preview(
         payload.to_string().len() < 60 * 1024,
         "the event must not hold the full text"
     );
-    assert!(text.contains(attachment), "the preview names the attachment");
+    assert!(
+        text.contains(attachment),
+        "the preview names the attachment"
+    );
 }

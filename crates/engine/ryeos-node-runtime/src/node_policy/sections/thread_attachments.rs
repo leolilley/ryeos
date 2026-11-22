@@ -168,7 +168,8 @@ mod tests {
                 "image/gif",
                 "image/jpeg",
                 "image/png",
-                "image/webp"
+                "image/webp",
+                "text/plain"
             ]
         })
     }

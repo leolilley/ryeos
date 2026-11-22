@@ -195,10 +195,7 @@ fn cut(
         return (content.to_string(), None, None);
     }
     let mut text = content[..floor_boundary(content, max_bytes)].to_string();
-    text.push_str(&format!(
-        "\n[...truncated at {}KB]",
-        max_bytes / 1024
-    ));
+    text.push_str(&format!("\n[...truncated at {}KB]", max_bytes / 1024));
     (text, Some(reason), None)
 }
 
@@ -209,7 +206,9 @@ fn spill(content: &str, config: &ToolOutputConfig) -> Option<(String, GuardedSpi
     let head_end = floor_boundary(content, config.preview_head_bytes as usize);
     let tail_start = ceil_boundary(
         content,
-        content.len().saturating_sub(config.preview_tail_bytes as usize),
+        content
+            .len()
+            .saturating_sub(config.preview_tail_bytes as usize),
     )
     .max(head_end);
     let total = content.len();
@@ -267,7 +266,11 @@ mod tests {
     #[test]
     fn short_content_passes_through() {
         let mut guard = ResultGuard::new();
-        let result = guard.process("hello world", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let result = guard.process(
+            "hello world",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(result.content, "hello world");
         assert!(result.duplicate_of.is_none());
         assert!(!result.truncated);
@@ -277,7 +280,11 @@ mod tests {
     fn truncates_at_100kb() {
         let mut guard = ResultGuard::new();
         let big = "x".repeat(150_000);
-        let result = guard.process(&big, &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let result = guard.process(
+            &big,
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert!(result.content.len() < 110_000);
         assert!(result.content.ends_with("[...truncated at 100KB]"));
         assert!(result.truncated);
@@ -291,7 +298,11 @@ mod tests {
         while content.len() < byte_target + 10 {
             content.push('日');
         }
-        let result = guard.process(&content, &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let result = guard.process(
+            &content,
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert!(result.content.len() < 110_000);
         assert!(String::from_utf8(result.content.clone().into_bytes()).is_ok());
     }
@@ -299,8 +310,16 @@ mod tests {
     #[test]
     fn small_identical_content_passes_through() {
         let mut guard = ResultGuard::new();
-        let first = guard.process("same content", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
-        let second = guard.process("same content", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let first = guard.process(
+            "same content",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
+        let second = guard.process(
+            "same content",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(first.content, "same content");
         assert_eq!(second.content, "same content");
         assert!(second.duplicate_of.is_none());
@@ -310,8 +329,16 @@ mod tests {
     fn deduplicates_large_identical_content() {
         let mut guard = ResultGuard::new();
         let content = "x".repeat(MIN_DEDUP_BYTES);
-        let first = guard.process(&content, &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
-        let second = guard.process(&content, &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let first = guard.process(
+            &content,
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
+        let second = guard.process(
+            &content,
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(first.content, content);
         assert!(first.duplicate_of.is_none());
         assert!(second.content.contains("duplicate result omitted"));
@@ -321,8 +348,16 @@ mod tests {
     #[test]
     fn different_content_not_deduplicated() {
         let mut guard = ResultGuard::new();
-        let first = guard.process("content A", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
-        let second = guard.process("content B", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let first = guard.process(
+            "content A",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
+        let second = guard.process(
+            "content B",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(first.content, "content A");
         assert_eq!(second.content, "content B");
     }
@@ -330,7 +365,11 @@ mod tests {
     #[test]
     fn process_bytes_works() {
         let mut guard = ResultGuard::new();
-        let result = guard.process_bytes(b"test data", &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let result = guard.process_bytes(
+            b"test data",
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(String::from_utf8(result.bytes).unwrap(), "test data");
         assert!(result.duplicate_of.is_none());
         assert!(!result.truncated);
@@ -343,7 +382,11 @@ mod tests {
         let mut guard = ResultGuard::new();
         guard.restore_result(&content, None).unwrap();
 
-        let duplicate = guard.process(&content, &ToolOutputConfig::default(), SpillMode::Disabled(HARD_CUT_REASON));
+        let duplicate = guard.process(
+            &content,
+            &ToolOutputConfig::default(),
+            SpillMode::Disabled(HARD_CUT_REASON),
+        );
         assert_eq!(duplicate.duplicate_of.as_deref(), Some(hash.as_str()));
         assert_eq!(
             duplicate.content,
@@ -376,7 +419,9 @@ mod tests {
     #[test]
     fn oversize_result_spills_with_a_pinned_partial_header() {
         let mut guard = ResultGuard::new();
-        let body: String = (0..8000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        let body: String = (0..8000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
         let result = guard.process(&body, &small_config(), SpillMode::Allowed);
         let spill = result.spill.expect("an oversize result spills");
         assert_eq!(result.truncated_reason, Some("result_spilled"));
@@ -432,7 +477,10 @@ mod tests {
             &small_config(),
             SpillMode::Disabled("spill_media_type_not_admitted"),
         );
-        assert_eq!(result.truncated_reason, Some("spill_media_type_not_admitted"));
+        assert_eq!(
+            result.truncated_reason,
+            Some("spill_media_type_not_admitted")
+        );
         assert!(result.spill.is_none());
         assert!(result.content.ends_with("[...truncated at 5KB]"));
     }
