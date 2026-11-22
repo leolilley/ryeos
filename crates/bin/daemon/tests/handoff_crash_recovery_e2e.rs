@@ -120,6 +120,10 @@ fn remote_config(
             )?
             .to_owned(),
             ryeos_api::remote::config::RemoteProjectBinding {
+                project_name: ryeos_state::project_identity::ProjectDeclaration::declared_name(
+                    local,
+                )?
+                .context("the bound local checkout declares a project name")?,
                 remote_project_path: target.display().to_string(),
                 sync_scope: ryeos_api::remote::config::ProjectSyncScope::FullProject,
             },
@@ -3170,17 +3174,17 @@ fn plant_target_abort_state(
     store.release_credential_profile(TARGET_CREDENTIAL_PROFILE_ID, enrollment_lock)?;
     let subject_contract_digest = fixture_hash("credential-subject-contract");
     let subject_digest = fixture_hash("credential-subject");
-    let project_principal_key =
-        ryeos_state::refs::principal_storage_key(&source.operation.owner_principal)?;
-    let target_project_hash = fixture_hash("target-abort-project");
+    let target_project_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &source.operation.owner_principal,
+        &ryeos_state::project_identity::ProjectName::new("target-abort-project")?,
+    )?;
     let target_project_head_hash = fixture_hash("target-abort-project-head");
     let target_authority = store.pinned_state_authority()?;
     let target_guard = target_authority.acquire_shared_guard()?;
     target_authority.ensure_guard(&target_guard)?;
     let target_signer = NodeIdentitySigner::from_identity(&daemon_identity(state_path)?);
     store.write_project_head_ref(
-        project_principal_key,
-        &target_project_hash,
+        &target_project_key,
         &target_project_head_hash,
         &target_signer,
         &target_guard,
@@ -3196,8 +3200,8 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
-        project_principal_key,
-        project_hash: &target_project_hash,
+        project_principal_key: target_project_key.owner_key(),
+        project_hash: target_project_key.name_hash(),
         target_project_head_hash: &target_project_head_hash,
     })?;
 
@@ -3869,21 +3873,12 @@ fn install_target_project_head(
         anyhow::ensure!(target_cas.store_blob(&value)? == hash);
     }
     target.verify_project_snapshot_closure(snapshot_hash)?;
-    let canonical = ryeos_api::remote::config::canonical_local_project_path(target_project)?;
-    let project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
-        ryeos_api::remote::config::local_project_identity(&canonical)?,
-    )?;
-    let project_hash = lillux::sha256_hex(project_ref.as_bytes());
-    let principal_key = ryeos_state::refs::principal_storage_key(owner_principal)?.to_owned();
+    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project)?
+        .context("the target checkout declares a project name")?;
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(owner_principal, &name)?;
     let signer = NodeIdentitySigner::from_identity(&daemon_identity(target_state_path)?);
     target.with_state_db(|db| {
-        db.write_project_head_ref(
-            &principal_key,
-            &project_hash,
-            snapshot_hash,
-            &signer,
-            &target_guard,
-        )
+        db.write_project_head_ref(&head_key, snapshot_hash, &signer, &target_guard)
     })?;
     Ok(())
 }
@@ -4119,6 +4114,10 @@ impl RealPortableHandoff {
 async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
     let project = tempfile::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
+    std::fs::write(
+        project.path().join(".ai/project.yaml"),
+        b"schema: 1\nname: portable-handoff\n",
+    )?;
     std::fs::write(
         project.path().join("fixture.txt"),
         b"portable handoff fixture\n",

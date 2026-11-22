@@ -420,6 +420,16 @@ async fn remote_admit_refuses_an_edited_pin_before_releasing_token() {
     assert_eq!(contacts.claim_count.load(Ordering::SeqCst), 0);
 }
 
+/// Gives the checkout at `root` a `.ai/project.yaml` declaring `name`.
+fn declare_project(root: &std::path::Path, name: &str) {
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(
+        root.join(".ai/project.yaml"),
+        format!("schema: 1\nname: {name}\n"),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn remote_bind_project_records_binding_in_the_signed_pin() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
@@ -427,6 +437,7 @@ async fn remote_bind_project_records_binding_in_the_signed_pin() {
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
+    declare_project(&project_root, "bound-project");
     install_remote(
         &local_state,
         &remote_config("prod", "https://project.example.com", &public_key),
@@ -463,15 +474,13 @@ async fn remote_bind_project_records_binding_in_the_signed_pin() {
         Some("https://project.example.com")
     );
     let local_key = project_root.to_string_lossy().to_string();
-    assert_eq!(
-        operator_remote
-            .config
-            .project_bindings
-            .get(&local_key)
-            .unwrap()
-            .remote_project_path,
-        "/srv/project"
-    );
+    let binding = operator_remote
+        .config
+        .project_bindings
+        .get(&local_key)
+        .unwrap();
+    assert_eq!(binding.remote_project_path, "/srv/project");
+    assert_eq!(binding.project_name.as_str(), "bound-project");
 }
 
 #[tokio::test]
@@ -481,6 +490,7 @@ async fn remote_bind_project_refuses_an_unpinned_remote_and_a_non_operator() {
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
+    declare_project(&project_root, "bound-project");
     let request = || remote_bind_project::Request {
         remote: "prod".to_string(),
         project: project_root.clone(),
@@ -547,12 +557,15 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
     let public_key = public_key_response(&remote_state);
     let (url, contacts) = start_mock_remote(public_key).await.unwrap();
     let project = tempfile::tempdir().unwrap();
+    declare_project(project.path(), "stale-remote-project");
     let project_path = project.path().canonicalize().unwrap();
     let mut stale = remote_config("prod", &url, &public_key_response(&remote_state));
     stale.site_id = "site:stale-coordinate".to_string();
     stale.project_bindings.insert(
         project_path.to_string_lossy().to_string(),
         RemoteProjectBinding {
+            project_name: ryeos_state::project_identity::ProjectName::new("stale-remote-project")
+                .unwrap(),
             remote_project_path: "/srv/project".to_string(),
             sync_scope: ProjectSyncScope::FullProject,
         },

@@ -185,8 +185,15 @@ async fn unauthorized_callers_are_refused_before_project_path_observation() {
 async fn local_operator_status_reuses_principal_head_comparison_without_creating_a_head() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".ai")).unwrap();
+    std::fs::write(
+        project.path().join(".ai/project.yaml"),
+        b"schema: 1\nname: status-probe\n",
+    )
+    .unwrap();
     std::fs::write(project.path().join("edited.txt"), b"current workspace edit").unwrap();
     let caller = local_operator(&state);
+    let caller_fingerprint = caller.fingerprint.clone();
     let expected_principal = ryeos_state::refs::principal_storage_key(&caller.fingerprint)
         .unwrap()
         .to_owned();
@@ -204,16 +211,25 @@ async fn local_operator_status_reuses_principal_head_comparison_without_creating
     assert_eq!(result["baseline"], "principal_head");
     assert_eq!(result["scan_complete"], true);
     assert_eq!(result["dirty"], true);
-    assert_eq!(result["counts"]["added"], 1);
-    assert_eq!(result["changes"][0]["path"], "edited.txt");
+    assert_eq!(result["counts"]["added"], 2);
+    let added = result["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(added, vec![".ai/project.yaml", "edited.txt"]);
     assert!(result["head_snapshot_hash"].is_null());
     assert!(result["deployed_snapshot_hash"].is_null());
     let head = state
         .state_store
         .with_state_db(|db| {
             db.read_project_head(
-                &expected_principal,
-                result["project_hash"].as_str().unwrap(),
+                &ryeos_state::project_identity::ProjectHeadKey::owned_by(
+                    &caller_fingerprint,
+                    &ryeos_state::project_identity::ProjectName::new("status-probe").unwrap(),
+                )
+                .unwrap(),
             )
         })
         .unwrap();
@@ -229,6 +245,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     let (_tmp, _state_owner, mut state) = test_state::build_test_state();
     let project = tempfile::tempdir().unwrap();
     for (path, bytes) in [
+        (".ai/project.yaml", "schema: 1\nname: status-snapshot\n"),
         (
             PROJECT_SNAPSHOT_CONFIG_RELATIVE,
             "schema: 1\nexclusions: [\"/.local/\"]\n",
@@ -277,7 +294,12 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     let guard = authority.acquire_shared_guard().unwrap();
     let old_policy_hash = cas.store_object(&old_policy.to_value()).unwrap();
     let mut files = BTreeMap::new();
-    for path in [PROJECT_SNAPSHOT_CONFIG_RELATIVE, "script", "state/kept"] {
+    for path in [
+        ".ai/project.yaml",
+        PROJECT_SNAPSHOT_CONFIG_RELATIVE,
+        "script",
+        "state/kept",
+    ] {
         let bytes = std::fs::read(project.path().join(path)).unwrap();
         let file = ProjectFile {
             blob_hash: cas.store_blob(&bytes).unwrap(),
@@ -297,14 +319,16 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     };
     let head = cas.store_object(&snapshot.to_value()).unwrap();
     let caller = local_operator(&state);
-    let principal = ryeos_state::refs::principal_storage_key(&caller.fingerprint).unwrap();
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &caller.fingerprint,
+        &ryeos_state::project_identity::ProjectName::new("status-snapshot").unwrap(),
+    )
+    .unwrap();
     let project_path = project.path().canonicalize().unwrap();
-    let project_hash = ryeos_state::refs::deployed_project_key(project_path.to_str().unwrap());
     state
         .state_store
         .write_project_head_ref(
-            principal,
-            &project_hash,
+            &head_key,
             &head,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
@@ -349,7 +373,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     assert_eq!(result["dirty"], true);
     assert_eq!(
         result["counts"],
-        json!({"added":0,"modified":0,"deleted":0,"unchanged":3})
+        json!({"added":0,"modified":0,"deleted":0,"unchanged":4})
     );
     let observed = result["changes"]
         .as_array()
@@ -359,6 +383,11 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
         .collect::<Vec<_>>();
     assert_eq!(
         observed,
-        vec![PROJECT_SNAPSHOT_CONFIG_RELATIVE, "script", "state/kept"]
+        vec![
+            PROJECT_SNAPSHOT_CONFIG_RELATIVE,
+            ".ai/project.yaml",
+            "script",
+            "state/kept"
+        ]
     );
 }

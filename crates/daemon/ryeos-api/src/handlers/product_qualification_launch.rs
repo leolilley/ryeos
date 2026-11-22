@@ -5,10 +5,7 @@
 //! from current trusted Bundle authority after reserving the launch ID.
 
 use std::collections::BTreeMap;
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
 use ryeos_app::handler_context::HandlerContext;
@@ -179,9 +176,7 @@ pub fn state_pinned_qualification_logical_project(
         ProjectSourceError::SnapshotNotCurrentHead { .. } => {
             HandlerError::Conflict(format!("snapshot_not_current_head: {error}"))
         }
-        other => {
-            HandlerError::BadRequest(format!("qualification_project_unresolvable: {other}"))
-        }
+        other => HandlerError::BadRequest(format!("qualification_project_unresolvable: {other}")),
     })
 }
 
@@ -266,23 +261,24 @@ async fn handle_source(
             .and_then(|context| Some((context.project_path.as_deref()?, &context.snapshot_hash))),
         _ => None,
     };
-    let stated_project = match (&release_source, request_project) {
-        (Some(_), Some(_)) => {
-            return Err(HandlerError::BadRequest(
+    let stated_project =
+        match (&release_source, request_project) {
+            (Some(_), Some(_)) => {
+                return Err(HandlerError::BadRequest(
                 "a release qualification takes its logical project from the release source only"
                     .to_string(),
             ));
-        }
-        (Some(release), None) => Some(state_pinned_qualification_logical_project(
-            &state,
-            &ctx,
-            &release.head_snapshot_hash,
-        )?),
-        (None, Some((_label, snapshot_hash))) => Some(
-            state_pinned_qualification_logical_project(&state, &ctx, snapshot_hash)?,
-        ),
-        (None, None) => None,
-    };
+            }
+            (Some(release), None) => Some(state_pinned_qualification_logical_project(
+                &state,
+                &ctx,
+                &release.head_snapshot_hash,
+            )?),
+            (None, Some((_label, snapshot_hash))) => Some(
+                state_pinned_qualification_logical_project(&state, &ctx, snapshot_hash)?,
+            ),
+            (None, None) => None,
+        };
 
     let mut reservation =
         AcceptedLaunchAdmissionGuard::reserve(&state, req.launch_id(), &ctx.fingerprint)
@@ -884,30 +880,36 @@ mod tests {
         state: Arc<AppState>,
         operator: HandlerContext,
         operator_principal: String,
-        directory: tempfile::TempDir,
-        project: PathBuf,
+        name: ryeos_state::project_identity::ProjectName,
         head: String,
         other_snapshot: String,
         _owner: ryeos_app::test_support::TestStateStore,
         _node: tempfile::TempDir,
     }
 
-    fn write_head(state: &AppState, principal: &str, project: &Path, snapshot: &str) {
-        let project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
-            project.to_str().unwrap(),
-        )
-        .unwrap();
-        let project_hash = lillux::cas::sha256_hex(project_ref.as_bytes());
-        let principal_key = ryeos_state::refs::principal_storage_key(principal)
-            .unwrap()
-            .to_owned();
+    /// The bytes of a `.ai/project.yaml` declaring `name`.
+    fn declaration(name: &str) -> Vec<u8> {
+        format!("schema: 1\nname: {name}\n").into_bytes()
+    }
+
+    fn project_name(name: &str) -> ryeos_state::project_identity::ProjectName {
+        ryeos_state::project_identity::ProjectName::new(name).unwrap()
+    }
+
+    /// Writes `principal`'s head for `name` to `snapshot`.
+    fn write_head(
+        state: &AppState,
+        principal: &str,
+        name: &ryeos_state::project_identity::ProjectName,
+        snapshot: &str,
+    ) {
+        let key = ryeos_state::project_identity::ProjectHeadKey::owned_by(principal, name).unwrap();
         let authority = state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         state
             .state_store
             .write_project_head_ref(
-                &principal_key,
-                &project_hash,
+                &key,
                 snapshot,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
                 &guard,
@@ -915,7 +917,8 @@ mod tests {
             .unwrap();
     }
 
-    /// An operator-owned head at a real temp project; no head for anyone else.
+    /// An operator-owned head for the project `gate-project`, whose snapshot
+    /// declares that name; no head for anyone else.
     fn gate_fixture() -> GateFixture {
         let (node, owner, state) = crate::test_support::build_test_state_with_bundles();
         let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
@@ -923,16 +926,23 @@ mod tests {
         )
         .unwrap();
         let principal = operator.principal_id();
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("project");
-        std::fs::create_dir_all(project.join("sub")).unwrap();
-        let authority = state.state_store.pinned_state_authority().unwrap();
-        let cas = authority.cas_store().unwrap();
-        let head = cas.store_object(&json!({"snapshot": "head"})).unwrap();
-        let other_snapshot = cas.store_object(&json!({"snapshot": "other"})).unwrap();
-        drop(cas);
-        drop(authority);
-        write_head(&state, &principal, &project, &head);
+        let name = project_name("gate-project");
+        let head = store_ai_only_snapshot(
+            &state,
+            &[
+                (".ai/project.yaml", &declaration(name.as_str())),
+                (".ai/config/gate/head.yaml", b"snapshot: head\n"),
+            ],
+        );
+        // Declares the same project but is not its head.
+        let other_snapshot = store_ai_only_snapshot(
+            &state,
+            &[
+                (".ai/project.yaml", &declaration(name.as_str())),
+                (".ai/config/gate/other.yaml", b"snapshot: other\n"),
+            ],
+        );
+        write_head(&state, &principal, &name, &head);
         let operator_context = HandlerContext::new_with_authority(
             principal.clone(),
             vec![REQUIRED_CAP.to_owned()],
@@ -944,8 +954,7 @@ mod tests {
             state: Arc::new(state),
             operator: operator_context,
             operator_principal: principal,
-            directory,
-            project,
+            name,
             head,
             other_snapshot,
             _owner: owner,
@@ -967,33 +976,37 @@ mod tests {
     }
 
     #[test]
-    fn gate_states_the_canonical_project_for_the_operators_own_head() {
+    fn gate_states_the_operators_own_identity_for_the_declared_name() {
         let fixture = gate_fixture();
-        // Another spelling of the same project canonicalizes to the same path.
-        let respelled = fixture.project.join("sub/..");
         let stated = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &respelled,
             &fixture.head,
         )
         .unwrap();
-        assert_eq!(stated, fixture.project.canonicalize().unwrap());
+        assert_eq!(
+            stated,
+            ryeos_state::project_identity::ProjectIdentity::new(
+                fixture.operator_principal.clone(),
+                fixture.name.clone(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            stated.to_string(),
+            format!("{}/gate-project", fixture.operator_principal)
+        );
     }
 
     #[test]
     fn gate_refuses_a_non_operator_caller_even_with_a_matching_head() {
         let fixture = gate_fixture();
         let stranger = format!("fp:{}", "b".repeat(64));
-        write_head(&fixture.state, &stranger, &fixture.project, &fixture.head);
+        write_head(&fixture.state, &stranger, &fixture.name, &fixture.head);
         let context = HandlerContext::new(stranger, Vec::new(), true);
-        let refused = state_pinned_qualification_logical_project(
-            &fixture.state,
-            &context,
-            &fixture.project,
-            &fixture.head,
-        )
-        .unwrap_err();
+        let refused =
+            state_pinned_qualification_logical_project(&fixture.state, &context, &fixture.head)
+                .unwrap_err();
         assert!(
             matches!(&refused, HandlerError::Forbidden(message)
                 if message.starts_with("logical_project_requires_operator:")),
@@ -1004,16 +1017,17 @@ mod tests {
     #[test]
     fn gate_refuses_when_only_another_principal_holds_the_head() {
         let fixture = gate_fixture();
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("other-project");
-        std::fs::create_dir_all(&project).unwrap();
+        let name = project_name("other-project");
+        let snapshot = store_ai_only_snapshot(
+            &fixture.state,
+            &[(".ai/project.yaml", &declaration(name.as_str()))],
+        );
         let stranger = format!("fp:{}", "c".repeat(64));
-        write_head(&fixture.state, &stranger, &project, &fixture.head);
+        write_head(&fixture.state, &stranger, &name, &snapshot);
         let refused = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &project,
-            &fixture.head,
+            &snapshot,
         )
         .unwrap_err();
         assert!(
@@ -1030,7 +1044,6 @@ mod tests {
         let refused = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &fixture.project,
             &fixture.other_snapshot,
         )
         .unwrap_err();
@@ -1043,19 +1056,22 @@ mod tests {
     }
 
     #[test]
-    fn gate_refuses_an_unresolvable_path_without_a_synthetic_fallback() {
+    fn gate_refuses_a_snapshot_that_declares_no_project_name() {
         let fixture = gate_fixture();
-        let missing = fixture.directory.path().join("does-not-exist");
+        let undeclared = store_ai_only_snapshot(
+            &fixture.state,
+            &[(".ai/config/gate/undeclared.yaml", b"snapshot: undeclared\n")],
+        );
         let refused = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &missing,
-            &fixture.head,
+            &undeclared,
         )
         .unwrap_err();
         assert!(
             matches!(&refused, HandlerError::BadRequest(message)
-                if message.starts_with("qualification_project_path_unresolvable:")),
+                if message.starts_with("qualification_project_unresolvable:")
+                    && message.contains("project_undeclared")),
             "{refused:?}"
         );
     }
@@ -1104,11 +1120,13 @@ mod tests {
     async fn a_project_path_request_reaches_the_gate_before_anything_is_reserved() {
         let fixture = gate_fixture();
         let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("no-head");
+        let project = directory.path().join("labelled-only");
         std::fs::create_dir_all(&project).unwrap();
+        // The snapshot declares the operator's project but is not its head,
+        // whatever label path the request carries.
         let request: Request = serde_json::from_value(launch_request(
             Some(project.to_str().unwrap()),
-            &fixture.head,
+            &fixture.other_snapshot,
         ))
         .unwrap();
         let launch_id = request.launch_id.clone();
@@ -1198,8 +1216,14 @@ mod tests {
         let fixture = gate_fixture();
         let in_snapshot = ".ai/config/qlr/in-snapshot.yaml";
         let live_only = ".ai/config/qlr/live-only.yaml";
-        let snapshot =
-            store_ai_only_snapshot(&fixture.state, &[(in_snapshot, b"snapshot: true\n")]);
+        let name = project_name("labelled-project");
+        let snapshot = store_ai_only_snapshot(
+            &fixture.state,
+            &[
+                (".ai/project.yaml", &declaration(name.as_str())),
+                (in_snapshot, b"snapshot: true\n"),
+            ],
+        );
         // A project of its own: the fixture's project already has a head.
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("labelled-project");
@@ -1207,7 +1231,7 @@ mod tests {
         write_head(
             &fixture.state,
             &fixture.operator_principal,
-            &project,
+            &name,
             &snapshot,
         );
         for relative in [in_snapshot, live_only] {
@@ -1218,16 +1242,24 @@ mod tests {
         let stated = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &project,
             &snapshot,
         )
         .unwrap();
+        assert_eq!(
+            stated,
+            ryeos_state::project_identity::ProjectIdentity::new(
+                fixture.operator_principal.clone(),
+                name,
+            )
+            .unwrap(),
+            "the stated identity comes from the declared name, not the label path"
+        );
         let context = resolve_project_context_off_thread(ResolveProjectContextRequest {
             state: fixture.state.as_ref().clone(),
             source: ProjectSource::Snapshot {
                 hash: snapshot.clone(),
             },
-            project_path: stated.clone(),
+            project_path: project.clone(),
             principal_id: fixture.operator_principal.clone(),
             checkout_id: "qualification-label-test".to_owned(),
             pinned_realization: Some(
@@ -1238,14 +1270,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(context.original_path, stated);
+        assert_eq!(context.original_path, project);
         assert_eq!(context.snapshot_hash.as_deref(), Some(snapshot.as_str()));
         let effective = context.effective_path.canonicalize().unwrap();
         assert!(
-            !effective.starts_with(&stated) && !stated.starts_with(&effective),
+            !effective.starts_with(&project) && !project.starts_with(&effective),
             "the effective root {} must not be the live checkout {}",
             effective.display(),
-            stated.display()
+            project.display()
         );
         assert_eq!(
             std::fs::read(effective.join(in_snapshot)).unwrap(),
@@ -1261,12 +1293,14 @@ mod tests {
     #[tokio::test]
     async fn release_source_runs_the_gate_under_the_launching_principal() {
         let fixture = gate_fixture();
-        // Another principal's head at a path the launcher has no head for.
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("release-project");
-        std::fs::create_dir_all(&project).unwrap();
+        // Another principal's head for a project the launcher has no head for.
+        let name = project_name("release-project");
+        let stranger_snapshot = store_ai_only_snapshot(
+            &fixture.state,
+            &[(".ai/project.yaml", &declaration(name.as_str()))],
+        );
         let stranger = format!("fp:{}", "d".repeat(64));
-        write_head(&fixture.state, &stranger, &project, &fixture.head);
+        write_head(&fixture.state, &stranger, &name, &stranger_snapshot);
         // The overlay capture hash in the request differs from the source
         // snapshot the gate checks.
         let request: Request =
@@ -1278,8 +1312,7 @@ mod tests {
             None,
             None,
             Some(ReleaseHeadSource {
-                project_path: project,
-                head_snapshot_hash: fixture.head.clone(),
+                head_snapshot_hash: stranger_snapshot,
             }),
         )
         .await
@@ -1290,14 +1323,14 @@ mod tests {
                     && message.contains("current head: none")),
             "{refused:?}"
         );
-        // The launcher's own head at its own path passes the same gate.
+        // The launcher's own head for its own project passes the same gate.
         let stated = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &fixture.project,
             &fixture.head,
         )
         .unwrap();
-        assert_eq!(stated, fixture.project.canonicalize().unwrap());
+        assert_eq!(stated.owner(), fixture.operator_principal);
+        assert_eq!(stated.name(), &fixture.name);
     }
 }

@@ -26,10 +26,11 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     principal.verified = true;
     principal.authorized_key_class = Some(AuthorizedKeyPrincipalClass::LocalClient);
     principal.scopes = vec!["ryeos.execute.service.threads/list".to_owned()];
-    let principal_key = ryeos_state::refs::principal_storage_key(&principal.id)
-        .unwrap()
-        .to_owned();
-    let project_hash = ryeos_state::refs::deployed_project_key(project.path().to_str().unwrap());
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &principal.id,
+        &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+    )
+    .unwrap();
     let config_path = project.path().join(PROJECT_SNAPSHOT_CONFIG_RELATIVE);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let config = b"schema: 1\nexclusions: []\n";
@@ -56,8 +57,18 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         size: service_bytes.len() as u64,
         normalized_mode: 0o644,
     };
+    let declaration = b"schema: 1\nname: demo\n";
+    let declaration_file = ProjectFile {
+        blob_hash: cas.store_blob(declaration).unwrap(),
+        size: declaration.len() as u64,
+        normalized_mode: 0o644,
+    };
     let tree = ProjectTree {
         files: [
+            (
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH.to_owned(),
+                cas.store_object(&declaration_file.to_value()).unwrap(),
+            ),
             (
                 PROJECT_SNAPSHOT_CONFIG_RELATIVE.to_owned(),
                 cas.store_object(&file.to_value()).unwrap(),
@@ -81,8 +92,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     state
         .state_store
         .write_project_head_ref(
-            &principal_key,
-            &project_hash,
+            &head_key,
             &head,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
@@ -172,7 +182,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     );
     let retained_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+        .with_state_db(|db| db.read_project_head(&head_key))
         .unwrap();
     assert_eq!(retained_head.as_deref(), Some(head.as_str()));
     assert_eq!(

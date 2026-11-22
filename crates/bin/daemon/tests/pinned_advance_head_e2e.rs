@@ -57,6 +57,21 @@ fn plant_vault_with_zen_key(state_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The name every head in this file is keyed by.
+const PROJECT_NAME: &str = "demo";
+
+/// The live project declares its name, so the snapshot Tool keys its HEAD by
+/// it and the pinned policy below names the same head.
+fn plant_declaration(project_dir: &Path) -> Result<()> {
+    let ai = project_dir.join(ryeos_engine::AI_DIR);
+    std::fs::create_dir_all(&ai)?;
+    std::fs::write(
+        ai.join("project.yaml"),
+        format!("schema: 1\nname: {PROJECT_NAME}\n"),
+    )?;
+    Ok(())
+}
+
 /// `tool:advance/write`: optionally waits for a gate file, then writes
 /// [`WRITTEN`] into its (copy-on-write) project root. The wait gives the test a
 /// window to move HEAD while the run holds its pinned base. If isolation hides
@@ -138,6 +153,7 @@ async fn start(project: &Path) -> Result<(DaemonHarness, FastFixture)> {
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {}).await?;
+    plant_declaration(project)?;
     plant_writing_tool(project, &fixture.publisher)?;
     plant_writing_graph(project, &fixture.publisher)?;
     Ok((h, fixture))
@@ -186,28 +202,28 @@ fn user_principal(fixture: &FastFixture) -> String {
     )
 }
 
-fn project_hash(project: &Path) -> Result<String> {
-    let project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
-        project.to_str().context("UTF-8 project path")?,
-    )?;
-    Ok(lillux::sha256_hex(project_ref.as_bytes()))
+fn head_key(fixture: &FastFixture) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+    ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &user_principal(fixture),
+        &ryeos_state::project_identity::ProjectName::new(PROJECT_NAME)?,
+    )
 }
 
 /// Pinned CoW from the current HEAD, advancing that HEAD from `expected`.
 fn advance_head_policy(
     fixture: &FastFixture,
-    project: &Path,
+    _project: &Path,
     expected: &str,
     response: ExecutionResponse,
 ) -> Result<ExecutionPolicy> {
-    let principal = user_principal(fixture);
-    let principal_key = ryeos_state::refs::principal_storage_key(&principal)?;
     let policy = ExecutionPolicy {
         project: ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named(PROJECT_NAME),
+            },
             realization: PinnedRealization::Cow {
                 terminal_publication: TerminalPublication::AdvanceHead {
-                    head_ref: format!("projects/{principal_key}/{}/head", project_hash(project)?),
+                    head_ref: head_key(fixture)?.ref_path(),
                     expected_hash: expected.to_owned(),
                 },
             },
@@ -235,14 +251,12 @@ fn open_stopped_state(state_path: &Path) -> Result<TestStateStore> {
 fn read_head_and_tree(
     state_path: &Path,
     fixture: &FastFixture,
-    project: &Path,
+    _project: &Path,
     snapshot: Option<&str>,
 ) -> Result<(Option<String>, Vec<String>)> {
     let store = open_stopped_state(state_path)?;
-    let principal = user_principal(fixture);
-    let principal_key = ryeos_state::refs::principal_storage_key(&principal)?.to_owned();
-    let project_hash = project_hash(project)?;
-    let head = store.with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
+    let key = head_key(fixture)?;
+    let head = store.with_state_db(|db| db.read_project_head(&key))?;
     let mut files = Vec::new();
     if let Some(snapshot) = snapshot.or(head.as_deref()) {
         let authority = store.pinned_state_authority()?;

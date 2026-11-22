@@ -20,10 +20,50 @@ use ryeos_engine::trust::{
     EndorsedItem, EndorsementBody, SignedEndorsement, TrustStore, compute_fingerprint,
 };
 use ryeos_node::node_journal::{JournalType, NodeJournal};
+use ryeos_node::offline_operation::BareHost;
+use ryeos_node::offline_operation::apply::{LocalDraft, apply_local};
 use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_state::project_identity::{ProjectIdentity, ProjectName};
 use serde_json::{Value, json};
 
 const KNOWLEDGE_REF: &str = "knowledge:acme/note";
+const PROJECT_NAME: &str = "endorsed-project";
+
+/// The identity of the test project as `operator` owns it.
+fn project_identity(operator: &SigningKey) -> ProjectIdentity {
+    ProjectIdentity::new(
+        format!("fp:{}", compute_fingerprint(&operator.verifying_key())),
+        ProjectName::new(PROJECT_NAME).expect("project name"),
+    )
+    .expect("project identity")
+}
+
+/// Make `project` the operator's registered live checkout: it declares
+/// [`PROJECT_NAME`] and the operator registers it while the node is stopped,
+/// so a launch from it states `fp:<operator>/endorsed-project`.
+async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
+    let ai = project.join(".ai");
+    std::fs::create_dir_all(&ai).expect("project .ai directory");
+    std::fs::write(
+        ai.join("project.yaml"),
+        format!("schema: 1\nname: {PROJECT_NAME}\n"),
+    )
+    .expect("project declaration");
+    h.kill_daemon().await.expect("stop the daemon");
+    apply_local(
+        &h.state_path,
+        &BareHost,
+        operator,
+        LocalDraft {
+            operation: "node.project.register".to_owned(),
+            arguments: json!({ "path": project.canonicalize().unwrap().to_str().unwrap() }),
+            inputs: std::collections::BTreeMap::new(),
+            expected_result: std::collections::BTreeMap::new(),
+        },
+    )
+    .expect("register the project");
+    h.respawn_with(|_| {}).await.expect("restart the daemon");
+}
 
 fn envelope() -> SignatureEnvelope {
     SignatureEnvelope {
@@ -73,18 +113,13 @@ async fn trust_class(h: &DaemonHarness, project: &Path) -> String {
 
 /// What `ryeos endorse` does once it has the digests: read the ledger head
 /// from the node, sign the body with the operator key here, submit it.
-async fn endorse_items(
-    h: &DaemonHarness,
-    operator: &SigningKey,
-    project: &Path,
-    digest: &str,
-) -> (u16, Value) {
+async fn endorse_items(h: &DaemonHarness, operator: &SigningKey, digest: &str) -> (u16, Value) {
     let (status, facts) = service(h, "service:endorsements/record", json!({})).await;
     assert_eq!(status, 200, "{facts:#}");
     let head = facts["result"]["ledger_head"].as_str().expect("head");
     let nonce: [u8; 16] = rand::random();
     let body = EndorsementBody::for_items(
-        project.canonicalize().unwrap().to_str().unwrap(),
+        &project_identity(operator),
         &format!("fp:{}", compute_fingerprint(&operator.verifying_key())),
         vec![EndorsedItem {
             item_ref: KNOWLEDGE_REF.to_owned(),
@@ -133,9 +168,10 @@ async fn an_endorsement_trusts_an_authored_item_until_it_changes_or_is_revoked()
     let (mut h, fixture) = start().await;
     let project = tempfile::tempdir().expect("project");
     let digest = plant_note(project.path(), "one", &fixture.authoring);
+    register_project(&mut h, &fixture.user, project.path()).await;
     assert_eq!(trust_class(&h, project.path()).await, "untrusted_project");
 
-    let (status, recorded) = endorse_items(&h, &fixture.user, project.path(), &digest).await;
+    let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
     assert_eq!(status, 200, "{recorded:#}");
     let endorsement = recorded["result"]["endorsement_digest"]
         .as_str()
@@ -219,12 +255,13 @@ async fn an_endorsement_trusts_an_authored_item_until_it_changes_or_is_revoked()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers() {
-    let (h, fixture) = start().await;
+    let (mut h, fixture) = start().await;
     let project = tempfile::tempdir().expect("project");
     let digest = plant_note(project.path(), "one", &fixture.authoring);
+    register_project(&mut h, &fixture.user, project.path()).await;
 
     // The authoring key cannot endorse its own output.
-    let (status, refused) = endorse_items(&h, &fixture.authoring, project.path(), &digest).await;
+    let (status, refused) = endorse_items(&h, &fixture.authoring, &digest).await;
     assert_eq!(status, 403, "{refused:#}");
     assert!(
         refused
@@ -244,7 +281,7 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         let nonce: [u8; 16] = rand::random();
         SignedEndorsement::sign(
             EndorsementBody::standing(
-                project.path().canonicalize().unwrap().to_str().unwrap(),
+                &project_identity(&fixture.user),
                 &format!("fp:{}", fixture.user_fp()),
                 vec![item.to_owned()],
                 None,

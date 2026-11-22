@@ -17,6 +17,58 @@ use common::fast_fixture::{
 };
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
+use ryeos_node::offline_operation::BareHost;
+use ryeos_node::offline_operation::apply::{LocalDraft, apply_local};
+
+const PROJECT_NAME: &str = "endorsed-launch-project";
+
+/// The identity the test project states for `operator` once it is the
+/// operator's registered live checkout.
+fn project_identity(operator: &SigningKey) -> ryeos_state::project_identity::ProjectIdentity {
+    ryeos_state::project_identity::ProjectIdentity::new(
+        format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&operator.verifying_key())
+        ),
+        ryeos_state::project_identity::ProjectName::new(PROJECT_NAME).expect("project name"),
+    )
+    .expect("project identity")
+}
+
+/// Write the project's `.ai/project.yaml` declaring [`PROJECT_NAME`].
+fn plant_project_declaration(project: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(project.join(".ai"))?;
+    std::fs::write(
+        project.join(".ai/project.yaml"),
+        format!("schema: 1\nname: {PROJECT_NAME}\n"),
+    )?;
+    Ok(())
+}
+
+/// The operator registers the declared checkout while the node is stopped, so
+/// a launch from it states `fp:<operator>/<name>`.
+async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
+    h.kill_daemon().await.expect("stop the daemon");
+    apply_local(
+        &h.state_path,
+        &BareHost,
+        operator,
+        LocalDraft {
+            operation: "node.project.register".to_owned(),
+            arguments: serde_json::json!({
+                "path": project.canonicalize().unwrap().to_str().unwrap()
+            }),
+            inputs: std::collections::BTreeMap::new(),
+            expected_result: std::collections::BTreeMap::new(),
+        },
+    )
+    .expect("register the project");
+    h.respawn_with(|cmd| {
+        cmd.env("RUST_LOG", "info");
+    })
+    .await
+    .expect("restart the daemon");
+}
 
 fn plant_mock_provider(
     user_space: &Path,
@@ -186,7 +238,7 @@ async fn endorse_note(h: &DaemonHarness, fixture: &FastFixture, project: &Path) 
     let head = facts["result"]["ledger_head"].as_str().expect("head");
     let nonce: [u8; 16] = rand::random();
     let body = ryeos_engine::trust::EndorsementBody::for_items(
-        project.canonicalize().unwrap().to_str().unwrap(),
+        &project_identity(&fixture.user),
         &format!("fp:{}", fixture.user_fp()),
         vec![ryeos_engine::trust::EndorsedItem {
             item_ref: NOTE_REF.to_owned(),
@@ -244,6 +296,7 @@ async fn e2e_an_endorsed_authoring_signed_reference_runs_and_a_revocation_refuse
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
+            plant_project_declaration(&project_path)?;
             plant_model_routing(&project_path, &fixture.publisher)?;
             plant_knowledge_item(
                 &project_path,
@@ -268,11 +321,12 @@ async fn e2e_an_endorsed_authoring_signed_reference_runs_and_a_revocation_refuse
             )?;
             Ok(())
         };
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
     })
     .await
     .expect("daemon should start");
+    register_project(&mut h, &fixture.user, project.path()).await;
 
     // Unendorsed: a machine draft never reaches the model.
     let (status, body) = launch(&h, project.path()).await;
