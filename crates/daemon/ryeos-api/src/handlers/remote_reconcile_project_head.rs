@@ -68,6 +68,12 @@ struct ReconciliationOperation {
     remote_principal_id: String,
     local_project_path: String,
     remote_project_path: String,
+    /// The bound project name, sealed at admission. The remote head is the
+    /// operator's head under it on the remote node.
+    project_name: ryeos_state::project_identity::ProjectName,
+    /// The configured operator's local head ref, sealed at admission and
+    /// parsed back; never re-derived from the path or the name.
+    local_head_ref: String,
     operator_fingerprint: String,
     delegation_digest: String,
     requested_origin_site_id: Option<String>,
@@ -200,7 +206,26 @@ impl ReconciliationOperation {
         }
         ryeos_state::parse_canonical_timestamp(&self.merge_created_at)
             .context("project-head reconciliation merge timestamp is not canonical")?;
+        self.local_head()?;
         Ok(())
+    }
+
+    /// The sealed local head, which must be the configured operator's own.
+    fn local_head(&self) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+        let head = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(
+            &self.local_head_ref,
+        )?;
+        if head.owner_key() != self.operator_fingerprint {
+            bail!("project-head reconciliation local head is not the operator's own");
+        }
+        Ok(head)
+    }
+
+    /// The operator's head on the remote node, under the sealed name.
+    fn remote_project(&self) -> ryeos_state::project_identity::PushedProject {
+        ryeos_state::project_identity::PushedProject::Named {
+            name: self.project_name.clone(),
+        }
     }
 
     fn from_value(value: Value) -> Result<Self> {
@@ -225,6 +250,8 @@ impl ReconciliationOperation {
             "remote_principal_id": self.remote_principal_id,
             "local_project_path": self.local_project_path,
             "remote_project_path": self.remote_project_path,
+            "project_name": self.project_name,
+            "local_head_ref": self.local_head_ref,
             "operator_fingerprint": self.operator_fingerprint,
             "delegation_digest": self.delegation_digest,
             "requested_origin_site_id": self.requested_origin_site_id,
@@ -247,8 +274,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     validate_hash("expected remote HEAD", &req.expected_remote_head)?;
     let operator_fingerprint =
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
-    let (local_project_path, remote, remote_project_path) =
+    let (local_project_path, remote, remote_project_path, project_name) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
+    let local_head_ref = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &format!("fp:{operator_fingerprint}"),
+        &project_name,
+    )?
+    .ref_path();
     let delegation_digest = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?
         .delegation_digest()
         .context("delegated client carries no delegation")?;
@@ -262,6 +294,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         remote_principal_id: remote.principal_id,
         local_project_path,
         remote_project_path,
+        project_name,
+        local_head_ref,
         operator_fingerprint,
         delegation_digest,
         requested_origin_site_id: ctx.authenticated_origin_site_id,
@@ -279,11 +313,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .with_state_db(|db| db.get_sync_job(&operation.job_id()?))?
         .is_none()
     {
-        let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
-        let project_hash = lillux::sha256_hex(operation.local_project_path.as_bytes());
+        let head = operation.local_head()?;
         let local_head = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            .with_state_db(|db| db.read_project_head(&head))?;
         if local_head.as_deref() != Some(operation.expected_local_head.as_str()) {
             bail!(
                 "local project HEAD mismatch: expected {}, current is {:?}",
@@ -351,12 +384,10 @@ async fn execute_operation(
             Some(response.reconciled_head.as_str()),
             true,
         )?;
-        let principal = format!("fp:{}", operation.operator_fingerprint);
-        let principal_key = ryeos_state::refs::principal_storage_key(&principal)?;
-        let project_hash = lillux::sha256_hex(operation.local_project_path.as_bytes());
+        let head = operation.local_head()?;
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            .with_state_db(|db| db.read_project_head(&head))?;
         let current = current.context(
             "completed reconciliation lost the configured operator's local project HEAD",
         )?;
@@ -485,7 +516,7 @@ async fn run_attempt(
     )
     .map_err(AttemptFailure::permanent)?;
     let upload_session = operator_client
-        .objects_put(None, &operation.remote_project_path, &[], &[])
+        .objects_put(None, &operation.remote_project(), &[], &[])
         .await
         .map_err(AttemptFailure::retryable)?;
     progress.latest_remote_staging_id = Some(upload_session.staging_id.clone());
@@ -550,7 +581,7 @@ async fn run_attempt(
         &operator_client,
         &authority,
         &merge_hash,
-        &operation.remote_project_path,
+        &operation.project_name,
         upload_session,
     )
     .await
@@ -617,7 +648,7 @@ async fn ensure_remote_generation_local(
     let closure = operator_client
         .objects_closure_get(
             &crate::objects_read_scope::ReadRoot::ProjectHead {
-                project_path: operation.remote_project_path.clone(),
+                project: operation.remote_project(),
             },
             std::slice::from_ref(&operation.expected_remote_head),
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
@@ -850,10 +881,8 @@ async fn publish_local_head(
     merge_hash: &str,
 ) -> Result<()> {
     validate_merge_generation(state, operation, merge_hash)?;
-    let principal = format!("fp:{}", operation.operator_fingerprint);
-    let principal_key = ryeos_state::refs::principal_storage_key(&principal)?;
-    let project_hash = lillux::sha256_hex(operation.local_project_path.as_bytes());
-    let project_lock = super::project_apply_snapshot::project_apply_lock(&project_hash);
+    let head = operation.local_head()?;
+    let project_lock = super::project_apply_snapshot::project_apply_lock(&head.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let authority = state.state_store.pinned_state_authority()?;
     let cas_guard = authority.acquire_shared_guard()?;
@@ -866,7 +895,7 @@ async fn publish_local_head(
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&head))?;
     let publication = if current.as_deref() == Some(merge_hash) {
         Ok(())
     } else if current.as_deref() != Some(operation.expected_local_head.as_str()) {
@@ -877,8 +906,7 @@ async fn publish_local_head(
         ))
     } else {
         state.state_store.advance_project_head_ref(
-            principal_key,
-            &project_hash,
+            &head,
             merge_hash,
             &operation.expected_local_head,
             &signer,
@@ -891,7 +919,7 @@ async fn publish_local_head(
         // verified HEAD rather than reporting a false split-brain result.
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            .with_state_db(|db| db.read_project_head(&head))?;
         if current.as_deref() == Some(merge_hash) {
             tracing::warn!(
                 error = %format!("{error:#}"),
@@ -935,7 +963,7 @@ fn resolve_initial_route(
     state: &AppState,
     remote_name: &str,
     project: &Path,
-) -> Result<(String, RemoteConfig, String)> {
+) -> Result<(String, RemoteConfig, String, ryeos_state::project_identity::ProjectName)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
     let report = config::load_remotes_report(&state.config.app_root)?;
@@ -948,6 +976,7 @@ fn resolve_initial_route(
         local_project_path,
         loaded.config,
         binding.remote_project_path,
+        binding.project_name,
     ))
 }
 
@@ -977,6 +1006,7 @@ fn validate_current_route_and_authority(
     let binding = config::resolve_loaded_project_binding(&loaded, &project)?;
     if binding.sync_scope != ProjectSyncScope::FullProject
         || binding.remote_project_path != operation.remote_project_path
+        || binding.project_name != operation.project_name
     {
         bail!("durable project-head reconciliation route changed");
     }
@@ -1296,6 +1326,13 @@ mod tests {
             remote_principal_id: format!("fp:{}", "3".repeat(64)),
             local_project_path: "/project".to_owned(),
             remote_project_path: "/remote/project".to_owned(),
+            project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
+                &format!("fp:{}", "4".repeat(64)),
+                &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            )
+            .unwrap()
+            .ref_path(),
             operator_fingerprint: "4".repeat(64),
             delegation_digest: "5".repeat(64),
             requested_origin_site_id: None,
