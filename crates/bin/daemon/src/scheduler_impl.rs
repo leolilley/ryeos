@@ -88,8 +88,10 @@ impl AppSchedulerContext {
                         expected_hash,
                     },
             } => Some(ResolvedCurrentHeadDestination {
-                principal_key: principal_key.clone(),
-                project_hash: project_hash.clone(),
+                head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                    principal_key,
+                    project_hash,
+                )?,
                 expected_hash: expected_hash.clone(),
             }),
             _ => None,
@@ -410,7 +412,7 @@ impl SchedulerContext for AppSchedulerContext {
                     )?;
                     ryeos_api::routes::response_modes::execute_mode::authorize_terminal_publication(
                         &execution.policy,
-                        &context.original_path,
+                        context.current_head_destination.as_ref(),
                         execution.principal_id(),
                         &handler_context.scopes,
                         context.snapshot_hash.as_deref(),

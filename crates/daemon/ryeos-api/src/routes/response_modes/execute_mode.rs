@@ -510,8 +510,8 @@ pub fn resolve_execution_project_authority(
                                 );
                             }
                             PinnedTerminalPublication::RetainCurrentHead {
-                                principal_key: destination.principal_key.clone(),
-                                project_hash: destination.project_hash.clone(),
+                                principal_key: destination.head.owner_key().to_owned(),
+                                project_hash: destination.head.name_hash().to_owned(),
                                 expected_hash: destination.expected_hash.clone(),
                             }
                         }
@@ -686,7 +686,7 @@ pub fn resolve_execution_contract_with_posture(
     };
     authorize_terminal_publication(
         policy,
-        &project_ctx.original_path,
+        project_ctx.current_head_destination.as_ref(),
         acting_principal,
         caller_scopes,
         project_ctx.snapshot_hash.as_deref(),
@@ -964,7 +964,7 @@ pub(crate) fn map_project_source_error(
 
 pub fn authorize_terminal_publication(
     policy: &ExecutionPolicy,
-    original_project_path: &Path,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
     acting_principal: &str,
     caller_scopes: &[String],
     resolved_snapshot_hash: Option<&str>,
@@ -985,14 +985,16 @@ pub fn authorize_terminal_publication(
         return Ok(());
     };
 
-    let project_path = original_project_path.to_str().ok_or_else(|| {
-        anyhow::anyhow!("project path is not valid UTF-8 and cannot identify a project HEAD")
+    // The only head an advance may name is the acting principal's own head
+    // the current-head lookup admitted; nothing is rebuilt from a path.
+    let destination = current_head_destination.ok_or_else(|| {
+        anyhow::anyhow!("advance-head publication requires a current-head project source")
     })?;
-    let canonical_project = project_source::canonical_project_ref(project_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let project_hash = lillux::sha256_hex(canonical_project.as_bytes());
     let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)?;
-    let admitted_head_ref = format!("projects/{principal_key}/{project_hash}/head");
+    if destination.head.owner_key() != principal_key {
+        anyhow::bail!("advance-head destination is not the acting principal's own head");
+    }
+    let admitted_head_ref = destination.head.ref_path();
     if head_ref != &admitted_head_ref {
         anyhow::bail!(
             "advance-head ref does not identify the acting principal's admitted project HEAD: expected {admitted_head_ref:?}, got {head_ref:?}"
@@ -1007,7 +1009,7 @@ pub fn authorize_terminal_publication(
     }
     let current_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&destination.head))?;
     if current_head.as_deref() != Some(expected_hash.as_str()) {
         anyhow::bail!(
             "advance-head expected hash is stale: expected {}, current HEAD {:?}",
@@ -3561,8 +3563,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let snapshot_hash = "a".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
-            principal_key: "d".repeat(64),
-            project_hash: "b".repeat(64),
+            head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                &"d".repeat(64),
+                &"b".repeat(64),
+            )
+            .unwrap(),
             expected_hash: snapshot_hash.clone(),
         };
         let policy = ExecutionPolicy {
@@ -3607,8 +3612,8 @@ mod tests {
             authority.terminal_publication(),
             Some(
                 &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: destination.principal_key.clone(),
-                    project_hash: destination.project_hash.clone(),
+                    principal_key: destination.head.owner_key().to_owned(),
+                    project_hash: destination.head.name_hash().to_owned(),
                     expected_hash: snapshot_hash.clone(),
                 }
             )
@@ -3651,8 +3656,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let snapshot_hash = "d".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
-            principal_key: "e".repeat(64),
-            project_hash: "f".repeat(64),
+            head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                &"e".repeat(64),
+                &"f".repeat(64),
+            )
+            .unwrap(),
             expected_hash: snapshot_hash.clone(),
         };
         let policy = ExecutionPolicy {
