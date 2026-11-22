@@ -63,6 +63,11 @@ struct PullIntent {
     target_signing_key: String,
     local_project_path: String,
     target_project_path: String,
+    /// The bound project name, sealed at admission.
+    project_name: ryeos_state::project_identity::ProjectName,
+    /// The delegator's local head ref, sealed at admission and parsed back;
+    /// never re-derived from the path or the name.
+    local_head_ref: String,
     delegator_fingerprint: String,
     delegation_digest: String,
     chain_root_id: String,
@@ -161,7 +166,19 @@ impl PullIntent {
         if lillux::crypto::fingerprint(&target_key) != target {
             bail!("hosted worker-result pull target key differs from target principal");
         }
+        self.local_head()?;
         Ok(())
+    }
+
+    /// The sealed local head, which must be the delegator's own.
+    fn local_head(&self) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+        let head = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(
+            &self.local_head_ref,
+        )?;
+        if head.owner_key() != self.delegator_fingerprint {
+            bail!("hosted worker-result pull local head is not the delegator's own");
+        }
+        Ok(head)
     }
 
     fn job_id(&self) -> Result<String> {
@@ -230,8 +247,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .map_err(|error| anyhow::anyhow!(error))
         .context("hosted worker-result chain root is not canonical")?;
     let delegator_fingerprint = crate::remote::client::delegator_fingerprint(&ctx)?;
-    let (local_project_path, remote, target_project_path) =
+    let (local_project_path, remote, target_project_path, project_name) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
+    let local_head_ref = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &format!("fp:{delegator_fingerprint}"),
+        &project_name,
+    )?
+    .ref_path();
     let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?;
     let delegation_digest = client
         .delegation_digest()
@@ -246,6 +268,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         target_signing_key: remote.signing_key.clone(),
         local_project_path,
         target_project_path,
+        project_name,
+        local_head_ref,
         delegator_fingerprint,
         delegation_digest,
         chain_root_id: req.chain_root_id,
@@ -557,12 +581,10 @@ fn validate_local_base(
     operation: &PullOperation,
 ) -> Result<(ryeos_state::PinnedStateAuthority, ProjectTree)> {
     let evidence = &operation.candidate_result.evidence;
-    let owner_principal = operation.intent.owner_principal();
-    let principal_key = ryeos_state::refs::principal_storage_key(&owner_principal)?;
-    let project_hash = lillux::sha256_hex(operation.intent.local_project_path.as_bytes());
+    let head = operation.intent.local_head()?;
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&head))?;
     if current.as_deref() != Some(evidence.base_snapshot_hash.as_str()) {
         bail!(
             "local project HEAD differs from hosted execution base: expected {}, current is {:?}",
@@ -606,7 +628,7 @@ fn resolve_initial_route(
     state: &AppState,
     remote_name: &str,
     project: &Path,
-) -> Result<(String, RemoteConfig, String)> {
+) -> Result<(String, RemoteConfig, String, ryeos_state::project_identity::ProjectName)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
     let report = config::load_remotes_report(&state.config.app_root)?;
@@ -619,6 +641,7 @@ fn resolve_initial_route(
         local_project_path,
         loaded.config,
         binding.remote_project_path,
+        binding.project_name,
     ))
 }
 
@@ -648,6 +671,7 @@ fn resolve_current_route(state: &AppState, intent: &PullIntent) -> Result<Remote
         != intent.local_project_path.as_str()
         || binding.sync_scope != ProjectSyncScope::FullProject
         || binding.remote_project_path != intent.target_project_path
+        || binding.project_name != intent.project_name
     {
         bail!("durable hosted worker-result pull project route changed");
     }
@@ -878,6 +902,13 @@ mod tests {
             ),
             local_project_path: "/source/project".to_owned(),
             target_project_path: "/target/project".to_owned(),
+            project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
+                &format!("fp:{}", "a".repeat(64)),
+                &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+            )
+            .unwrap()
+            .ref_path(),
             delegator_fingerprint: "a".repeat(64),
             delegation_digest: "b".repeat(64),
             chain_root_id: "T-root".to_owned(),
