@@ -2309,7 +2309,9 @@ impl Runner {
                     self.loop_warned.insert(finding.kind, i64::from(turns));
                     return Ok(None);
                 }
-                Some(warned_at) if i64::from(turns) >= warned_at + i64::from(config.grace_turns) => {
+                Some(warned_at)
+                    if i64::from(turns) >= warned_at + i64::from(config.grace_turns) =>
+                {
                     return Ok(Some(format!(
                         "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
                         finding.kind.code(),
