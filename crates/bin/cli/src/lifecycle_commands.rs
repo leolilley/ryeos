@@ -6619,7 +6619,8 @@ mod tests {
         }
 
         // The named replacement cures it.
-        ryeos_node::run_init(&doctor_init_options(&app_root, true)).expect("replace the generation");
+        ryeos_node::run_init(&doctor_init_options(&app_root, true))
+            .expect("replace the generation");
         assert_eq!(node_policy_check(&app_root).status, OK);
         assert_eq!(ui_browser_sessions_check(&app_root, true).status, OK);
     }

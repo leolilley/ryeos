@@ -855,8 +855,8 @@ fn load_policy_generation_from_directory(
         .into());
     }
     let recorded = operator_sections.clone();
-    validate_policy_generation(policy_table, policies, operator_sections, directory.path())
-        .map_err(|error| {
+    validate_policy_generation(policy_table, policies, operator_sections, directory.path()).map_err(
+        |error| {
             let Some(stale) = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<SectionSchemaStale>())
@@ -875,7 +875,8 @@ fn load_policy_generation_from_directory(
                 host_class: None,
             }
             .into()
-        })
+        },
+    )
 }
 
 /// A generation's node-signed members, read without compiling any section.
@@ -1873,7 +1874,9 @@ mod tests {
         fixture.install(&installed, Some(&[]));
         let error = load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
             .expect_err("a schema-5 section does not load");
-        let stale = error.downcast_ref::<NodePolicySectionSchemaStale>().unwrap();
+        let stale = error
+            .downcast_ref::<NodePolicySectionSchemaStale>()
+            .unwrap();
         assert!(!stale.reset_section_needed);
         assert!(
             stale
