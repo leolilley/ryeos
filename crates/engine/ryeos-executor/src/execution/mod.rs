@@ -352,7 +352,10 @@ pub(crate) fn derive_pinned_child_authority(
         environment,
         capability_ceiling,
     )?
-    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
+    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)?
+    // A child pinned from its parent's project carries the identity the
+    // parent sealed at admission.
+    .with_signer_project(parent.signer_project())
 }
 
 /// Capture a live project tree under a durable recovery root. The

@@ -9016,7 +9016,8 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         EnvironmentAuthority::None,
         candidate_capabilities,
     )?
-    .with_child_policy(ChildProjectAuthorityPolicy::Inherit)?;
+    .with_child_policy(ChildProjectAuthorityPolicy::Inherit)?
+    .with_signer_project(resume.project_authority.signer_project())?;
     let base_provenance = ExecutionProvenance::root_pushed_head(
         original_project_path.clone(),
         base.request_engine.clone(),
