@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:45:45Z:6d076bf70b49c1bbdfe6238482b1c62a356387c8cd57181f043ebd527f86a699:Xy3CVCtOaF9qisKNjkGF0jDT/eD2U7yWXrcwI+kxKHjxDF0gv0Eois9Cb7BYvzuhl/euopo95mPletgYnPA1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:45:55Z:fdbd64e0d86cec2fde49cd2dbc37bd85c9690c223c75aa7c6255d180bb191d73:cb13ks4b7Mv9YdWVQxWulT+FtTuzlJiyi2n+Ij69evW0Ocb+AiKtkJTExkqF4TdVshs6qeuOkSFVpk5wbLLgBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -61,6 +61,8 @@ ordinary advancement path (one `provider_retry` event, the stored backoff, the
 next attempt). Otherwise the resume fails with `provider_attempt_outcome_unknown`
 and the provider is not contacted again. A route with no accounting ledger has
 no attempt record to prove the cut, so it fails the same way.
+
+Resume is bounded separately: after a hard crash a turn is resumed at most once; planned restarts re-arm.
 
 ## Malformed tool calls
 
