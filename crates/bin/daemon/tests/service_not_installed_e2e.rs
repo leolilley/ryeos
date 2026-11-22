@@ -18,7 +18,9 @@ use common::DaemonHarness;
 async fn execute_missing_service_returns_service_not_installed() -> anyhow::Result<()> {
     let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
-    let project = harness.state_path.display().to_string();
+    // A live project beside the node, never its app root.
+    let project_dir = tempfile::tempdir()?;
+    let project = project_dir.path().canonicalize()?.display().to_string();
     let (status, body) = harness
         .post_execute(
             "service:scheduler/register",
@@ -83,7 +85,9 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
 async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()> {
     let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
-    let project = harness.state_path.display().to_string();
+    // A live project beside the node, never its app root.
+    let project_dir = tempfile::tempdir()?;
+    let project = project_dir.path().canonicalize()?.display().to_string();
     // bundle.list ships in core and takes no params — must succeed.
     let (status, body) = harness
         .post_execute("service:bundle/list", &project, serde_json::json!({}))
@@ -108,7 +112,9 @@ async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()>
 async fn system_routes_reports_routes_and_bundles() -> anyhow::Result<()> {
     let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
-    let project = harness.state_path.display().to_string();
+    // A live project beside the node, never its app root.
+    let project_dir = tempfile::tempdir()?;
+    let project = project_dir.path().canonicalize()?.display().to_string();
     let (status, body) = harness
         .post_execute("service:system/routes", &project, serde_json::json!({}))
         .await?;
