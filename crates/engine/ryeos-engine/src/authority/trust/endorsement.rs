@@ -788,6 +788,16 @@ impl EndorsementIndex {
     }
 
     /// Digests of the live endorsements, in order.
+    /// The projects the endorsements in this index are for.
+    pub fn projects(
+        &self,
+    ) -> std::collections::BTreeSet<ryeos_state::project_identity::ProjectIdentity> {
+        self.entries
+            .iter()
+            .map(|entry| entry.body.project.clone())
+            .collect()
+    }
+
     pub fn digests(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|entry| entry.digest.as_str())
     }

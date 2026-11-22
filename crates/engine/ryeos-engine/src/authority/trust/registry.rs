@@ -832,10 +832,31 @@ pub fn load_node_verifying_key(app_root: &Path) -> Result<VerifyingKey, TrustErr
 
 /// Read every record under `signers_dir`, verifying each under `node_key`.
 /// A missing directory is an empty registry.
+/// Load every signer record, dropping each record whose schema this node no
+/// longer reads (a v1 record with path project entries). A dropped record
+/// makes only that signer unusable; it is logged by file. Every other
+/// refusal still refuses the whole registry.
 pub fn load_signer_records(
     signers_dir: &Path,
     node_key: &VerifyingKey,
 ) -> Result<Vec<SignerRecord>, TrustError> {
+    let (records, refused) = load_signer_records_reporting(signers_dir, node_key)?;
+    for refusal in &refused {
+        tracing::warn!(
+            code = refusal.code(),
+            error = %refusal,
+            "signer record refused; that signer is unusable until it is re-scoped"
+        );
+    }
+    Ok(records)
+}
+
+/// [`load_signer_records`], returning the dropped records' refusals for
+/// reports (doctor, `ryeos trust list`).
+pub fn load_signer_records_reporting(
+    signers_dir: &Path,
+    node_key: &VerifyingKey,
+) -> Result<(Vec<SignerRecord>, Vec<TrustError>), TrustError> {
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut count = 0_usize;
     let mut total = 0_u64;
@@ -880,6 +901,7 @@ pub fn load_signer_records(
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut records = Vec::with_capacity(files.len());
+    let mut refused = Vec::new();
     for (path, bytes) in files {
         let is_yaml = path.extension().and_then(|e| e.to_str()) == Some("yaml");
         if !is_yaml {
@@ -888,9 +910,13 @@ pub fn load_signer_records(
                 reason: "is not a `<fingerprint>.yaml` record".to_string(),
             });
         }
-        records.push(parse_signer_record(&path, &bytes, node_key)?);
+        match parse_signer_record(&path, &bytes, node_key) {
+            Ok(record) => records.push(record),
+            Err(refusal @ TrustError::RecordSchemaUnsupported { .. }) => refused.push(refusal),
+            Err(error) => return Err(error),
+        }
     }
-    Ok(records)
+    Ok((records, refused))
 }
 
 // ── Key events ──────────────────────────────────────────────────────
