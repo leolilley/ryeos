@@ -308,6 +308,17 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     // Projects mean nothing outside project space: a scope that leaves
     // project space drops them rather than carrying them, and never becomes
     // an all-projects scope.
+    let adds_project_space = spaces.iter().any(|space| space == "project")
+        && !current
+            .scope
+            .spaces
+            .contains(&ryeos_engine::trust::SignerSpace::Project);
+    if adds_project_space && args.projects.is_empty() && !args.any_project {
+        bail!(
+            "trust_scope_invalid: adding the project space needs --project fp:<owner>/<name> \
+             (or own:<name>), or --any-project to sign for every project"
+        );
+    }
     let projects = if spaces.iter().any(|space| space == "project") {
         scope_projects(&args, &current_projects)
     } else {

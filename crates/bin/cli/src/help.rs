@@ -240,6 +240,7 @@ pub(crate) fn resolve_selected_command_help(
     )
     .map_err(|error| format!("{error:#}"))?;
     let value = crate::effective_metadata::resolve_effective_composed_value(
+        app_root,
         &engine,
         execute_ref,
         project_root,
@@ -464,7 +465,7 @@ pub(crate) fn command_rows(
                 .or_insert_with(|| {
                     engine
                         .as_ref()
-                        .and_then(|engine| resolve_effective_help(engine, execute, project_path))
+                        .and_then(|engine| resolve_effective_help(app_root, engine, execute, project_path))
                 })
                 .as_ref()
         });
@@ -680,7 +681,7 @@ fn build_installed_command_help(
     let item = execute_ref.and_then(|execute| {
         engine
             .as_ref()
-            .and_then(|engine| resolve_effective_help(engine, execute, project_path))
+            .and_then(|engine| resolve_effective_help(app_root, engine, execute, project_path))
     });
 
     let command = command_descriptor.tokens.join(" ");
@@ -904,12 +905,18 @@ fn installed_usage_line(
 }
 
 fn resolve_effective_help(
+    app_root: &Path,
     engine: &Engine,
     execute_ref: &str,
     project_path: &str,
 ) -> Option<ItemHelpMetadata> {
     let project_root = (project_path != ".").then(|| Path::new(project_path));
-    crate::effective_metadata::resolve_effective_composed_value(engine, execute_ref, project_root)
+    crate::effective_metadata::resolve_effective_composed_value(
+        app_root,
+        engine,
+        execute_ref,
+        project_root,
+    )
         .ok()
         .flatten()
         .map(|value| ItemHelpMetadata::from_composed(&value))
