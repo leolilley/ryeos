@@ -799,7 +799,7 @@ pub struct Runner {
     wrap_up_delivered: crate::resume::WrapUpDelivered,
     /// The loop findings the model was warned about, each with the turn
     /// count when it was warned.
-    loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
+    loop_warned: crate::loop_guards::WarnedAt,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -2123,10 +2123,22 @@ impl Runner {
             .first()
             .filter(|message| message.role() == "system")
             .cloned();
+        let old_turns = crate::loop_guards::digests_from_messages(&self.messages).len() as u32;
         self.messages = system.into_iter().chain(rebuilt.messages).collect();
+        let new_turns = crate::loop_guards::digests_from_messages(&self.messages).len() as u32;
         self.result_guard = rebuilt.result_guard;
-        self.wrap_up_delivered = rebuilt.wrap_up_delivered;
-        self.loop_warned = rebuilt.loop_warned;
+        // A notice or warning this process already gave stays given: the
+        // rebuilt conversation may have summarised it away, and the model must
+        // not be told again nor its grace restarted. A delivered flag only
+        // ever turns on; a warning keeps the grace it had used, re-based onto
+        // the shorter conversation.
+        self.wrap_up_delivered = self.wrap_up_delivered.union(rebuilt.wrap_up_delivered);
+        self.loop_warned = crate::loop_guards::warnings_after_compaction(
+            &self.loop_warned,
+            old_turns,
+            rebuilt.loop_warned,
+            new_turns,
+        );
         self.compaction_memo = Some(CompactionMemo::of(&record));
         block_at_directive_recovery_test_cut(&self.callback, "compaction_recorded").await;
         self.refused_code = None;
@@ -2294,10 +2306,10 @@ impl Runner {
                             format!("resume-critical loop warning input append failed: {e}")
                         })?;
                     self.messages.push(ProviderMessage::user(text));
-                    self.loop_warned.insert(finding.kind, turns);
+                    self.loop_warned.insert(finding.kind, i64::from(turns));
                     return Ok(None);
                 }
-                Some(warned_at) if turns >= warned_at + config.grace_turns => {
+                Some(warned_at) if i64::from(turns) >= warned_at + i64::from(config.grace_turns) => {
                     return Ok(Some(format!(
                         "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
                         finding.kind.code(),

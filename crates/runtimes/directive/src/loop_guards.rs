@@ -108,6 +108,44 @@ impl FindingKind {
     }
 }
 
+/// The findings the model was warned about, each with the conversation
+/// position of its warning: the number of turns the conversation held when
+/// the warning was given. After a compaction shortens the conversation the
+/// position is re-based and can be negative (the warning predates the turns
+/// the conversation still holds), so it is signed.
+pub type WarnedAt = std::collections::BTreeMap<FindingKind, i64>;
+
+/// Re-base a warning's position onto a conversation of `new_turns_now` turns.
+/// The grace a warning has already used is the number of turns since it
+/// (`old_turns_now - old_position`); it is kept exactly, so the stop lands on
+/// the same turn it would have without the compaction.
+pub fn rebase_warning(old_turns_now: u32, old_position: i64, new_turns_now: u32) -> i64 {
+    let elapsed = (i64::from(old_turns_now) - old_position).max(0);
+    i64::from(new_turns_now) - elapsed
+}
+
+/// The warnings in force after a live compaction. `rebuilt` is what the
+/// rebuilt conversation yields; a warning the process already gave can only be
+/// kept, never forgotten, so each old entry is re-based and joins it. A kind
+/// in both keeps the earlier position, which is the earlier stop. A kind that
+/// is no longer detected is dropped at the next boundary as before.
+pub fn warnings_after_compaction(
+    old: &WarnedAt,
+    old_turns_now: u32,
+    rebuilt: WarnedAt,
+    new_turns_now: u32,
+) -> WarnedAt {
+    let mut merged = rebuilt;
+    for (kind, position) in old {
+        let rebased = rebase_warning(old_turns_now, *position, new_turns_now);
+        merged
+            .entry(*kind)
+            .and_modify(|existing| *existing = (*existing).min(rebased))
+            .or_insert(rebased);
+    }
+    merged
+}
+
 /// A detector's verdict: which pattern and the turns it spans. No content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -428,5 +466,76 @@ mod tests {
             assert_eq!(FindingKind::from_code(kind.code()), Some(kind));
         }
         assert_eq!(FindingKind::from_code("other"), None);
+    }
+
+    #[test]
+    fn rebasing_keeps_the_grace_already_used() {
+        // (old turns now, old position, new turns now, expected position)
+        let table: [(u32, i64, u32, i64); 7] = [
+            // Warned this very turn: nothing elapsed, position is the new end.
+            (10, 10, 4, 4),
+            // Two turns elapsed: the new position sits two turns back.
+            (10, 8, 4, 2),
+            // Elapsed equals the new length: position 0.
+            (10, 6, 4, 0),
+            // Elapsed exceeds the new length: negative, never clamped (a clamp
+            // would lengthen the grace).
+            (10, 3, 4, -3),
+            // No change in length: unchanged.
+            (10, 8, 10, 8),
+            // A position past the end (never recorded) counts as nothing elapsed.
+            (5, 9, 4, 4),
+            // Re-basing the already negative position again keeps elapsed.
+            (6, -3, 5, -4),
+        ];
+        for (old_now, old_pos, new_now, expected) in table {
+            assert_eq!(
+                rebase_warning(old_now, old_pos, new_now),
+                expected,
+                "{old_now} {old_pos} {new_now}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_warning_dropped_by_compaction_stops_on_its_original_turn() {
+        let grace = 3i64;
+        let (old_now, old_pos) = (10u32, 8i64);
+        // Without the compaction the stop lands when turns >= 8 + 3 = 11.
+        let original_stop = old_pos + grace;
+        let mut old = WarnedAt::new();
+        old.insert(FindingKind::PingPong, old_pos);
+        // The compaction leaves 4 turns and its fold carries no warning.
+        let merged = warnings_after_compaction(&old, old_now, WarnedAt::new(), 4);
+        let position = merged[&FindingKind::PingPong];
+        // Turns after the compaction: stop is the same number of turns later.
+        let turns_until_stop = |turns_at_compaction: u32, position: i64| {
+            (0u32..)
+                .find(|more| i64::from(turns_at_compaction + more) >= position + grace)
+                .unwrap()
+        };
+        assert_eq!(
+            turns_until_stop(4, position),
+            turns_until_stop(old_now, old_pos)
+        );
+        assert_eq!(position + grace, 4 + (original_stop - i64::from(old_now)));
+    }
+
+    #[test]
+    fn a_kind_in_both_keeps_the_earlier_stop() {
+        let mut old = WarnedAt::new();
+        old.insert(FindingKind::Idle, 8);
+        old.insert(FindingKind::Repetition, 10);
+        let mut rebuilt = WarnedAt::new();
+        // Later than the re-based old one (2): the old one wins.
+        rebuilt.insert(FindingKind::Idle, 4);
+        // Earlier than the re-based old one (4): the rebuilt one wins.
+        rebuilt.insert(FindingKind::Repetition, 1);
+        // A kind only the rebuilt map holds stays.
+        rebuilt.insert(FindingKind::NoProgress, 3);
+        let merged = warnings_after_compaction(&old, 10, rebuilt, 4);
+        assert_eq!(merged[&FindingKind::Idle], 2);
+        assert_eq!(merged[&FindingKind::Repetition], 1);
+        assert_eq!(merged[&FindingKind::NoProgress], 3);
     }
 }

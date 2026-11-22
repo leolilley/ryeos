@@ -61,7 +61,7 @@ pub struct ResumeState {
     pub wrap_up_delivered: WrapUpDelivered,
     /// The loop findings the model was already warned about, each with the
     /// number of turns the conversation held when the warning was given.
-    pub loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
+    pub loop_warned: crate::loop_guards::WarnedAt,
     /// What the path has stored of tool images, against the run's limits.
     pub images: ImageRunState,
     /// Tool starts and child spawns counted before the replay window of the
@@ -349,7 +349,24 @@ pub async fn load_resume_state(
         // again. A successor's start must still fit the window.
         Some(anchor) => {
             let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
-            let (delivered, warned) = compacted_signals(&folded);
+            let (delivered, warned) = match mode {
+                // A successor's conversation is what it was given: a notice
+                // counts only if that conversation still holds it.
+                ResumeMode::Continuation => compacted_signals(&folded),
+                // Same-thread recovery never trims the thread's own events:
+                // what it has told the model is what it recorded, whether or
+                // not the compaction summarised the message away.
+                ResumeMode::NativeSameThread => {
+                    let own_full = fold_messages(
+                        &replay_own_inputs_and_turns(callback, previous_thread_id).await?,
+                    )?;
+                    let compacted: Vec<ProviderMessage> =
+                        folded.iter().map(|folded| folded.message.clone()).collect();
+                    let compacted_turns =
+                        crate::loop_guards::digests_from_messages(&compacted).len() as u32;
+                    own_signals(&own_full, compacted_turns)
+                }
+            };
             let messages: Vec<ProviderMessage> =
                 folded.into_iter().map(|folded| folded.message).collect();
             let over = mode == ResumeMode::Continuation
@@ -389,7 +406,7 @@ pub async fn load_resume_state(
                     turns_so_far += 1;
                 }
                 if let Some(kind) = loop_warning_kind(folded) {
-                    loop_warned.insert(kind, turns_so_far);
+                    loop_warned.insert(kind, i64::from(turns_so_far));
                 }
             }
             messages.extend(own.into_iter().map(|folded| folded.message));
@@ -782,7 +799,7 @@ pub struct WrapUpDelivered {
 }
 
 impl WrapUpDelivered {
-    fn union(self, other: Self) -> Self {
+    pub(crate) fn union(self, other: Self) -> Self {
         Self {
             deadline: self.deadline || other.deadline,
             turn_limit: self.turn_limit || other.turn_limit,
@@ -793,12 +810,7 @@ impl WrapUpDelivered {
 /// The wrap-up reasons already given and the loop findings already warned
 /// about in a compacted conversation, each warning positioned by the assistant
 /// turns before it in the conversation the model is given.
-fn compacted_signals(
-    folded: &[FoldedMessage],
-) -> (
-    WrapUpDelivered,
-    std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
-) {
+fn compacted_signals(folded: &[FoldedMessage]) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
     let delivered = folded
         .iter()
         .filter_map(wrap_up_notice_reasons)
@@ -810,9 +822,60 @@ fn compacted_signals(
             turns_so_far += 1;
         }
         if let Some(kind) = loop_warning_kind(message) {
-            warned.insert(kind, turns_so_far);
+            warned.insert(kind, i64::from(turns_so_far));
         }
     }
+    (delivered, warned)
+}
+
+/// Every input and turn a thread recorded itself, from its first event: the
+/// thread's own record, not the replay window a compaction opens.
+async fn replay_own_inputs_and_turns(
+    callback: &CallbackClient,
+    thread_id: &str,
+) -> Result<Vec<ReplayedEventRecord>> {
+    Ok(callback
+        .replay_thread_with_budget(
+            thread_id,
+            Some(&["cognition_in", "cognition_out"]),
+            &mut RuntimeReplayBudget::default(),
+        )
+        .await?
+        .events)
+}
+
+/// The wrap-up reasons given and loop findings warned about, read from a
+/// thread's whole own fold (no compaction applied), for a conversation a
+/// compaction has since shortened to `compacted_turns` turns. A warning keeps
+/// the grace it had used: its position is re-based so the turns since it are
+/// the same in the shorter conversation.
+fn own_signals(
+    own_full: &[FoldedMessage],
+    compacted_turns: u32,
+) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
+    let delivered = own_full
+        .iter()
+        .filter_map(wrap_up_notice_reasons)
+        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
+    let mut at_warning = crate::loop_guards::WarnedAt::new();
+    let mut turns_so_far = 0u32;
+    for message in own_full {
+        if message.message.role == ryeos_provider_contract::Role::Assistant {
+            turns_so_far += 1;
+        }
+        if let Some(kind) = loop_warning_kind(message) {
+            at_warning.insert(kind, i64::from(turns_so_far));
+        }
+    }
+    let warned = at_warning
+        .into_iter()
+        .map(|(kind, position)| {
+            (
+                kind,
+                crate::loop_guards::rebase_warning(turns_so_far, position, compacted_turns),
+            )
+        })
+        .collect();
     (delivered, warned)
 }
 
@@ -5433,6 +5496,92 @@ mod tests {
         let (none, empty) = compacted_signals(&plain);
         assert_eq!(none, WrapUpDelivered::default());
         assert!(empty.is_empty());
+    }
+
+    /// The thread's whole own record: turns 1 and 2, then a deadline wrap-up
+    /// notice and a ping-pong warning (both before the compaction's kept
+    /// window), then the windowed events of `windowed_events`.
+    fn whole_own_record() -> Vec<ReplayedEventRecord> {
+        let mut events = vec![
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 2, out(1, "one")),
+            event_at("cognition_in", 3, json!({"turn": 2, "purpose": "turn"})),
+            event_at("cognition_out", 4, out(2, "two")),
+        ];
+        events.extend(
+            kinded_input(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+                .into_iter()
+                .chain(kinded_input("loop_warning_ping_pong")),
+        );
+        events.extend(windowed_events());
+        events
+    }
+
+    #[test]
+    fn same_thread_recovery_remembers_a_wrap_up_a_compaction_dropped() {
+        let compacted_turns = |folded: &[FoldedMessage]| {
+            let messages: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
+            crate::loop_guards::digests_from_messages(&messages).len() as u32
+        };
+        let window = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        // The compacted conversation holds no notice: the successor rule
+        // reads nothing from it.
+        let (successor_delivered, successor_warned) = compacted_signals(&window);
+        assert_eq!(successor_delivered, WrapUpDelivered::default());
+        assert!(successor_warned.is_empty());
+        // Same-thread recovery reads the thread's own record instead.
+        let own_full = fold_messages(&whole_own_record()).unwrap();
+        let (delivered, _) = own_signals(&own_full, compacted_turns(&window));
+        assert_eq!(
+            delivered,
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: false
+            }
+        );
+    }
+
+    #[test]
+    fn same_thread_recovery_keeps_the_grace_a_dropped_warning_had_used() {
+        let window = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let messages: Vec<ProviderMessage> = window.iter().map(|f| f.message.clone()).collect();
+        // Kept turns 3 and 4 plus turn 6.
+        let compacted_turns = crate::loop_guards::digests_from_messages(&messages).len() as u32;
+        assert_eq!(compacted_turns, 3);
+        let own_full = fold_messages(&whole_own_record()).unwrap();
+        let (_, warned) = own_signals(&own_full, compacted_turns);
+        // Warned after turn 2 of 5 turns (1, 2, 3, 4, 6): three turns have
+        // passed since. In the 3-turn conversation that is position 0.
+        assert_eq!(
+            warned.get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&0)
+        );
+        // Grace 3: the warning's stop lands at position + 3 = 3 turns, which
+        // is 0 more turns than the 3 the conversation holds now; without the
+        // compaction it was 2 + 3 = 5 turns, again 0 more than the 5 held.
+        let grace = 3i64;
+        let position = warned[&crate::loop_guards::FindingKind::PingPong];
+        assert_eq!(position + grace - i64::from(compacted_turns), 2 + grace - 5);
+    }
+
+    #[test]
+    fn a_wrap_up_flag_a_live_process_set_cannot_turn_off() {
+        let given = WrapUpDelivered {
+            deadline: true,
+            turn_limit: false,
+        };
+        let rebuilt = WrapUpDelivered {
+            deadline: false,
+            turn_limit: true,
+        };
+        assert_eq!(
+            given.union(rebuilt),
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: true
+            }
+        );
+        assert_eq!(given.union(WrapUpDelivered::default()), given);
     }
 
     #[test]
