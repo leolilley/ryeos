@@ -85,6 +85,29 @@ pub fn wrap_up_reasons(kind: &str) -> Option<(bool, bool)> {
 /// looping; the finding's code follows it.
 pub const KIND_LOOP_WARNING_PREFIX: &str = "loop_warning_";
 
+/// Prefix of the kind of the harness input that replaces a malformed reply.
+/// The kind names the turn it corrects and the reply's position in the run of
+/// malformed replies: `malformed_reply_turn_<turn>_streak_<position>`.
+pub const KIND_MALFORMED_REPLY_PREFIX: &str = "malformed_reply_turn_";
+
+const MALFORMED_REPLY_STREAK_SEPARATOR: &str = "_streak_";
+
+/// The kind of the input that corrects `turn`, the `streak`th malformed reply
+/// in a row (counting from 1).
+pub fn malformed_reply_kind(turn: u32, streak: u32) -> String {
+    format!("{KIND_MALFORMED_REPLY_PREFIX}{turn}{MALFORMED_REPLY_STREAK_SEPARATOR}{streak}")
+}
+
+/// The turn a malformed-reply kind corrects and its position in the run, or
+/// `None` for any other kind.
+pub fn malformed_reply_of_kind(kind: &str) -> Option<(u32, u32)> {
+    let rest = kind.strip_prefix(KIND_MALFORMED_REPLY_PREFIX)?;
+    let (turn, streak) = rest.split_once(MALFORMED_REPLY_STREAK_SEPARATOR)?;
+    let turn = turn.parse::<u32>().ok().filter(|turn| *turn > 0)?;
+    let streak = streak.parse::<u32>().ok().filter(|streak| *streak > 0)?;
+    Some((turn, streak))
+}
+
 /// One input to cognition: what the model is given as a user message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -599,6 +622,23 @@ pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_malformed_reply_kind_names_its_turn_and_position() {
+        let kind = malformed_reply_kind(7, 2);
+        assert_eq!(kind, "malformed_reply_turn_7_streak_2");
+        validate_token("kind", &kind).unwrap();
+        assert_eq!(malformed_reply_of_kind(&kind), Some((7, 2)));
+        for other in [
+            "output_limit",
+            "malformed_reply_turn_0_streak_1",
+            "malformed_reply_turn_3_streak_0",
+            "malformed_reply_turn_x_streak_1",
+            "malformed_reply_turn_3",
+        ] {
+            assert_eq!(malformed_reply_of_kind(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn input_serialises_without_empty_optionals() {
