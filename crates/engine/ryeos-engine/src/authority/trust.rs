@@ -1321,11 +1321,28 @@ mod tests {
     const PROJECT_OWNER: &str =
         "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// A stated project owned by [`PROJECT_OWNER`].
+    /// A stated project owned by [`PROJECT_OWNER`], one per test name.
     fn stated_project(name: &str) -> &'static LogicalProject {
-        Box::leak(Box::new(LogicalProject::Stated(
-            format!("{PROJECT_OWNER}/{name}").parse().unwrap(),
-        )))
+        fn stated(name: &str) -> LogicalProject {
+            LogicalProject::Stated(format!("{PROJECT_OWNER}/{name}").parse().unwrap())
+        }
+        static P: std::sync::LazyLock<LogicalProject> = std::sync::LazyLock::new(|| stated("p"));
+        static ALPHA: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("alpha"));
+        static BETA: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("beta"));
+        static LISTED: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("listed"));
+        static OTHER: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("other"));
+        match name {
+            "p" => &P,
+            "alpha" => &ALPHA,
+            "beta" => &BETA,
+            "listed" => &LISTED,
+            "other" => &OTHER,
+            other => panic!("no fixture project named {other}"),
+        }
     }
 
     fn absent_project() -> &'static LogicalProject {
