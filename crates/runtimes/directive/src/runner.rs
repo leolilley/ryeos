@@ -777,7 +777,10 @@ pub struct Runner {
     /// Whether the run-deadline wrap-up input is already in the transcript.
     /// Rebuilt from the replayed record on resume, so a recovered or
     /// continued segment never repeats it.
-    wrap_up_delivered: bool,
+    wrap_up_delivered: crate::resume::WrapUpDelivered,
+    /// The loop findings the model was warned about, each with the turn
+    /// count when it was warned.
+    loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -856,6 +859,40 @@ fn wrap_up_message(remaining_ms: u64, outputs_declared: bool) -> String {
         "Deadline notice: about {seconds} seconds remain before this run is stopped. \
          Do not start new lines of work. Record what you have, hand off anything \
          unfinished, and wrap up now. {finish}"
+    )
+}
+
+fn limit_wrap_up_message(outputs_declared: bool) -> String {
+    let finish = if outputs_declared {
+        "Finish with `directive_return` carrying every declared output."
+    } else {
+        "Finish with your best result."
+    };
+    format!(
+        "Turn limit notice: this is the last turn this run is allowed. Do not start \
+         new lines of work. Record what you have, hand off anything unfinished, and \
+         wrap up now. {finish}"
+    )
+}
+
+fn loop_warning_message(finding: &crate::loop_guards::Finding, grace_turns: u32) -> String {
+    let pattern = match finding.kind {
+        crate::loop_guards::FindingKind::Repetition => {
+            "the same call keeps returning the same result"
+        }
+        crate::loop_guards::FindingKind::PingPong => {
+            "you are alternating between the same calls and getting nothing new"
+        }
+        crate::loop_guards::FindingKind::NoProgress => {
+            "your recent turns have only shown you results you had already seen"
+        }
+        crate::loop_guards::FindingKind::Idle => "your recent turns made no call and said nothing",
+    };
+    format!(
+        "Loop notice: {pattern} (turns {} to {}). Change your approach, or finish with \
+         what you have. If this continues for {grace_turns} more turns the run will be \
+         stopped.",
+        finding.first_turn, finding.last_turn
     )
 }
 
@@ -1585,7 +1622,8 @@ impl Runner {
             directive_outputs: outputs,
             return_nudge,
             return_nudge_sent: false,
-            wrap_up_delivered: false,
+            wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
+            loop_warned: std::collections::BTreeMap::new(),
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1660,7 +1698,8 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
-        let wrap_up_delivered = resume.deadline_wrap_up_delivered;
+        let wrap_up_delivered = resume.wrap_up_delivered;
+        let loop_warned = resume.loop_warned.clone();
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
@@ -1742,6 +1781,7 @@ impl Runner {
         runner.restart_cut_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
+        runner.loop_warned = loop_warned;
         runner.consecutive_length_turns = trailing_length_turns;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
@@ -1783,43 +1823,106 @@ impl Runner {
         )
     }
 
-    /// The run deadline's boundary at the start of a turn. At the hard stop
-    /// the run stops; in the wrap-up phase the model is told once, as a
-    /// durable harness input, that time is short. A recovered provider turn
-    /// takes no new input, since its transcript is already fixed.
+    /// The run's boundary at the start of a turn. At the deadline's hard stop
+    /// the run stops. Otherwise the model is told once, as a durable harness
+    /// input, about each wrap-up reason that has come due: time is short
+    /// (the deadline's wrap-up phase), or the next turn is the last the turn
+    /// limit allows. Both due on the same turn give one input naming both. A
+    /// recovered provider turn takes no new input, since its transcript is
+    /// already fixed.
     async fn run_deadline_boundary(&mut self) -> Result<RunDeadlineBoundary, String> {
-        let Some(clock) = self.harness.run_clock() else {
+        let clock = self.harness.run_clock();
+        let now_ms = lillux::time::timestamp_millis();
+        let phase = clock.as_ref().map(|clock| clock.phase_at(now_ms));
+        if phase == Some(RunPhase::HardStop) {
+            return Ok(RunDeadlineBoundary::HardStop);
+        }
+        if self.resume_active_provider_turn.is_some() {
+            return Ok(RunDeadlineBoundary::Proceed);
+        }
+        let deadline_due = phase == Some(RunPhase::WrapUp) && !self.wrap_up_delivered.deadline;
+        let limit_due = self.harness.final_turn_next() && !self.wrap_up_delivered.turn_limit;
+        let Some(kind) = ryeos_runtime::cognition::wrap_up_kind(deadline_due, limit_due) else {
             return Ok(RunDeadlineBoundary::Proceed);
         };
-        let now_ms = lillux::time::timestamp_millis();
-        match clock.phase_at(now_ms) {
-            RunPhase::HardStop => Ok(RunDeadlineBoundary::HardStop),
-            RunPhase::WrapUp
-                if !self.wrap_up_delivered && self.resume_active_provider_turn.is_none() =>
-            {
-                let text = wrap_up_message(
-                    clock.remaining_ms(now_ms),
-                    self.directive_outputs
-                        .as_deref()
-                        .is_some_and(|outputs| !outputs.is_empty()),
-                );
-                // Deliberately not pinned: its text is a time-left figure, which
-                // is stale in a successor. A successor whose carried conversation
-                // lacks the notice is told again.
-                let input = ryeos_runtime::CognitionInput::text("harness", &text)
-                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
-                self.callback
-                    .emit_cognition_input(&input)
-                    .await
-                    .map_err(|e| {
-                        format!("resume-critical deadline wrap-up input append failed: {e}")
-                    })?;
-                self.messages.push(ProviderMessage::user(text));
-                self.wrap_up_delivered = true;
-                Ok(RunDeadlineBoundary::Proceed)
-            }
-            RunPhase::WrapUp | RunPhase::Running => Ok(RunDeadlineBoundary::Proceed),
+        let outputs_declared = self
+            .directive_outputs
+            .as_deref()
+            .is_some_and(|outputs| !outputs.is_empty());
+        let mut sections = Vec::new();
+        if let (true, Some(clock)) = (deadline_due, clock.as_ref()) {
+            sections.push(wrap_up_message(
+                clock.remaining_ms(now_ms),
+                outputs_declared,
+            ));
         }
+        if limit_due {
+            sections.push(limit_wrap_up_message(outputs_declared));
+        }
+        let text = sections.join("\n\n");
+        // Deliberately not pinned: its text is a time-left figure or a turn
+        // count, which is stale in a successor. A successor whose carried
+        // conversation lacks the notice is told again.
+        let input = ryeos_runtime::CognitionInput::text("harness", &text).with_kind(kind);
+        self.callback
+            .emit_cognition_input(&input)
+            .await
+            .map_err(|e| format!("resume-critical wrap-up input append failed: {e}"))?;
+        self.messages.push(ProviderMessage::user(text));
+        self.wrap_up_delivered.deadline |= deadline_due;
+        self.wrap_up_delivered.turn_limit |= limit_due;
+        Ok(RunDeadlineBoundary::Proceed)
+    }
+
+    /// The loop and stall detectors at the start of a turn. A finding the
+    /// model has not been warned about gets a durable harness warning; the same
+    /// finding still present `grace_turns` turns after its warning stops the run
+    /// with the typed failure `loop_detected`. Returns the stop's error text.
+    async fn loop_guard_boundary(&mut self) -> Result<Option<String>, String> {
+        let config = self.execution.loop_guards.clone();
+        if !config.enabled || self.resume_active_provider_turn.is_some() {
+            return Ok(None);
+        }
+        let digests = crate::loop_guards::digests_from_messages(&self.messages);
+        let turns = digests.len() as u32;
+        let findings = crate::loop_guards::detect(&digests, &config);
+        // A warned kind that is no longer found starts over.
+        self.loop_warned
+            .retain(|kind, _| findings.iter().any(|finding| finding.kind == *kind));
+        for finding in findings {
+            match self.loop_warned.get(&finding.kind) {
+                None => {
+                    let text = loop_warning_message(&finding, config.grace_turns);
+                    let kind = format!(
+                        "{}{}",
+                        ryeos_runtime::cognition::KIND_LOOP_WARNING_PREFIX,
+                        finding.kind.code()
+                    );
+                    let input =
+                        ryeos_runtime::CognitionInput::text("harness", &text).with_kind(kind);
+                    self.callback
+                        .emit_cognition_input(&input)
+                        .await
+                        .map_err(|e| {
+                            format!("resume-critical loop warning input append failed: {e}")
+                        })?;
+                    self.messages.push(ProviderMessage::user(text));
+                    self.loop_warned.insert(finding.kind, turns);
+                    return Ok(None);
+                }
+                Some(warned_at) if turns >= warned_at + config.grace_turns => {
+                    return Ok(Some(format!(
+                        "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
+                        finding.kind.code(),
+                        finding.first_turn,
+                        finding.last_turn,
+                        config.grace_turns
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(None)
     }
 
     async fn poll_pending_input(&mut self) -> Result<bool, String> {
@@ -1991,6 +2094,17 @@ impl Runner {
                         Ok(RunDeadlineBoundary::Proceed) => {}
                         Ok(RunDeadlineBoundary::HardStop) => {
                             state = State::DeadlineStopped;
+                            continue;
+                        }
+                        Err(error) => {
+                            state = State::RecoveryRequired { error };
+                            continue;
+                        }
+                    }
+                    match self.loop_guard_boundary().await {
+                        Ok(None) => {}
+                        Ok(Some(error)) => {
+                            state = State::Errored { error };
                             continue;
                         }
                         Err(error) => {
@@ -4628,7 +4742,8 @@ impl Runner {
                         "deadline_at_ms": self.harness.run_clock().map(|clock| clock.end_at_ms()),
                         "stopped_at_ms": stopped_at_ms,
                         "turn": turn,
-                        "wrap_up_delivered": self.wrap_up_delivered,
+                        "wrap_up_delivered": self.wrap_up_delivered.deadline,
+                        "limit_wrap_up_delivered": self.wrap_up_delivered.turn_limit,
                     });
                     // The runtime settles its own deadline stop over the
                     // callback, so the thread records the structured result
@@ -8568,13 +8683,184 @@ mod tests {
     async fn a_recovered_run_does_not_repeat_the_wrap_up_notice() {
         let mock = Arc::new(ScriptedLedger::new("authority"));
         let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
-        runner.wrap_up_delivered = true;
+        runner.wrap_up_delivered.deadline = true;
         assert!(matches!(
             runner.run_deadline_boundary().await,
             Ok(RunDeadlineBoundary::Proceed)
         ));
         assert!(mock.recorded("append_event").is_empty());
         assert!(runner.messages.is_empty());
+    }
+
+    fn turn_limit_policy(turns: u32, end_in_ms: Option<i64>) -> EnvelopePolicy {
+        let mut policy = match end_in_ms {
+            Some(end) => deadline_policy(end),
+            None => EnvelopePolicy {
+                effective_caps: vec![],
+                hard_limits: HardLimits::default(),
+            },
+        };
+        policy.hard_limits.turns = turns;
+        policy
+    }
+
+    #[tokio::test]
+    async fn the_last_permitted_turn_is_told_to_wrap_up_once() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(3, None));
+        // Before turns 1 and 2 of 3: nothing is said.
+        for _ in 0..2 {
+            assert!(matches!(
+                runner.run_deadline_boundary().await,
+                Ok(RunDeadlineBoundary::Proceed)
+            ));
+            runner.harness.record_turn();
+        }
+        assert!(mock.recorded("append_event").is_empty());
+        // Before turn 3, the last the limit allows, it is told, once.
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "limit_wrap_up");
+        assert!(appended[0]["payload"].get("pinned").is_none());
+        runner.run_deadline_boundary().await.unwrap();
+        assert_eq!(mock.recorded("append_event").len(), 1);
+        assert!(
+            runner.messages[0]
+                .text()
+                .unwrap()
+                .starts_with("Turn limit notice")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_limit_of_one_tells_the_first_turn() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, None));
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "limit_wrap_up");
+    }
+
+    #[tokio::test]
+    async fn no_turn_limit_means_no_turn_limit_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(0, None));
+        for _ in 0..5 {
+            runner.run_deadline_boundary().await.unwrap();
+            runner.harness.record_turn();
+        }
+        assert!(mock.recorded("append_event").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_deadline_and_the_turn_limit_due_together_give_one_input_naming_both() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner =
+            ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, Some(25_000)));
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1, "one input, not two");
+        assert_eq!(appended[0]["payload"]["kind"], "deadline_limit_wrap_up");
+        let text = runner.messages[0].text().unwrap();
+        assert!(text.contains("Deadline notice") && text.contains("Turn limit notice"));
+        assert!(runner.wrap_up_delivered.deadline && runner.wrap_up_delivered.turn_limit);
+        runner.run_deadline_boundary().await.unwrap();
+        assert_eq!(mock.recorded("append_event").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_recovered_run_does_not_repeat_the_turn_limit_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, None));
+        runner.wrap_up_delivered.turn_limit = true;
+        runner.run_deadline_boundary().await.unwrap();
+        assert!(mock.recorded("append_event").is_empty());
+    }
+
+    fn push_turn(runner: &mut Runner, index: u32, tool: &str, result: &str) {
+        let id = format!("c{index}");
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::tool_call(&id, tool, json!({"p": "same"}))],
+        ));
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Tool,
+            vec![Part::ToolResult(ryeos_provider_contract::ToolResultPart {
+                call_id: id,
+                parts: vec![Part::text(result)],
+                status: ToolResultStatus::Ok,
+            })],
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_loop_is_warned_once_then_stopped_after_the_grace_turns() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        for index in 1..=4 {
+            push_turn(&mut runner, index, "read", "same");
+        }
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        // The fifth identical turn crosses the repeat threshold.
+        push_turn(&mut runner, 5, "read", "same");
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "loop_warning_repetition");
+        assert!(
+            runner
+                .messages
+                .last()
+                .unwrap()
+                .text()
+                .unwrap()
+                .starts_with("Loop notice")
+        );
+        // Not repeated while the grace turns run.
+        push_turn(&mut runner, 6, "read", "same");
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(mock.recorded("append_event").len(), 1);
+        // Two turns after the warning (grace_turns = 2) the run is stopped.
+        push_turn(&mut runner, 7, "read", "same");
+        let stop = runner
+            .loop_guard_boundary()
+            .await
+            .unwrap()
+            .expect("stopped");
+        assert!(stop.starts_with("loop_detected: "), "{stop}");
+        assert!(stop.contains("repetition"));
+        assert_eq!(mock.recorded("append_event").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_changes_course_after_the_warning_is_not_stopped() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        for index in 1..=5 {
+            push_turn(&mut runner, index, "read", "same");
+        }
+        runner.loop_guard_boundary().await.unwrap();
+        // Different calls with new results: the repetition is out of the window
+        // eventually; here a different tool starts, the count of the same
+        // call stays at five, so keep going until it leaves the window.
+        for index in 6..=24 {
+            push_turn(&mut runner, index, "write", &format!("new{index}"));
+            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_guards_never_warn_or_stop() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution.loop_guards.enabled = false;
+        for index in 1..=20 {
+            push_turn(&mut runner, index, "read", "same");
+            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        }
+        assert!(mock.recorded("append_event").is_empty());
     }
 
     #[tokio::test]

@@ -99,6 +99,12 @@ impl Harness {
         self.interrupted.swap(false, Ordering::Relaxed)
     }
 
+    /// Whether the next turn is the last the turn limit allows. With a limit of
+    /// one, that is the first turn.
+    pub fn final_turn_next(&self) -> bool {
+        self.limits.turns > 0 && self.turns_used.saturating_add(1) == self.limits.turns
+    }
+
     pub fn check_limits(&self) -> Result<(), String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err("cancelled".to_string());

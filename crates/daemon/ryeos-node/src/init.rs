@@ -3674,6 +3674,35 @@ mod tests {
         }
     }
 
+    /// Hosted profiles are single-operator nodes running pushed snapshots. A
+    /// browser seat on one must not register or open a host path, nor read a
+    /// live checkout; without an opened project the seat's file reads have no
+    /// root. This fails if a later copy from another profile brings them back.
+    #[test]
+    fn hosted_profiles_give_browser_sessions_no_live_project_scopes() {
+        const REFUSED: [&str; 3] = [
+            "ryeos.execute.service.projects/add",
+            "ryeos.execute.service.projects/open",
+            "ryeos.read.project.live",
+        ];
+        for name in ["hosted-node", "hosted-workflow", "hosted-controller"] {
+            let profile = authored_profile(name);
+            let scopes = profile.policies["ui_browser_sessions"]["session_scopes"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: no session_scopes"))
+                .iter()
+                .map(|scope| scope.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert!(!scopes.is_empty(), "{name}");
+            for refused in REFUSED {
+                assert!(
+                    !scopes.iter().any(|scope| scope == refused),
+                    "{name} grants browser sessions {refused}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_substrate_identity_binds_the_host_class_with_the_profile() {
         let digest = format!("sha256:{}", "1".repeat(64));
