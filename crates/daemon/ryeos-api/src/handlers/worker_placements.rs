@@ -3956,16 +3956,11 @@ async fn prepare_after_staging(
     state
         .state_store
         .verify_project_snapshot_closure(candidate)?;
-    let target_project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
-        target_project_path
-            .to_str()
-            .context("target project path is not UTF-8")?,
-    )?;
-    let target_project_hash = lillux::sha256_hex(target_project_ref.as_bytes());
-    let principal_key = ryeos_state::refs::principal_storage_key(owner)?.to_owned();
+    let target_head_key = target_project_head_key(owner, &target_project_path)?;
+    let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &target_project_hash))?
+        .with_state_db(|db| db.read_project_head(&target_head_key))?
         .context("target project has no principal-scoped HEAD")?;
     let (project_rebind, target_identity, target_overlay_root) =
         ryeos_app::worker_handoff::build_remote_project_rebind(
@@ -4350,16 +4345,11 @@ async fn preflight_after_staging(
         bail!("source preflight launch ledger contradicts owner or sites");
     }
     let target_project_path = canonical_target_project_path(&req.target_project_path)?;
-    let target_project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
-        target_project_path
-            .to_str()
-            .context("target project path is not UTF-8")?,
-    )?;
-    let target_project_hash = lillux::sha256_hex(target_project_ref.as_bytes());
-    let principal_key = ryeos_state::refs::principal_storage_key(owner)?.to_owned();
+    let target_head_key = target_project_head_key(owner, &target_project_path)?;
+    let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &target_project_hash))?
+        .with_state_db(|db| db.read_project_head(&target_head_key))?
         .context("target project has no principal-scoped HEAD")?;
     let (project_rebind, target_identity, target_overlay_root) =
         ryeos_app::worker_handoff::build_remote_project_rebind(
@@ -4495,6 +4485,25 @@ fn validate_transfer_request(
         bail!("request differs from its exact transfer manifest");
     }
     Ok(())
+}
+
+/// The owner's head of the target checkout on this node: keyed by the name
+/// the target tree declares now, owned by the authenticated handoff owner.
+/// Nothing from the source node names it.
+fn target_project_head_key(
+    owner: &str,
+    target_project_path: &Path,
+) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(
+        target_project_path,
+    )?
+    .with_context(|| {
+        format!(
+            "project_undeclared: target project {} declares no project name",
+            target_project_path.display()
+        )
+    })?;
+    ryeos_state::project_identity::ProjectHeadKey::owned_by(owner, &name)
 }
 
 fn canonical_target_project_path(raw: &str) -> Result<PathBuf> {
