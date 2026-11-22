@@ -113,6 +113,9 @@ struct Operation {
     target_signing_key: String,
     local_project_path: String,
     target_project_path: String,
+    /// The bound project name, sealed at admission; the pushed head on the
+    /// target is the operator's head under it.
+    project_name: ryeos_state::project_identity::ProjectName,
     admitted_source_snapshot_hash: String,
     source_snapshot_hash: String,
     workflow_ref: String,
@@ -501,7 +504,7 @@ pub async fn start(
         &admitted_source_snapshot_hash,
         req.source_snapshot_hash.as_deref(),
     )?;
-    let (resolved_local_path, remote, target_project_path) =
+    let (resolved_local_path, remote, target_project_path, project_name) =
         resolve_route(&state, &req.remote, Path::new(&local_project_path))?;
     if resolved_local_path != local_project_path {
         bail!("recorded workflow project identity changed during route resolution");
@@ -529,6 +532,7 @@ pub async fn start(
         target_signing_key: remote.signing_key,
         local_project_path,
         target_project_path,
+        project_name,
         admitted_source_snapshot_hash,
         source_snapshot_hash,
         workflow_ref: req.workflow_ref,
@@ -819,6 +823,7 @@ async fn drive_operation(
                 &state.state_store.pinned_state_authority()?,
                 &operation.source_snapshot_hash,
                 &operation.target_project_path,
+                &operation.project_name,
             )
             .await?;
             progress.pushed = true;
@@ -1768,7 +1773,7 @@ fn resolve_route(
     state: &AppState,
     remote_name: &str,
     project: &Path,
-) -> Result<(String, RemoteConfig, String)> {
+) -> Result<(String, RemoteConfig, String, ryeos_state::project_identity::ProjectName)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local = config::local_project_identity(&canonical)?.to_owned();
     let report = config::load_remotes_report(&state.config.app_root)?;
@@ -1777,7 +1782,12 @@ fn resolve_route(
     if binding.sync_scope != ProjectSyncScope::FullProject {
         bail!("remote-worker workflow requires a full_project remote binding");
     }
-    Ok((local, loaded.config, binding.remote_project_path))
+    Ok((
+        local,
+        loaded.config,
+        binding.remote_project_path,
+        binding.project_name,
+    ))
 }
 
 fn recorded_pinned_project(state: &AppState, source_work_id: &str) -> Result<(String, String)> {
@@ -1824,7 +1834,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         &operation.operator_fingerprint,
         &operation.delegation_digest,
     )?;
-    let (_, remote, target) = resolve_route(
+    let (_, remote, target, project_name) = resolve_route(
         state,
         &operation.remote,
         Path::new(&operation.local_project_path),
@@ -1834,6 +1844,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         || remote.principal_id != operation.target_principal_id
         || remote.signing_key != operation.target_signing_key
         || target != operation.target_project_path
+        || project_name != operation.project_name
     {
         bail!("remote-worker workflow route authority changed");
     }
@@ -4244,6 +4255,7 @@ mod tests {
             ),
             local_project_path: "/source".into(),
             target_project_path: "/target".into(),
+            project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
             admitted_source_snapshot_hash: "d".repeat(64),
             source_snapshot_hash: "d".repeat(64),
             workflow_ref: "config:development/remote-worker".into(),
