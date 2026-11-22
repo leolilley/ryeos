@@ -274,16 +274,28 @@ fn read_record(
     Ok(Some(record))
 }
 
+/// One recorded occurrence and whether its swap happened, derived on read
+/// (records are never rewritten).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadHeadAdvance {
+    pub record: HeadAdvanceRecord,
+    /// `false` when the swap after this record never happened: a later
+    /// occurrence of the same pair observed the same head ref (another key
+    /// retried after a crash), or, for the latest occurrence, the head ref is
+    /// still the one it observed.
+    pub applied: bool,
+}
+
 /// Every verified occurrence of one (previous, new) advance of the head in
-/// `head_directory`, ascending. A record whose advancer is the node key
-/// with no `via_root` and whose key is the node's is a node rewrite
-/// (compaction); readers show it as such.
+/// `head_directory`, ascending, each with its derived `applied` flag. A
+/// record whose advancer is the node key with no `via_root` is a node
+/// rewrite (compaction); readers show it as such.
 pub fn read_head_advances(
     head_directory: &lillux::PinnedDirectory,
     previous_hash: Option<&str>,
     target_hash: &str,
     trust_store: &TrustStore,
-) -> Result<Vec<HeadAdvanceRecord>> {
+) -> Result<Vec<ReadHeadAdvance>> {
     let mut records = Vec::new();
     for occurrence in occurrences(head_directory, previous_hash, target_hash)? {
         let name = record_name(previous_hash, target_hash, occurrence);
@@ -292,7 +304,27 @@ pub fn read_head_advances(
             records.push(record);
         }
     }
-    Ok(records)
+    let current_head = crate::refs::read_verified_ref_in_directory(
+        head_directory,
+        std::ffi::OsStr::new("head"),
+        trust_store,
+    )?
+    .map(|head| head.signature);
+    let count = records.len();
+    Ok(records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let superseded = records[index + 1..]
+                .iter()
+                .any(|later| later.observed_head == record.observed_head);
+            let unswapped_latest = index + 1 == count && current_head == record.observed_head;
+            ReadHeadAdvance {
+                record: record.clone(),
+                applied: !superseded && !unswapped_latest,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]

@@ -3191,9 +3191,10 @@ mod tests {
         let records =
             crate::head_advance::read_head_advances(&head_directory, Some(&a), &b, &trust).unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].advancer, one);
-        assert_eq!(records[1].advancer, two);
-        assert_eq!(records[1].occurrence, 2);
+        assert_eq!(records[0].record.advancer, one);
+        assert_eq!(records[1].record.advancer, two);
+        assert_eq!(records[1].record.occurrence, 2);
+        assert!(records.iter().all(|read| read.applied));
 
         // A crashed attempt: a record written, the swap never done. A retry by
         // the same key reuses it; another key writes the next occurrence.
@@ -3243,7 +3244,12 @@ mod tests {
             2,
             "another key after a crash writes its own record"
         );
-        assert_eq!(records[1].advancer, two);
+        assert_eq!(records[1].record.advancer, two);
+        assert!(
+            !records[0].applied,
+            "the crashed attempt never moved the head"
+        );
+        assert!(records[1].applied);
     }
 
     #[cfg(target_os = "linux")]
