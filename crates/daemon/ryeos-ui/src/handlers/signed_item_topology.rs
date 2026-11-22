@@ -300,7 +300,10 @@ pub(crate) fn build_topology(
     let project_path = project_resolution_root
         .as_ref()
         .map(std::path::PathBuf::from);
-    let roots = state.engine.resolution_roots(project_path);
+    let roots = state.engine.resolution_roots(
+        project_path,
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
 
     for kind in state.engine.kinds.kinds() {
         let Some(schema) = state.engine.kinds.get(kind) else {

@@ -229,7 +229,11 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
     .expect("composer registry derives from live bundle kinds");
 
     let project_dir = synth_project_with_directive("inline", directive_body);
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
+    let roots = ResolutionRoots::from_flat(
+        Some(project_dir.join(".ai")),
+        vec![],
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
     let item = CanonicalRef::parse("directive:test/sample").unwrap();
 
     let out = run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust_store, &composers)

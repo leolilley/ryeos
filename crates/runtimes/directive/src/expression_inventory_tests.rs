@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::contracts::{LogicalProject, LogicalProjectAbsence};
 use ryeos_engine::item_resolution::ResolutionRoots;
 use ryeos_engine::kind_registry::{KindRegistry, KindSchema};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
@@ -126,6 +127,7 @@ fn installable_directive_expression_fields_compile_through_live_loaders() {
     let roots = ResolutionRoots::from_flat(
         None,
         bundle_roots.iter().map(|root| root.join(".ai")).collect(),
+        LogicalProject::Absent(LogicalProjectAbsence::Projectless),
     );
 
     for (item_ref, source_root) in items {

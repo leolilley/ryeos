@@ -501,16 +501,19 @@ impl VerifiedLoader {
 
     /// State the logical project this loader's project root belongs to, when
     /// the root is a pinned or COW checkout rather than the project itself.
-    /// `None` states that the logical project is unknown, so signers scoped to
-    /// specific projects admit nothing.
+    /// An absent logical project is unknown, so signers scoped to specific
+    /// projects admit nothing; a live resolution is the project root itself.
     pub fn with_logical_project_of(
         self,
         roots: &ryeos_engine::item_resolution::ResolutionRoots,
     ) -> Self {
-        match roots.logical_project_root.clone() {
-            Some(logical) => self.with_logical_project_root(Some(logical)),
-            None => self,
-        }
+        use ryeos_engine::contracts::LogicalProject;
+        let logical = match &roots.logical_project {
+            LogicalProject::Stated(path) => Some(path.clone()),
+            LogicalProject::MaterializedLive => Some(self.project_root.clone()),
+            LogicalProject::Absent(_) => None,
+        };
+        self.with_logical_project_root(logical)
     }
 
     /// As [`Self::with_logical_project_of`] with an explicit value.
