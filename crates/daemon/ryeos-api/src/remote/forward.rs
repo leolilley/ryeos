@@ -340,13 +340,13 @@ fn validate_forward_policy_authority(
                         });
                     }
                 }
-                PinnedSource::CurrentHead if admitted_snapshot_hash.is_none() => {
+                PinnedSource::CurrentHead { .. } if admitted_snapshot_hash.is_none() => {
                     return Err(RemoteForwardError::ExecutionPolicyInvalid {
                         message: "current_head remote forwarding requires exact locally admitted snapshot authority"
                             .to_string(),
                     });
                 }
-                PinnedSource::CurrentHead | PinnedSource::CaptureLive { .. } => {}
+                PinnedSource::CurrentHead { .. } | PinnedSource::CaptureLive { .. } => {}
             }
         }
     }
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn current_head_is_bound_only_from_exact_local_admission() {
         let admitted = "22".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") }, PinnedRealization::ReadOnly);
 
         let bound = bind_destination_execution_policy(&policy, Some(&admitted), &admitted).unwrap();
 
@@ -1300,7 +1300,7 @@ mod tests {
     fn pushed_snapshot_must_match_local_admission() {
         let admitted = "55".repeat(32);
         let pushed = "66".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") }, PinnedRealization::ReadOnly);
 
         assert!(matches!(
             bind_destination_execution_policy(&policy, Some(&admitted), &pushed),

@@ -108,7 +108,7 @@ pub async fn handle(
     let retained_current_head = matches!(
         &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
-            source: ryeos_app::execution_policy::PinnedSource::CurrentHead,
+            source: ryeos_app::execution_policy::PinnedSource::CurrentHead { .. },
             realization: ryeos_app::execution_policy::PinnedRealization::Cow {
                 terminal_publication:
                     ryeos_app::execution_policy::TerminalPublication::RetainCurrentHead,

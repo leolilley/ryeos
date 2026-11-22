@@ -364,7 +364,9 @@ impl SchedulerContext for AppSchedulerContext {
             ProjectExecutionPolicy::Pinned { source, .. } => {
                 let project_root = Self::project_root(spec)?;
                 let project_source = match source {
-                    PinnedSource::CurrentHead => ProjectSource::PushedHead,
+                    PinnedSource::CurrentHead { project } => ProjectSource::PushedHead {
+                        project: project.clone(),
+                    },
                     PinnedSource::Snapshot { hash } => {
                         ProjectSource::Snapshot { hash: hash.clone() }
                     }

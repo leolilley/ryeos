@@ -174,9 +174,11 @@ pub fn project_source_from_execution_policy(policy: &ProjectExecutionPolicy) -> 
             ProjectSource::LiveFs
         }
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project },
             ..
-        } => ProjectSource::PushedHead,
+        } => ProjectSource::PushedHead {
+            project: project.clone(),
+        },
         ProjectExecutionPolicy::Pinned {
             source: PinnedSource::Snapshot { hash },
             ..
@@ -217,7 +219,7 @@ pub(crate) fn project_execution_dimension_classes(
         ProjectExecutionPolicy::Projectless => (Source::Projectless, Realization::Isolated),
         ProjectExecutionPolicy::LiveDirect { .. } => (Source::LiveFs, Realization::Live),
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { .. },
             realization,
             ..
         } => (
@@ -620,13 +622,6 @@ pub fn resolve_execution_contract_with_posture(
         | (ProjectExecutionPolicy::LiveDirect { .. }, ProjectSource::LiveFs)
         | (
             ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
-                ..
-            },
-            ProjectSource::PushedHead,
-        )
-        | (
-            ProjectExecutionPolicy::Pinned {
                 source: PinnedSource::CaptureLive { .. },
                 ..
             },
@@ -639,6 +634,18 @@ pub fn resolve_execution_contract_with_posture(
             },
             ProjectSource::Snapshot { hash: source_hash },
         ) => policy_hash == source_hash,
+        (
+            ProjectExecutionPolicy::Pinned {
+                source:
+                    PinnedSource::CurrentHead {
+                        project: policy_project,
+                    },
+                ..
+            },
+            ProjectSource::PushedHead {
+                project: source_project,
+            },
+        ) => policy_project == source_project,
         _ => false,
     };
     if !source_matches_policy {
@@ -708,7 +715,7 @@ pub fn resolve_execution_contract_with_posture(
                 .with_workspace_lifeline(project_ctx.temp_dir.clone().or(workspace_lifeline))
                 .with_state_root(state_root)
             }
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject => {
                 ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
@@ -876,7 +883,7 @@ pub fn project_root_normalization_from_execution_policy(
             ..
         } => ProjectRootNormalization::CanonicalizeLive,
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead | PinnedSource::Snapshot { .. },
+            source: PinnedSource::CurrentHead { .. } | PinnedSource::Snapshot { .. },
             ..
         } => ProjectRootNormalization::Preserve,
     }
@@ -1588,7 +1595,7 @@ async fn admit_execution_with_publication(
         Some(p) => {
             let path = std::path::PathBuf::from(p);
             if p == NO_PROJECT_SENTINEL {
-                if matches!(&project_source, ProjectSource::PushedHead) {
+                if matches!(&project_source, ProjectSource::PushedHead { .. }) {
                     path
                 } else {
                     return Ok((
@@ -3425,13 +3432,13 @@ mod tests {
         ));
 
         let current_head = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };
         assert!(matches!(
             project_source_from_execution_policy(&current_head),
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
         ));
 
         let snapshot = ProjectExecutionPolicy::Pinned {
@@ -3566,7 +3573,7 @@ mod tests {
             target: ryeos_app::execution_policy::ExecutionTarget::Here,
             environment: ExecutionEnvironmentPolicy::None,
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3660,7 +3667,7 @@ mod tests {
                     ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
             },
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3709,7 +3716,7 @@ mod tests {
     #[test]
     fn pinned_realization_and_metric_classes_follow_policy() {
         let read_only = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };
@@ -4243,7 +4250,9 @@ mod tests {
         remotes.insert("remote".into(), loaded(remote));
         let plan = plan_target_site_forward(
             &req,
-            &ProjectSource::PushedHead,
+            &ProjectSource::PushedHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             false,
             "site:local",
             tmpdir.path(),

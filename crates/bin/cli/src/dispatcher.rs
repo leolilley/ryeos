@@ -2986,9 +2986,7 @@ mod tests {
         assert_eq!(
             execution_policy_value(true, false, false, true, false, true),
             serde_json::to_value(
-                ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(
-                    ryeos_app::execution_policy::ExecutionResponse::Wait,
-                )
+                ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(ryeos_app::execution_policy::ExecutionResponse::Wait, ryeos_state::project_identity::PushedProject::test_named("demo"))
                 .exclude_operator_vault()
             )
             .unwrap(),

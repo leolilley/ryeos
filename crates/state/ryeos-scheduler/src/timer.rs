@@ -1059,7 +1059,7 @@ mod tests {
         spec.project_root = Some("/project".to_owned());
         spec.execution.policy.project =
             ryeos_engine::execution_contract::ProjectExecutionPolicy::Pinned {
-                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
                 realization: ryeos_engine::execution_contract::PinnedRealization::ReadOnly,
                 child_policy: ryeos_engine::execution_contract::ChildProjectPolicy::Inherit,
             };
@@ -1258,7 +1258,7 @@ mod tests {
         spec.project_root = Some("/project".to_owned());
         spec.execution.policy.project =
             ryeos_engine::execution_contract::ProjectExecutionPolicy::Pinned {
-                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
                 realization: ryeos_engine::execution_contract::PinnedRealization::ReadOnly,
                 child_policy: ryeos_engine::execution_contract::ChildProjectPolicy::Inherit,
             };

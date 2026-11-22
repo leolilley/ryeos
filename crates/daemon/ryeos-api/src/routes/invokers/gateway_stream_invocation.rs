@@ -949,14 +949,14 @@ mod tests {
         ));
 
         let current_head = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
             realization: PinnedRealization::ReadOnly,
             child_policy: ChildProjectPolicy::Inherit,
         };
         assert!(matches!(
             gateway_project_selection(&current_head),
             (
-                ProjectSource::PushedHead,
+                ProjectSource::PushedHead { .. },
                 Some(PinnedContextRealization::ReadOnly),
                 ProjectRootNormalization::Preserve
             )

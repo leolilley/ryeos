@@ -204,7 +204,7 @@ fn advance_head_policy(
     let principal_key = ryeos_state::refs::principal_storage_key(&principal)?;
     let policy = ExecutionPolicy {
         project: ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
             realization: PinnedRealization::Cow {
                 terminal_publication: TerminalPublication::AdvanceHead {
                     head_ref: format!("projects/{principal_key}/{}/head", project_hash(project)?),

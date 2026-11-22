@@ -196,6 +196,15 @@ impl PushedProject {
     }
 }
 
+impl PushedProject {
+    /// A named target for fixtures; panics on an invalid name.
+    pub fn test_named(name: &str) -> Self {
+        Self::Named {
+            name: ProjectName::new(name).expect("valid test project name"),
+        }
+    }
+}
+
 impl fmt::Display for PushedProject {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

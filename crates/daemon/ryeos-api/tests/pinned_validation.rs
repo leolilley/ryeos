@@ -134,7 +134,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
             "item_ref": "service:threads/list",
             "ref_bindings": {},
             "project_path": project.path(),
-            "execution_policy": ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Wait).exclude_operator_vault(),
+            "execution_policy": ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Wait, ryeos_state::project_identity::PushedProject::test_named("demo")).exclude_operator_vault(),
             "validate_only": true,
             "parameters": {"limit": "007"},
             "parameter_encoding": "command",
