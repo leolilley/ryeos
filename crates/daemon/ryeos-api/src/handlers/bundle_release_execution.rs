@@ -710,6 +710,15 @@ pub(crate) async fn execute_protected_qualification(
     // authority for this release; below, before any verifier is launched, the
     // overlay's resolved recipe must equal the publisher-authorized raw digest
     // and verify as trusted. Every other byte of the overlay is the gated head.
+    // The same gate the qualification launch runs: the operator's own head
+    // for the name the source snapshot declares, at exactly that snapshot.
+    let release_signer_identity =
+        super::product_qualification_launch::state_pinned_qualification_logical_project(
+            &state,
+            &context,
+            source_generation.source_snapshot_hash(),
+        )
+        .map_err(|error| anyhow::anyhow!("release source identity: {error}"))?;
     let release_head_source = super::product_qualification_launch::ReleaseHeadSource {
         project_path: release_project_identity.clone(),
         head_snapshot_hash: source_generation.source_snapshot_hash().to_owned(),
@@ -748,7 +757,9 @@ pub(crate) async fn execute_protected_qualification(
         // The overlay copies the release source generation into a private
         // workspace; project-scoped signers are matched on the registered
         // project the generation stands for, never on that workspace.
-        logical_project: ryeos_engine::contracts::LogicalProject::Stated(release_project_identity),
+        logical_project: ryeos_engine::contracts::LogicalProject::Stated(
+            release_signer_identity,
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

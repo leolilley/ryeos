@@ -1519,6 +1519,7 @@ async fn verify_target_launch(
             environment,
             capability_ceiling: _,
             child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+            signer_project: _,
         } if stable_project_identity == &expected_project_identity
             && display_path == Path::new(&operation.target_project_path)
             && base_snapshot_hash == &operation.source_snapshot_hash

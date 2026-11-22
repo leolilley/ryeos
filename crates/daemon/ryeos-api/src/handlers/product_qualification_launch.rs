@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 

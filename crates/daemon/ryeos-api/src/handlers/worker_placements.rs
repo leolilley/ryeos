@@ -4351,8 +4351,6 @@ async fn preflight_after_staging(
     let target_project_identity = target_project_identity(owner, &target_project_path)?;
     let target_head_key =
         ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
-    let principal_key = target_head_key.owner_key().to_owned();
-    let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
         .with_state_db(|db| db.read_project_head(&target_head_key))?
