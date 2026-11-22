@@ -2828,6 +2828,7 @@ name = "ryeos-claude-code-adapter"
 version = "0.1.0"
 dependencies = [
  "lillux",
+ "ryeos-accounting",
  "serde_json",
  "uuid",
 ]

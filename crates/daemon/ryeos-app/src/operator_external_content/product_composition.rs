@@ -475,7 +475,7 @@ fn relationship_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
-        logical_project_root: None,
+        logical_project_root: roots.logical_project_root.clone(),
         item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(relationship_ref)?,
         expected_kind: Some("config".to_owned()),
         project_root,
@@ -1194,6 +1194,30 @@ mod tests {
             assert_eq!(pinned_request.project_root, request.project_root);
             assert_eq!(pinned_request.subject_resolution_authority, pinned);
         }
+    }
+
+    #[test]
+    fn relationship_lookup_states_the_roots_logical_project_not_the_checkout() {
+        use ryeos_engine::item_resolution::ResolutionRoots;
+        let checkout = std::path::PathBuf::from("/admitted/exact-source-generation");
+        let logical = std::path::PathBuf::from("/srv/projects/alpha");
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        let stated = ResolutionRoots::from_registered(Some(checkout.clone()), &[])
+            .with_logical_project_root(Some(logical.clone()));
+        let request =
+            relationship_resolution_request(&stated, &pinned, "config:example/relationships")
+                .unwrap();
+        assert_eq!(request.logical_project_root, Some(logical));
+        assert_eq!(request.project_root, Some(checkout.clone()));
+
+        let unstated = ResolutionRoots::from_registered(Some(checkout.clone()), &[]);
+        let request =
+            relationship_resolution_request(&unstated, &pinned, "config:example/relationships")
+                .unwrap();
+        assert_eq!(request.logical_project_root, None);
+        assert_eq!(request.project_root, Some(checkout));
     }
 
     #[test]

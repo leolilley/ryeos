@@ -2,6 +2,7 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm};
 
@@ -77,7 +78,7 @@ pub fn draw_rows(
         let meta_width = if meta.is_empty() {
             0
         } else {
-            display_width(meta).min(width / 3)
+            display_width(meta).min(width / LAYOUT.cells.meta_divisor)
         };
         let primary_width = width.saturating_sub(3 + meta_width + usize::from(meta_width > 0));
         let mut primary = row.primary.clone();

@@ -15,8 +15,10 @@
 //! 5. an oversize value, or one holding control characters, refuses with
 //!    `session_secret_unbounded`;
 //! 6. recovery after the recipient rule is withdrawn refuses with
-//!    `session_secret_revoked` (ignored, see its reason);
-//! 7. the workload holds no sealed descriptor.
+//!    `session_secret_revoked`, and no worker respawns;
+//! 7. the workload holds no sealed descriptor;
+//! 8. a session whose lease ended before the restart is not resumed and its
+//!    root ends in a typed terminal state.
 //!
 //! The session worker here is a script that plays the bridge's part for this
 //! boundary: it adopts and closes the sealed descriptor before anything else,
@@ -975,7 +977,6 @@ async fn a_value_with_control_characters_is_refused_as_unbounded() -> Result<()>
 /// owner and the node restarts, the recovering session is refused with
 /// `session_secret_revoked` instead of replaying the earlier value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "recovery of a live session is reached only after the reconciler marks it `recovering` and a later command re-attaches it; forcing that transition on this fixture is unproven, so where the revoked refusal surfaces (command response or daemon log) is untested"]
 async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() -> Result<()> {
     let reports = tempfile::tempdir()?;
     let report_path = reports.path().join("report.json");
@@ -997,6 +998,9 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
     read_report(&report_path).await?;
 
     daemon.kill_daemon().await?;
+    // The first worker's report must not be rewritten: a respawn would
+    // write it again.
+    std::fs::remove_file(&report_path).context("clear the first worker's report")?;
     let node = common::fast_fixture::node_signing_key();
     let other = other_principal();
     write_sealed_vault_names(&daemon.state_path, &node, &operator, &[other.as_str()])?;
@@ -1027,7 +1031,113 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
         evidence.contains(REVOKED_CODE),
         "recovery never reported `{REVOKED_CODE}`: {evidence}"
     );
+    anyhow::ensure!(
+        !report_path.exists(),
+        "a revoked delivery must never reach worker contact, yet a worker reported"
+    );
+    let log = daemon.stderr_so_far();
+    anyhow::ensure!(
+        !log.contains("dedicated-session start: worker ready and bound"),
+        "a worker was respawned over a revoked secret:\n{log}"
+    );
     daemon.kill_daemon().await?;
     assert_values_absent(&daemon, &[SECRET_VALUE])?;
+    Ok(())
+}
+
+/// The sibling lease: the session's lease ended while the node was down, so
+/// the session settles terminal (its worker proved reaped). The session's root
+/// is still a running row whose process is dead; restart must finalize it with
+/// a typed outcome rather than resume it onto a session that can no longer
+/// run. The settlement is applied through the same Store calls the startup
+/// lease reconcile makes; the leased adapter path itself is exercised by the
+/// lease-adapter lane, which this fixture does not have.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_terminal() -> Result<()>
+{
+    let reports = tempfile::tempdir()?;
+    let report_path = reports.path().join("report.json");
+    let project = fixture_project()?;
+    let (mut daemon, _operator) =
+        start_node(Case::holding(SECRET_VALUE), report_path.clone()).await?;
+    let chain_root_id = match launch_session(
+        &mut daemon,
+        project.path(),
+        "L-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa7",
+    )
+    .await?
+    {
+        Launch::Started(chain_root_id) => chain_root_id,
+        Launch::HostUnqualified => return Ok(()),
+        Launch::Rejected(text) => anyhow::bail!("session launch was rejected: {text}"),
+    };
+    first_session_command(&daemon, &chain_root_id, "session-lease-gone-start").await?;
+    read_report(&report_path).await?;
+
+    daemon.kill_daemon().await?;
+    std::fs::remove_file(&report_path).context("clear the first worker's report")?;
+    {
+        let store = common::open_stopped_node_store(&daemon.state_path)?;
+        let session = store
+            .dedicated_session(&chain_root_id)?
+            .context("the launched session was lost")?;
+        let worker = session
+            .worker_instance_id
+            .context("the launched session has no worker")?;
+        let epoch = session
+            .worker_boot_epoch
+            .context("the launched session has no worker epoch")?;
+        store.settle_worker_process(&worker, &chain_root_id, epoch, "reaped", "lease ended")?;
+        store.fail_dedicated_session_start(&chain_root_id, &worker, epoch, "lease ended", true)?;
+    }
+    daemon.respawn_with(|_| {}).await?;
+
+    // The root reaches a terminal state without any operator action.
+    let mut status = String::new();
+    for _ in 0..240 {
+        if let Some(thread) = daemon.get_thread(&chain_root_id).await? {
+            status = thread
+                .pointer("/thread/status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if !status.is_empty() && !matches!(status.as_str(), "created" | "running") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let log = daemon.stderr_so_far();
+    anyhow::ensure!(
+        status == "failed",
+        "the root of an ended session ended `{status}`, not failed:\n{log}"
+    );
+    anyhow::ensure!(
+        !report_path.exists(),
+        "a worker was respawned for a session whose lease ended"
+    );
+    anyhow::ensure!(
+        !log.contains("dedicated-session start: worker ready and bound"),
+        "the ended session was resumed:\n{log}"
+    );
+    daemon.stop_gracefully().await?;
+    let store = common::open_stopped_node_store(&daemon.state_path)?;
+    let result = store
+        .get_thread_result(&chain_root_id)?
+        .context("the settled root has no result")?;
+    anyhow::ensure!(
+        result
+            .outcome_code
+            .as_deref()
+            .is_some_and(|code| !code.is_empty()),
+        "the root settled without a typed outcome: {result:?}"
+    );
+    let session = store
+        .dedicated_session(&chain_root_id)?
+        .context("the session was lost")?;
+    anyhow::ensure!(
+        session.state == "terminal" && session.worker_instance_id.is_none(),
+        "the ended session did not stay terminal: {session:?}"
+    );
     Ok(())
 }

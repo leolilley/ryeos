@@ -9,6 +9,7 @@ pub mod diagnostic;
 pub mod effective_surface;
 pub mod ids;
 pub mod layout;
+pub mod layout_table;
 pub mod presentation;
 pub mod surface;
 pub mod text_surface;
@@ -22,4 +23,4 @@ pub mod view_set;
 /// Daemon, signed content, web, and terminal cut over together. There is no
 /// compatibility parser: a session advertising any other revision is refused
 /// before embedded view bindings are decoded or source effects are emitted.
-pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v15";
+pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v16";

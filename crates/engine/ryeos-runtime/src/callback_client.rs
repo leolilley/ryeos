@@ -1854,6 +1854,7 @@ mod tests {
                 truncated_reason: reason.map(str::to_string),
                 duplicate_of: duplicate_of.map(str::to_string),
                 dropped_images: Vec::new(),
+                spill: None,
             },
             attachment_refs: Vec::new(),
         }

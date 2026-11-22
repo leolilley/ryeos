@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-19T06:28:49Z:d756e8c4cc06c61bb11ade8319412bb1ea57fc03d726c50552485ba69cce3a59:8GTMa1nNYOW8nJP72B3ukOq0+KUB5CdF+em6ik+ttbRhLLAg3hBL2rUkvJ8bUrL1A6FykAKWg88pu6m06yR3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T23:17:59Z:f33cfbbd0bafc0cc55d246aa43a7e067e2353ee6d91f62b5d95e8cb4b0d133b2:WGRGZqNOzST9VTFpT377Tq5lYgsgXuU5m9h+MUiV2sG6AIDHF1Ev7mGrEvhHS/STenm9iJ9Kvke4/JQSW54PCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.5.0"
+version: "3.0.0"
 # A project file may not take the ref of a surface an installed bundle
 # supplies. Resolution refuses the ref, naming both files, so a project can
 # add its own surfaces but never replace the node's.
@@ -44,6 +44,8 @@ composer_config:
     - name: tiles
       strategy: replace_root_last
       expect_value_type: sequence
+    # The ref list is replaced whole: a child Surface names the complete
+    # ordered list of sets it opens.
     - name: view_sets
       strategy: replace_root_last
       expect_value_type: sequence
@@ -98,9 +100,13 @@ composed_value_contract:
     tiles:
       type: single
       prim: sequence
+    # The sets this Surface opens as tabs, in tab order, each a `view_set:`
+    # ref. A set is its own item (see the `view_set` kind); a Surface never
+    # carries one inline, and a Surface that does is refused at resolution.
     view_sets:
       type: single
       prim: sequence
+      elements: { type: single, prim: string }
     dialogs:
       type: single
       prim: sequence

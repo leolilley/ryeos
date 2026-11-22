@@ -8478,7 +8478,7 @@ pub fn select_direct_terminator_protocol<'a>(
         None => bail!("execution kind '{kind}' has no terminator"),
     }
     let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-        logical_project_root: None,
+        logical_project_root: resolved.resolved_item.logical_project_root.clone(),
         item_ref: resolved.resolved_item.canonical_ref.clone(),
         expected_kind: Some(kind.clone()),
         project_root: resolved.resolved_item.materialized_project_root.clone(),

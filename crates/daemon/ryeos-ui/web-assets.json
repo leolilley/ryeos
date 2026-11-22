@@ -1,7 +1,7 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
-  "ui_binding_revision": "ryeos.ui.binding.v15",
-  "source_digest": "11cfde9d6c8cbb8b9de0e05543747d06d72800e247506f754427a4b14174e31b",
+  "ui_binding_revision": "ryeos.ui.binding.v16",
+  "source_digest": "7e2d188d8df924a64f3a66f1c5b4b4ad59e688903372ada27bed7603fcb4b450",
   "assets": [
     {
       "route": "/ui",
@@ -115,7 +115,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "07d8e722c99c656e368bb3ce34ee611b2e5cddda30983336acb172da8c44d048",
+      "sha256": "5f44a0a5cb64bb19c13c7f369066842559b189cf68297b84d10853e844694a8b",
       "imports": [],
       "encoding": "gzip"
     },

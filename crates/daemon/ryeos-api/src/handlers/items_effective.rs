@@ -122,6 +122,7 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
                     generation,
                     project_root.as_deref(),
                     &mut effective.composed_value,
+                    &crate::surface_views::view_set_body_is_mapping,
                 );
                 for (view_ref, reason) in failures {
                     effective.diagnostics.push(EffectiveItemDiagnostic {

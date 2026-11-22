@@ -414,6 +414,9 @@ mod tests {
             tile_count: 1,
             lens_trail: Vec::new(),
             lens_label: None,
+            presentation: Default::default(),
+            scroll: false,
+            sequence: None,
         }
     }
 

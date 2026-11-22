@@ -1,0 +1,18 @@
+# ryeos:signed:2026-11-20T23:17:59Z:da35282c141cf31847ff819332c49eae880f87e5304b1a857d22b87762f8b59c:pTzQRLWXVbey4+6g0y34JeRU/nMVYRyrSTlPZZoKbw4A0qGxBmXU8iSf1GQZ3L8dFT6e0OjH4Ihw4gUM/CU5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: 2
+id: work
+title: Work
+root:
+  type: split
+  axis: horizontal
+  ratio: 0.22
+  first:
+    type: group
+    label: Work
+    views: ["view:ryeos/work/list"]
+    active: 0
+  second:
+    type: group
+    label: Detail
+    views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+    active: 0

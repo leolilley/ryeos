@@ -692,6 +692,38 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
         assert!(Instant::now() < wait_until, "no wrap-up notice arrived");
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    // Kill only while a tool call is executing. A provider attempt that is
+    // reserved or issued when the node dies is fenced as an unknown outcome,
+    // and resuming that turn would contact the provider a second time, which
+    // the ledger refuses by design. Between a turn's settled provider attempt
+    // and its next reservation the run is in the tool phase, which is where a
+    // restart resumes cleanly.
+    let tool_phase_until = Instant::now() + Duration::from_secs(40);
+    loop {
+        let events = chain_event_list(&rig.h, &id).await;
+        let after_notice: Vec<&str> = events
+            .iter()
+            .skip_while(|(_, kind, payload)| {
+                !(kind == "cognition_in"
+                    && payload.get("kind").and_then(Value::as_str) == Some("deadline_wrap_up"))
+            })
+            .map(|(_, kind, _)| kind.as_str())
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "tool_call_start" | "tool_call_result" | "cognition_in"
+                )
+            })
+            .collect();
+        if after_notice.last() == Some(&"tool_call_start") {
+            break;
+        }
+        assert!(
+            Instant::now() < tool_phase_until,
+            "no tool call was executing after the wrap-up notice"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     rig.h.kill_daemon().await.expect("kill the node mid-run");
     let before = accounting_deadlines(&rig.h);
     assert_eq!(before.len(), 1, "one execution budget row: {before:?}");

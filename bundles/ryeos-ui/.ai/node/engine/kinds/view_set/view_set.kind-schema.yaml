@@ -1,0 +1,62 @@
+# ryeos:signed:2026-11-20T23:17:59Z:155a86f37222572aae43521e909400e9dcc0ed0524fc30354b58d2198f339f52:hJc2TfQJpN6HgdQKZXdK4IJKZs/DRh3oERJ7MDJYL084F6OmQsGu2c9TvHjMsL4+zy2s9i6wMAzFwAaBwQWHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/view_set"
+version: "1.0.0"
+# A project file may not take the ref of a view set an installed bundle
+# supplies. Resolution refuses the ref, naming both files, so a project can
+# add its own view sets but never replace the node's.
+project_shadowing: refuse
+location:
+  directory: view_sets
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# A view set is the arrangement of views one tab opens with: a title, a tree
+# of groups and splits whose leaves are `view:` refs, and how that tree is
+# drawn. It carries no sources, affordances or capabilities, so it holds no
+# authority. A Surface lists the sets it opens by `view_set:` ref; the list
+# order is the tab order. A view set has no `extends`: an arrangement is
+# replaced whole, never merged.
+#
+# The body is the composition the daemon validates for every saved personal
+# template too (composition schema 2), so the layout tree itself (`root`) is
+# checked by that one validator at admission, not by this contract:
+# group `{type: group, label?, views, active}` and split
+# `{type: split, axis, ratio, first, second}` nodes, bounded in depth, tile
+# count, labels and ratios.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    schema: { type: single, prim: integer }
+    id: { type: single, prim: string }
+    title: { type: single, prim: string }
+  optional:
+    root:
+      type: union
+      prims: [mapping, "null"]
+    # How the tile tree is drawn. Absent means tiled.
+    presentation:
+      type: single
+      prim: string
+      enum: [tiled, page]
+    # Page presentations only: the tree is read as rows and the page scrolls.
+    scroll: { type: single, prim: boolean }
+    # Opaque step identifier; a set carrying one is a step of that sequence,
+    # in the Surface's list order.
+    sequence: { type: single, prim: string }
+    # Whether the set is listed where a person adds a tab. Absent means true.
+    offered: { type: single, prim: boolean }
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    category:
+      from: relative_dir
+      required: true

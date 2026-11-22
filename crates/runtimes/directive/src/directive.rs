@@ -409,6 +409,87 @@ pub struct ExecutionConfig {
     /// policy and the model's own limits.
     #[serde(default)]
     pub tool_images: ToolImagesConfig,
+    /// How an oversize tool result is shown to the model and stored.
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
+}
+
+/// Signed thresholds for oversize tool results. A result longer than
+/// `spill_threshold_bytes` is stored whole beside its event and the model sees
+/// a head-and-tail preview that says it is partial. When the node cannot store
+/// it, the result is cut at `hard_cut_bytes` instead and the record names why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputConfig {
+    #[serde(default = "default_tool_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    #[serde(default = "default_tool_preview_head_bytes")]
+    pub preview_head_bytes: u64,
+    #[serde(default = "default_tool_preview_tail_bytes")]
+    pub preview_tail_bytes: u64,
+    /// Most bytes of one result stored; keep it within the node's
+    /// `thread_attachments` per-attachment limit, which refuses a larger one.
+    #[serde(default = "default_tool_spill_stored_bytes")]
+    pub max_stored_bytes: u64,
+    /// The cut applied when a result is not stored.
+    #[serde(default = "default_tool_hard_cut_bytes")]
+    pub hard_cut_bytes: u64,
+}
+
+fn default_tool_spill_threshold_bytes() -> u64 {
+    64 * 1024
+}
+
+fn default_tool_preview_head_bytes() -> u64 {
+    24 * 1024
+}
+
+fn default_tool_preview_tail_bytes() -> u64 {
+    8 * 1024
+}
+
+fn default_tool_spill_stored_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+fn default_tool_hard_cut_bytes() -> u64 {
+    100 * 1024
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_tool_spill_threshold_bytes(),
+            preview_head_bytes: default_tool_preview_head_bytes(),
+            preview_tail_bytes: default_tool_preview_tail_bytes(),
+            max_stored_bytes: default_tool_spill_stored_bytes(),
+            hard_cut_bytes: default_tool_hard_cut_bytes(),
+        }
+    }
+}
+
+impl ToolOutputConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.spill_threshold_bytes == 0
+            || self.preview_head_bytes == 0
+            || self.preview_tail_bytes == 0
+            || self.max_stored_bytes == 0
+            || self.hard_cut_bytes == 0
+        {
+            anyhow::bail!("execution.tool_output limits must all be positive");
+        }
+        if self.preview_head_bytes + self.preview_tail_bytes >= self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output preview_head_bytes + preview_tail_bytes must be below spill_threshold_bytes, or the preview would not be smaller than the result it replaces"
+            );
+        }
+        if self.max_stored_bytes < self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output max_stored_bytes must be at least spill_threshold_bytes"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Signed ceilings on the images a run's tools may return. The per-run
@@ -598,6 +679,7 @@ impl Default for ExecutionConfig {
             on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
             tool_images: ToolImagesConfig::default(),
+            tool_output: ToolOutputConfig::default(),
         }
     }
 }
@@ -637,6 +719,7 @@ impl ExecutionConfig {
             }
         }
         self.tool_images.validate()?;
+        self.tool_output.validate()?;
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -1247,6 +1330,32 @@ mod tests {
             serde_yaml::from_str("tool_images:\n  max_images_per_run: 0\n").unwrap();
         assert!(zero.validate().is_err());
         assert!(serde_yaml::from_str::<ExecutionConfig>("tool_images:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn tool_output_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_output, ToolOutputConfig::default());
+        defaults.validate().unwrap();
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 400\n  preview_tail_bytes: 100\n  max_stored_bytes: 5000\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        // A preview that is not smaller than the threshold would not bound
+        // anything.
+        let wide: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 900\n  preview_tail_bytes: 100\n",
+        )
+        .unwrap();
+        assert!(wide.validate().is_err());
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  hard_cut_bytes: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        let small_store: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  max_stored_bytes: 10\n").unwrap();
+        assert!(small_store.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_output:\n  unknown: 1\n").is_err());
     }
 
     #[test]
