@@ -2351,6 +2351,7 @@ async fn admit_execution_with_publication(
                 local_project_path: plan.local_project_path.as_deref(),
                 source_snapshot_hash: project_ctx.snapshot_hash.as_deref(),
                 remote_project_path: &plan.remote_project_path,
+                project_name: plan.project_name.as_ref(),
                 parameters: request.parameters.clone(),
                 execution_policy: &destination_policy,
                 acting_principal: &caller_principal_id,
@@ -2600,6 +2601,8 @@ struct TargetSiteForwardPlan {
     remote: ResolvedRemote,
     local_project_path: Option<PathBuf>,
     remote_project_path: String,
+    /// The bound project name; `None` only for a projectless forward.
+    project_name: Option<ryeos_state::project_identity::ProjectName>,
 }
 
 fn plan_target_site_forward(
@@ -2661,8 +2664,8 @@ fn plan_target_site_forward(
         config_key: loaded_remote.config.name.clone(),
     };
 
-    let (local_project_path, remote_project_path) = if no_project_requested {
-        (None, NO_PROJECT_SENTINEL.to_string())
+    let (local_project_path, remote_project_path, project_name) = if no_project_requested {
+        (None, NO_PROJECT_SENTINEL.to_string(), None)
     } else {
         let binding = crate::remote::config::resolve_loaded_project_binding(
             &loaded_remote,
@@ -2692,6 +2695,7 @@ fn plan_target_site_forward(
         (
             Some(binding.local_project_path),
             binding.remote_project_path,
+            Some(binding.project_name),
         )
     };
 
@@ -2700,6 +2704,7 @@ fn plan_target_site_forward(
         remote,
         local_project_path,
         remote_project_path,
+        project_name,
     })))
 }
 
@@ -4203,6 +4208,12 @@ mod tests {
     #[test]
     fn target_site_plan_rejects_ai_only_binding() {
         let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
+        std::fs::write(
+            tmpdir.path().join(".ai/project.yaml"),
+            "schema: 1\nname: demo\n",
+        )
+        .unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()
@@ -4214,6 +4225,7 @@ mod tests {
         remote.project_bindings.insert(
             local_key,
             crate::remote::config::RemoteProjectBinding {
+                project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::AiOnly,
             },
@@ -4239,6 +4251,12 @@ mod tests {
     #[test]
     fn target_site_plan_uses_full_project_binding_for_pinned_source() {
         let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
+        std::fs::write(
+            tmpdir.path().join(".ai/project.yaml"),
+            "schema: 1\nname: demo\n",
+        )
+        .unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()
@@ -4250,6 +4268,7 @@ mod tests {
         remote.project_bindings.insert(
             local_key,
             crate::remote::config::RemoteProjectBinding {
+                project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::FullProject,
             },

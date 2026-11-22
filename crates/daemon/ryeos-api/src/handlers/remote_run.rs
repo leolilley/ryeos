@@ -184,6 +184,25 @@ pub async fn handle(
         }
         (false, None) => {}
     }
+    // A current-head policy names the head it runs; it must be the bound
+    // project, never a name the binding does not carry.
+    if let ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+        source: ryeos_app::execution_policy::PinnedSource::CurrentHead { project },
+        ..
+    } = &req.execution_policy.project
+    {
+        let bound = binding.as_ref().map(|binding| {
+            ryeos_state::project_identity::PushedProject::Named {
+                name: binding.project_name.clone(),
+            }
+        });
+        if bound.as_ref() != Some(project) {
+            return Err(HandlerError::BadRequest(format!(
+                "project_name_mismatch: the current-head policy names project {project} but the binding names {}",
+                bound.map_or_else(|| "none".to_owned(), |bound| bound.to_string())
+            )));
+        }
+    }
     let remote_result = submit_remote_request(
         &client,
         &req,
