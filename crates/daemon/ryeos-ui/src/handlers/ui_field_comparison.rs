@@ -599,7 +599,7 @@ fn add_cost(
         "comparison-cost",
         &json!({"comparison_id": model.id, "kind": "run_cost", "side": side}),
     )?;
-    let attributes = json!({
+    let mut attributes = json!({
         "side": side,
         "turns": operand.cost.turns,
         "input_tokens": operand.cost.input_tokens,
@@ -607,6 +607,9 @@ fn add_cost(
         "spend": operand.cost.spend,
         "basis": operand.cost.basis,
     });
+    if !operand.cost.usage_status.is_complete() {
+        attributes["usage_status"] = json!(operand.cost.usage_status);
+    }
     emitter.add_entity(FieldFactEntity {
         id: id.clone(),
         kind: "run_cost".to_string(),
@@ -948,6 +951,7 @@ mod tests {
                 output_tokens: Some(7),
                 spend: Some("0.125".to_string()),
                 basis: Some(CostBasis::Direct),
+                usage_status: Default::default(),
                 resource_status: CostSampleStatus::Available,
                 resource_operation_count: 1,
                 resource_attributed_spend: "0.025".to_string(),

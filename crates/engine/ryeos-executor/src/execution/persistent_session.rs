@@ -18,8 +18,8 @@ use ryeos_app::runtime_db::{WorkerProcessRecord, WorkerProcessState, daemon_gene
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, prepare_captured_item_plan};
 use ryeos_engine::contracts::{
-    EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
-    SubjectResolutionAuthority,
+    EffectivePrincipal, ExecutionHints, LogicalProject, LogicalProjectAbsence, PlanContext,
+    Principal, ProjectContext, SubjectResolutionAuthority,
 };
 use ryeos_engine::kind_registry::{PersistentSessionDecl, TerminatorDecl};
 use ryeos_engine::protocols::descriptor::{
@@ -748,7 +748,7 @@ pub(crate) fn reset_for_cross_site_admission(
         let canonical =
             ryeos_engine::canonical_ref::CanonicalRef::parse(&dependency.canonical_ref)?;
         let plan_context = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             requested_by: principal.clone(),
             project_context: ProjectContext::None,
             subject_resolution_authority: SubjectResolutionAuthority::Projectless,
@@ -762,7 +762,7 @@ pub(crate) fn reset_for_cross_site_admission(
         let target_verified = engine.verify(&plan_context, target_resolved)?;
         let target_resolution =
             engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
                 item_ref: canonical,
                 expected_kind: None,
                 project_root: None,
@@ -864,7 +864,7 @@ fn transferred_content_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
-        logical_project_root: roots.logical_project_root.clone(),
+        logical_project: roots.logical_project.clone(),
         item_ref,
         expected_kind: None,
         project_root: project_root.map(std::path::Path::to_path_buf),
@@ -1124,7 +1124,10 @@ pub(crate) fn preview_prepared_dependencies(
     // Execution dependencies are admitted bundle programs. This projectless
     // lookup must not be copied into the content-dependency pass below: a
     // project-bound contributor keeps the outer root's definition generation.
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+    );
     let mut execution_dependencies = BTreeMap::new();
     let mut content_dependencies = BTreeMap::new();
     let mut environment_contributions = BTreeMap::new();
@@ -5169,7 +5172,7 @@ fn direct_request(
         resolved_item: verified.resolved.clone(),
         root_raw_content_digest: dependency.subject.raw_content_digest.clone(),
         plan_context: PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             requested_by: principal,
             project_context: ProjectContext::None,
             subject_resolution_authority: SubjectResolutionAuthority::Projectless,
@@ -5600,7 +5603,11 @@ mod tests {
         use ryeos_engine::contracts::ItemSpace;
         use ryeos_engine::item_resolution::ResolutionRoots;
         let project = std::path::PathBuf::from("/admitted/definition-generation");
-        let roots = ResolutionRoots::from_registered(Some(project.clone()), &[]);
+        let roots = ResolutionRoots::from_registered(
+            Some(project.clone()),
+            &[],
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+        );
         let subject = SubjectResolutionAuthority::CowWorkspace {
             base_snapshot_hash: "a".repeat(64),
             current_operational_generation: "b".repeat(64),
@@ -5641,7 +5648,11 @@ mod tests {
         assert!(
             request(
                 ItemSpace::Project,
-                &ResolutionRoots::from_registered(None, &[]),
+                &ResolutionRoots::from_registered(
+                    None,
+                    &[],
+                    LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+                ),
                 &subject
             )
             .is_err()

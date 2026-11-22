@@ -2112,6 +2112,7 @@ fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
@@ -2941,7 +2942,7 @@ mod tests {
 
     fn roots_for(bundle_roots: &[&Path]) -> ResolutionRoots {
         ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: bundle_roots
                 .iter()

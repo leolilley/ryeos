@@ -30,8 +30,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use ryeos_engine::contracts::{
-    EffectivePrincipal, ExecutionHints, ItemSourceRoot, ItemSpace, PlanContext, Principal,
-    ProjectContext, SubjectResolutionAuthority,
+    EffectivePrincipal, ExecutionHints, ItemSourceRoot, ItemSpace, LogicalProject,
+    LogicalProjectAbsence, PlanContext, Principal, ProjectContext, SubjectResolutionAuthority,
 };
 use ryeos_engine::external_content::{
     EXTERNAL_REALIZATIONS_DERIVED_KEY, insert_resolved_product_selections,
@@ -287,11 +287,13 @@ pub fn finalize_pinned_qualification_launch(
     // The pinned authority's logical project, when it states one. A pinned
     // verifier lane may legitimately state none (its tools are judged by
     // bundle trust), so an absent root is not refused here.
-    let roots = request_engine
-        .resolution_roots(Some(project_root.to_path_buf()))
-        .with_logical_project_root(
+    let roots = request_engine.resolution_roots(
+        Some(project_root.to_path_buf()),
+        LogicalProject::from_optional(
             project_authority.logical_project_root(&plan_context.current_site_id),
-        );
+            &plan_context.subject_resolution_authority,
+        ),
+    );
     let selectors = prepared
         .product_selections
         .iter()
@@ -2445,7 +2447,7 @@ fn prepare_signed_bundle_consumer_worker_literals(
             {
                 bail!("qualification Worker source-derived D0 changed before literal admission");
             }
-            let roots = state.engine.resolution_roots(None);
+            let roots = state.engine.resolution_roots(None, LogicalProject::Absent(LogicalProjectAbsence::Projectless));
             let declarations = if activated {
                 let contract = state.engine.kinds.get("worker").and_then(|schema| schema.external_content_contract());
                 let declarations = ryeos_engine::external_content::effective_external_content_declarations(
@@ -2542,7 +2544,10 @@ fn prepare_exact_bundle_consumer_realizations(
         if consumer_definition_identity(&resolution)? != *definition {
             bail!("qualification consumer changed signed definition before realization");
         }
-        let roots = state.engine.resolution_roots(None);
+        let roots = state.engine.resolution_roots(
+            None,
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+        );
         let _admitted =
             crate::external_content_admission::admit_external_realizations_in_publication(
                 state,
@@ -2773,7 +2778,7 @@ pub(super) fn resolve_consumer_definition_in_generation(
     }
     let resolution =
         generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             item_ref: canonical,
             expected_kind: Some(kind.into()),
             project_root: None,
@@ -4855,7 +4860,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         // fixtures only. Production evidence paths always carry a sealed
         // capsule and cannot invent project authority here.
         let plan_context = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: context.fingerprint.clone(),
                 scopes: context.scopes.clone(),
@@ -4893,11 +4898,10 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // admission carries one. A bundle verifier's own trust does not depend on
     // it, and a pinned verifier may legitimately state none, so there is no
     // refusal here.
-    let roots = request_engine
-        .resolution_roots(project_root.clone())
-        .with_logical_project_root(
-            plan_context.effective_logical_project_root(project_root.as_deref()),
-        );
+    let roots = request_engine.resolution_roots(
+        project_root.clone(),
+        plan_context.effective_logical_project(project_root.as_deref()),
+    );
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(

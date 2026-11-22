@@ -270,12 +270,14 @@ impl Harness {
             output_tokens: 0,
             total_usd: self.spend_used,
             basis: None,
+            usage_status: Default::default(),
         };
         accumulated.checked_accumulate(&RuntimeCost {
             input_tokens: 0,
             output_tokens: 0,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         })?;
         self.spend_used = accumulated.total_usd;
         Ok(())

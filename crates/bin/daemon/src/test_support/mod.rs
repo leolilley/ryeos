@@ -360,7 +360,9 @@ async fn wait_for_daemon_ready(
     context: &str,
     deadline: Instant,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    let client = ryeos_http_egress::client_builder()
+        .build()
+        .expect("the HTTP client builds");
     let url = format!("http://{bind}/_ryeos/ready");
 
     loop {
@@ -1665,7 +1667,9 @@ impl DaemonHarness {
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
         let body_bytes = serde_json::to_vec(&body)?;
 
-        let mut req = reqwest::Client::new()
+        let mut req = ryeos_http_egress::client_builder()
+            .build()
+            .expect("the HTTP client builds")
             .post(format!("http://{}{}", self.bind, route_path))
             .header("content-type", "application/json")
             .body(body_bytes.clone());

@@ -42,6 +42,7 @@ fn resolve_allowed_root(
     root_type: &str,
     caller: &crate::seat_auth::SeatCaller,
     operator_project_path: Option<&str>,
+    app_root: &Path,
 ) -> Result<PinnedDirectory> {
     let project = match caller.project_access()? {
         Some(project) => project.try_clone_directory()?,
@@ -52,6 +53,11 @@ fn resolve_allowed_root(
                 .ok_or_else(|| anyhow::anyhow!("operator-selected project does not exist"))?
         }
     };
+    // Re-checked on every read: a registry entry written before the rule
+    // existed must not stay a way into the node's own state.
+    let pinned = std::fs::canonicalize(project.path())
+        .with_context(|| format!("canonicalize project root {}", project.path().display()))?;
+    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(&pinned, app_root)?;
     match root_type {
         "project" => Ok(project),
         "project_ai" => project
@@ -114,8 +120,13 @@ pub async fn handle_files_list(
     let req: FilesListRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
+    let allowed_root = resolve_allowed_root(
+        &req.root,
+        &caller,
+        operator_project_path.as_deref(),
+        &state.config.app_root,
+    )
+    .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let (directory, _) = open_relative_directory(&allowed_root, &req.path)
         .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
@@ -277,8 +288,13 @@ pub async fn handle_files_tree(
     let req: FilesTreeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
+    let allowed_root = resolve_allowed_root(
+        &req.root,
+        &caller,
+        operator_project_path.as_deref(),
+        &state.config.app_root,
+    )
+    .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let (directory, relative_directory) = open_relative_directory(&allowed_root, &req.path)
         .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
@@ -437,8 +453,13 @@ pub async fn handle_files_read(
     let req: FilesReadRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
+    let allowed_root = resolve_allowed_root(
+        &req.root,
+        &caller,
+        operator_project_path.as_deref(),
+        &state.config.app_root,
+    )
+    .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let file = allowed_root
         .open_pinned_regular_descendant(Path::new(&req.path), false)?
         .ok_or_else(|| HandlerError::BadRequest("path is not a regular file".into()))?;

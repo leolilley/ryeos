@@ -99,7 +99,9 @@ fn observation_context() -> ryeos_ui::browser_session::LaunchContext {
 fn dispatch_transport_is_unrecorded() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let ctx = PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-ui-dispatch".into(),
             scopes: vec![],

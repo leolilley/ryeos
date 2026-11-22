@@ -46,7 +46,9 @@ pub async fn handle(
     let effective = state
         .engine
         .effective_item(EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             item_ref,
             expected_kind: None,
             project_root: None,
@@ -116,7 +118,7 @@ pub async fn handle(
         HandlerError::Internal(format!("verified validation URL is invalid: {error}"))
     })?;
     let pinned_resolution = resolve_validation_target(&parsed_url, credential.is_some()).await?;
-    let mut client_builder = reqwest::Client::builder()
+    let mut client_builder = ryeos_http_egress::client_builder()
         .connect_timeout(Duration::from_secs(validation.timeout_seconds.min(30)))
         .timeout(Duration::from_secs(validation.timeout_seconds.min(60)))
         .redirect(reqwest::redirect::Policy::none());

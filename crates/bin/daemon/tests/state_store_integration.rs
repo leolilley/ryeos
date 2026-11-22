@@ -2316,6 +2316,7 @@ mod integration_tests {
                 spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.05").unwrap(),
                 provider: None,
                 basis: None,
+                usage_status: Default::default(),
                 metadata: None,
             }),
         };

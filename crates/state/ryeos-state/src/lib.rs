@@ -31,6 +31,7 @@ pub mod operational;
 mod pending_publication;
 pub mod private_cas;
 pub mod project_discovery;
+pub mod project_identity;
 pub mod project_materialization;
 pub mod project_observation;
 pub mod project_sync;

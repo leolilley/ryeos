@@ -4811,19 +4811,16 @@ pub(crate) fn finalize_direct_effective_program(
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine
-        .resolution_roots(
-            admission
-                .resolution_workspace()
-                .map(std::path::Path::to_path_buf),
-        )
-        .with_logical_project_root(
-            admission
-                .verified_subject()
-                .resolved
-                .logical_project_root
-                .clone(),
-        );
+    let roots = engine.resolution_roots(
+        admission
+            .resolution_workspace()
+            .map(std::path::Path::to_path_buf),
+        admission
+            .verified_subject()
+            .resolved
+            .logical_project
+            .clone(),
+    );
     // A declaring kind captures here exactly as the managed path does. A
     // direct launch dispatched as a child (`parent_thread_id`) may reuse the
     // parent's outer sealed realization set under the existing inheritance
@@ -5803,7 +5800,13 @@ pub async fn run_and_wait(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
-        &engine.resolution_roots(Some(effective_path.clone())),
+        &engine.resolution_roots(
+            Some(effective_path.clone()),
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                None,
+                &params.provenance.subject_resolution_authority(),
+            ),
+        ),
         &state.config.app_root,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
@@ -7272,7 +7275,13 @@ async fn dispatch_detached_bg_task(
         _ => None,
     };
     let roots = match ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
-        &eng_for_spawn.resolution_roots(project_root),
+        &eng_for_spawn.resolution_roots(
+            project_root,
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                None,
+                &res_for_spawn.plan_context.subject_resolution_authority,
+            ),
+        ),
         &bg_runtime_state_dir,
     ) {
         Ok(roots) => roots,
@@ -9029,7 +9038,10 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: base_provenance.logical_project_root(&resume.current_site_id),
+        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+            base_provenance.logical_project_root(&resume.current_site_id),
+            &base_provenance.subject_resolution_authority(),
+        ),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -9419,6 +9431,10 @@ async fn run_existing_recovered_thread(
             retained_admission
                 .resolution_workspace()
                 .map(std::path::Path::to_path_buf),
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                None,
+                retained_admission.resolution_subject_authority(),
+            ),
         ),
         retained_admission.resolution_subject_authority(),
         &mut selection_resolution,

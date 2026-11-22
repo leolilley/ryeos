@@ -35,7 +35,12 @@ fn descriptors() -> &'static [ServiceDescriptor] {
 /// authority deciding which services this bundle set installed.
 fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
     let refs = ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
-        &engine.resolution_roots(None),
+        &engine.resolution_roots(
+            None,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        ),
         &engine.kinds,
         ryeos_engine::kind_registry::InProcessRegistryKind::Services,
     )
@@ -44,7 +49,9 @@ fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
         .filter(|canonical| {
             let effective = engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                        ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                    ),
                     item_ref: canonical.clone(),
                     expected_kind: Some(canonical.kind.clone()),
                     project_root: None,
@@ -116,7 +123,9 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],
