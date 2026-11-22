@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T01:37:20Z:83c2a07b51cb7aa33cdddac58288435324683c654d8bbbadf5d5e99a412266cc:m6jiP0/9+cTHzF/PEFNAF+5t276isIURJayTlUjdGCPjq/aPs7CDc5s+ngueoqwWv5d5O3n6SeSPbFda/ySoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T09:46:53Z:5aa5beddabad60f2386519f69b792d0fb16e3afa6fb19e79c907bf281b61468a:Tf1GEfKp8Nynk1r0u4PkTmY+fcmi42PLPXV0ZWlTaC6ALvDx1nArDDvSKOsB2I3TGKncF8pxW9jRBcpdXvSiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -24,6 +24,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `never_retry`        | 401, 403, 404 | HTTP codes that never retry    |
 | `backoff_base_ms`    | 1000     | Exponential backoff base (ms)         |
 | `backoff_max_ms`     | 60000    | Cap on any single backoff delay (ms); must not be below `backoff_base_ms` |
+| `retry_after_max_ms` | 60000   | Longest `Retry-After` wait honoured on a retryable status; `0` ignores the header; otherwise at least `backoff_base_ms` |
 | `on_output_limit` | absent | Recovery when the provider ends a turn at its output limit; absent fails the thread |
 | `unknown_outcome_retry` | absent | Retry policy after a failure that leaves the provider outcome unknown; see below |
 | `timeout_seconds`    | 300      | Overall request timeout               |
@@ -43,6 +44,31 @@ When an API call fails with a retryable status code (429, 500, 502, 503, 504, 52
 1. Wait `min(backoff_base_ms * 2^attempt, backoff_max_ms)` milliseconds
 2. Retry the request
 3. Repeat up to `retries` times (default: 2 → 3 total attempts)
+
+A retryable response may carry a `Retry-After` header, either whole seconds or
+an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`, measured against the node's wall
+clock). A value that is negative, not a number or date, or a date not in the
+future is ignored, and a longer wait than one day counts as one day. When the
+header is present the delay becomes the larger of the backoff and the header,
+so a retry is never earlier than the provider asked. A header above
+`retry_after_max_ms` is not waited out: the run fails with the original provider
+error and the typed reason `provider_retry_after_exceeds_cap`, naming the asked
+wait and the cap. `retry_after_max_ms: 0` ignores the header entirely (it does
+not mean "no cap"). The retry decision records the header it honoured as
+`retry_after_ms`, and its `backoff_ms` is the delay actually used.
+
+A retry whose wait would not finish before the run's hard stop is not made: the
+run fails with the original error and the typed reason
+`provider_retry_exceeds_run_deadline`.
+
+A retry needs the daemon's attempt ledger to record it. On a route without
+ledger authority `retries` has no effect; when `retries` is above zero such a
+run says "provider retries unavailable: no ledger authority" in its run
+warnings and in a launch observation, instead of looking as if retries were on.
+
+The retry policy digest sealed into every retry decision covers
+`retry_after_max_ms`. A decision recorded under the earlier digest schema is
+refused by recovery with `provider_retry_policy_digest_retired`.
 
 Auth errors (401, 403) and not-found (404) are never retried.
 
