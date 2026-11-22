@@ -463,9 +463,9 @@ pub(crate) fn command_rows(
             metadata_by_ref
                 .entry(execute.to_string())
                 .or_insert_with(|| {
-                    engine
-                        .as_ref()
-                        .and_then(|engine| resolve_effective_help(app_root, engine, execute, project_path))
+                    engine.as_ref().and_then(|engine| {
+                        resolve_effective_help(app_root, engine, execute, project_path)
+                    })
                 })
                 .as_ref()
         });
@@ -917,9 +917,9 @@ fn resolve_effective_help(
         execute_ref,
         project_root,
     )
-        .ok()
-        .flatten()
-        .map(|value| ItemHelpMetadata::from_composed(&value))
+    .ok()
+    .flatten()
+    .map(|value| ItemHelpMetadata::from_composed(&value))
 }
 
 /// Build help for lifecycle commands when installed descriptors are unavailable.

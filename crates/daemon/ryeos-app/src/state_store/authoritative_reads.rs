@@ -239,12 +239,8 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db
             .require_project_head_mutation_unfenced(key.owner_key(), key.name_hash())?;
-        g.state_db.write_project_head_ref(
-            key,
-            project_snapshot_hash,
-            signer,
-            cas_mutation_guard,
-        )
+        g.state_db
+            .write_project_head_ref(key, project_snapshot_hash, signer, cas_mutation_guard)
     }
 
     pub fn advance_project_head_ref(

@@ -584,7 +584,10 @@ impl TrustStore {
             });
             entry.scope.projects.clear();
             if !named {
-                entry.scope.spaces.retain(|space| *space != SignerSpace::Project);
+                entry
+                    .scope
+                    .spaces
+                    .retain(|space| *space != SignerSpace::Project);
             }
             !entry.scope.spaces.is_empty()
         });
@@ -1788,7 +1791,11 @@ mod tests {
         ));
         // A path is not a scope.
         assert!("/work/listed".parse::<ProjectScopeEntry>().is_err());
-        assert!(format!("fp:{other}/demo").parse::<ProjectScopeEntry>().is_ok());
+        assert!(
+            format!("fp:{other}/demo")
+                .parse::<ProjectScopeEntry>()
+                .is_ok()
+        );
     }
 
     #[test]

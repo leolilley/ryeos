@@ -4895,10 +4895,8 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // admission carries one. A bundle verifier's own trust does not depend on
     // it, and a pinned verifier may legitimately state none, so there is no
     // refusal here.
-    let roots = request_engine.resolution_roots(
-        project_root.clone(),
-        plan_context.signer_project().clone(),
-    );
+    let roots = request_engine
+        .resolution_roots(project_root.clone(), plan_context.signer_project().clone());
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(

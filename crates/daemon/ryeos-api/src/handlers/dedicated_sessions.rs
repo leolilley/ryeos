@@ -11346,10 +11346,7 @@ mod tests {
         for disposition in [&OwnerDecision, &RetainedForReview] {
             let other_owner = "d".repeat(64);
             assert!(!check(disposition, &pin(&other_owner, path, &base)));
-            assert!(!check(
-                disposition,
-                &pin(owner_key, "other", &base)
-            ));
+            assert!(!check(disposition, &pin(owner_key, "other", &base)));
             assert!(!check(disposition, &pin(owner_key, path, &"c".repeat(64))));
             assert!(!check(disposition, &Discard));
         }

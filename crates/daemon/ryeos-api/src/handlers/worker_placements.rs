@@ -4498,15 +4498,14 @@ fn target_project_identity(
     owner: &str,
     target_project_path: &Path,
 ) -> Result<ryeos_state::project_identity::ProjectIdentity> {
-    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(
-        target_project_path,
-    )?
-    .with_context(|| {
-        format!(
-            "project_undeclared: target project {} declares no project name",
-            target_project_path.display()
-        )
-    })?;
+    let name =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project_path)?
+            .with_context(|| {
+                format!(
+                    "project_undeclared: target project {} declares no project name",
+                    target_project_path.display()
+                )
+            })?;
     ryeos_state::project_identity::ProjectIdentity::new(owner.to_owned(), name)
 }
 

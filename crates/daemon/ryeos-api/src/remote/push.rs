@@ -65,7 +65,9 @@ pub async fn push_snapshot_generation(
         })?;
     let tree = ProjectTree::from_value(&tree_value)?;
     require_declared_name(
-        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&local_cas, &tree)?,
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(
+            &local_cas, &tree,
+        )?,
         project_name,
     )?;
     let recovery = authority.require_recovery()?;
@@ -94,9 +96,7 @@ pub async fn push_snapshot_generation(
                 blobs_skipped: 0,
             });
         }
-        let upload_session = client
-            .objects_put(None, &project, &[], &[])
-            .await?;
+        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
         let upload_closure = collect_snapshot_upload_hashes(
             &local_cas,
             snapshot_hash,
@@ -190,7 +190,9 @@ pub async fn push_descendant_snapshot_with_session(
         })?;
     let tree = ProjectTree::from_value(&tree_value)?;
     require_declared_name(
-        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&local_cas, &tree)?,
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(
+            &local_cas, &tree,
+        )?,
         project_name,
     )?;
     let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
@@ -321,9 +323,7 @@ pub async fn push_project_ai_only(
         }
         project_root.ensure_path_binding()?;
 
-        let upload_session = client
-            .objects_put(None, &project, &[], &[])
-            .await?;
+        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
 
         let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
@@ -468,9 +468,7 @@ pub async fn push_project(
         }
         project_root.ensure_path_binding()?;
 
-        let upload_session = client
-            .objects_put(None, &project, &[], &[])
-            .await?;
+        let upload_session = client.objects_put(None, &project, &[], &[]).await?;
 
         let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
@@ -872,7 +870,10 @@ fn load_canonical_object_for_upload(
     RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)
 }
 
-fn object_put_envelope_bytes(staging_id: &str, project: &ryeos_state::project_identity::PushedProject) -> Result<usize> {
+fn object_put_envelope_bytes(
+    staging_id: &str,
+    project: &ryeos_state::project_identity::PushedProject,
+) -> Result<usize> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "staging_id": staging_id,
         "project": project,

@@ -815,7 +815,10 @@ pub fn resolve_project_binding(
 
 /// Refuse unless the local tree at `canonical` still declares `bound`. A
 /// stored binding name is never used without re-reading the declaration.
-pub fn require_bound_name(canonical: &Path, bound: &ryeos_state::project_identity::ProjectName) -> Result<()> {
+pub fn require_bound_name(
+    canonical: &Path,
+    bound: &ryeos_state::project_identity::ProjectName,
+) -> Result<()> {
     let declared = ryeos_state::project_identity::ProjectDeclaration::declared_name(canonical)?;
     if declared.as_ref() != Some(bound) {
         anyhow::bail!(

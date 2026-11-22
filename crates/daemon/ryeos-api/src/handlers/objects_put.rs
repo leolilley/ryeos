@@ -468,8 +468,10 @@ mod raw_ingress_controls {
             .is_ok()
         );
         assert!(
-            validate_raw_object_put_request(br#"{"project":{"kind":"named","name":"project"},"extra":true}"#)
-                .is_err()
+            validate_raw_object_put_request(
+                br#"{"project":{"kind":"named","name":"project"},"extra":true}"#
+            )
+            .is_err()
         );
         assert!(
             validate_raw_object_put_request(
@@ -542,7 +544,9 @@ mod raw_ingress_controls {
             "{{\"payload\":\"{}\"}}",
             "x".repeat(MAX_RAW_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!(
+            "{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+        );
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -550,7 +554,9 @@ mod raw_ingress_controls {
     fn generic_object_raw_and_canonical_ceiling_accept_exact_and_reject_one_over() {
         let value_at = |raw_len: usize| format!("\"{}\"", "x".repeat(raw_len - 2));
         let make_body = |value: String| {
-            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
+            format!(
+                "{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+            )
         };
         assert!(
             validate_raw_object_put_request(make_body(value_at(MAX_RAW_OBJECT_BYTES)).as_bytes())
@@ -575,7 +581,9 @@ mod raw_ingress_controls {
                 "🧭".repeat(astral_count),
                 "a".repeat(ascii_count)
             );
-            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
+            format!(
+                "{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+            )
         };
         let exact = make_body(MAX_RAW_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
@@ -589,7 +597,9 @@ mod raw_ingress_controls {
             "{{\"kind\":\"admitted_launch_capsule\",\"payload\":\"{}\"}}",
             "x".repeat(MAX_CAPSULE_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!(
+            "{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+        );
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -604,7 +614,9 @@ mod raw_ingress_controls {
                 "x".repeat(raw_len - prefix.len() - suffix.len()),
                 suffix
             );
-            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
+            format!(
+                "{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+            )
         };
         for kind_json in [
             "\"admitted_launch_capsule\"",
@@ -641,7 +653,9 @@ mod raw_ingress_controls {
                 "a".repeat(ascii_count),
                 suffix
             );
-            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
+            format!(
+                "{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}"
+            )
         };
         let exact = make_body(MAX_CAPSULE_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());

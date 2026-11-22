@@ -354,7 +354,9 @@ impl std::str::FromStr for ProjectScopeEntry {
             .parse::<ryeos_state::project_identity::ProjectIdentity>()
             .map(Self::Identity)
             .map_err(|error| {
-                format!("project scope `{value}` must be fp:<owner>/<name> or own:<name>: {error:#}")
+                format!(
+                    "project scope `{value}` must be fp:<owner>/<name> or own:<name>: {error:#}"
+                )
             })
     }
 }

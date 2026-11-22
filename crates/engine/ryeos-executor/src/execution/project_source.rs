@@ -624,7 +624,9 @@ pub fn current_head_logical_project(
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(
         &cas.get_object(snapshot_hash)
             .map_err(other)?
-            .ok_or_else(|| ProjectSourceError::Other(format!("snapshot {snapshot_hash} is absent")))?,
+            .ok_or_else(|| {
+                ProjectSourceError::Other(format!("snapshot {snapshot_hash} is absent"))
+            })?,
     )
     .map_err(other)?;
     let tree = ryeos_state::objects::ProjectTree::from_value(
@@ -638,13 +640,14 @@ pub fn current_head_logical_project(
             })?,
     )
     .map_err(other)?;
-    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)
-        .map_err(other)?
-        .ok_or_else(|| {
-            ProjectSourceError::Other(format!(
-                "project_undeclared: snapshot {snapshot_hash} declares no project name"
-            ))
-        })?;
+    let name =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)
+            .map_err(other)?
+            .ok_or_else(|| {
+                ProjectSourceError::Other(format!(
+                    "project_undeclared: snapshot {snapshot_hash} declares no project name"
+                ))
+            })?;
     let identity =
         ryeos_state::project_identity::ProjectIdentity::new(principal_id.to_owned(), name)
             .map_err(other)?;

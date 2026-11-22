@@ -949,7 +949,9 @@ mod tests {
         ));
 
         let current_head = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             realization: PinnedRealization::ReadOnly,
             child_policy: ChildProjectPolicy::Inherit,
         };

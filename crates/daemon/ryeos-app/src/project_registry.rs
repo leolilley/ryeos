@@ -174,9 +174,8 @@ pub fn load_registrations(
                     owner_directory.path().display()
                 )
             })?;
-            let (file, registration) =
-                read_registration(&owner_directory, &entry.name, node_key)?
-                    .with_context(|| format!("registration {file_name} vanished"))?;
+            let (file, registration) = read_registration(&owner_directory, &entry.name, node_key)?
+                .with_context(|| format!("registration {file_name} vanished"))?;
             let path = file.path().to_path_buf();
             ensure!(
                 registration.identity.owner() == owner && registration.identity.name() == &name,
@@ -253,14 +252,20 @@ pub fn live_signer_project(
     }
     let (canonical, declared) = inspect_checkout(app_root, checkout)?;
     let Some(declared) = declared else {
-        return Ok(LogicalProject::Absent(LogicalProjectAbsence::NoDeclaredName));
+        return Ok(LogicalProject::Absent(
+            LogicalProjectAbsence::NoDeclaredName,
+        ));
     };
     let identity = ProjectIdentity::new(launcher.to_owned(), declared)?;
     let registered = load_registrations(app_root, node_key)?
         .into_iter()
         .any(|loaded| {
             loaded.registration.identity == identity
-                && loaded.registration.paths.iter().any(|path| path == &canonical)
+                && loaded
+                    .registration
+                    .paths
+                    .iter()
+                    .any(|path| path == &canonical)
         });
     if registered {
         Ok(LogicalProject::Stated(identity))

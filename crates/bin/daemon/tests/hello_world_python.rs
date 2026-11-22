@@ -228,7 +228,9 @@ fn daemon_executes_python_hello_world_end_to_end() {
     let project_dir = synth_project_with_hello();
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -375,7 +377,9 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
     let project_dir = synth_project_with_bundle_local_imports();
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -509,7 +513,9 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
     let project_dir = synth_project_with_function_bundle_local_imports();
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -653,7 +659,9 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
     let project_dir = synth_project_with_hello();
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],

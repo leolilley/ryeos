@@ -103,7 +103,9 @@ fn session_context(
         .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
             let root =
                 generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                        ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+                    ),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         "config:test/presentation",
                     )?,

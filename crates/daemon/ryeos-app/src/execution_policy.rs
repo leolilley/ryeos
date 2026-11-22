@@ -533,7 +533,10 @@ mod policy_tests {
 
     #[test]
     fn local_pinned_current_head_is_daemon_owned_cow_with_retained_current_head() {
-        let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted, ryeos_state::project_identity::PushedProject::test_named("demo"));
+        let policy = ExecutionPolicy::local_pinned_current_head(
+            ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
+        );
         assert_eq!(policy.response, ExecutionResponse::Accepted);
         assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
         assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);

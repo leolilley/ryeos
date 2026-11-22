@@ -454,41 +454,39 @@ pub async fn execute_unary_forward(
 
     // 1. Push project (or no-project user-space-only push).
     let push_result = match (req.source_snapshot_hash, req.local_project_path) {
-        (Some(snapshot_hash), _) => {
-            push_snapshot_generation(
-                client,
-                &authority,
-                snapshot_hash,
-                req.remote_project_path,
-                required_project_name(req.project_name)?,
-            )
-            .await
-                .map_err(|e| {
-                    let message = format!("{e:#}");
-                    let _ = finish_sync_job_attempt_and_update_job(
-                        state,
-                        &attempt_id,
-                        FinishSyncJobAttempt {
-                            state: SyncJobAttemptState::Failed,
-                            phase: "push_failed".to_string(),
-                            error: Some(message.clone()),
-                            result: None,
-                        },
-                        &job_id,
-                        SyncJobUpdate {
-                            state: SyncJobState::Failed,
-                            phase: "push_failed".to_string(),
-                            roots: None,
-                            heads: None,
-                            uploaded_hashes: Vec::new(),
-                            fetched_hashes: Vec::new(),
-                            last_error: Some(message.clone()),
-                            result: None,
-                        },
-                    );
-                    RemoteForwardError::PushFailed(message)
-                })?
-        }
+        (Some(snapshot_hash), _) => push_snapshot_generation(
+            client,
+            &authority,
+            snapshot_hash,
+            req.remote_project_path,
+            required_project_name(req.project_name)?,
+        )
+        .await
+        .map_err(|e| {
+            let message = format!("{e:#}");
+            let _ = finish_sync_job_attempt_and_update_job(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "push_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+                &job_id,
+                SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "push_failed".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: Vec::new(),
+                    last_error: Some(message.clone()),
+                    result: None,
+                },
+            );
+            RemoteForwardError::PushFailed(message)
+        })?,
         (None, Some(proj_path)) => push_project(
             client,
             state,
@@ -529,13 +527,7 @@ pub async fn execute_unary_forward(
                 .ignore_matcher
                 .union(req.remote_ignore)
                 .map_err(|error| RemoteForwardError::PushFailed(format!("{error:#}")))?;
-            match push_no_project(
-                &authority,
-                client,
-                &transfer_ignore,
-            )
-            .await
-            {
+            match push_no_project(&authority, client, &transfer_ignore).await {
                 Ok(value) => value,
                 Err(err) => {
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -1069,9 +1061,7 @@ fn required_project_name(
     name: Option<&ryeos_state::project_identity::ProjectName>,
 ) -> Result<&ryeos_state::project_identity::ProjectName, RemoteForwardError> {
     name.ok_or_else(|| {
-        RemoteForwardError::PushFailed(
-            "a project push needs the bound project name".to_owned(),
-        )
+        RemoteForwardError::PushFailed("a project push needs the bound project name".to_owned())
     })
 }
 
@@ -1258,7 +1248,12 @@ mod tests {
     #[test]
     fn current_head_is_bound_only_from_exact_local_admission() {
         let admitted = "22".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") }, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(
+            PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
+            PinnedRealization::ReadOnly,
+        );
 
         let bound = bind_destination_execution_policy(&policy, Some(&admitted), &admitted).unwrap();
 
@@ -1300,7 +1295,12 @@ mod tests {
     fn pushed_snapshot_must_match_local_admission() {
         let admitted = "55".repeat(32);
         let pushed = "66".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") }, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(
+            PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
+            PinnedRealization::ReadOnly,
+        );
 
         assert!(matches!(
             bind_destination_execution_policy(&policy, Some(&admitted), &pushed),

@@ -232,7 +232,9 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+        ),
     );
     let item = CanonicalRef::parse("directive:test/sample").unwrap();
 

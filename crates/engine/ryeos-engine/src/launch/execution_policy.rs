@@ -718,7 +718,9 @@ mod tests {
             ],
         };
         let roots = ResolutionRoots {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,

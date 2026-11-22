@@ -468,7 +468,10 @@ mod tests {
             key.ref_path(),
             format!("projects/{}/{}/head", &OWNER[3..], key.name_hash())
         );
-        assert_eq!(ProjectHeadKey::parse_ref_path(&key.ref_path()).unwrap(), key);
+        assert_eq!(
+            ProjectHeadKey::parse_ref_path(&key.ref_path()).unwrap(),
+            key
+        );
         let identity = ProjectIdentity::new(OWNER, name).unwrap();
         assert_eq!(ProjectHeadKey::for_project(&identity), key);
         for bad in [

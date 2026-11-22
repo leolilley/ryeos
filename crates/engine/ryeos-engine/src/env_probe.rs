@@ -13,9 +13,7 @@
 
 use serde_json::{Value, json};
 
-use crate::contracts::{
-    ExecutionHints, PlanArgument, PlanContext, PlanNode, VerifiedItem,
-};
+use crate::contracts::{ExecutionHints, PlanArgument, PlanContext, PlanNode, VerifiedItem};
 use crate::engine::Engine;
 use crate::isolation::{IsolationLaunchContext, IsolationRuntime};
 

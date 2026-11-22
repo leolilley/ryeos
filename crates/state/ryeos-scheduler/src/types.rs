@@ -615,7 +615,10 @@ mod tests {
     #[test]
     fn scheduled_execution_preserves_explicit_pinned_lane() {
         let source = source_with_policy(
-            ryeos_engine::execution_contract::ExecutionPolicy::local_pinned_current_head(ryeos_engine::execution_contract::ExecutionResponse::Accepted, ryeos_state::project_identity::PushedProject::test_named("demo")),
+            ryeos_engine::execution_contract::ExecutionPolicy::local_pinned_current_head(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ryeos_state::project_identity::PushedProject::test_named("demo"),
+            ),
             Some("/project"),
         );
 

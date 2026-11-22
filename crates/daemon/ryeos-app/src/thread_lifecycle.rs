@@ -9007,7 +9007,9 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:bundle-subject-test".to_string(),
                 scopes: Vec::new(),

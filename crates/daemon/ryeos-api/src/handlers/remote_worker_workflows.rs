@@ -1774,7 +1774,12 @@ fn resolve_route(
     state: &AppState,
     remote_name: &str,
     project: &Path,
-) -> Result<(String, RemoteConfig, String, ryeos_state::project_identity::ProjectName)> {
+) -> Result<(
+    String,
+    RemoteConfig,
+    String,
+    ryeos_state::project_identity::ProjectName,
+)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local = config::local_project_identity(&canonical)?.to_owned();
     let report = config::load_remotes_report(&state.config.app_root)?;

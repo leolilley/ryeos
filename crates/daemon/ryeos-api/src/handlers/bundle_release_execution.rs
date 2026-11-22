@@ -755,9 +755,7 @@ pub(crate) async fn execute_protected_qualification(
         // The overlay copies the release source generation into a private
         // workspace; project-scoped signers are matched on the registered
         // project the generation stands for, never on that workspace.
-        logical_project: ryeos_engine::contracts::LogicalProject::Stated(
-            release_signer_identity,
-        ),
+        logical_project: ryeos_engine::contracts::LogicalProject::Stated(release_signer_identity),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

@@ -2448,10 +2448,7 @@ impl Engine {
                 })?;
 
         // Build resolution roots (system-first order)
-        let roots = self.resolution_roots(
-            project_root.clone(),
-            ctx.signer_project().clone(),
-        );
+        let roots = self.resolution_roots(project_root.clone(), ctx.signer_project().clone());
 
         tracing::debug!(item_ref = %item_ref, "resolving item");
 
@@ -4148,10 +4145,7 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let roots = self.resolution_roots(
-            project_root.clone(),
-            ctx.signer_project().clone(),
-        );
+        let roots = self.resolution_roots(project_root.clone(), ctx.signer_project().clone());
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             &ctx.subject_resolution_authority,
@@ -4200,10 +4194,7 @@ impl Engine {
                 crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
                 _ => None,
             };
-            let roots = self.resolution_roots(
-                project_root.clone(),
-                ctx.signer_project().clone(),
-            );
+            let roots = self.resolution_roots(project_root.clone(), ctx.signer_project().clone());
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
@@ -6006,7 +5997,9 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6103,7 +6096,9 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6149,7 +6144,9 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6192,7 +6189,9 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6240,7 +6239,9 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6305,7 +6306,9 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6354,7 +6357,9 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6423,7 +6428,9 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6483,7 +6490,9 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6715,7 +6724,9 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

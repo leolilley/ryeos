@@ -946,11 +946,17 @@ mod tests {
             snapshot_hash: "a".repeat(64),
         };
         let absent = LogicalProject::Absent(LogicalProjectAbsence::NotStated);
-        assert_eq!(plan_context(pinned.clone(), absent.clone()).signer_project(), &absent);
+        assert_eq!(
+            plan_context(pinned.clone(), absent.clone()).signer_project(),
+            &absent
+        );
         let identity: ryeos_state::project_identity::ProjectIdentity =
             format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
         let stated = LogicalProject::Stated(identity);
-        assert_eq!(plan_context(pinned, stated.clone()).signer_project(), &stated);
+        assert_eq!(
+            plan_context(pinned, stated.clone()).signer_project(),
+            &stated
+        );
         // A live plan states nothing unless admission established an identity.
         let unregistered = LogicalProject::Absent(LogicalProjectAbsence::NotRegistered);
         assert_eq!(

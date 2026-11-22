@@ -2058,7 +2058,9 @@ mod tests {
         };
         let base = provenance("base", &base_hash);
         let context = PlanContext {
-            logical_project: ryeos_engine::contracts::unestablished_project(&base.subject_resolution_authority()),
+            logical_project: ryeos_engine::contracts::unestablished_project(
+                &base.subject_resolution_authority(),
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.clone(),
                 scopes: Vec::new(),

@@ -60,7 +60,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // capability, then hold the shared CAS guard from closure verification
     // through signed HEAD publication and lease consumption.
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&head_key.ref_path());
+    let project_lock =
+        crate::handlers::project_apply_snapshot::project_apply_lock(&head_key.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let authority = state
         .state_store

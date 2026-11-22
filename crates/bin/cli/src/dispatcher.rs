@@ -413,7 +413,10 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError> {
     // A current-head run names the caller's own head by the name the checkout
     // declares now.
-    let current_head_name = match (&resolved.project_path, resolved.pin_current_head_at_admission) {
+    let current_head_name = match (
+        &resolved.project_path,
+        resolved.pin_current_head_at_admission,
+    ) {
         (Some(root), true) => Some(
             ryeos_state::project_identity::ProjectDeclaration::declared_name(root)
                 .map_err(|error| CliError::ProjectResolution(format!("{error:#}")))?
@@ -3011,7 +3014,10 @@ mod tests {
         assert_eq!(
             execution_policy_value(true, false, false, true, false, true),
             serde_json::to_value(
-                ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(ryeos_app::execution_policy::ExecutionResponse::Wait, ryeos_state::project_identity::PushedProject::test_named("demo"))
+                ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                    ryeos_state::project_identity::PushedProject::test_named("demo")
+                )
                 .exclude_operator_vault()
             )
             .unwrap(),

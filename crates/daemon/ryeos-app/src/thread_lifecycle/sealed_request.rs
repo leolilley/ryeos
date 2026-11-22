@@ -341,7 +341,9 @@ impl SealedResolvedItem {
         pinned_capsule_root.ensure_path_binding()?;
         let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
-            logical_project: ryeos_engine::contracts::unestablished_project(&self.subject_resolution_authority),
+            logical_project: ryeos_engine::contracts::unestablished_project(
+                &self.subject_resolution_authority,
+            ),
             canonical_ref,
             kind: self.kind.clone(),
             source_path: materialized_source,
@@ -2017,8 +2019,7 @@ impl SealedRootExecutionRequest {
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
-        rebound_plan_context.logical_project =
-            provenance.signer_project();
+        rebound_plan_context.logical_project = provenance.signer_project();
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -2032,8 +2033,7 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
-        request.resolved_item.logical_project =
-            provenance.signer_project();
+        request.resolved_item.logical_project = provenance.signer_project();
         {
             let admission = request
                 .root_admission
@@ -2045,8 +2045,7 @@ impl SealedRootExecutionRequest {
                 .verified_subject
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
-            admission.verified_subject.resolved.logical_project =
-                provenance.signer_project();
+            admission.verified_subject.resolved.logical_project = provenance.signer_project();
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current

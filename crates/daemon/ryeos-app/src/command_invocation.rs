@@ -361,9 +361,12 @@ pub fn compile_command_invocation(
         ),
         _ => None,
     };
-    let policy =
-        command_execution_policy(project_path.is_some(), current_head_name.as_ref(), &controls)
-            .map_err(Invalid)?;
+    let policy = command_execution_policy(
+        project_path.is_some(),
+        current_head_name.as_ref(),
+        &controls,
+    )
+    .map_err(Invalid)?;
     // Keep structured payload values intact; effective schema normalization is
     // performed against the selected callee by execution admission.
     Ok(CompiledCommandInvocation {

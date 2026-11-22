@@ -51,7 +51,9 @@ pub const OBJECT_NOT_IN_SCOPE: &str = "object_not_in_scope";
 pub enum ReadRoot {
     /// One of the caller's own heads, with that head's history. There is no
     /// owner field: another owner's head is not readable here.
-    ProjectHead { project: ryeos_state::project_identity::PushedProject },
+    ProjectHead {
+        project: ryeos_state::project_identity::PushedProject,
+    },
     /// A thread the caller owns.
     ThreadResult { thread_id: String },
     /// An installed bundle's exported files.

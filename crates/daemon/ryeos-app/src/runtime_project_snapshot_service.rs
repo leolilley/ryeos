@@ -500,12 +500,9 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
             &signer,
             &guard,
         ),
-        None => state.state_store.write_project_head_ref(
-            head_key,
-            &snapshot_hash,
-            &signer,
-            &guard,
-        ),
+        None => state
+            .state_store
+            .write_project_head_ref(head_key, &snapshot_hash, &signer, &guard),
     }?;
     Ok(json!({
         "kind": "snapshot_create",

@@ -1032,7 +1032,10 @@ pub struct VerifiedProjectHead {
 impl VerifiedProjectHead {
     /// The head key this ref was found under.
     pub fn key(&self) -> anyhow::Result<crate::project_identity::ProjectHeadKey> {
-        crate::project_identity::ProjectHeadKey::from_sealed(&self.principal_key, &self.project_hash)
+        crate::project_identity::ProjectHeadKey::from_sealed(
+            &self.principal_key,
+            &self.project_hash,
+        )
     }
 }
 

@@ -9728,13 +9728,8 @@ mod tests {
         let principal_snapshot_hash = "c".repeat(64);
         let deployed_snapshot_hash = "d".repeat(64);
 
-        db.write_project_head_ref(
-            &head_key,
-            &principal_snapshot_hash,
-            &signer,
-            &guard,
-        )
-        .unwrap();
+        db.write_project_head_ref(&head_key, &principal_snapshot_hash, &signer, &guard)
+            .unwrap();
         db.write_deployed_project_ref(
             &deployed_project_hash,
             &deployed_snapshot_hash,
@@ -9752,11 +9747,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert!(
-            db.read_project_head(&head_key)
-                .unwrap()
-                .is_none()
-        );
+        assert!(db.read_project_head(&head_key).unwrap().is_none());
         assert!(
             db.read_deployed_project_ref(&deployed_project_hash)
                 .unwrap()

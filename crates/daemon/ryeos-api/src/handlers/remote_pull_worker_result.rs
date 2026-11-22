@@ -172,9 +172,8 @@ impl PullIntent {
 
     /// The sealed local head, which must be the delegator's own.
     fn local_head(&self) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
-        let head = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(
-            &self.local_head_ref,
-        )?;
+        let head =
+            ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(&self.local_head_ref)?;
         if head.owner_key() != self.delegator_fingerprint {
             bail!("hosted worker-result pull local head is not the delegator's own");
         }
@@ -628,7 +627,12 @@ fn resolve_initial_route(
     state: &AppState,
     remote_name: &str,
     project: &Path,
-) -> Result<(String, RemoteConfig, String, ryeos_state::project_identity::ProjectName)> {
+) -> Result<(
+    String,
+    RemoteConfig,
+    String,
+    ryeos_state::project_identity::ProjectName,
+)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
     let report = config::load_remotes_report(&state.config.app_root)?;

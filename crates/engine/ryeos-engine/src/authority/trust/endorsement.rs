@@ -730,7 +730,13 @@ impl EndorsementIndex {
 
     /// Whether a live endorsement covers an item of `kind` with content
     /// `digest` in `project` at `now` (unix seconds).
-    pub fn covers(&self, project: &ryeos_state::project_identity::ProjectIdentity, kind: &str, digest: &str, now: u64) -> bool {
+    pub fn covers(
+        &self,
+        project: &ryeos_state::project_identity::ProjectIdentity,
+        kind: &str,
+        digest: &str,
+        now: u64,
+    ) -> bool {
         self.entries
             .iter()
             .any(|entry| &entry.body.project == project && entry.body.covers(kind, digest, now))
@@ -738,7 +744,10 @@ impl EndorsementIndex {
 
     /// The live endorsements of `project`, for a launch's signer list. `None`
     /// when none apply.
-    pub fn snapshot_for(&self, project: &ryeos_state::project_identity::ProjectIdentity) -> Option<EndorsementSnapshot> {
+    pub fn snapshot_for(
+        &self,
+        project: &ryeos_state::project_identity::ProjectIdentity,
+    ) -> Option<EndorsementSnapshot> {
         let endorsements: Vec<StoredEndorsement> = self
             .entries
             .iter()

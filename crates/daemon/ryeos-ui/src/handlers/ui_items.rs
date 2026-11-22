@@ -230,10 +230,9 @@ fn build_items_list(
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
 ) -> ItemsListResponse {
-    let roots = state.engine.resolution_roots(
-        project_path.cloned(),
-        signer_project.clone(),
-    );
+    let roots = state
+        .engine
+        .resolution_roots(project_path.cloned(), signer_project.clone());
 
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_space: BTreeMap<String, usize> = BTreeMap::new();
@@ -476,10 +475,9 @@ fn build_item_inspect(
         ))
     })?;
 
-    let roots = state.engine.resolution_roots(
-        project_path.cloned(),
-        signer_project.clone(),
-    );
+    let roots = state
+        .engine
+        .resolution_roots(project_path.cloned(), signer_project.clone());
 
     let Some(schema) = state.engine.kinds.get(&item_ref.kind) else {
         return Err(HandlerError::NotFound.into());

@@ -1020,7 +1020,9 @@ pub fn admission_signer_project(
             if ryeos_state::project_identity::ProjectHeadKey::for_project(&identity)
                 != destination.head
             {
-                anyhow::bail!("the admitted head is not the acting principal's head for {identity}");
+                anyhow::bail!(
+                    "the admitted head is not the acting principal's head for {identity}"
+                );
             }
             LogicalProject::Stated(identity)
         }
@@ -3504,7 +3506,9 @@ mod tests {
         ));
 
         let current_head = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };
@@ -3648,7 +3652,9 @@ mod tests {
             target: ryeos_app::execution_policy::ExecutionTarget::Here,
             environment: ExecutionEnvironmentPolicy::None,
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+                source: PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+                },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3745,7 +3751,9 @@ mod tests {
                     ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
             },
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+                source: PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+                },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3794,7 +3802,9 @@ mod tests {
     #[test]
     fn pinned_realization_and_metric_classes_follow_policy() {
         let read_only = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead { project: ryeos_state::project_identity::PushedProject::test_named("demo") },
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };

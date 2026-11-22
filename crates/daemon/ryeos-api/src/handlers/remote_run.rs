@@ -191,11 +191,12 @@ pub async fn handle(
         ..
     } = &req.execution_policy.project
     {
-        let bound = binding.as_ref().map(|binding| {
-            ryeos_state::project_identity::PushedProject::Named {
-                name: binding.project_name.clone(),
-            }
-        });
+        let bound =
+            binding.as_ref().map(
+                |binding| ryeos_state::project_identity::PushedProject::Named {
+                    name: binding.project_name.clone(),
+                },
+            );
         if bound.as_ref() != Some(project) {
             return Err(HandlerError::BadRequest(format!(
                 "project_name_mismatch: the current-head policy names project {project} but the binding names {}",

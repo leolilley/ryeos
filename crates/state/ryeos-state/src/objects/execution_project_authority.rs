@@ -440,12 +440,17 @@ impl ExecutionProjectAuthority {
 
     /// Seal the signer project established at admission. A projectless
     /// authority states none; nothing else may state `Projectless`.
-    pub fn with_signer_project(mut self, project: crate::project_identity::LogicalProject) -> anyhow::Result<Self> {
+    pub fn with_signer_project(
+        mut self,
+        project: crate::project_identity::LogicalProject,
+    ) -> anyhow::Result<Self> {
         match &mut self {
             Self::Projectless { .. } => {
                 if !matches!(
                     project,
-                    crate::project_identity::LogicalProject::Absent(crate::project_identity::LogicalProjectAbsence::Projectless)
+                    crate::project_identity::LogicalProject::Absent(
+                        crate::project_identity::LogicalProjectAbsence::Projectless
+                    )
                 ) {
                     anyhow::bail!("a projectless authority cannot state a project identity");
                 }
@@ -454,7 +459,9 @@ impl ExecutionProjectAuthority {
             | Self::PinnedGeneration { signer_project, .. } => {
                 if matches!(
                     project,
-                    crate::project_identity::LogicalProject::Absent(crate::project_identity::LogicalProjectAbsence::Projectless)
+                    crate::project_identity::LogicalProject::Absent(
+                        crate::project_identity::LogicalProjectAbsence::Projectless
+                    )
                 ) {
                     anyhow::bail!("a project authority cannot be projectless");
                 }
@@ -1496,7 +1503,10 @@ mod tests {
         let sealed = pinned
             .with_signer_project(LogicalProject::Stated(identity.clone()))
             .unwrap();
-        assert_eq!(sealed.signer_project(), LogicalProject::Stated(identity.clone()));
+        assert_eq!(
+            sealed.signer_project(),
+            LogicalProject::Stated(identity.clone())
+        );
         // A projectless authority states none, and nothing else is projectless.
         assert_eq!(
             ExecutionProjectAuthority::PROJECTLESS.signer_project(),

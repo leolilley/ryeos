@@ -5185,8 +5185,8 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
             }),
         )
     });
-    let registrations = ryeos_node::project_registry::load_registrations(app_root, &node_key)
-        .unwrap_or_default();
+    let registrations =
+        ryeos_node::project_registry::load_registrations(app_root, &node_key).unwrap_or_default();
     let refs_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
         .state()
         .join("refs");
@@ -5205,7 +5205,9 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
                 .iter()
                 .any(|loaded| &loaded.registration.identity == identity);
             let head = refs_root
-                .join(ryeos_state::project_identity::ProjectHeadKey::for_project(identity).ref_path())
+                .join(
+                    ryeos_state::project_identity::ProjectHeadKey::for_project(identity).ref_path(),
+                )
                 .is_file();
             !registered && !head
         })
