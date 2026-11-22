@@ -868,6 +868,37 @@ impl ExecutionProvenance {
         self.project_authority().signer_project()
     }
 
+    /// Seal the identity an admission gate established on this root
+    /// execution's authority. Only a gate that proved the identity (for
+    /// example the operator's own head at exactly this generation) calls it.
+    pub fn with_signer_project(
+        mut self,
+        project: ryeos_engine::contracts::LogicalProject,
+    ) -> anyhow::Result<Self> {
+        let authority = match &mut self {
+            Self::Projectless {
+                project_authority, ..
+            }
+            | Self::RootLiveProject {
+                project_authority, ..
+            }
+            | Self::RootPinnedGeneration {
+                project_authority, ..
+            }
+            | Self::ChildLiveProject {
+                project_authority, ..
+            }
+            | Self::ChildPinnedGeneration {
+                project_authority, ..
+            }
+            | Self::ChildImmutableWorkspaceInput {
+                project_authority, ..
+            } => project_authority,
+        };
+        *authority = authority.clone().with_signer_project(project)?;
+        Ok(self)
+    }
+
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
         match self {
             Self::Projectless {

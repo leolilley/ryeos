@@ -155,17 +155,16 @@ fn require_exact_admitted_fixed_pin(
     Ok(())
 }
 
-/// The logical project a pinned qualification may state, and the only way it
-/// is ever stated. The caller must be the node's admitted operator (checked
-/// first), and the caller's own pushed head for the canonical `project_path`
-/// must be exactly `head_snapshot_hash`. Returns the canonical project path.
-/// Every refusal is typed; none falls back to the synthetic pinned locator.
+/// The project identity a pinned qualification may state, and the only way
+/// it is ever stated. The caller must be the node's admitted operator
+/// (checked first), and the caller's own head for the name the snapshot
+/// declares must be exactly `head_snapshot_hash`. A path the caller names is
+/// a label only and never participates. Every refusal is typed.
 pub fn state_pinned_qualification_logical_project(
     state: &AppState,
     ctx: &HandlerContext,
-    project_path: &Path,
     head_snapshot_hash: &str,
-) -> Result<PathBuf, HandlerError> {
+) -> Result<ryeos_state::project_identity::ProjectIdentity, HandlerError> {
     ryeos_app::operator_authority::require_admitted_operator(state, ctx).map_err(|error| {
         HandlerError::Forbidden(format!(
             "logical_project_requires_operator: a pinned qualification states a logical project only for the node's operator: {error:#}"
@@ -174,7 +173,6 @@ pub fn state_pinned_qualification_logical_project(
     ryeos_executor::execution::project_source::current_head_logical_project(
         state,
         &ctx.fingerprint,
-        project_path,
         head_snapshot_hash,
     )
     .map_err(|error| match error {
@@ -182,7 +180,7 @@ pub fn state_pinned_qualification_logical_project(
             HandlerError::Conflict(format!("snapshot_not_current_head: {error}"))
         }
         other => {
-            HandlerError::BadRequest(format!("qualification_project_path_unresolvable: {other}"))
+            HandlerError::BadRequest(format!("qualification_project_unresolvable: {other}"))
         }
     })
 }
@@ -279,15 +277,11 @@ async fn handle_source(
         (Some(release), None) => Some(state_pinned_qualification_logical_project(
             &state,
             &ctx,
-            &release.project_path,
             &release.head_snapshot_hash,
         )?),
-        (None, Some((path, snapshot_hash))) => Some(state_pinned_qualification_logical_project(
-            &state,
-            &ctx,
-            Path::new(path),
-            snapshot_hash,
-        )?),
+        (None, Some((_label, snapshot_hash))) => Some(
+            state_pinned_qualification_logical_project(&state, &ctx, snapshot_hash)?,
+        ),
         (None, None) => None,
     };
 
@@ -331,13 +325,10 @@ async fn handle_source(
     let checkout_id = format!("qualification-{}", reservation.reserved_thread_id);
     let (project, workspace_guard, provenance, lifecycle_authority, pinned_project_snapshot) =
         if let Some(snapshot_hash) = prepared.pinned_snapshot_hash() {
-            // With no stated logical project the locator is synthesized from
-            // immutable identity. A stated project is only the gated canonical
-            // path (operator caller, own head at this snapshot); it names the
-            // logical project and is never opened as a source.
-            let display_path = stated_project
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("/ryeos/pinned-snapshots").join(snapshot_hash));
+            // The locator is always synthesized from immutable identity; a
+            // stated project is an owner+name identity the gate proved, never a
+            // path that is opened.
+            let display_path = PathBuf::from("/ryeos/pinned-snapshots").join(snapshot_hash);
             let source = ProjectSource::Snapshot {
                 hash: snapshot_hash.to_owned(),
             };
@@ -378,6 +369,17 @@ async fn handle_source(
             .map_err(|error| {
                 HandlerError::Internal(format!("qualification pinned provenance: {error:#}"))
             })?;
+            let mut contract = contract;
+            if let Some(identity) = &stated_project {
+                contract.provenance = contract
+                    .provenance
+                    .with_signer_project(ryeos_engine::contracts::LogicalProject::Stated(
+                        identity.clone(),
+                    ))
+                    .map_err(|error| {
+                        HandlerError::Internal(format!("seal the qualification project: {error:#}"))
+                    })?;
+            }
             let lifeline = project.temp_dir.clone().ok_or_else(|| {
                 HandlerError::Internal(
                     "pinned qualification snapshot lost its materialization lease".to_string(),
