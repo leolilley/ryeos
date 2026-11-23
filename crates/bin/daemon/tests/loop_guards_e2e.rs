@@ -73,6 +73,16 @@ async fn a_run_that_repeats_one_call_is_warned_then_stopped_with_a_typed_failure
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["outcome_code"], "failed", "{failed:?}");
     assert_eq!(failed[0]["has_error"], true, "{failed:?}");
+    // It carries the failure inline, so the timeline's reason (which reads
+    // `payload.error.summary` after the old runtime event's `message`) and the
+    // typed code are still there.
+    assert_eq!(failed[0]["error"]["code"], "loop_detected", "{failed:?}");
+    assert!(
+        failed[0]["error"]["summary"]
+            .as_str()
+            .is_some_and(|summary| !summary.is_empty()),
+        "{failed:?}"
+    );
 
     // Warned once, with the finding named in the input's kind.
     let inputs = chain_payloads(&rig.h, &thread_id, "cognition_in").await;
