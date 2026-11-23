@@ -610,6 +610,49 @@ async fn session_hints_keep_only_what_the_entry_names() {
 }
 
 #[tokio::test]
+async fn an_item_hint_reaches_the_seat_with_the_fields_the_shipped_entry_names() {
+    let shipped = ryeos_ui::test_support::shipped_seat_reads_record();
+    let shipped = shipped
+        .as_any()
+        .downcast_ref::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>()
+        .unwrap();
+    let entries = shipped.entries_for(&format!("route:{SESSION_ROUTE}"));
+    assert_eq!(entries.len(), 1);
+    let keep: Vec<&str> = entries[0].keep.iter().map(|path| path.text()).collect();
+    for field in ["item_ref", "digest", "revision", "change_set"] {
+        assert!(
+            keep.contains(&format!("/payload/{field}").as_str()),
+            "the shipped session entry does not keep `{field}`: {keep:?}"
+        );
+    }
+
+    let (_tmp, _owner, state, session_id, _principal) =
+        seated(&policy(vec![session_entry(json!({"keep": keep}))]), None);
+    let bus = get_ui_state(&state).unwrap().session_bus.clone();
+    let stream = open(&state, &session_id, "session.yaml", &session_id)
+        .await
+        .expect("the session stream opens");
+    let drain_task = tokio::spawn(drain(stream));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let hint = json!({
+        "item_ref": "view:acme/a",
+        "digest": "ab".repeat(32),
+        "revision": 4,
+        "change_set": "set-1",
+    });
+    bus.publish(&session_id, "item.hint", hint.clone());
+    bus.publish(
+        &session_id,
+        "thread.hint",
+        json!({"kind": "activity", "thread_ids": ["T-1"], "event_count": 3}),
+    );
+    let (frames, _) = drain_task.await.unwrap();
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert_eq!(frames[0]["name"], "item.hint");
+    assert_eq!(frames[0]["data"], hint);
+}
+
+#[tokio::test]
 async fn an_oversize_session_event_ends_the_session_stream_with_a_refusal() {
     let (_tmp, _owner, state, session_id, _principal) = seated(
         &policy(vec![session_entry(json!({"max_result_bytes": 128}))]),

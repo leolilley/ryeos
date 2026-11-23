@@ -163,6 +163,7 @@ pub(crate) fn session() -> BrowserSession {
         root_attachment_id: "fixture-shared-attachment".into(),
         presentations: vec![],
         binding_attachments: vec![crate::ui::binding::UiBindingAttachment {
+            named_items: vec!["view:test/home".to_owned()],
             binding_attachment_id: "fixture-attachment".into(),
             binding_generation: 1,
             binding_digest: "11".repeat(32),
@@ -189,6 +190,7 @@ pub(crate) fn session() -> BrowserSession {
 
 fn install_fixture_membership(session: &mut BrowserSession) {
     let shared = crate::ui::binding::UiBindingAttachment {
+        named_items: Vec::new(),
         binding_attachment_id: "fixture-shared-attachment".into(),
         binding_generation: 2,
         binding_digest: "33".repeat(32),
@@ -366,6 +368,7 @@ pub(crate) fn fixture_attachment(
     effective_surface: serde_json::Value,
 ) -> crate::ui::binding::UiBindingAttachment {
     crate::ui::binding::UiBindingAttachment {
+        named_items: Vec::new(),
         binding_attachment_id: id.to_string(),
         binding_generation: generation,
         binding_digest: digest.to_string(),
