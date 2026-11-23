@@ -27,6 +27,32 @@ for features in "" scheduling model-provider-setup scheduling,model-provider-set
     check ryeosd "$features" || status=1
     check ryeos-cli "$features" || status=1
 done
+# Lillux's `test-support` feature carries test-only controller launch
+# (`spawn_controller_with_inherited_document`). No package that builds a
+# binary may resolve it through a normal or build edge; dev-dependency edges
+# and test-only feature chains of library crates are not shipped and are not
+# followed here.
+check_lillux() {
+    local package="$1" tree
+    tree="$(cargo tree --locked -p "$package" --edges normal,build --prefix none \
+        --format '{p} [{f}]' -i lillux 2>/dev/null || true)"
+    if grep -E '^lillux v' <<<"$tree" | grep -q 'test-support'; then
+        echo "lillux test-support resolved through the normal edges of $package:" >&2
+        grep -E '^lillux v' <<<"$tree" | sort -u >&2
+        return 1
+    fi
+    echo "ok: $package resolves no lillux test-support"
+}
+binary_packages="$(cargo metadata --locked --no-deps --format-version 1 \
+    | python3 -c '
+import json, sys
+for package in json.load(sys.stdin)["packages"]:
+    if any("bin" in target["kind"] for target in package["targets"]):
+        print(package["name"])
+')"
+for package in $binary_packages; do
+    check_lillux "$package" || status=1
+done
 check ryeosd latency-profiling || status=1
 check ryeosd scheduling,model-provider-setup,latency-profiling || status=1
 exit "$status"
