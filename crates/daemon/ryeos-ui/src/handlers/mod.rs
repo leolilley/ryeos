@@ -47,6 +47,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_sessions_admin::REVOKE_DESCRIPTOR,
     ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
+    ui_session_attachments::REVISE_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,
     ui_field_definition::DESCRIPTOR,

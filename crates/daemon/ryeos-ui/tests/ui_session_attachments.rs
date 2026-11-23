@@ -195,3 +195,46 @@ async fn surface_open_requires_existing_presentation_producer_and_rejects_browse
     assert_eq!(after.attachments.len(), 1);
     assert!(after.presentations.is_empty());
 }
+
+fn revise_request(coordinate: &BindingAttachmentCoordinate) -> serde_json::Value {
+    let mut value = request(coordinate);
+    value["presentation_id"] = serde_json::json!("11111111-1111-4111-8111-111111111111");
+    value
+}
+
+#[tokio::test]
+async fn revise_refuses_the_root_and_a_foreign_or_unowned_attachment() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let (owner_id, owner_ctx) = activate(&state, context("surface:ryeos/ui/base"));
+    let root = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&owner_id)
+        .map(|session| {
+            session
+                .attachments
+                .get(&session.root_attachment_id)
+                .unwrap()
+                .coordinate()
+        })
+        .unwrap();
+    let refused = (ryeos_ui::handlers::ui_session_attachments::REVISE_DESCRIPTOR.handler)(
+        revise_request(&root),
+        owner_ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await;
+    assert!(format!("{:#}", refused.unwrap_err()).contains("surface_attachment_immutable"));
+
+    let coordinate = secondary_attachment(&state, &owner_id);
+    let (_other_id, other_ctx) = activate(&state, context("surface:ryeos/ui/base"));
+    for ctx in [other_ctx, owner_ctx] {
+        let result = (ryeos_ui::handlers::ui_session_attachments::REVISE_DESCRIPTOR.handler)(
+            revise_request(&coordinate),
+            ctx,
+            Arc::new(state.clone()),
+        )
+        .await;
+        assert!(result.is_err(), "no presentation owns this attachment");
+    }
+}

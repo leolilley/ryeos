@@ -37,9 +37,9 @@ use ryeos_client_base::ui::{
 use serde_json::{Value, json};
 
 use crate::api::{
-    ATTACHMENT_DETACH_PATH, INVOCATION_DISPATCH_PATH, SEAT_OPEN_PATH, SEAT_TRANSFER_PATH,
-    detach_request, dispatch_request, observe_destination_request, transfer_contact_request,
-    transfer_prepare_request,
+    ATTACHMENT_DETACH_PATH, ATTACHMENT_REVISE_PATH, INVOCATION_DISPATCH_PATH, SEAT_OPEN_PATH,
+    SEAT_TRANSFER_PATH, detach_request, dispatch_request, observe_destination_request,
+    revise_request, transfer_contact_request, transfer_prepare_request,
 };
 use crate::codec::decode_strict;
 use crate::documents::DocumentOffers;
@@ -118,6 +118,7 @@ fn is_mutation(kind: &RyeOsEffectKind) -> bool {
             | RyeOsEffectKind::InvokePresentationOperation { .. }
             | RyeOsEffectKind::ReplaceSession { .. }
             | RyeOsEffectKind::ReleaseBindingAttachment { .. }
+            | RyeOsEffectKind::ReviseBindingAttachment { .. }
     )
 }
 
@@ -129,6 +130,9 @@ pub fn failure_result(effect: &RyeOsEffect, error: &RuntimeError) -> RyeOsEffect
             RyeOsEffectKind::ReplaceSession { .. } => "session_replacement_outcome_unknown",
             RyeOsEffectKind::ReleaseBindingAttachment { .. } => {
                 "attachment_release_outcome_unknown"
+            }
+            RyeOsEffectKind::ReviseBindingAttachment { .. } => {
+                "attachment_revision_outcome_unknown"
             }
             _ => "invocation_outcome_unknown",
         };
@@ -322,6 +326,26 @@ async fn run<P: Platform>(
                 binding_digest,
             )?;
             let data = post(platform, ATTACHMENT_DETACH_PATH, encoded).await?;
+            Ok((RyeOsEffectResultKind::BrowserOnly, Some(data)))
+        }
+        RyeOsEffectKind::ReviseBindingAttachment {
+            presentation_id,
+            binding_attachment_id,
+            binding_generation,
+            binding_digest,
+        } => {
+            let producer = require_producer(
+                producer,
+                "attachment revision requires an acknowledged active presentation producer",
+            )?;
+            let encoded = revise_request(
+                &producer,
+                presentation_id,
+                binding_attachment_id,
+                *binding_generation,
+                binding_digest,
+            )?;
+            let data = post(platform, ATTACHMENT_REVISE_PATH, encoded).await?;
             Ok((RyeOsEffectResultKind::BrowserOnly, Some(data)))
         }
         RyeOsEffectKind::ReplaceSession {
