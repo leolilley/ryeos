@@ -5186,7 +5186,7 @@ mod tests {
             snapshot_hash: current.to_owned(),
             realization: PinnedProjectRealization::Cow {
                 terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                    owner_component: "a".repeat(64),
+                    owner_component: format!("pid-v1-{}", "a".repeat(64)),
                     project_hash: "b".repeat(64),
                     expected_hash: base.to_owned(),
                 },
