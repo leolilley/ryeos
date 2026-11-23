@@ -116,6 +116,15 @@ pub enum RyeOsEffectKind {
         binding_generation: u64,
         binding_digest: String,
     },
+    /// Ask the daemon to recompile one exact non-root attachment from its own
+    /// origin and publish the successor beside it. The answer names the
+    /// successor; swapping it in is a separate journalled composition request.
+    ReviseBindingAttachment {
+        presentation_id: String,
+        binding_attachment_id: String,
+        binding_generation: u64,
+        binding_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

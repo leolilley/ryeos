@@ -180,6 +180,35 @@ async fn length_finish_reason_streams_and_non_streams() {
 }
 
 #[tokio::test]
+async fn a_step_with_no_text_and_no_calls_is_an_empty_stop_and_finish_reasons_pass_through() {
+    let stub = serve(
+        "steps:\n  - { reasoning: thinking }\n  - { finish_reason: content_filter }\n  - {}\n",
+    )
+    .await;
+    // Reasoning only: no text, no calls, a normal stop.
+    let frames = data_frames(&post(&stub, json!({"stream": true})).await);
+    let delta = |frame: &Value| frame["choices"][0]["delta"].clone();
+    assert!(frames.iter().all(|frame| delta(frame)["content"].is_null()));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| delta(frame)["tool_calls"].is_null())
+    );
+    assert_eq!(
+        frames.last().unwrap()["choices"][0]["finish_reason"],
+        "stop"
+    );
+    // A withheld reply: the finish reason passes through.
+    let withheld = json_body(&post(&stub, json!({})).await);
+    assert_eq!(withheld["choices"][0]["finish_reason"], "content_filter");
+    assert!(withheld["choices"][0]["message"]["content"].is_null());
+    // A step with nothing at all is an empty non-streamed stop.
+    let empty = json_body(&post(&stub, json!({})).await);
+    assert_eq!(empty["choices"][0]["finish_reason"], "stop");
+    assert!(empty["choices"][0]["message"]["tool_calls"].is_null());
+}
+
+#[tokio::test]
 async fn mid_stream_cut_aborts_without_done_or_chunk_terminator() {
     let stub = serve("steps:\n  - text: abcdefghij\n    cut_after_chunks: 2\n    stream: { text_chunk_bytes: 2 }\n").await;
     let raw = post(&stub, json!({"stream": true})).await;

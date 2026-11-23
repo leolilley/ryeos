@@ -366,6 +366,10 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
 /// marker the last reply matched.
 const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
 
+/// Code that starts the failure text of a run whose empty replies the
+/// provider's signed policy could not correct.
+const EMPTY_REPLY_ERROR_CODE: &str = "empty_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -526,6 +530,53 @@ fn deadline_stop_result(
 /// stable reason.
 fn tool_error_body(code: &str, message: &str) -> String {
     json!({"error": {"code": code, "message": message}}).to_string()
+}
+
+/// What the model reads of a dispatch answer.
+#[derive(Debug, PartialEq)]
+enum ModelView<'a> {
+    /// Not a completion record: rendered as it arrived.
+    Whole,
+    /// The completion record of a tool that succeeded: the tool's own result.
+    Result(&'a Value),
+    /// A succeeded record that lists artifacts, which the model must still see
+    /// beside the result.
+    ResultWithArtifacts(Value),
+    /// The completion record of a tool that failed: the error body.
+    Failed(String),
+}
+
+/// Reads a dispatch answer as the model should. A subprocess tool is answered
+/// with its completion record `{outcome_code, result, error, artifacts}`; the
+/// model reads the tool's result on success and the standard error body on
+/// failure, never the record's own bookkeeping. A record that reports no
+/// outcome and no error is a retained-effect replay, which is a success.
+fn model_view(response_result: &Value) -> ModelView<'_> {
+    let Some(record) = response_result.as_object() else {
+        return ModelView::Whole;
+    };
+    if !(record.contains_key("outcome_code") && record.contains_key("result")) {
+        return ModelView::Whole;
+    }
+    let error = record.get("error").filter(|error| !error.is_null());
+    let outcome = record.get("outcome_code").filter(|code| !code.is_null());
+    if !(crate::tool_images::completion_succeeded(record) || (outcome.is_none() && error.is_none()))
+    {
+        let code = outcome.and_then(Value::as_str).unwrap_or("tool_failed");
+        let message = match error {
+            Some(Value::String(text)) => text.clone(),
+            Some(other) => other.to_string(),
+            None => format!("the tool ended with outcome {code}"),
+        };
+        return ModelView::Failed(tool_error_body(code, &message));
+    }
+    let result = &record["result"];
+    match record.get("artifacts") {
+        Some(Value::Array(artifacts)) if !artifacts.is_empty() => {
+            ModelView::ResultWithArtifacts(json!({"result": result, "artifacts": artifacts}))
+        }
+        _ => ModelView::Result(result),
+    }
 }
 
 fn callback_error_envelope(error: &ryeos_runtime::callback::CallbackError) -> String {
@@ -836,6 +887,13 @@ pub struct Runner {
     /// Malformed replies in a row that were corrected. Derived from the
     /// record on resume.
     consecutive_malformed_replies: u32,
+    /// Empty replies in a row that were corrected. Derived from the record on
+    /// resume.
+    consecutive_empty_replies: u32,
+    /// Whether the latest recorded reply ended at a normal stop finish. The
+    /// empty-reply correction applies only then: a content-filter, unknown or
+    /// output-limit finish is a different condition and is never nudged past.
+    last_reply_stopped: bool,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     /// The provider turn a restart cut. Set on resume of an unfinished
@@ -1965,6 +2023,8 @@ impl Runner {
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
             consecutive_malformed_replies: 0,
+            consecutive_empty_replies: 0,
+            last_reply_stopped: false,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             restart_cut_turn: None,
@@ -2036,6 +2096,8 @@ impl Runner {
         let guard_history = resume.guard_history;
         let trailing_length_turns = resume.trailing_length_turns;
         let trailing_malformed_replies = resume.trailing_malformed_replies;
+        let trailing_empty_replies = resume.trailing_empty_replies;
+        let last_final_stopped = resume.last_final_stopped;
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
         let refused_code = resume.refused_code.clone();
@@ -2147,6 +2209,8 @@ impl Runner {
         runner.refused_code = refused_code;
         runner.resume_summary_trigger = resume_summary_trigger;
         runner.consecutive_malformed_replies = trailing_malformed_replies;
+        runner.consecutive_empty_replies = trailing_empty_replies;
+        runner.last_reply_stopped = last_final_stopped;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -3994,6 +4058,9 @@ impl Runner {
                             } else {
                                 0
                             };
+                            self.last_reply_stopped = crate::directive::normalize_finish_reason(
+                                resp.finish_reason.as_deref(),
+                            ) == FinishReason::Stop;
                             self.messages.push(resp.message.clone());
                             if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
@@ -4588,6 +4655,7 @@ impl Runner {
                         Some(msg) => {
                             if msg.has_tool_calls() {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -4629,6 +4697,7 @@ impl Runner {
                                 }
                             } else if self.consecutive_length_turns > 0 {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -4682,6 +4751,7 @@ impl Runner {
                                 // another turn is taken within the policy's
                                 // bound and the turn limit. Otherwise the run
                                 // fails, and the reply is never the result.
+                                self.consecutive_empty_replies = 0;
                                 let streak = self.consecutive_malformed_replies.saturating_add(1);
                                 tracing::warn!(
                                     turn,
@@ -4712,6 +4782,9 @@ impl Runner {
                                         self.messages.pop();
                                         self.messages.push(ProviderMessage::user(policy.message));
                                         self.consecutive_malformed_replies = streak;
+                                        warnings.push(format!(
+                                            "malformed reply corrected: turn {turn}, {streak} in a row"
+                                        ));
                                         State::CheckingLimits
                                     }
                                 } else {
@@ -4722,8 +4795,64 @@ impl Runner {
                                         ),
                                     }
                                 }
+                            } else if let Some(policy) =
+                                self.provider_config.empty_replies.clone().filter(|_| {
+                                    self.last_reply_stopped
+                                        && crate::directive::is_empty_reply(&msg)
+                                })
+                            {
+                                // A normal stop with no tool call and no text
+                                // beyond whitespace (a reply holding only
+                                // reasoning counts) is empty. The reply is
+                                // dropped from the conversation, the policy's
+                                // message takes its place, and another turn is
+                                // taken within the policy's bound and the turn
+                                // limit. Other finishes (output limit, content
+                                // filter, unknown) never reach here.
+                                self.consecutive_malformed_replies = 0;
+                                let streak = self.consecutive_empty_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is empty"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::empty_reply_kind(turn, streak),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical empty_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_empty_replies = streak;
+                                        warnings.push(format!(
+                                            "empty reply corrected: turn {turn}, {streak} in a row"
+                                        ));
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{EMPTY_REPLY_ERROR_CODE}: the provider's reply was empty and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -4749,6 +4878,7 @@ impl Runner {
                                     State::Finalizing { result: content }
                                 }
                             } else {
+                                self.consecutive_empty_replies = 0;
                                 State::CheckingContinuation
                             }
                         }
@@ -6132,15 +6262,30 @@ impl Runner {
             return Self::rendered_error_envelope(tool_name, tool_interrupted_envelope());
         }
         // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
-        // the wrapping `thread` snapshot. Without this, the LLM saw the whole
-        // {thread, result} envelope and the child-thread metadata leaked into
-        // every tool-result message.
-        let raw_bytes = serde_json::to_vec(response_result).unwrap_or_else(|e| {
+        // the wrapping `thread` snapshot, and, for a subprocess tool, never
+        // its completion record. Without this the LLM saw the whole record
+        // and imitated its envelope in its own text.
+        let artifacts_view;
+        let (shown, may_hold_parts) = match model_view(response_result) {
+            ModelView::Failed(body) => return Self::rendered_error_envelope(tool_name, body),
+            ModelView::Whole => (response_result, true),
+            ModelView::Result(result) => (result, true),
+            ModelView::ResultWithArtifacts(view) => {
+                artifacts_view = view;
+                (&artifacts_view, false)
+            }
+        };
+        let raw_bytes = serde_json::to_vec(shown).unwrap_or_else(|e| {
             tracing::warn!("failed to serialize dispatch result: {e}");
             Vec::new()
         });
         let raw_size = raw_bytes.len() as u64;
-        let parts = match crate::tool_images::parse_envelope(response_result) {
+        let envelope = if may_hold_parts {
+            crate::tool_images::parse_envelope(response_result)
+        } else {
+            crate::tool_images::Envelope::NotParts
+        };
+        let parts = match envelope {
             crate::tool_images::Envelope::NotParts => None,
             crate::tool_images::Envelope::Invalid(message) => {
                 return Self::rendered_error_envelope(
@@ -7804,6 +7949,167 @@ mod tests {
         assert_eq!(payload.guard.dropped_images.len(), 3);
     }
 
+    fn failed_body(record: Value) -> Value {
+        match model_view(&record) {
+            ModelView::Failed(body) => serde_json::from_str(&body).expect("error body is JSON"),
+            other => panic!("expected a failed view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_answer_that_is_not_a_completion_record_is_rendered_whole() {
+        for answer in [
+            json!({"seconds_left": 12}),
+            json!({"outcome_code": "exit:0"}),
+            json!({"result": {"ok": true}}),
+            json!("text"),
+            json!([1, 2]),
+        ] {
+            assert_eq!(model_view(&answer), ModelView::Whole, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_successful_record_shows_the_tools_own_result() {
+        for outcome in ["success", "exit:0"] {
+            let record = json!({
+                "outcome_code": outcome,
+                "result": {"ok": true, "n": 3},
+                "error": null,
+                "artifacts": [],
+            });
+            assert_eq!(
+                model_view(&record),
+                ModelView::Result(&json!({"ok": true, "n": 3}))
+            );
+        }
+        // A string result stays a JSON string, and no result is `null`.
+        let text = json!({"outcome_code": "exit:0", "result": "plain", "error": null});
+        assert_eq!(model_view(&text), ModelView::Result(&json!("plain")));
+        let none = json!({"outcome_code": "exit:0", "result": null, "error": null});
+        assert_eq!(
+            serde_json::to_string(match model_view(&none) {
+                ModelView::Result(value) => value,
+                other => panic!("{other:?}"),
+            })
+            .unwrap(),
+            "null"
+        );
+        // A retained-effect replay reports neither outcome nor error.
+        let replay =
+            json!({"outcome_code": null, "result": {"x": 1}, "error": null, "artifacts": []});
+        assert_eq!(model_view(&replay), ModelView::Result(&json!({"x": 1})));
+    }
+
+    #[test]
+    fn a_successful_tool_whose_own_result_has_an_error_key_is_still_a_success() {
+        let record = json!({
+            "outcome_code": "exit:0",
+            "result": {"error": {"status": 500, "body": "upstream said no"}},
+            "error": null,
+            "artifacts": [],
+        });
+        assert_eq!(
+            model_view(&record),
+            ModelView::Result(&json!({"error": {"status": 500, "body": "upstream said no"}}))
+        );
+    }
+
+    #[test]
+    fn a_result_parts_result_is_still_recognised_inside_a_successful_record() {
+        let record = json!({
+            "outcome_code": "exit:0",
+            "result": {"result_parts": [{"type": "text", "text": "hi"}]},
+            "error": null,
+            "artifacts": [],
+        });
+        assert!(matches!(model_view(&record), ModelView::Result(_)));
+        assert_eq!(
+            crate::tool_images::parse_envelope(&record),
+            crate::tool_images::Envelope::Parts(vec![crate::tool_images::EnvelopePart::Text(
+                "hi".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn listed_artifacts_stay_visible_and_an_empty_list_is_dropped() {
+        let artifacts = json!([{"artifact_type": "file", "uri": "cas://abc"}]);
+        let listed = json!({
+            "outcome_code": "exit:0",
+            "result": {"ok": true},
+            "error": null,
+            "artifacts": artifacts,
+        });
+        assert_eq!(
+            model_view(&listed),
+            ModelView::ResultWithArtifacts(json!({"result": {"ok": true}, "artifacts": artifacts}))
+        );
+        let absent = json!({"outcome_code": "exit:0", "result": 1, "error": null});
+        assert_eq!(model_view(&absent), ModelView::Result(&json!(1)));
+    }
+
+    #[test]
+    fn a_failed_record_shows_the_standard_error_body() {
+        // A runtime child's failure carries its error as text.
+        assert_eq!(
+            failed_body(json!({
+                "outcome_code": "failed", "result": null, "error": "boom", "artifacts": []
+            })),
+            json!({"error": {"code": "failed", "message": "boom"}})
+        );
+        // A subprocess failure carries an object; it becomes the message text.
+        let exit = json!({"exit_code": 3, "stdout": "", "stderr": "Traceback"});
+        assert_eq!(
+            failed_body(json!({
+                "outcome_code": "exit:3", "result": null, "error": exit, "artifacts": []
+            })),
+            json!({"error": {"code": "exit:3", "message": exit.to_string()}})
+        );
+        // A soft failure exits 0 but reports the failure in its error object.
+        let soft = json!({"exit_code": 0, "soft_failure": true, "stdout": "{}", "stderr": "bad"});
+        assert_eq!(
+            failed_body(json!({
+                "outcome_code": "exit:0", "result": {"success": false}, "error": soft, "artifacts": []
+            })),
+            json!({"error": {"code": "exit:0", "message": soft.to_string()}})
+        );
+        // A failure outcome with no error text gets a fixed message.
+        assert_eq!(
+            failed_body(json!({
+                "outcome_code": "timeout", "result": null, "error": null, "artifacts": []
+            })),
+            json!({"error": {"code": "timeout", "message": "the tool ended with outcome timeout"}})
+        );
+        // No outcome code but an error: the code is the generic one.
+        assert_eq!(
+            failed_body(json!({
+                "outcome_code": null, "result": null, "error": "bad", "artifacts": []
+            })),
+            json!({"error": {"code": "tool_failed", "message": "bad"}})
+        );
+    }
+
+    #[test]
+    fn a_failed_record_is_an_error_result_the_result_guard_never_sees() {
+        let record = json!({
+            "outcome_code": "exit:1", "result": null, "error": {"exit_code": 1}, "artifacts": []
+        });
+        let ModelView::Failed(body) = model_view(&record) else {
+            panic!("expected a failed view");
+        };
+        let first = Runner::rendered_error_envelope("t", body.clone());
+        assert_eq!(first.status, ToolResultStatus::Error);
+        assert_eq!(first.duplicate_of, None);
+        assert!(!first.truncated);
+        first.payload(&"a".repeat(64), "call-1").validate().unwrap();
+        // The same failure twice reads the same: the loop guards hash this
+        // text, and a repeated failure must keep repeating it.
+        let second = Runner::rendered_error_envelope("t", body);
+        assert_eq!(first.content, second.content);
+        assert_eq!(second.duplicate_of, None);
+    }
+
     #[test]
     fn error_envelopes_are_bounded_and_retain_honest_metadata() {
         let small = Runner::rendered_error_envelope("t", "{\"error\":\"no\"}".to_string());
@@ -8057,6 +8363,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8140,6 +8447,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8199,6 +8507,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8257,6 +8566,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -8330,6 +8640,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -8508,6 +8819,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8586,6 +8898,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8661,6 +8974,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8720,6 +9034,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -9959,6 +10274,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

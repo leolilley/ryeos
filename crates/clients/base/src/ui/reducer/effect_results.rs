@@ -124,6 +124,25 @@ impl RyeOsCore {
             return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
+        if let RyeOsEffectKind::ReviseBindingAttachment {
+            binding_attachment_id,
+            ..
+        } = &expected
+        {
+            let data = if result.ok { result.data } else { None };
+            self.finish_attachment_revision(binding_attachment_id, data);
+            return Vec::new();
+        }
+
+        if !result.ok
+            && result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "ui_binding_stale")
+        {
+            self.note_stale_effect(&expected);
+        }
+
         if result.ok
             && let RyeOsEffectKind::ReleaseBindingAttachment {
                 binding_attachment_id,
@@ -1228,6 +1247,9 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
             RyeOsEffectResultKind::BrowserOnly
         ) | (
             RyeOsEffectKind::ReleaseBindingAttachment { .. },
+            RyeOsEffectResultKind::BrowserOnly
+        ) | (
+            RyeOsEffectKind::ReviseBindingAttachment { .. },
             RyeOsEffectResultKind::BrowserOnly
         )
     )

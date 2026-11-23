@@ -69,6 +69,7 @@ pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
 pub mod items_effective;
+pub mod items_revised;
 pub mod launch_cancel;
 pub mod launch_status;
 pub mod maintenance_gc;
@@ -357,6 +358,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     endorsements::RECORD,
     endorsements::REVOKE,
     endorsements::LIST,
+    items_revised::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,
     remote_delegation::REVOKE,

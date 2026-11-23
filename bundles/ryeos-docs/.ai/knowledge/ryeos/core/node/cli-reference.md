@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T01:34:41Z:4e2075d0da919ffd74fde008d3d0a84b2b3edc15eb674c71d10d7948c0efdb5c:hwlqaJPbwOu5PyG7+Z9dpJjq4SYZfzBu2xyJMj3dau7O/eH74tB3v0wYxndRjtkiaIaR5il/mY4m3zMMBUUEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:33:07Z:b6b5ce058bd3c5f4e2c265df7133fe7925fcbe3630146d5b4bec6587ad2b37c9:eaoxwrUu5AhWqrGIk8AY8LMxG9cMZK1DQ5QjCt/N7s8bZiJJCxpTYzLJl+XNPEcVWBApA+Cn5BpqKvUb/KtgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1004,8 +1004,9 @@ the operator key inside the CLI and submitted to the running node; see
 
 | Verb | Effect |
 |---|---|
-| `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `fp:<operator>/<declared name>` (printed before signing) |
+| `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `pid:v1:<owner>/<declared name>` with the operator's principal as owner (printed before signing) |
 | `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes when given |
+| `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |
 
@@ -1016,8 +1017,8 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 
 | Verb | Effect |
 |---|---|
-| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project fp:<owner>/<name>\|own:<name>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope; project entries are owner+name identities, never paths |
-| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project fp:<owner>/<name>\|own:<name>]... [--any-project]` | Replace a signer's scope. Adding the project space needs `--project` or `--any-project`; leaving it drops the projects. For an authoring key it takes no flags and restores the authoring scope; endorsements, not scope, trust what it signs |
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project pid:v1:<owner>/<name>\|own:<name>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope; project entries are owner+name identities, never paths |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project pid:v1:<owner>/<name>\|own:<name>]... [--any-project]` | Replace a signer's scope. Adding the project space needs `--project` or `--any-project`; leaving it drops the projects. For an authoring key it takes no flags and restores the authoring scope; endorsements, not scope, trust what it signs |
 | `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
 | `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
 | `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |
@@ -1036,14 +1037,14 @@ Each change appends a node-signed, hash-chained key event under
 
 | Verb | Effect |
 |---|---|
-| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/manifest.yaml` must carry the name (its top-level `name:`), and `--name` defaults to it and must equal it. The owner defaults to the node's operator and is never the node key or the authoring key |
-| `ryeos project unregister <path> [--name <name>] [--owner fp:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
+| `ryeos project register <path> [--name <name>] [--owner pid:v1:<hex>]` | Register a live checkout under `pid:v1:<owner>/<name>`. The checkout's `.ai/manifest.yaml` must carry the name (its top-level `name:`), and `--name` defaults to it and must equal it. The owner defaults to the node's operator and is never the node key or the authoring key |
+| `ryeos project unregister <path> [--name <name>] [--owner pid:v1:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
 
 Both are signed offline operations (`node.project.register`,
 `node.project.unregister`; local signer only) and refuse on a running node with
 `node_running_trust_change`. A path that is `/`, the node app root, an ancestor
 of it or inside it is refused. Each registration is a node-signed record at
-`<app_root>/.ai/node/projects/<owner-hex>/<name>.yaml` listing the canonical
+`<app_root>/.ai/node/projects/pid-v1-<hex>/<name>.yaml` listing the canonical
 checkout paths. Refusal codes: `project_manifest_missing`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
@@ -1051,13 +1052,14 @@ checkout paths. Refusal codes: `project_manifest_missing`, `project_name_mismatc
 A registration is what lets a live checkout state its project identity: a run
 launched from a registered checkout, by the registering owner holding
 `ryeos.write.project.live`, whose tree still declares the name, states
-`fp:<owner>/<name>`. Registration matters only for signers scoped to specific
+`pid:v1:<owner>/<name>`. Registration matters only for signers scoped to specific
 projects; an unscoped signer is trusted in every checkout. See
 [Signing and Trust](../signing.md).
 
-#### Owner+name trust cut (operator note)
+#### Owner+name trust cut (epoch 143 operator note)
 
-This build keys project trust and pushed heads by `fp:<owner>/<name>`.
+The epoch 143 build keyed project trust and pushed heads by `fp:<owner>/<name>`;
+epoch 144 replaces the key owner with a principal (see the epoch 144 note above).
 
 Before installing it, on the old build, run `ryeos trust list` on every node
 and re-scope any signer record that lists project paths, for example

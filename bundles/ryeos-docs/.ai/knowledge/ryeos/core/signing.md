@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T00:05:35Z:d1e0eeb56040f6a1d23a96d89fc7a215a81660acb1be001ca1308dc777ea4beb:DyFMxf9KT7y20xJkhE/WAXuo9h8DJkuKz6/KR60OpCYcNX0J/P9huN9wmOcMrZfpaiSulQbSQGu3D4CabdASCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:33:07Z:7d9764b6cc1d9ad653507dea3ad991140664ecee6962f80d1f123a12652aed76:zFRbIxvNN+0vOeHHKg/sttuEP2028n+s7vvgqZZNpM0aV2phponOE1Abnjy2ANM9joJR4fAAmeFH7q5PcbSbDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -196,7 +196,7 @@ A record carries the signer's fingerprint and public key, a label, and:
 | Field | Values |
 |---|---|
 | `role` | `publisher`, `operator`, `project_author`, `authoring` |
-| `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (owner+name identities `fp:<owner>/<name>` or `own:<name>`; empty is unscoped) |
+| `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (owner+name identities `pid:v1:<owner>/<name>` or `own:<name>`; empty is unscoped) |
 | `status` | `active`, `retired`, `revoked` |
 
 Defaults: a publisher is scoped to the bundle space for every kind; the
@@ -207,7 +207,7 @@ never decides trust, so items it signs are untrusted until an operator endorses
 them (see [Endorsements](#endorsements)).
 
 `scope.projects` names projects by owner+name identity, never by path. An
-entry is `fp:<owner>/<name>` (a named owner) or `own:<name>` (the signer's own
+entry is `pid:v1:<owner>/<name>` (a named owner principal) or `own:<name>` (the signer's own
 key as owner). A project's name is the `name:` of its `.ai/manifest.yaml` (the same name its
 items are namespaced under; renaming a project means changing that name and
 registering the checkout again); the manifest's signature plays no part in
@@ -231,7 +231,7 @@ project context, identified or not. Registration matters only for scoped
 signers. `ryeos node doctor` lists unscoped project-space signers other than the
 operator and the authoring key under `unscoped_project_signers`.
 
-`ryeos trust scope <fp> --project fp:<owner>/<name>` (or `own:<name>`) replaces
+`ryeos trust scope <fp> --project pid:v1:<owner>/<name>` (or `own:<name>`) replaces
 the list; `ryeos trust scope <fp> --any-project` clears it. Adding the project
 space needs one of the two, so a scope never becomes all-projects by accident;
 a scope that leaves the project space drops its projects. A signer record
@@ -398,7 +398,7 @@ were.
 | Form | Names | Covers |
 |---|---|---|
 | per-change | the exact items: ref, kind and the digest of the signed bytes after the signature line | those bytes only; one changed byte returns the item to `untrusted_project` |
-| standing | kinds within one project (`fp:<operator>/<name>`), optionally until a time | whatever the authoring key signs of those kinds where that identity is established |
+| standing | kinds within one project (`pid:v1:<owner>/<name>`), optionally until a time | whatever the authoring key signs of those kinds where that identity is established |
 
 ```bash
 ryeos --project . endorse --item view:acme/home --item surface:acme/main
@@ -409,7 +409,7 @@ ryeos endorse revoke --endorsement <digest> --reason "no longer wanted"
 
 `ryeos endorse` signs the endorsement with the operator key inside the CLI; the
 daemon never holds that key. The project is the checkout's declared name owned
-by the endorsing operator, `fp:<operator>/<name>`; the CLI prints it before
+by the endorsing operator, `pid:v1:<owner>/<name>` with the operator's principal as owner; the CLI prints it before
 signing and refuses a checkout that declares no name, and the node refuses an
 endorsement for a project another key owns. An endorsement covers items only
 where that identity is established (a registration or a held head), the same

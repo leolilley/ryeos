@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-22T00:20:41Z:87bbc2aa7db47a540e5d7cd94c8f5e0173b9e2760953cff7a618fdf4aca9e82a:xMmEzad77Ceg7SkKBEYP3ljY83+kOZfz8fqC9KEx+zGqf3AXsZr091B6GAe8d7dVeRQJ821nm1DapBjieQQuBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/attachments/revise
+path: /ui/api/session/attachments/revise
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 16384, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/session/attachments/revise" }

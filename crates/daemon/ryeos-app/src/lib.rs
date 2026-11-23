@@ -61,6 +61,7 @@ pub mod hosted_operation;
 pub mod ignore;
 #[path = "io/mod.rs"]
 pub mod io;
+pub mod item_revised;
 pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
