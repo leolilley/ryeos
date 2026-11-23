@@ -1283,6 +1283,8 @@ jobs:
           name: e2e-test-archive-${{ github.sha }}
           path: ${{ runner.temp }}/e2e-archive
 
+      # A binary gated on a crash-qualification feature compiles empty here (its own job runs it),
+      # and a shard may draw only such binaries.
       - name: Run this shard of the daemon e2e tests
         env:
           # Same stack as the workspace shards (deep admission futures in debug builds).
@@ -1292,6 +1294,7 @@ jobs:
           ./scripts/gate.sh
           --nextest-run-archive "$RUNNER_TEMP/e2e-archive/e2e.tar.zst"
           --partition "hash:${{ matrix.shard }}/$SHARDS"
+          --no-tests=pass
 
   test:
     name: Workspace tests
