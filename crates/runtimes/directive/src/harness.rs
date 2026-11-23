@@ -112,21 +112,21 @@ impl Harness {
 
         if self.limits.turns > 0 && self.turns_used >= self.limits.turns {
             return Err(format!(
-                "turn limit exceeded: {} >= {}",
+                "turn_limit_exceeded: {} >= {}",
                 self.turns_used, self.limits.turns
             ));
         }
 
         if self.limits.tokens > 0 && self.tokens_used >= self.limits.tokens {
             return Err(format!(
-                "token limit exceeded: {} >= {}",
+                "token_limit_exceeded: {} >= {}",
                 self.tokens_used, self.limits.tokens
             ));
         }
 
         if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded: ${} >= ${}",
+                "spend_limit_exceeded: ${} >= ${}",
                 self.spend_used.to_canonical_string(),
                 self.limits.spend_usd.to_canonical_string()
             ));
@@ -134,7 +134,7 @@ impl Harness {
 
         if self.limits.spawns > 0 && self.spawns_used >= self.limits.spawns {
             return Err(format!(
-                "spawn limit exceeded: {} >= {}",
+                "spawn_limit_exceeded: {} >= {}",
                 self.spawns_used, self.limits.spawns
             ));
         }
@@ -143,7 +143,7 @@ impl Harness {
             let elapsed = self.start.elapsed().as_secs();
             if elapsed >= self.limits.duration_seconds {
                 return Err(format!(
-                    "duration limit exceeded: {}s >= {}s",
+                    "duration_limit_exceeded: {}s >= {}s",
                     elapsed, self.limits.duration_seconds
                 ));
             }
@@ -151,7 +151,7 @@ impl Harness {
 
         if self.limits.depth > 0 && self.depth >= self.limits.depth {
             return Err(format!(
-                "depth limit exceeded: {} >= {}",
+                "depth_limit_exceeded: {} >= {}",
                 self.depth, self.limits.depth
             ));
         }
@@ -169,13 +169,13 @@ impl Harness {
         }
         if self.limits.tokens > 0 && self.tokens_used >= self.limits.tokens {
             return Err(format!(
-                "token limit exceeded before retry: {} >= {}",
+                "token_limit_exceeded: before retry, {} >= {}",
                 self.tokens_used, self.limits.tokens
             ));
         }
         if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded before retry: ${} >= ${}",
+                "spend_limit_exceeded: before retry, ${} >= ${}",
                 self.spend_used.to_canonical_string(),
                 self.limits.spend_usd.to_canonical_string()
             ));
@@ -184,20 +184,20 @@ impl Harness {
             let elapsed = self.start.elapsed().as_secs();
             if elapsed >= self.limits.duration_seconds {
                 return Err(format!(
-                    "duration limit exceeded before retry: {}s >= {}s",
+                    "duration_limit_exceeded: before retry, {}s >= {}s",
                     elapsed, self.limits.duration_seconds
                 ));
             }
         }
         if self.limits.spawns > 0 && self.spawns_used >= self.limits.spawns {
             return Err(format!(
-                "spawn limit exceeded before retry: {} >= {}",
+                "spawn_limit_exceeded: before retry, {} >= {}",
                 self.spawns_used, self.limits.spawns
             ));
         }
         if self.limits.depth > 0 && self.depth >= self.limits.depth {
             return Err(format!(
-                "depth limit exceeded before retry: {} >= {}",
+                "depth_limit_exceeded: before retry, {} >= {}",
                 self.depth, self.limits.depth
             ));
         }
@@ -543,7 +543,8 @@ mod tests {
         );
         harness.record_turn();
         harness.record_turn();
-        assert!(harness.check_limits().is_err());
+        let error = harness.check_limits().expect_err("turn limit reached");
+        assert!(error.starts_with("turn_limit_exceeded: "), "{error}");
     }
 
     #[test]
