@@ -26,6 +26,7 @@ mod field_interaction;
 #[cfg(test)]
 mod import_tabs_tests;
 mod input;
+pub(crate) mod item_revision;
 mod presentation_operations;
 mod saved_view_sets;
 #[cfg(test)]
@@ -148,6 +149,12 @@ impl RyeOsCore {
         if self.presentation_operations.replay_blocked {
             return Vec::new();
         }
+        let mut effects = self.dispatch_event(event);
+        effects.extend(self.pump_item_revisions());
+        effects
+    }
+
+    fn dispatch_event(&mut self, event: RyeOsEvent) -> Vec<RyeOsEffect> {
         self.ui.motion.clear();
         match event {
             RyeOsEvent::Start {
@@ -170,7 +177,11 @@ impl RyeOsCore {
             } => self.presentation_producer_ready(producer, next_engine_seq),
             RyeOsEvent::DaemonEvent { payload } => self.apply_daemon_event(payload),
             RyeOsEvent::HintReceived { kind, payload } => {
-                self.note_hint_received(&kind, &payload);
+                if kind == item_revision::ITEM_HINT_KIND {
+                    self.note_item_hint(&payload);
+                } else {
+                    self.note_hint_received(&kind, &payload);
+                }
                 Vec::new()
             }
             RyeOsEvent::HintFlushBatch { kinds } => self.effects_for_hints(&kinds),

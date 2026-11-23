@@ -9785,7 +9785,8 @@ impl RuntimeDb {
                 [now],
             )?;
             let locks_released = tx.execute(
-                "UPDATE credential_profile
+                &format!(
+                    "UPDATE credential_profile
                 SET lock_owner=NULL, updated_at_ms=?1
               WHERE lock_owner IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM worker_process
@@ -9794,7 +9795,7 @@ impl RuntimeDb {
                       WHERE dedicated_session.worker_instance_id=credential_profile.lock_owner)
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session
                       WHERE dedicated_session.credential_profile_id=credential_profile.profile_id
-                        AND dedicated_session.state IN ('admitted','binding','outcome_unknown'))
+                        AND dedicated_session.state IN ({}))
                 AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
                       WHERE credential_profile_reservation.reservation_id=credential_profile.lock_owner
                         AND credential_profile_reservation.state='reserved')
@@ -9802,6 +9803,8 @@ impl RuntimeDb {
                       WHERE json_extract(q.record_json,'$.credential_custody.profile_id')=credential_profile.profile_id
                         AND json_type(q.record_json,'$.credential_custody')='object'
                         AND json_type(q.record_json,'$.credential_custody.released_at_ms')='null')",
+                    crate::dedicated_session_service::start_claimed_lock_states_sql()
+                ),
                 [now],
             )?;
             tx.commit()?;
@@ -10097,10 +10100,13 @@ impl RuntimeDb {
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
-                "UPDATE dedicated_session SET state='terminal', terminal_reason=?2,
+                &format!(
+                    "UPDATE dedicated_session SET state='terminal', terminal_reason=?2,
                     current_turn_id=NULL, send_boundary='none', updated_at_ms=?3
               WHERE placement_thread_id=?1 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
-                AND state IN ('admitted','recovering','outcome_unknown')",
+                AND state IN ({})",
+                    crate::dedicated_session_service::unattached_settled_states_sql()
+                ),
                 params![placement_thread_id, reason, now],
             )?;
             if changed != 1 {
@@ -10187,7 +10193,8 @@ impl RuntimeDb {
                 .optional()?
                 .unwrap_or(false);
             let changed = tx.execute(
-                "UPDATE dedicated_session
+                &format!(
+                    "UPDATE dedicated_session
                 SET state=?5, terminal_reason=?3,
                     worker_trusted_holding=CASE WHEN ?5='terminal' THEN NULL
                       ELSE worker_trusted_holding END,
@@ -10200,7 +10207,9 @@ impl RuntimeDb {
                     send_boundary=CASE WHEN ?5='outcome_unknown' THEN 'outcome_unknown' ELSE 'none' END,
                     updated_at_ms=?4
               WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?6
-                AND state IN ('admitted','binding','recovering','outcome_unknown')",
+                AND state IN ({})",
+                    crate::dedicated_session_service::failed_start_settled_states_sql()
+                ),
                 params![placement_thread_id, worker_instance_id, reason, now, next_state, epoch],
             )?;
             if changed != 1 {

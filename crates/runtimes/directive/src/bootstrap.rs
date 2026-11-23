@@ -357,8 +357,44 @@ fn compile_admitted_directive_hooks(
             "directive authored hooks differ from the captured effective hook plan"
         ));
     }
-    ryeos_runtime::compile_effective_hook_plan(&plan, &ryeos_runtime::CompilationLimits::default())
-        .context("compile captured directive hook plan")
+    let compiled = ryeos_runtime::compile_effective_hook_plan(
+        &plan,
+        &ryeos_runtime::CompilationLimits::default(),
+    )
+    .context("compile captured directive hook plan")?;
+    refuse_hooks_on_unfired_events(&compiled)?;
+    Ok(compiled)
+}
+
+/// The hook events this runtime fires. The signed kind-schema declares which
+/// events a directive may hook; a schema newer than this runtime can declare
+/// an event the runtime never fires, and a hook on it would sit silently
+/// inert. It is refused instead, so a launch never carries a hook that cannot
+/// run. A test holds this list equal to the kind-schema's events.
+pub(super) const FIRED_HOOK_EVENTS: [&str; 8] = [
+    "after_step",
+    "continuation",
+    "provider_error",
+    "context_pressure",
+    "before_tool",
+    "after_tool",
+    "turn_incomplete",
+    "idle",
+];
+
+fn refuse_hooks_on_unfired_events(hooks: &[ryeos_runtime::CompiledHook]) -> Result<()> {
+    match hooks
+        .iter()
+        .find(|hook| !FIRED_HOOK_EVENTS.contains(&hook.event()))
+    {
+        Some(hook) => Err(anyhow!(
+            "hook_event_unknown_to_runtime: hook `{}` is on the event `{}`, which this \
+             directive runtime does not fire; it ships with a newer runtime",
+            hook.id(),
+            hook.event()
+        )),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +406,10 @@ pub(super) fn compile_directive_hook_sources(
         ryeos_runtime::HookContextSchema::new("continuation", ["event"]),
         ryeos_runtime::HookContextSchema::new("provider_error", ["event"]),
         ryeos_runtime::HookContextSchema::new("context_pressure", ["event"]),
+        ryeos_runtime::HookContextSchema::new("before_tool", ["event"]),
+        ryeos_runtime::HookContextSchema::new("after_tool", ["event"]),
+        ryeos_runtime::HookContextSchema::new("turn_incomplete", ["event"]),
+        ryeos_runtime::HookContextSchema::new("idle", ["event"]),
     ];
     ryeos_runtime::compile_hooks(
         sources,
@@ -791,5 +831,70 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(error, ConfigLoadError::Unsigned { .. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod fired_hook_events_tests {
+    use super::*;
+
+    fn compiled(event: &str) -> Vec<ryeos_runtime::CompiledHook> {
+        let source: ryeos_runtime::HookDefinition = serde_yaml::from_str(&format!(
+            "id: probe\nevent: {event}\nresult: observation\naction:\n  primary: execute\n  item_id: \"tool:marker/marker\"\n  ref_bindings: {{}}\n  params: {{}}\n"
+        ))
+        .unwrap();
+        ryeos_runtime::compile_hooks(
+            ryeos_runtime::HookSources {
+                authored: vec![source],
+                ..ryeos_runtime::HookSources::default()
+            },
+            &[ryeos_runtime::HookContextSchema::new(event, ["event"])],
+            &ryeos_runtime::CompilationLimits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_hook_on_an_event_the_runtime_does_not_fire_is_refused_typed() {
+        for event in FIRED_HOOK_EVENTS {
+            assert!(
+                refuse_hooks_on_unfired_events(&compiled(event)).is_ok(),
+                "{event}"
+            );
+        }
+        let error = refuse_hooks_on_unfired_events(&compiled("from_a_newer_schema"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("hook_event_unknown_to_runtime"),
+            "{error}"
+        );
+        assert!(error.contains("from_a_newer_schema"), "{error}");
+    }
+
+    /// The runtime's list and the signed kind-schema's events are the same set,
+    /// so neither can gain an event the other lacks.
+    #[test]
+    fn the_runtimes_fired_events_equal_the_kind_schemas_events() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../bundles/directive/.ai/node/engine/kinds/directive/directive.kind-schema.yaml",
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let body: String = text
+            .lines()
+            .filter(|line| !line.starts_with("# ryeos:signed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let schema: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
+        let mut declared: Vec<String> = schema["execution"]["hooks"]["events"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|key| key.as_str().unwrap().to_string())
+            .collect();
+        declared.sort();
+        let mut fired: Vec<String> = FIRED_HOOK_EVENTS.iter().map(|e| e.to_string()).collect();
+        fired.sort();
+        assert_eq!(declared, fired);
     }
 }

@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-11-20T23:17:59Z:0c6e5db774a876924b4231e9621612385f13ef720a815a016b54f4ebd1b9df65:zNFLO5Hn2ABKgFg1miAT9if75WW8sJEMXE0/fb1v4v63m5iSEQwc9rLlAevkUCmH9F/vIvlJx1Bg0pgTaufiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:24:31Z:8fd1fc159a8d9bbb19e697e496d26bf0812f79451bbea47f260caf1c19fc9af7:Ge29PNW7gcZV+KHOE0UROWB+iYtfqjqI3xGpiW22q1KeWijWYgeylwD6gtappIxUbzeBl8gBAKKAP9b09te9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.4.0"
+version: "2.5.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.4.0`, implemented with UI binding contract
-`ryeos.ui.binding.v16` and timeline contract `ryeos.timeline.v1` (the
+Frame contract version `2.5.0`, implemented with UI binding contract
+`ryeos.ui.binding.v17` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
 version in force, and there is no reader for an earlier one.
@@ -456,6 +456,38 @@ destination — `center_is_empty` is a derived query.
 
 Backdrop removed 2026-11-08; an empty centre renders the empty state. The
 ambient-scene intent is kept in the project's future notes for the GPU renderer.
+
+## Live item pickup (`item.hint`)
+
+A session whose attachments name a revised item receives the session-bus event
+`item.hint` with `{ item_ref, digest, revision, change_set }`. The hint carries
+no content; it prompts a look. The seat reacts only to non-root attachments:
+
+1. The seat posts `ui/api/session/attachments/revise` for each held non-root
+   attachment (effect `revise_binding_attachment`). The daemon recompiles the
+   attachment from its own origin under the current engine generation. When
+   the digest is unchanged it answers `revised: false`. Otherwise it publishes
+   a successor attachment beside the source and answers with the successor's
+   public descriptor. Both stay owned by the Surface until the swap settles.
+2. The seat journals one composition mutation, `rebind_attachment`
+   (`from`, `to`, and the complete successor descriptor), for the owning
+   Surface. Every coordinate equal to `from` in the Surface binding, its tile
+   bindings, dialogs, saved-tab provenance, insertion defaults and lens frames
+   becomes `to`. Tile ids and instance keys do not change, so facets,
+   selection, scroll and composer drafts carry over. A tile whose view is
+   absent from the successor closes in the same step.
+3. After the completion settles, the daemon's authenticated reconciliation
+   moves the Surface's ownership from `from` to `to` and drops `from` from the
+   session. A detach of `from` before that point is refused (the Surface still
+   owns it); after it, the detach is the idempotent "already gone".
+
+Hints sharing a `change_set` produce one sweep, so a seat never renders half
+of a set. The root attachment is immutable: a hint naming only root items
+changes nothing, and a revise request for the root or for an attachment the
+presentation does not own is refused. A dispatch refused with
+`ui_binding_stale` revises the attachment once; a second stale for the same
+attachment is reported as before. An unsigned hand edit announces nothing and
+still surfaces through that dispatch-time refusal.
 
 ## Laws
 

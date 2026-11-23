@@ -181,6 +181,12 @@ impl AdmittedBindingAttachment {
                 }
             },
             binding_request_bounds,
+            named_items: self
+                .compiled_binding
+                .binding
+                .named_item_refs()
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -212,6 +218,8 @@ pub enum AttachmentStoreError {
     SessionInvalid,
     AttachmentStale,
     RootAttachmentImmutable,
+    /// A live presentation Surface still owns this attachment.
+    AttachmentInUse,
     PrincipalMismatch,
     PolicyStale,
     Capacity,
@@ -225,6 +233,7 @@ impl std::fmt::Display for AttachmentStoreError {
             Self::SessionInvalid => "session expired or invalid",
             Self::AttachmentStale => "binding attachment is stale or revoked",
             Self::RootAttachmentImmutable => "the original root attachment is immutable",
+            Self::AttachmentInUse => "binding attachment is still owned by a presentation Surface",
             Self::PrincipalMismatch => "binding attachment principal does not match the session",
             Self::PolicyStale => "binding attachment node policy generation is stale",
             Self::Capacity => "binding attachment capacity reached",
@@ -275,6 +284,11 @@ pub struct SurfaceMembership {
     /// Exact admission receipts retain imported descriptors before the seat's
     /// completion ACK. They never replace this Surface's origin or seed.
     pub(crate) tab_openings: BTreeMap<String, surface_opening::SurfaceTabsOpeningReceipt>,
+    /// Successor attachments published for an in-place rebind and not yet
+    /// settled in seat history, as (from, to). Both stay live until the
+    /// authenticated replay shows the rebind settled, so a crash leaves
+    /// either the old binding or the new one fully owned, never neither.
+    pub(crate) pending_rebinds: Vec<(BindingAttachmentCoordinate, BindingAttachmentCoordinate)>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -599,12 +613,52 @@ mod particular_receipt_tests {
 }
 
 impl SurfaceMembership {
+    /// Swap every coordinate this Surface holds for `from` to `to`.
+    pub(crate) fn apply_rebind(
+        &mut self,
+        from: &BindingAttachmentCoordinate,
+        to: &BindingAttachmentCoordinate,
+    ) {
+        if self.coordinate == *from {
+            self.coordinate = to.clone();
+        }
+        if let Some(receipt) = self.saved_resume.as_mut() {
+            match &mut receipt.body {
+                SavedSurfaceReceiptBody::Particular { tabs } => {
+                    for tab in tabs {
+                        if tab.coordinate == *from {
+                            tab.coordinate = to.clone();
+                        }
+                    }
+                }
+                SavedSurfaceReceiptBody::Reusable { tabs }
+                | SavedSurfaceReceiptBody::Composed { tabs } => {
+                    for tab in tabs {
+                        if tab.coordinate == *from {
+                            tab.coordinate = to.clone();
+                        }
+                    }
+                }
+            }
+        }
+        for opening in self.tab_openings.values_mut() {
+            for coordinate in &mut opening.current_coordinates {
+                if coordinate == from {
+                    *coordinate = to.clone();
+                }
+            }
+        }
+        self.pending_rebinds
+            .retain(|(source, target)| !(source == from && target == to));
+    }
+
     pub fn owns_coordinate(&self, coordinate: &BindingAttachmentCoordinate) -> bool {
         !self.closed
             && (self.coordinate == *coordinate
                 || self.saved_resume.as_ref().is_some_and(|receipt| {
                     receipt.coordinates().iter().any(|tab| **tab == *coordinate)
-                }))
+                })
+                || self.pending_rebinds.iter().any(|(_, to)| to == coordinate))
             || self
                 .tab_openings
                 .values()
@@ -1186,6 +1240,114 @@ impl BrowserSessionStore {
         Ok(attachment)
     }
 
+    /// Publish the recompiled successor of one presentation-owned non-root
+    /// attachment and record it as pending beside its source. Both coordinates
+    /// stay owned until authenticated seat history shows the rebind settled
+    /// (`apply_settled_rebinds`), so an interruption leaves exactly the old
+    /// binding or exactly the new one fully live. A repeat for the same source
+    /// replaces the earlier unsettled successor.
+    pub fn publish_rebind_attachment(
+        &self,
+        session_id: &str,
+        presentation_id: &str,
+        from: &BindingAttachmentCoordinate,
+        candidate: BindingAttachmentCandidate,
+        max_attachments: usize,
+        current_policy_generation_digest: &str,
+    ) -> Result<Arc<AdmittedBindingAttachment>, AttachmentStoreError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = live_session(&mut sessions, session_id)?;
+        exact_attachment(session, from)?;
+        if from.binding_attachment_id == session.root_attachment_id {
+            return Err(AttachmentStoreError::RootAttachmentImmutable);
+        }
+        let member = session
+            .presentations
+            .get(presentation_id)
+            .ok_or(AttachmentStoreError::PresentationInvalid)?;
+        if member.root_coordinate == *from {
+            return Err(AttachmentStoreError::RootAttachmentImmutable);
+        }
+        let surface_id = member
+            .surfaces
+            .iter()
+            .find(|(_, surface)| {
+                surface.owns_coordinate(from)
+                    && !surface.pending_rebinds.iter().any(|(_, to)| to == from)
+            })
+            .map(|(id, _)| id.clone())
+            .ok_or(AttachmentStoreError::PresentationConflict)?;
+        let replaced = member.surfaces[&surface_id]
+            .pending_rebinds
+            .iter()
+            .filter(|(source, _)| source == from)
+            .map(|(_, to)| to.clone())
+            .collect::<Vec<_>>();
+        if transfer_reservation::occupied_attachment_count(session).saturating_sub(replaced.len())
+            >= max_attachments
+        {
+            return Err(AttachmentStoreError::Capacity);
+        }
+        let attachment_id = uuid::Uuid::new_v4().to_string();
+        let generation = session.next_attachment_generation;
+        let attachment = Arc::new(build_attachment(
+            attachment_id.clone(),
+            generation,
+            candidate,
+            &session.principal_id,
+            current_policy_generation_digest,
+        )?);
+        session.next_attachment_generation = generation
+            .checked_add(1)
+            .ok_or(AttachmentStoreError::Capacity)?;
+        for stale in &replaced {
+            session.attachments.remove(&stale.binding_attachment_id);
+        }
+        session
+            .attachments
+            .insert(attachment_id, attachment.clone());
+        let surface = session
+            .presentations
+            .get_mut(presentation_id)
+            .and_then(|member| member.surfaces.get_mut(&surface_id))
+            .expect("surface checked above");
+        surface.pending_rebinds.retain(|(source, _)| source != from);
+        surface
+            .pending_rebinds
+            .push((from.clone(), attachment.coordinate()));
+        Ok(attachment)
+    }
+
+    /// Apply rebinds that authenticated seat history shows settled: every
+    /// coordinate a Surface owned for `from` becomes `to`, and a source nothing
+    /// owns any longer leaves the session. Idempotent, so reconciliation can
+    /// repeat it on every read of the same history.
+    pub fn apply_settled_rebinds(
+        &self,
+        session_id: &str,
+        presentation_id: &str,
+        rebinds: &[(BindingAttachmentCoordinate, BindingAttachmentCoordinate)],
+    ) -> Result<(), AttachmentStoreError> {
+        if rebinds.is_empty() {
+            return Ok(());
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = live_session(&mut sessions, session_id)?;
+        let member = session
+            .presentations
+            .get_mut(presentation_id)
+            .ok_or(AttachmentStoreError::PresentationInvalid)?;
+        for (from, to) in rebinds {
+            for surface in member.surfaces.values_mut() {
+                surface.apply_rebind(from, to);
+            }
+        }
+        for (from, _) in rebinds {
+            transfer_reservation::remove_attachment_if_unowned(session, from);
+        }
+        Ok(())
+    }
+
     pub fn revoke_attachment(
         &self,
         session_id: &str,
@@ -1417,6 +1579,7 @@ impl BrowserSessionStore {
                 particular_resume: None,
                 saved_resume: None,
                 tab_openings: BTreeMap::new(),
+                pending_rebinds: Vec::new(),
             };
             generation = generation
                 .checked_add(1)
@@ -1832,6 +1995,7 @@ impl BrowserSessionStore {
             particular_resume: None,
             saved_resume: Some(retained_receipt),
             tab_openings: BTreeMap::new(),
+            pending_rebinds: Vec::new(),
         };
         validate_publication(&surface, &origin_attachment, &staged_tabs)?;
         session.attachments.insert(
@@ -2113,6 +2277,7 @@ impl BrowserSessionStore {
             particular_resume,
             saved_resume: None,
             tab_openings: BTreeMap::new(),
+            pending_rebinds: Vec::new(),
         };
         // Validate the exact allocated result under this lock, before any
         // membership, attachment, receipt or counter becomes observable.
@@ -2254,7 +2419,16 @@ impl BrowserSessionStore {
             return Err(AttachmentStoreError::RootAttachmentImmutable);
         }
         if let Some(attachment) = session.attachments.get(&coordinate.binding_attachment_id) {
-            return exact_attachment(session, coordinate).map(|_| Some(attachment.clone()));
+            exact_attachment(session, coordinate)?;
+            if session.presentations.values().any(|presentation| {
+                presentation
+                    .surfaces
+                    .values()
+                    .any(|surface| surface.owns_coordinate(coordinate))
+            }) {
+                return Err(AttachmentStoreError::AttachmentInUse);
+            }
+            return Ok(Some(attachment.clone()));
         }
         Ok(None)
     }
@@ -3859,6 +4033,7 @@ pub(crate) mod tests {
                 request_engine_generation_identity: "generation:test".to_string(),
                 node_policy_generation_digest: "22".repeat(32),
                 surface: EffectiveUiItemIdentity {
+                    chain: Vec::new(),
                     canonical_ref: surface_ref.to_string(),
                     effective_definition_digest: EffectiveDefinitionDigest::parse("33".repeat(32))
                         .expect("valid fixture digest"),
@@ -4520,6 +4695,138 @@ pub(crate) mod tests {
             AttachmentStoreError::PresentationConflict
         );
         assert_eq!(store.get_session(&id).unwrap().attachments.len(), 3);
+    }
+
+    #[test]
+    fn rebind_keeps_old_or_new_live_until_settled_then_hands_ownership_over() {
+        let store = BrowserSessionStore::new();
+        let (id, token) = mint(&store, test_shared_context());
+        store.activate_launch_token(&token).unwrap();
+        let session = store.get_session(&id).unwrap();
+        let root = session.attachments[&session.root_attachment_id].coordinate();
+        let policy = "22".repeat(32);
+        let presentation = store
+            .prepare_presentation(
+                &id,
+                &uuid::Uuid::new_v4().to_string(),
+                &root,
+                &limits(4, 16, 16, 128),
+                &policy,
+                test_bounds(),
+            )
+            .unwrap();
+        let candidate = || {
+            let context = test_context();
+            BindingAttachmentCandidate {
+                registered_project_id: None,
+                compiled_binding: context.compiled_binding,
+                presentation: context.presentation,
+                project_authority: None,
+            }
+        };
+        let (surface, attachment) = store
+            .publish_surface(
+                &id,
+                &presentation.presentation_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &root,
+                candidate(),
+                &limits(16, 8, 8, 128),
+                &policy,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        let from = attachment.coordinate();
+        assert_eq!(
+            store
+                .publish_rebind_attachment(
+                    &id,
+                    &presentation.presentation_id,
+                    &root,
+                    candidate(),
+                    16,
+                    &policy
+                )
+                .unwrap_err(),
+            AttachmentStoreError::RootAttachmentImmutable
+        );
+        let successor = store
+            .publish_rebind_attachment(
+                &id,
+                &presentation.presentation_id,
+                &from,
+                candidate(),
+                16,
+                &policy,
+            )
+            .unwrap();
+        let to = successor.coordinate();
+        // Published but unsettled: both are live and owned, neither is lost.
+        for coordinate in [&from, &to] {
+            store
+                .require_presentation_attachment(
+                    &id,
+                    &presentation.presentation_id,
+                    coordinate,
+                    &policy,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.attachment_for_detach(&id, &from).unwrap_err(),
+            AttachmentStoreError::AttachmentInUse
+        );
+        // A repeat replaces the earlier unsettled successor.
+        let again = store
+            .publish_rebind_attachment(
+                &id,
+                &presentation.presentation_id,
+                &from,
+                candidate(),
+                16,
+                &policy,
+            )
+            .unwrap()
+            .coordinate();
+        assert!(store.resolve_attachment(&id, &to).is_err());
+        store
+            .apply_settled_rebinds(
+                &id,
+                &presentation.presentation_id,
+                &[(from.clone(), again.clone())],
+            )
+            .unwrap();
+        let settled = store.get_session(&id).unwrap();
+        let member = &settled.presentations[&presentation.presentation_id];
+        assert_eq!(
+            member.surfaces[&surface.surface_instance_id].coordinate,
+            again
+        );
+        assert!(
+            member.surfaces[&surface.surface_instance_id]
+                .pending_rebinds
+                .is_empty()
+        );
+        store
+            .require_presentation_attachment(&id, &presentation.presentation_id, &again, &policy)
+            .unwrap();
+        // The source left the session; a detach is the idempotent no-op.
+        assert!(store.attachment_for_detach(&id, &from).unwrap().is_none());
+        assert!(
+            store
+                .require_presentation_attachment(&id, &presentation.presentation_id, &from, &policy)
+                .is_err()
+        );
+        // Applying the same settled history again changes nothing.
+        store
+            .apply_settled_rebinds(&id, &presentation.presentation_id, &[(from, again.clone())])
+            .unwrap();
+        assert_eq!(
+            store.get_session(&id).unwrap().presentations[&presentation.presentation_id].surfaces
+                [&surface.surface_instance_id]
+                .coordinate,
+            again
+        );
     }
 
     #[test]

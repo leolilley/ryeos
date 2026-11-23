@@ -175,6 +175,29 @@ pub fn project_source_ceiling_digest(sources: &[String]) -> Result<String> {
 }
 
 impl CompiledUiBinding {
+    /// Every item ref this binding was compiled from: the surface, each view
+    /// and view set it names, and the members of each one's extends chain. A
+    /// view or view set that failed to resolve is still named, because the
+    /// item that would fix it is a change this binding must hear about.
+    pub fn named_item_refs(&self) -> BTreeSet<String> {
+        fn add_identity(
+            refs: &mut BTreeSet<String>,
+            identity: &ryeos_api::surface_views::EffectiveUiItemIdentity,
+        ) {
+            refs.insert(identity.canonical_ref.clone());
+            refs.extend(identity.chain.iter().cloned());
+        }
+        let mut refs = BTreeSet::new();
+        add_identity(&mut refs, &self.surface);
+        for (name, member) in self.views.iter().chain(self.view_sets.iter()) {
+            refs.insert(name.clone());
+            if let EmbeddedViewIdentity::Resolved { identity } = member {
+                add_identity(&mut refs, identity);
+            }
+        }
+        refs
+    }
+
     /// Whether the admitted composition root is an item of exactly this kind.
     /// The kind is read from the root's canonical identity, never from a
     /// separately stored discriminant.
@@ -1452,6 +1475,7 @@ mod tests {
 
     fn identity(item_ref: &str, byte: char) -> EffectiveUiItemIdentity {
         EffectiveUiItemIdentity {
+            chain: Vec::new(),
             canonical_ref: item_ref.to_string(),
             effective_definition_digest: EffectiveDefinitionDigest::parse(
                 byte.to_string().repeat(64),
