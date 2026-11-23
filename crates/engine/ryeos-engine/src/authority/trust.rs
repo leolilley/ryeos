@@ -1941,6 +1941,66 @@ mod tests {
     }
 
     #[test]
+    fn a_project_named_core_and_the_installed_core_bundle_are_judged_apart() {
+        // A project whose manifest says `name: core` is pid:v1:<owner>/core.
+        // The installed bundle `core` is judged in bundle space by its
+        // publisher. Neither trust ever stands in for the other, and nothing
+        // compares the two names: a project identity is a principal plus a
+        // name, never a bundle name.
+        let (author_sk, author_vk, author_fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let publisher_sk = SigningKey::from_bytes(&[11u8; 32]);
+        let publisher_vk = publisher_sk.verifying_key();
+        let publisher_fp = compute_fingerprint(&publisher_vk);
+        let core_project = format!("{PROJECT_OWNER}/core");
+        let store = TrustStore::from_registry(
+            node_vk,
+            vec![
+                record_for(
+                    &author_vk,
+                    SignerRole::ProjectAuthor,
+                    vec![SignerSpace::Project],
+                    &["*"],
+                    &[core_project.as_str()],
+                    SignerStatus::Active,
+                ),
+                publisher_record(&publisher_vk, SignerStatus::Active),
+            ],
+        )
+        .unwrap()
+        .with_succession_chain(&[]);
+        let project = LogicalProject::Stated(core_project.parse().unwrap());
+        let in_project = SignerContext::project("tool", &project);
+
+        // The project author is trusted in its project, never for the bundle.
+        let (content, envelope, header) = signed_with_header(&author_sk, &author_fp);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &in_project).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
+        assert_eq!(class, TrustClass::Untrusted);
+
+        // The core bundle's publisher is trusted in bundle space, never as
+        // the project named core.
+        let (content, envelope, header) = signed_with_header(&publisher_sk, &publisher_fp);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &in_project).unwrap();
+        assert_eq!(class, TrustClass::Untrusted);
+
+        // `core` alone is not a project identity, so a bundle name can never
+        // be read as one.
+        assert!(
+            "core"
+                .parse::<ryeos_state::project_identity::ProjectIdentity>()
+                .is_err()
+        );
+    }
+
+    #[test]
     fn own_scope_verification_follows_retired_verifies_and_revoked_does_not() {
         let (root_sk, root_vk, root_fp) = gen_key();
         let (_, node_vk, _) = gen_key2();

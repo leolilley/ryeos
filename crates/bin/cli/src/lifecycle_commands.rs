@@ -5400,7 +5400,7 @@ fn project_registration_checks(
                     "checkout": path,
                     "manifest_source_name": source.name.as_str(),
                     "manifest_name": manifest.name.as_str(),
-                    "fix": "re-populate the manifest (ryeos manifest build/sign) before registering",
+                    "fix": "regenerate .ai/manifest.yaml from .ai/manifest.source.yaml with `ryeos bundle manifest-sign <checkout>` before registering",
                 }));
             }
             let declared = ryeos_node::project_registry::inspect_checkout(app_root, path);
