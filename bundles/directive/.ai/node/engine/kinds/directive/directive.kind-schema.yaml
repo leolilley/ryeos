@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T14:28:47Z:1233eedd59a35cfc4e7518a196963d65b73a38bf9916c054a8477d179b689f5f:ks/y7bbmiSksWGydQGADA4CQ6/9pRngGVZ5wF1RzuSIwRX+bTGxlf0Av4wxOQWnoDagFtdRzTTYyhYGOA6UpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:37:24Z:025570d55f8ccdf4113c1cadeda8d2cdff09ae00648d8485c89cfb9ba47b65c3:lulGlLLhBiEA8HO0DGJ3UxnLQjJdU84QYey7BZfqc9ae/UoelEBK9j98C28VBnK7c9UAcM97uzjj4ZsW/ZTmDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -82,6 +82,47 @@ execution:
           schema: ryeos.hooks.context.v1
           allowed_roots: [event]
         allowed_results: [discard, observation, control]
+      # The four events below observe the run and never steer it: a result is
+      # validated and dropped, so no result can block a call, retry a turn or
+      # end the run. Their roots carry names, counts and codes only, never a
+      # call's arguments or result text.
+      #
+      # Fired once for each tool call about to be dispatched (not for
+      # `directive_return`). The event root carries `turn`, `tool`, `call_id`,
+      # `index` and `batch_size`. Every call that fired it fires `after_tool`.
+      before_tool:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation]
+      # Fired once for each tool call after its result is recorded. The event
+      # root carries `turn`, `tool`, `call_id`, `status` (`ok`, `error` or
+      # `refused`), `raw_size`, `truncated`, `spilled` and `duplicate`. A call
+      # refused before it ran (limit, deadline, preflight) has status `refused`.
+      after_tool:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation]
+      # Fired when a provider turn ended without a usable answer: at the output
+      # limit, with an empty reply, or with a reply that wrote a call as text.
+      # The event root carries `turn`, `reason` (`output_limit`, `empty_reply`
+      # or `malformed_reply`), `outcome` (`corrected`, `failed`, or `retried`
+      # for an empty reply no policy counts) and `streak` (0 when no policy
+      # counts it).
+      turn_incomplete:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation]
+      # Fired by the loop guard's idle finding: when the model is warned and
+      # when the run is stopped. The event root carries `turn`, `phase`
+      # (`warned` or `stopped`), `idle_turns` and `grace_turns`.
+      idle:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation]
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive
