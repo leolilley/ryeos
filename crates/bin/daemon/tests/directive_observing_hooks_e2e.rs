@@ -14,20 +14,27 @@ use stub_rig::{RigOptions, launch_on, start_rig, wait_terminal};
 
 const MAX_WAIT: Duration = Duration::from_secs(120);
 
-fn hook(id: &str, event: &str) -> String {
-    format!(
-        "  - id: {id}\n    event: {event}\n    result: observation\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {{}}\n      params: {{}}\n"
-    )
+/// A marker-running hook for an event, as directive frontmatter lines.
+macro_rules! marker_hook {
+    ($event:literal) => {
+        concat!(
+            "  - id: on-",
+            $event,
+            "\n    event: ",
+            $event,
+            "\n    result: observation\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {}\n      params: {}\n"
+        )
+    };
 }
 
-/// A directive header declaring a marker-running hook for each event.
-fn hooks(events: &[&str]) -> &'static str {
-    let body: String = events
-        .iter()
-        .map(|event| hook(&format!("on-{event}"), event))
-        .collect();
-    Box::leak(format!("hooks:\n{body}").into_boxed_str())
-}
+const BEFORE_AND_AFTER: &str = concat!(
+    "hooks:\n",
+    marker_hook!("before_tool"),
+    marker_hook!("after_tool")
+);
+const BEFORE_ONLY: &str = concat!("hooks:\n", marker_hook!("before_tool"));
+const TURN_INCOMPLETE: &str = concat!("hooks:\n", marker_hook!("turn_incomplete"));
+const IDLE: &str = concat!("hooks:\n", marker_hook!("idle"));
 
 fn execution(extra: &str) -> String {
     format!(
@@ -55,7 +62,7 @@ const TWO_CALLS: &str = "steps:\n  - tool_calls:\n      - name: noop\n        ar
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_dispatched_call_fires_before_and_after() {
-    let (rig, status) = run(TWO_CALLS, options(hooks(&["before_tool", "after_tool"]))).await;
+    let (rig, status) = run(TWO_CALLS, options(BEFORE_AND_AFTER)).await;
     assert_eq!(status, "completed");
     assert_eq!(
         rig.marker_count(),
@@ -71,7 +78,7 @@ async fn a_hooks_own_tool_call_does_not_fire_the_runs_tool_hooks() {
     // count would grow past three.
     let script =
         "steps:\n  - tool_calls:\n      - name: marker\n        arguments: {}\n  - text: done\n";
-    let (rig, status) = run(script, options(hooks(&["before_tool", "after_tool"]))).await;
+    let (rig, status) = run(script, options(BEFORE_AND_AFTER)).await;
     assert_eq!(status, "completed");
     assert_eq!(rig.marker_count(), 3);
 }
@@ -79,7 +86,7 @@ async fn a_hooks_own_tool_call_does_not_fire_the_runs_tool_hooks() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_refused_after_before_tool_still_gets_after_tool() {
     // One tool call is allowed; the second call of the batch is refused.
-    let mut opts = options(hooks(&["before_tool", "after_tool"]));
+    let mut opts = options(BEFORE_AND_AFTER);
     opts.limits = Some((10, 1));
     let (rig, status) = run(TWO_CALLS, opts).await;
     assert_eq!(status, "completed");
@@ -88,7 +95,7 @@ async fn a_call_refused_after_before_tool_still_gets_after_tool() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_s_observation_dispatches_are_capped() {
-    let mut opts = options(hooks(&["before_tool"]));
+    let mut opts = options(BEFORE_ONLY);
     opts.exec_yaml = Some(execution("observing_hooks_per_turn: 1\n"));
     let (rig, status) = run(TWO_CALLS, opts).await;
     assert_eq!(status, "completed");
@@ -102,11 +109,11 @@ async fn a_turn_s_observation_dispatches_are_capped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_reply_fires_turn_incomplete_with_or_without_a_policy() {
     let script = "steps:\n  - reasoning: \"EMPTY_REPLY_REASONING\"\n  - text: \"the answer\"\n";
-    let (rig, status) = run(script, options(hooks(&["turn_incomplete"]))).await;
+    let (rig, status) = run(script, options(TURN_INCOMPLETE)).await;
     assert_eq!(status, "completed");
     assert_eq!(rig.marker_count(), 1, "retried, no policy");
 
-    let mut opts = options(hooks(&["turn_incomplete"]));
+    let mut opts = options(TURN_INCOMPLETE);
     opts.provider_top_extra =
         "empty_replies:\n  max_consecutive: 2\n  message: \"Call a tool or give your answer.\"\n"
             .to_string();
@@ -118,7 +125,7 @@ async fn an_empty_reply_fires_turn_incomplete_with_or_without_a_policy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_idle_finding_fires_idle_when_warned_and_when_stopped() {
     let script = "steps:\n  - repeat: 12\n    reasoning: \"EMPTY_REPLY_REASONING\"\n";
-    let (rig, status) = run(script, options(hooks(&["idle"]))).await;
+    let (rig, status) = run(script, options(IDLE)).await;
     assert_eq!(status, "failed");
     assert_eq!(rig.marker_count(), 2, "one warning, one stop");
 }
