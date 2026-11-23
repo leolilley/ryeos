@@ -21,7 +21,9 @@ scratch="$work/scratch.git"
 git init -q --bare "$scratch"
 printf '%s\n' "$(git rev-parse --absolute-git-dir)/objects" > "$scratch/objects/info/alternates"
 head_sha="$(git rev-parse HEAD)"
-remote_url="https://x-access-token:${GH_TOKEN}@github.com/${repo}.git"
+remote_url="https://github.com/${repo}.git"
+auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+echo "::add-mask::${auth_header#AUTHORIZATION: basic }"
 
 # gh api with backoff: a rate limit or a transient error is retried a few times
 # with growing sleeps, never in a tight loop.
@@ -74,7 +76,7 @@ while read -r id head; do
         echo "next $head (run $id): no retained bundle state"
         continue
     fi
-    if ! git --git-dir="$scratch" fetch -q --no-tags --depth=1 "$remote_url" "$head" 2>/dev/null; then
+    if ! git --git-dir="$scratch" -c "http.https://github.com/.extraheader=$auth_header" fetch -q --no-tags --depth=1 "$remote_url" "$head" 2>/dev/null; then
         echo "next $head (run $id): could not fetch the commit, skipped"
         continue
     fi
