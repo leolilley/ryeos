@@ -4,7 +4,7 @@
 //! { "schema": "ryeos.read.<family>.<name>/v1",
 //!   "as_of": "<UTC instant, daemon clock>",
 //!   "revision": "<opaque token for the state this answer was read from>",
-//!   "coverage": { "state": "observed | partial | unavailable", "reason": "<code or null>", ... },
+//!   "coverage": { "state": "complete | observed | partial | failed | unavailable", "reason": "<code or null>", ... },
 //!   "rows": [ ... ]            // or "record": { ... } for a single-record read
 //!   "page": { "next_cursor": "<opaque or null>", "total": 172, "total_basis": "exact | at_least | unknown" },
 //!   "signers": { "fp:<hex>": { "label": "...", "role": "...", "status": "active | retired | revoked | node | unknown" } } }
@@ -60,12 +60,21 @@ pub const MAX_LIMIT: usize = 200;
 /// Longest cursor accepted, in bytes.
 pub const MAX_CURSOR_BYTES: usize = 1024;
 
-/// How complete an answer is.
+/// How complete an answer is. A closed set, shared with the client's
+/// wording table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageState {
+    /// Everything the source holds that the filter admits is accounted for:
+    /// an empty answer is verified empty.
+    Complete,
+    /// What was observed is shown; it may not be everything.
     Observed,
+    /// Part of what exists is shown.
     Partial,
+    /// The source could not be read.
+    Failed,
+    /// The source is not available on this node.
     Unavailable,
 }
 
@@ -81,6 +90,16 @@ pub struct Coverage {
 }
 
 impl Coverage {
+    /// Everything the filter admits is accounted for.
+    pub fn complete() -> Self {
+        Self {
+            state: CoverageState::Complete,
+            reason: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// What was observed, with no claim that it is everything.
     pub fn observed() -> Self {
         Self {
             state: CoverageState::Observed,
@@ -89,7 +108,7 @@ impl Coverage {
         }
     }
 
-    /// An incomplete or unavailable answer with its code. A code is lower
+    /// A partial, failed or unavailable answer with its code. A code is lower
     /// snake case, as every stable refusal code is.
     pub fn with_reason(state: CoverageState, reason: &'static str) -> Self {
         debug_assert!(is_code(reason), "coverage reason {reason:?} is not a code");
