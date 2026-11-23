@@ -47,7 +47,7 @@ fn view_and_surface_schemas_judge_the_collection_value_type() {
     let registry = registry();
     let cases = [
         ("view", "views/ryeos/node/bundles.yaml"),
-        ("surface", "surfaces/ryeos/ui/base.yaml"),
+        ("surface", "surfaces/ryeos/ui/lens.yaml"),
     ];
     for (kind, relative) in cases {
         let base = authored(relative);
