@@ -39,7 +39,7 @@ fn a_cursor_returns_its_position_only_to_its_own_read_filter_and_order() {
             CODEC
                 .decode("not base64 !", &filter, "at_desc")
                 .unwrap_err(),
-            "not one this read issued",
+            "not a cursor for this read",
         ),
         (
             CODEC.decode("", &filter, "at_desc").unwrap_err(),
@@ -74,9 +74,9 @@ fn a_cursor_carries_only_the_position_and_its_binding() {
 #[test]
 fn the_revision_changes_with_any_source_tip_and_with_the_filter() {
     let tips = [("journal", "a"), ("ledger", "b"), ("trust", "c")];
-    let base = revision_of("node_journal", &tips, "f");
+    let base = revision_of("node_journal", "auth", &tips, "f");
     assert!(base.starts_with("rev1:"));
-    assert_eq!(base, revision_of("node_journal", &tips, "f"));
+    assert_eq!(base, revision_of("node_journal", "auth", &tips, "f"));
     for changed in [
         revision_of(
             "node_journal",
@@ -88,8 +88,8 @@ fn the_revision_changes_with_any_source_tip_and_with_the_filter() {
             &[("journal", "x"), ("ledger", "b"), ("trust", "c")],
             "f",
         ),
-        revision_of("node_journal", &tips, "g"),
-        revision_of("threads", &tips, "f"),
+        revision_of("node_journal", "auth", &tips, "g"),
+        revision_of("threads", "auth", &tips, "f"),
         revision_of(
             "node_journal",
             &[
@@ -128,9 +128,29 @@ fn limits_default_and_are_bounded() {
 }
 
 #[test]
-fn key_ids_are_typed_once() {
-    assert_eq!(key_id("ab"), "fp:ab");
-    assert_eq!(key_id("fp:ab"), "fp:ab");
+fn key_ids_are_typed_once_and_validated() {
+    let hex = "ab".repeat(32);
+    assert_eq!(key_id(&hex).unwrap(), format!("fp:{hex}"));
+    assert_eq!(key_id(&format!("fp:{hex}")).unwrap(), format!("fp:{hex}"));
+    for junk in ["ab", "fp:ab", &"AB".repeat(32), &"zz".repeat(32), ""] {
+        assert!(key_id(junk).is_err(), "{junk}");
+    }
+}
+
+#[test]
+fn the_revision_follows_the_callers_authorization() {
+    let policy = "gen1";
+    let wide = authorization_digest("fp:k", &["a".to_owned(), "b".to_owned()], policy);
+    let narrowed = authorization_digest("fp:k", &["a".to_owned()], policy);
+    let reordered = authorization_digest("fp:k", &["b".to_owned(), "a".to_owned()], policy);
+    let other_key = authorization_digest("fp:j", &["a".to_owned(), "b".to_owned()], policy);
+    let other_policy = authorization_digest("fp:k", &["a".to_owned(), "b".to_owned()], "gen2");
+    assert_eq!(wide, reordered);
+    let tips = [("journal", "a")];
+    let base = revision_of("node_journal", &wide, &tips, "f");
+    for changed in [narrowed, other_key, other_policy] {
+        assert_ne!(base, revision_of("node_journal", &changed, &tips, "f"));
+    }
 }
 
 #[test]
@@ -223,25 +243,41 @@ fn the_signers_table_names_exactly_the_given_keys_with_fresh_standing() {
     };
     let view = ryeos_node::trust_registry::RegistryView {
         records: vec![
-            record("aa", Standing::Active),
-            record("bb", Standing::Revoked),
-            record("cc", Standing::Retired),
+            record(&"a".repeat(64), Standing::Active),
+            record(&"b".repeat(64), Standing::Revoked),
+            record(&"c".repeat(64), Standing::Retired),
         ],
         chain: Vec::new(),
         signed_at: Vec::new(),
         registry_digest: "d".to_owned(),
     };
-    let table = signers_table(["fp:bb", "cc", "nn", "zz"], &view, "nn");
+    let fp = |c: &str| c.repeat(64);
+    let table = signers_table(
+        [
+            format!("fp:{}", fp("b")).as_str(),
+            fp("c").as_str(),
+            fp("e").as_str(),
+            fp("f").as_str(),
+        ],
+        &view,
+        &fp("e"),
+    )
+    .unwrap();
+    let key = |c: &str| format!("fp:{}", fp(c));
     assert_eq!(
-        table.keys().collect::<Vec<_>>(),
-        ["fp:bb", "fp:cc", "fp:nn", "fp:zz"]
+        table.keys().cloned().collect::<Vec<_>>(),
+        [key("b"), key("c"), key("e"), key("f")]
     );
-    assert_eq!(table["fp:bb"].status, SignerStatus::Revoked);
-    assert_eq!(table["fp:cc"].status, SignerStatus::Retired);
-    assert_eq!(table["fp:cc"].label.as_deref(), Some("label-cc"));
-    assert_eq!(table["fp:nn"].status, SignerStatus::Node);
-    assert_eq!(table["fp:zz"].status, SignerStatus::Unknown);
-    assert!(!table.contains_key("fp:aa"));
+    assert_eq!(table[&key("b")].status, SignerStatus::Revoked);
+    assert_eq!(table[&key("c")].status, SignerStatus::Retired);
+    assert_eq!(
+        table[&key("c")].label.as_deref(),
+        Some(format!("label-{}", fp("c")).as_str())
+    );
+    assert_eq!(table[&key("e")].status, SignerStatus::Node);
+    assert_eq!(table[&key("f")].status, SignerStatus::Unknown);
+    assert!(!table.contains_key(&key("a")));
+    assert!(signers_table(["junk"], &view, &fp("e")).is_err());
 }
 
 #[test]

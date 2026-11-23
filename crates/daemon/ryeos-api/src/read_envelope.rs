@@ -242,27 +242,64 @@ fn digest_hex(bytes: &[u8]) -> String {
     lillux::sha256_hex(bytes)
 }
 
-/// Digest of a filter: the JSON of the read's parsed filter (cursor, limit
-/// and `if_revision` excluded by the caller). It is canonical only when the
-/// filter type serializes in a fixed order: a struct with fixed fields, and
-/// `BTreeMap`/`BTreeSet` or sorted vectors for collections, never a
-/// `HashMap` or `HashSet`.
+/// Digest of a filter: the canonical JSON (sorted keys) of the read's parsed
+/// filter, with cursor, limit and `if_revision` left out by the caller, so a
+/// field order or map order never changes it.
 pub fn filter_digest(filter: &impl Serialize) -> Result<String, HandlerError> {
-    let bytes = serde_json::to_vec(filter)
+    let value = serde_json::to_value(filter)
         .map_err(|error| HandlerError::Internal(format!("filter does not serialize: {error}")))?;
-    Ok(digest_hex(&bytes))
+    let canonical = lillux::canonical_json(&value).map_err(|error| {
+        HandlerError::Internal(format!("filter is not canonical JSON: {error}"))
+    })?;
+    Ok(digest_hex(canonical.as_bytes()))
+}
+
+/// Digest of what a caller may see: its key, its effective scopes and the
+/// node policy generation it was judged under. Folded into every revision,
+/// so narrowing a caller's scope, removing its grant, retiring its key or
+/// replacing the policy changes the revision even when no source moved.
+pub fn authorization_digest(
+    caller_key: &str,
+    effective_scopes: &[String],
+    policy_generation: &str,
+) -> String {
+    let mut scopes = effective_scopes.to_vec();
+    scopes.sort();
+    scopes.dedup();
+    let mut bytes = Vec::new();
+    for part in [caller_key, policy_generation] {
+        bytes.extend_from_slice(part.as_bytes());
+        bytes.push(0);
+    }
+    for scope in &scopes {
+        bytes.extend_from_slice(scope.as_bytes());
+        bytes.push(0);
+    }
+    digest_hex(&bytes)
 }
 
 /// The revision of the state a caller's filter reads: a digest over every
 /// source tip the read draws on, named, and the filter. A change in any
 /// source changes it; another filter has another revision.
 ///
-/// Every read MUST include the node policy generation digest among `tips`,
-/// and for a seat the seat's pins, so a change of grant or disclosure never
-/// leaves a stale `not_modified` standing.
-pub fn revision_of(read: &str, tips: &[(&str, &str)], filter_digest: &str) -> String {
+/// `authorization` is [`authorization_digest`] of the caller, so a change of
+/// the caller's grant, scope, key standing or the node policy never leaves a
+/// stale `not_modified` standing; a seat also names its pins among `tips`.
+///
+/// Source tips are node-wide, so a polling caller can learn that something
+/// changed beyond its own rows. That is acceptable for operator-tier reads;
+/// a principal-tier read should pass tips scoped to the caller where that is
+/// cheap.
+pub fn revision_of(
+    read: &str,
+    authorization: &str,
+    tips: &[(&str, &str)],
+    filter_digest: &str,
+) -> String {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(read.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(authorization.as_bytes());
     bytes.push(0);
     for (name, tip) in tips {
         bytes.extend_from_slice(name.as_bytes());
@@ -327,9 +364,9 @@ impl CursorCodec {
         }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(cursor)
-            .map_err(|_| self.invalid("the cursor is not one this read issued"))?;
+            .map_err(|_| self.invalid("not a cursor for this read"))?;
         let payload: CursorPayload = serde_json::from_slice(&bytes)
-            .map_err(|_| self.invalid("the cursor is not one this read issued"))?;
+            .map_err(|_| self.invalid("not a cursor for this read"))?;
         if payload.read != self.read {
             return Err(self.invalid("the cursor belongs to another read"));
         }
@@ -355,19 +392,32 @@ pub fn page_limit(limit: Option<usize>) -> Result<usize, HandlerError> {
     }
 }
 
-/// A key fingerprint in the typed form reads return: `fp:<hex>`.
-pub fn key_id(fingerprint: &str) -> String {
+/// A key fingerprint in the typed form reads return: `fp:<hex>`. Accepts the
+/// typed form or bare hex, both 64 lowercase hex digits; anything else is
+/// refused so junk never looks like a typed key.
+pub fn key_id(fingerprint: &str) -> Result<String, HandlerError> {
     let hex = fingerprint.strip_prefix("fp:").unwrap_or(fingerprint);
-    format!("fp:{hex}")
+    if hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(format!("fp:{hex}"))
+    } else {
+        Err(HandlerError::Internal(format!(
+            "{fingerprint:?} is not a key fingerprint"
+        )))
+    }
 }
 
 /// The signers side table for exactly `fingerprints`, resolved from the
-/// node's signer registry as it stands now.
+/// node's signer registry as it stands now. A value that is not a key
+/// fingerprint refuses the table.
 pub fn signers_table<'a>(
     fingerprints: impl IntoIterator<Item = &'a str>,
     view: &ryeos_node::trust_registry::RegistryView,
     node_fingerprint: &str,
-) -> BTreeMap<String, SignerEntry> {
+) -> Result<BTreeMap<String, SignerEntry>, HandlerError> {
     let node_hex = node_fingerprint
         .strip_prefix("fp:")
         .unwrap_or(node_fingerprint);
@@ -397,9 +447,9 @@ pub fn signers_table<'a>(
                 status: SignerStatus::Unknown,
             }
         };
-        table.insert(key_id(hex), entry);
+        table.insert(key_id(hex)?, entry);
     }
-    table
+    Ok(table)
 }
 
 #[cfg(test)]
