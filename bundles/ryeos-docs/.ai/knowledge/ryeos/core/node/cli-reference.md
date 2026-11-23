@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T00:12:49Z:448c94f949b9da7ae732bf365a3b24e49d0982d3b9717e7fb1bf26c286c5c0c1:66ntr1dH/AM0m5oNi/HVSQ1B+9XKSLHzBkX9mcTkuYawkELeXOoiClDnhC3MSyEICovjbYo8HTe7ZnpKlrjHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T01:34:41Z:4e2075d0da919ffd74fde008d3d0a84b2b3edc15eb674c71d10d7948c0efdb5c:hwlqaJPbwOu5PyG7+Z9dpJjq4SYZfzBu2xyJMj3dau7O/eH74tB3v0wYxndRjtkiaIaR5il/mY4m3zMMBUUEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -352,6 +352,13 @@ cure; see [`retire`](#ryeos-node-external-execution-retire).
 Operator note for the owner+name project identity cut, epoch 144.
 
 Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 143 --schema-cut-to 144 --include-project-heads --confirm-project-heads` on its next upgrade. Project heads are reset too, because their keys change shape.
+
+A node still on epoch 142 goes straight to 144 with one reset, in place of the 143 reset and this one: `ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 144 --include-project-heads --confirm-project-heads`. The reset accepts any earlier stored epoch named exactly as `--schema-cut-from`, and clears that store without reading it, so no 143 build is needed in between. Such a node still carries the 143 cut's own ordering, described in the epoch 143 note below:
+- Drain before stopping: settle or terminate every lease, qualification occurrence and termination in flight.
+- After starting, recompose each binding `ryeos node doctor` names as stranded.
+- Run the rig preflight before any live spend.
+
+Everything else below applies to both paths.
 
 What a project is now:
 - **project**: `pid:v1:<owner>/<name>`.
