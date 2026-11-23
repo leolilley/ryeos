@@ -422,7 +422,7 @@ fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError>
                 .map_err(|error| CliError::ProjectResolution(format!("{error:#}")))?
                 .ok_or_else(|| {
                     CliError::ProjectResolution(format!(
-                        "project_undeclared: --current-head needs {} to declare its name in {}",
+                        "project_manifest_missing: --current-head needs {} to have a {} whose `name:` is the project's name",
                         root.display(),
                         ryeos_state::project_identity::PROJECT_DECLARATION_PATH
                     ))
@@ -2858,11 +2858,7 @@ mod tests {
     fn direct_execute_current_head_is_typed_control_not_item_input() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
-        std::fs::write(
-            tmp.path().join(".ai/project.yaml"),
-            "schema: 1\nname: fixture\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join(".ai/manifest.yaml"), "name: fixture\n").unwrap();
         let commands = vec![direct_execute_command()];
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
@@ -2995,11 +2991,7 @@ mod tests {
         command.name = "validate".to_string();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(".ai")).unwrap();
-        std::fs::write(
-            project.path().join(".ai/project.yaml"),
-            "schema: 1\nname: fixture\n",
-        )
-        .unwrap();
+        std::fs::write(project.path().join(".ai/manifest.yaml"), "name: fixture\n").unwrap();
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
                 "validate",

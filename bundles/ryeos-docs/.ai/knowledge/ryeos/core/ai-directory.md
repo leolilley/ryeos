@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T19:08:37Z:9782d8c437ef334feb9f24e28573b1943931edfba2825ee5d2609fbd3587e1d2:sX5xHSceN8uZBi61SGLRd71jDTRl+mAECAf28t7ynwUUiU32GvGjz4Ra0PlO984P3DGSiMID9vRxhqgpSIvEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:367a9a32eb7c37d9cd3a4325ffc58dfe168ef5447c12766ed15f210a84ece153:2fHJSu2bBYmJOaTObJDDvu991D5l25ftMsvWyBM+/nuUjRiK1l5VvGU+Omw8kqfnegXySPWL4WBejjtGZSPdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -27,23 +27,26 @@ manifest digest. This keeps kind coverage meaningful, keeps source intuitive
 to author, and prevents arbitrary dependency files from being mistaken for
 RyeOS items.
 
-## The project's name: `.ai/project.yaml`
+## The project's name: `.ai/manifest.yaml`
 
-A project declares its name in `.ai/project.yaml`:
+A project's name is the top-level `name:` of its `.ai/manifest.yaml`, the same
+name its items are namespaced under:
 
 ```yaml
-schema: 1
 name: my-project
 ```
 
 A name is 1 to 64 characters of `[a-z0-9._-]`, starting with a letter or digit.
-The node identifies a project as `fp:<owner>/<name>`: the name comes from this
-file, the owner never does. The owner is the launcher of a checkout it
-registered (`ryeos project register`), or the principal whose pushed head the
-node found. The file is unsigned on purpose: it is a claim, and trust comes
-only from a registration or a held head (see
-[Signing and Trust](signing.md)). Pushed heads, remote bindings, signer project
-scopes and endorsements all key on this name; AI-only sync carries the file.
+The node identifies a project as `pid:v1:<owner>/<name>`: the name comes from
+the manifest, the owner never does. The owner is the principal the launcher's
+key acts for on the node for a checkout it registered
+(`ryeos project register`), or the principal whose pushed head the node found.
+The manifest's signature plays no part in identity: the name is read as one
+plain `name:` line, and trust comes only from a registration or a held head
+(see [Signing and Trust](signing.md)). Renaming a project means changing that
+name (and its item namespace) and registering the checkout again. Pushed
+heads, remote bindings, signer project scopes and endorsements all key on this
+name; AI-only sync carries the manifest.
 
 ## Bundle Layout (Core)
 

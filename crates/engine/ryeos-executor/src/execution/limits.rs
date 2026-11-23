@@ -958,7 +958,8 @@ mod tests {
                 ),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .with_succession_chain(&[]);
         let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
             .config()
             .join("example-runtime");

@@ -5376,14 +5376,38 @@ fn project_registration_checks(
         )
     };
     let mut stale = Vec::new();
+    let mut drifted = Vec::new();
     for loaded in &registrations {
         let identity = &loaded.registration.identity;
         for path in &loaded.registration.paths {
+            // The source manifest is read only to compare its name with the
+            // manifest's; it never decides identity.
+            let source = std::fs::read(path.join(".ai/manifest.source.yaml"))
+                .ok()
+                .and_then(|bytes| {
+                    ryeos_state::project_identity::ProjectDeclaration::parse(&bytes).ok()
+                });
+            let manifest =
+                std::fs::read(path.join(ryeos_state::project_identity::PROJECT_DECLARATION_PATH))
+                    .ok()
+                    .and_then(|bytes| {
+                        ryeos_state::project_identity::ProjectDeclaration::parse(&bytes).ok()
+                    });
+            if let (Some(source), Some(manifest)) = (source, manifest)
+                && source.name != manifest.name
+            {
+                drifted.push(serde_json::json!({
+                    "checkout": path,
+                    "manifest_source_name": source.name.as_str(),
+                    "manifest_name": manifest.name.as_str(),
+                    "fix": "re-populate the manifest (ryeos manifest build/sign) before registering",
+                }));
+            }
             let declared = ryeos_node::project_registry::inspect_checkout(app_root, path);
             let problem = match declared {
                 Ok((_, Some(name))) if &name == identity.name() => None,
                 Ok((_, Some(name))) => Some(format!("declares `{name}`")),
-                Ok((_, None)) => Some("declares no name".to_owned()),
+                Ok((_, None)) => Some("has no manifest name".to_owned()),
                 Err(error) => Some(format!("{error:#}")),
             };
             if let Some(problem) = problem {
@@ -5391,7 +5415,7 @@ fn project_registration_checks(
                     "identity": identity,
                     "path": path,
                     "problem": problem,
-                    "fix": format!("restore the checkout's .ai/project.yaml (name: {}) or `ryeos project unregister {} --name {}`", identity.name(), path.display(), identity.name()),
+                    "fix": format!("restore the checkout's .ai/manifest.yaml (name: {}) or `ryeos project unregister {} --name {}`", identity.name(), path.display(), identity.name()),
                 }));
             }
         }
@@ -5418,7 +5442,15 @@ fn project_registration_checks(
             "fix": "register each checkout again with `ryeos project register <checkout>`, then remove the old directory",
         }),
     );
-    vec![registrations_row, declarations_row, pre_cut_row]
+    let mut rows = vec![registrations_row, declarations_row, pre_cut_row];
+    if !drifted.is_empty() {
+        rows.push(check(
+            "project_manifest_name_drift",
+            WARN,
+            serde_json::json!({ "checkouts": drifted }),
+        ));
+    }
+    rows
 }
 
 fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {

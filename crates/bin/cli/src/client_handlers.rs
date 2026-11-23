@@ -368,7 +368,7 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .map_err(|error| local(format!("{error:#}")))?
         .ok_or_else(|| {
             local(format!(
-                "project_undeclared: {} declares no project name in {}",
+                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest",
                 project.display(),
                 ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             ))

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T19:08:16Z:3fea3560cee8de6c916106bcf0c50170ede0011e070a39605f9a561374aa7c2d:D26rjw5U7lmEpHN0pPTj/wImaT/Gwpc86FM/g/hmtB11tdR0kHpdMKUy3T3TZGTB+Ws0mLm7tEpQR5J1IPzFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:0751040d7a8e033bde17c40f48a83fe955a06712fb1b979f5c4ba818f1cc4b5a:EMSotmHuQz5ziZ7/Nt5zY7+tN0A51NJsICBYXKGxLwXoNDmknjuKaLNc2YWkxqEOLhrJJmZxrVR0aGg85aaLAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -488,10 +488,10 @@ ryeos remote push --remote prod --project /absolute/path/to/project
 The push pipeline ingests local project content, uploads missing CAS
 objects, and writes a principal-scoped remote pushed HEAD via
 `/push-head`. The head is keyed by the pushing principal and the project name
-the checkout declares in `.ai/project.yaml` (a binding records that name and
-every push re-reads the declaration, refusing `project_name_mismatch`); the
+the checkout's `.ai/manifest.yaml` names in its `name:` (a binding records that
+name and every push re-reads the manifest, refusing `project_name_mismatch`); the
 target refuses a snapshot that does not declare the name it is pushed under.
-A checkout that declares no name cannot be pushed (`project_undeclared`). Before local CAS ingestion, it unions the source node's current
+A checkout with no `.ai/manifest.yaml` cannot be pushed (`project_manifest_missing`). Before local CAS ingestion, it unions the source node's current
 signed exclusions with the target's cached ingest-ignore rules. If the target
 cache is missing, the handler fetches `/ingest-ignore` inline and aborts if
 that fetch fails. The receiving node independently rechecks every transferred

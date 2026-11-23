@@ -2060,7 +2060,8 @@ mod tests {
                     ),
                 ],
             )
-            .unwrap();
+            .unwrap()
+            .with_succession_chain(&[]);
             let content =
                 lillux::signature::sign_content("name: authored\n", &authoring, "#", None);
             create_file(&checkout, &format!(".ai/config/{CONFIG_ID}.yaml"), &content);

@@ -3,7 +3,7 @@
 //! A project is identified by the principal that owns it and a name:
 //! `pid:v1:<64 lowercase hex>/<name>`. The owner is a principal id, never a
 //! key fingerprint (see [`crate::principal_id`]). The name comes from the
-//! project tree's `.ai/project.yaml`; that declaration is a claim, never
+//! project's `.ai/manifest.yaml` `name:`; that is a claim, never
 //! trust. The owner is never read from the tree: it is the principal the
 //! node's resolver says the authenticated launcher of a registered live
 //! checkout speaks for, or the principal whose head key a pushed head was
@@ -19,14 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::principal_id::PrincipalId;
 
-/// Relative path of a project's name declaration inside its root.
-pub const PROJECT_DECLARATION_PATH: &str = ".ai/project.yaml";
+/// Relative path of the file whose `name:` is a project's name: the
+/// project's own manifest.
+pub const PROJECT_DECLARATION_PATH: &str = ".ai/manifest.yaml";
 
-/// The only declaration schema this node reads.
-pub const PROJECT_DECLARATION_SCHEMA: u32 = 1;
-
-/// Upper bound on a declaration's size; the document holds two short fields.
-pub const MAX_PROJECT_DECLARATION_BYTES: u64 = 4 * 1024;
+/// Upper bound on a manifest read for its name.
+pub const MAX_PROJECT_DECLARATION_BYTES: u64 = 64 * 1024;
 
 const MAX_PROJECT_NAME_LEN: usize = 64;
 
@@ -187,7 +185,7 @@ pub enum LogicalProjectAbsence {
     /// this node at that snapshot.
     ForeignHeadNotHeld,
     /// A project tree that declares no name.
-    NoDeclaredName,
+    NoProjectName,
     /// A caller that states no project (for example a pinned generation
     /// known only by snapshot).
     NotStated,
@@ -209,7 +207,7 @@ impl fmt::Display for LogicalProjectAbsence {
             Self::Projectless => "projectless",
             Self::NotRegistered => "no project identity for this session",
             Self::ForeignHeadNotHeld => "this node does not hold the owner's head for this project",
-            Self::NoDeclaredName => "the project declares no name",
+            Self::NoProjectName => "the checkout's manifest names no project",
             Self::NotStated => "no project stated",
         })
     }
@@ -386,38 +384,64 @@ impl ProjectHeadKey {
     }
 }
 
-/// A project tree's `.ai/project.yaml`: the name the tree claims. Unsigned on
-/// purpose: a signature is not bound to a location, so a copied tree would
-/// carry a valid one. Trust comes from registration or a head key, never from
-/// this file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The project name a tree claims: the top-level `name:` of its
+/// `.ai/manifest.yaml`, the same name its items are namespaced under. It is
+/// an unverified claim: the manifest's signature is not checked here, and a
+/// signature would not be bound to a location anyway, so a copied tree would
+/// carry a valid one. Trust comes from a checkout registration or a head
+/// key, never from this file. A name outside the [`ProjectName`] grammar is
+/// refused, never normalized.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectDeclaration {
-    pub schema: u32,
     pub name: ProjectName,
 }
 
 impl ProjectDeclaration {
-    /// Parse and validate declaration bytes.
+    /// Parse manifest bytes and take the project name from `name:`.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_PROJECT_DECLARATION_BYTES {
             bail!(
-                "{PROJECT_DECLARATION_PATH} is larger than {MAX_PROJECT_DECLARATION_BYTES} bytes"
+                "project_manifest_invalid: {PROJECT_DECLARATION_PATH} is larger than {MAX_PROJECT_DECLARATION_BYTES} bytes"
             );
         }
-        let declaration: Self = serde_yaml::from_slice(bytes)
-            .with_context(|| format!("decode {PROJECT_DECLARATION_PATH}"))?;
-        if declaration.schema != PROJECT_DECLARATION_SCHEMA {
+        let document: serde_yaml::Value = serde_yaml::from_slice(bytes).with_context(|| {
+            format!("project_manifest_invalid: decode {PROJECT_DECLARATION_PATH}")
+        })?;
+        let Some(name) = document.get("name") else {
             bail!(
-                "{PROJECT_DECLARATION_PATH} schema {} is not supported (expected {PROJECT_DECLARATION_SCHEMA})",
-                declaration.schema
+                "project_manifest_name_missing: {PROJECT_DECLARATION_PATH} has no top-level `name:`; a project's name is its manifest name"
+            );
+        };
+        let Some(name) = name.as_str() else {
+            bail!(
+                "project_manifest_name_invalid: {PROJECT_DECLARATION_PATH} `name:` is not a string"
+            );
+        };
+        // Exactly one top-level `name:` line, written as a plain scalar: no
+        // quotes, anchors, aliases, tags or trailing comment. Anything the
+        // parser could have resolved into this value some other way refuses.
+        let text = std::str::from_utf8(bytes).map_err(|_| {
+            anyhow::anyhow!("project_manifest_invalid: {PROJECT_DECLARATION_PATH} is not UTF-8")
+        })?;
+        let name_lines: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("name:"))
+            .collect();
+        if name_lines.len() != 1 || name_lines[0].trim() != name {
+            bail!(
+                "project_manifest_name_invalid: {PROJECT_DECLARATION_PATH} must hold exactly one top-level `name: <name>` written as a plain value"
             );
         }
-        Ok(declaration)
+        let name = ProjectName::new(name).map_err(|error| {
+            anyhow::anyhow!(
+                "project_manifest_name_invalid: {PROJECT_DECLARATION_PATH} `name: {name}` is not a valid project name ({error:#})"
+            )
+        })?;
+        Ok(Self { name })
     }
 
-    /// Read the declaration under a pinned project root without following
-    /// symlinks. `Ok(None)` when the root declares no name.
+    /// Read the claim under a pinned project root without following
+    /// symlinks. `Ok(None)` when the root has no manifest.
     pub fn read(root: &lillux::PinnedDirectory) -> Result<Option<Self>> {
         let Some(file) = root
             .open_pinned_regular_descendant(Path::new(PROJECT_DECLARATION_PATH), false)
@@ -430,8 +454,8 @@ impl ProjectDeclaration {
         Self::parse(&bytes).map(Some)
     }
 
-    /// The name a stored project tree declares, read from its CAS objects.
-    /// `Ok(None)` when the tree holds no declaration.
+    /// The name a stored project tree claims, read from its CAS objects.
+    /// `Ok(None)` when the tree holds no manifest.
     pub fn declared_name_in_tree(
         cas: &lillux::CasStore,
         tree: &crate::objects::ProjectTree,
@@ -449,13 +473,13 @@ impl ProjectDeclaration {
         Ok(Some(Self::parse(&bytes)?.name))
     }
 
-    /// The name declared by the project tree at `root`, an existing
-    /// directory. `Ok(None)` when it declares none.
+    /// The name claimed by the project tree at `root`, an existing
+    /// directory. `Ok(None)` when it has no manifest.
     pub fn declared_name(root: &Path) -> Result<Option<ProjectName>> {
         let pinned = lillux::PinnedDirectory::open(root)?
             .with_context(|| format!("project root {} is not a directory", root.display()))?;
         Ok(Self::read(&pinned)
-            .with_context(|| format!("read the project declaration of {}", root.display()))?
+            .with_context(|| format!("read the project name of {}", root.display()))?
             .map(|declaration| declaration.name))
     }
 }
@@ -557,24 +581,36 @@ mod tests {
     }
 
     #[test]
-    fn declarations_parse_strictly() {
-        let declaration = ProjectDeclaration::parse(b"schema: 1\nname: ryeos-next\n").unwrap();
-        assert_eq!(declaration.name.as_str(), "ryeos-next");
-        for bad in [
-            &b"schema: 2\nname: x\n"[..],
-            b"name: x\n",
-            b"schema: 1\n",
-            b"schema: 1\nname: X\n",
-            b"schema: 1\nname: x\nowner: fp:abc\n",
-            b"- not a map\n",
+    fn the_project_name_is_the_manifest_name() {
+        // A real signed manifest: the signature comment and every other field
+        // are ignored; only `name:` is read.
+        let manifest = b"# ryeos:signed:2026-10-26T23:17:07Z:abc:sig:741a\nname: ryeos\nversion: 0.1.0\ndescription: x\nrequires_kinds:\n- config\n";
+        assert_eq!(
+            ProjectDeclaration::parse(manifest).unwrap().name.as_str(),
+            "ryeos"
+        );
+        for (bad, code) in [
+            (&b"version: 0.1.0\n"[..], "project_manifest_name_missing"),
+            (b"name: Farm\n", "project_manifest_name_invalid"),
+            (b"name: a/b\n", "project_manifest_name_invalid"),
+            (b"name: _x\n", "project_manifest_name_invalid"),
+            (b"name: [x]\n", "project_manifest_name_invalid"),
+            (b"- not a map\n", "project_manifest_name_missing"),
+            (b"name: x\nname: y\n", "project_manifest"),
+            (b"name: \"x\"\n", "project_manifest_name_invalid"),
+            (b"other: &a x\nname: *a\n", "project_manifest_name_invalid"),
+            (b"name: !!str x\n", "project_manifest_name_invalid"),
+            (b"name: x # comment\n", "project_manifest_name_invalid"),
+            (b"name: x\n---\nname: y\n", "project_manifest"),
         ] {
+            let error = ProjectDeclaration::parse(bad).unwrap_err();
             assert!(
-                ProjectDeclaration::parse(bad).is_err(),
-                "{:?} must be refused",
+                format!("{error:#}").contains(code),
+                "{:?}: {error:#}",
                 String::from_utf8_lossy(bad)
             );
         }
-        let oversized = format!("schema: 1\nname: x\n# {}\n", "a".repeat(4096));
+        let oversized = format!("name: x\n# {}\n", "a".repeat(64 * 1024));
         assert!(ProjectDeclaration::parse(oversized.as_bytes()).is_err());
     }
 
@@ -587,34 +623,26 @@ mod tests {
         std::fs::create_dir(root.path().join(".ai")).unwrap();
         assert_eq!(ProjectDeclaration::read(&pinned).unwrap(), None);
 
-        std::fs::write(
-            root.path().join(PROJECT_DECLARATION_PATH),
-            "schema: 1\nname: demo\n",
-        )
-        .unwrap();
+        std::fs::write(root.path().join(PROJECT_DECLARATION_PATH), "name: demo\n").unwrap();
         let read = ProjectDeclaration::read(&pinned).unwrap().unwrap();
         assert_eq!(read.name.as_str(), "demo");
 
         // A declaration reached through a symlink is never read.
         let elsewhere = tempfile::tempdir().unwrap();
-        std::fs::write(
-            elsewhere.path().join("project.yaml"),
-            "schema: 1\nname: other\n",
-        )
-        .unwrap();
+        std::fs::write(elsewhere.path().join("manifest.yaml"), "name: other\n").unwrap();
         std::fs::remove_file(root.path().join(PROJECT_DECLARATION_PATH)).unwrap();
-        let target = elsewhere.path().join("project.yaml");
+        let target = elsewhere.path().join("manifest.yaml");
         lillux::PinnedDirectory::open(&root.path().join(".ai"))
             .unwrap()
             .unwrap()
             .create_symlink(
-                std::ffi::OsStr::new("project.yaml"),
+                std::ffi::OsStr::new("manifest.yaml"),
                 target.to_str().unwrap().as_bytes(),
             )
             .unwrap();
         assert!(
             !matches!(ProjectDeclaration::read(&pinned), Ok(Some(_))),
-            "a symlinked declaration must never be read"
+            "a symlinked manifest must never be read"
         );
     }
 }

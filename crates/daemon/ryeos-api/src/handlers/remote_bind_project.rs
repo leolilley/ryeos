@@ -40,7 +40,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let project_name = ryeos_state::project_identity::ProjectDeclaration::declared_name(&local)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "project_undeclared: {} declares no project name in {}; add one before binding it",
+                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest; add one before binding it",
                 local.display(),
                 ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             )

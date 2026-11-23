@@ -96,7 +96,7 @@ async fn resolve_release_source_generation(
         ryeos_state::project_identity::ProjectDeclaration::declared_name(project_identity)?
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "project_undeclared: release source {} declares no project name in {}",
+                    "project_manifest_missing: release source {} has no {}; a project's name is the `name:` of its manifest",
                     project_identity.display(),
                     ryeos_state::project_identity::PROJECT_DECLARATION_PATH
                 )

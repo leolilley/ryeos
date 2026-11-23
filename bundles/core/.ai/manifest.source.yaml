@@ -19,9 +19,6 @@ sync_include:
     shape: file
   - root: .ai/manifest.yaml
     shape: file
-  # The project's name declaration: pushed heads are keyed by it.
-  - root: .ai/project.yaml
-    shape: file
   - root: .ai/directives
     shape: directory
   - root: .ai/graphs

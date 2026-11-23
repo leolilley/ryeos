@@ -1585,7 +1585,7 @@ pub struct ProjectRegistrationArguments {
     /// Absolute checkout path; the node canonicalizes it.
     pub path: String,
     /// The project name. Register defaults it to the name the checkout's
-    /// `.ai/project.yaml` declares and requires the two to agree.
+    /// `.ai/manifest.yaml` declares and requires the two to agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The owner principal, `pid:v1:<64 lowercase hex>`; defaults to the
@@ -1666,7 +1666,7 @@ pub(super) fn project_register(ctx: &HandlerContext<'_>) -> Result<Value> {
         crate::project_registry::inspect_checkout(ctx.app_root, Path::new(&arguments.path))?;
     let declared = declared.with_context(|| {
         format!(
-            "project_undeclared: {} has no {}; a registered checkout must declare its name",
+            "project_manifest_missing: {} has no {}; a registered checkout's name is the `name:` of its manifest",
             path.display(),
             ryeos_state::project_identity::PROJECT_DECLARATION_PATH
         )

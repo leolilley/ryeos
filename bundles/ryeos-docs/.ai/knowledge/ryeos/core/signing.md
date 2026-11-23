@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T19:08:16Z:c8378b003b3904f5adb383b7ed18a18386a832c6bda3a2463eaae06d8a755711:aHpLRb1+bPHm7rgwXIAe2Y4bQ9NDY1R1hwJhM20W5g3DYJsLwRTssQqdSXdKX1G9MkKPuhO9N/TahhDt+rZSBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:d1e0eeb56040f6a1d23a96d89fc7a215a81660acb1be001ca1308dc777ea4beb:DyFMxf9KT7y20xJkhE/WAXuo9h8DJkuKz6/KR60OpCYcNX0J/P9huN9wmOcMrZfpaiSulQbSQGu3D4CabdASCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -208,9 +208,10 @@ them (see [Endorsements](#endorsements)).
 
 `scope.projects` names projects by owner+name identity, never by path. An
 entry is `fp:<owner>/<name>` (a named owner) or `own:<name>` (the signer's own
-key as owner). A project's name is what its tree declares in
-`.ai/project.yaml` (`schema: 1`, `name: <name>`); the owner never comes from the
-tree. A scoped signer is trusted only where the node has established that
+key as owner). A project's name is the `name:` of its `.ai/manifest.yaml` (the same name its
+items are namespaced under; renaming a project means changing that name and
+registering the checkout again); the manifest's signature plays no part in
+identity, and the owner never comes from the tree. A scoped signer is trusted only where the node has established that
 identity:
 
 - a live checkout the launcher registered under its own owner

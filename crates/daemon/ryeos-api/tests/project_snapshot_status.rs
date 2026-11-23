@@ -187,8 +187,8 @@ async fn local_operator_status_reuses_principal_head_comparison_without_creating
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".ai")).unwrap();
     std::fs::write(
-        project.path().join(".ai/project.yaml"),
-        b"schema: 1\nname: status-probe\n",
+        project.path().join(".ai/manifest.yaml"),
+        b"name: status-probe\n",
     )
     .unwrap();
     std::fs::write(project.path().join("edited.txt"), b"current workspace edit").unwrap();
@@ -218,7 +218,7 @@ async fn local_operator_status_reuses_principal_head_comparison_without_creating
         .iter()
         .map(|entry| entry["path"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(added, vec![".ai/project.yaml", "edited.txt"]);
+    assert_eq!(added, vec![".ai/manifest.yaml", "edited.txt"]);
     assert!(result["head_snapshot_hash"].is_null());
     assert!(result["deployed_snapshot_hash"].is_null());
     let caller_owner =
@@ -244,7 +244,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     let (_tmp, _state_owner, mut state) = test_state::build_test_state();
     let project = tempfile::tempdir().unwrap();
     for (path, bytes) in [
-        (".ai/project.yaml", "schema: 1\nname: status-snapshot\n"),
+        (".ai/manifest.yaml", "name: status-snapshot\n"),
         (
             PROJECT_SNAPSHOT_CONFIG_RELATIVE,
             "schema: 1\nexclusions: [\"/.local/\"]\n",
@@ -294,7 +294,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     let old_policy_hash = cas.store_object(&old_policy.to_value()).unwrap();
     let mut files = BTreeMap::new();
     for path in [
-        ".ai/project.yaml",
+        ".ai/manifest.yaml",
         PROJECT_SNAPSHOT_CONFIG_RELATIVE,
         "script",
         "state/kept",
@@ -389,7 +389,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
         observed,
         vec![
             PROJECT_SNAPSHOT_CONFIG_RELATIVE,
-            ".ai/project.yaml",
+            ".ai/manifest.yaml",
             "script",
             "state/kept"
         ]

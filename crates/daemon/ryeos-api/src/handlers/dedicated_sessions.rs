@@ -294,8 +294,9 @@ fn owner_checkout_head_key(
         .map_err(internal)?
         .ok_or_else(|| {
             HandlerError::BadRequest(format!(
-                "project_undeclared: {} declares no project name",
-                checkout.display()
+                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest",
+                checkout.display(),
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             ))
         })?;
     let owner = ryeos_app::project_owner::owner_principal(state, owner_key).map_err(internal)?;

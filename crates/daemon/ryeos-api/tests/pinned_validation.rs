@@ -59,7 +59,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         size: service_bytes.len() as u64,
         normalized_mode: 0o644,
     };
-    let declaration = b"schema: 1\nname: demo\n";
+    let declaration = b"name: demo\n";
     let declaration_file = ProjectFile {
         blob_hash: cas.store_blob(declaration).unwrap(),
         size: declaration.len() as u64,

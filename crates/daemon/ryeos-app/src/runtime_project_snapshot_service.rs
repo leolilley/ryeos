@@ -489,7 +489,7 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let head_key = ctx.head_key.as_ref().ok_or_else(|| {
         anyhow!(
-            "project_undeclared: snapshot create needs {} to declare its name in {}",
+            "project_manifest_missing: snapshot create needs {} to have a {} whose `name:` is the project's name",
             ctx.project_path.display(),
             ryeos_state::project_identity::PROJECT_DECLARATION_PATH
         )

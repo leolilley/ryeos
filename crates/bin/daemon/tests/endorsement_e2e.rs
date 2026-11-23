@@ -44,11 +44,8 @@ fn project_identity(operator: &SigningKey) -> ProjectIdentity {
 async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
     let ai = project.join(".ai");
     std::fs::create_dir_all(&ai).expect("project .ai directory");
-    std::fs::write(
-        ai.join("project.yaml"),
-        format!("schema: 1\nname: {PROJECT_NAME}\n"),
-    )
-    .expect("project declaration");
+    std::fs::write(ai.join("manifest.yaml"), format!("name: {PROJECT_NAME}\n"))
+        .expect("project declaration");
     h.kill_daemon().await.expect("stop the daemon");
     apply_local(
         &h.state_path,

@@ -429,7 +429,6 @@ impl SyncInclude {
         let mut entries = vec![
             SyncIncludeEntry::file(".ai/manifest.source.yaml"),
             SyncIncludeEntry::file(".ai/manifest.yaml"),
-            SyncIncludeEntry::file(".ai/project.yaml"),
         ];
         entries.extend(
             [
@@ -1407,7 +1406,6 @@ mod tests {
             (".ai/config/ryeos-runtime", SyncIncludeShape::Directory),
             (".ai/config/development", SyncIncludeShape::Directory),
             (".ai/config/schedules", SyncIncludeShape::Directory),
-            (".ai/project.yaml", SyncIncludeShape::File),
         ];
         expected.sort();
         let table = inc();
@@ -1418,7 +1416,7 @@ mod tests {
             .collect();
         assert_eq!(actual, expected, "the table is ordered by root");
         assert!(table.entries().iter().all(|e| e.materialize_to_project));
-        assert_eq!(table.materialized().count(), 19);
+        assert_eq!(table.materialized().count(), 18);
     }
 
     fn refusal(entries: Vec<SyncIncludeEntry>) -> String {

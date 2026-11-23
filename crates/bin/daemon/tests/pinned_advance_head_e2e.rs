@@ -65,10 +65,7 @@ const PROJECT_NAME: &str = "demo";
 fn plant_declaration(project_dir: &Path) -> Result<()> {
     let ai = project_dir.join(ryeos_engine::AI_DIR);
     std::fs::create_dir_all(&ai)?;
-    std::fs::write(
-        ai.join("project.yaml"),
-        format!("schema: 1\nname: {PROJECT_NAME}\n"),
-    )?;
+    std::fs::write(ai.join("manifest.yaml"), format!("name: {PROJECT_NAME}\n"))?;
     Ok(())
 }
 

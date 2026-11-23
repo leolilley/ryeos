@@ -37,12 +37,12 @@ fn project_identity(operator: &SigningKey) -> ryeos_state::project_identity::Pro
     )
 }
 
-/// Write the project's `.ai/project.yaml` declaring [`PROJECT_NAME`].
+/// Write the project's `.ai/manifest.yaml` declaring [`PROJECT_NAME`].
 fn plant_project_declaration(project: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(project.join(".ai"))?;
     std::fs::write(
-        project.join(".ai/project.yaml"),
-        format!("schema: 1\nname: {PROJECT_NAME}\n"),
+        project.join(".ai/manifest.yaml"),
+        format!("name: {PROJECT_NAME}\n"),
     )?;
     Ok(())
 }

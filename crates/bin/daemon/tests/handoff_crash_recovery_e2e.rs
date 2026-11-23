@@ -4143,8 +4143,8 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
     let project = tempfile::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
-        project.path().join(".ai/project.yaml"),
-        b"schema: 1\nname: portable-handoff\n",
+        project.path().join(".ai/manifest.yaml"),
+        b"name: portable-handoff\n",
     )?;
     std::fs::write(
         project.path().join("fixture.txt"),

@@ -4505,8 +4505,9 @@ fn target_project_identity(
         ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project_path)?
             .with_context(|| {
                 format!(
-                    "project_undeclared: target project {} declares no project name",
-                    target_project_path.display()
+                    "project_manifest_missing: target project {} has no {}; a project's name is the `name:` of its manifest",
+                    target_project_path.display(),
+                    ryeos_state::project_identity::PROJECT_DECLARATION_PATH
                 )
             })?;
     let owner = ryeos_app::project_owner::owner_principal(state, owner_key)?;

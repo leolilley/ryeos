@@ -102,11 +102,7 @@ fn checkout(parent: &Path, directory: &str, declared: Option<&str>) -> PathBuf {
     let root = parent.join(directory);
     std::fs::create_dir_all(root.join(".ai")).unwrap();
     if let Some(name) = declared {
-        std::fs::write(
-            root.join(".ai/project.yaml"),
-            format!("schema: 1\nname: {name}\n"),
-        )
-        .unwrap();
+        std::fs::write(root.join(".ai/manifest.yaml"), format!("name: {name}\n")).unwrap();
     }
     root.canonicalize().unwrap()
 }
@@ -207,7 +203,7 @@ fn a_checkout_must_declare_the_registered_name() {
         .register(json!({ "path": text(&undeclared) }))
         .unwrap_err();
     assert!(
-        format!("{error:#}").contains("project_undeclared"),
+        format!("{error:#}").contains("project_manifest_missing"),
         "{error:#}"
     );
 

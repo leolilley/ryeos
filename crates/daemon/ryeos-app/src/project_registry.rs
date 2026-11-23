@@ -12,8 +12,9 @@
 //!
 //! This module is the only reader. A checkout states its project only when
 //! the launcher holds live write, the node's ownership resolver says the
-//! launcher acts for the registered owner, and the tree still declares that
-//! name ([`live_signer_project`]). The writer lives in `ryeos-node` and reads
+//! launcher acts for the registered owner, and the checkout's manifest still
+//! says the registered name ([`live_signer_project`]); a changed manifest
+//! name refuses `checkout_name_changed`. The writer lives in `ryeos-node` and reads
 //! records through [`read_registration`].
 
 use std::ffi::OsStr;
@@ -257,7 +258,7 @@ pub fn read_registration(
 /// launcher holds live project write, the node's ownership resolver (`trust`,
 /// the node registry store) says the launcher acts for an owner that
 /// registered `checkout`, and the tree still declares that name. Every other
-/// case is `Absent(NotRegistered)` (or `NoDeclaredName` when the tree
+/// case is `Absent(NotRegistered)` (or `NoProjectName` when the checkout has no manifest name
 /// declares none); a retired or revoked launcher key acts for no owner. A
 /// registry that cannot be read refuses.
 pub fn live_signer_project(
@@ -278,26 +279,40 @@ pub fn live_signer_project(
     };
     let (canonical, declared) = inspect_checkout(app_root, checkout)?;
     let Some(declared) = declared else {
-        return Ok(LogicalProject::Absent(
-            LogicalProjectAbsence::NoDeclaredName,
-        ));
+        return Ok(LogicalProject::Absent(LogicalProjectAbsence::NoProjectName));
     };
     let identity = ProjectIdentity::new(owner.principal, declared);
-    let registered = load_registrations(app_root, node_key)?
-        .into_iter()
-        .any(|loaded| {
-            loaded.registration.identity == identity
+    let registrations = load_registrations(app_root, node_key)?;
+    let holding: Vec<&ProjectIdentity> = registrations
+        .iter()
+        .filter(|loaded| {
+            loaded.registration.identity.owner() == identity.owner()
                 && loaded
                     .registration
                     .paths
                     .iter()
                     .any(|path| path == &canonical)
-        });
-    if registered {
-        Ok(LogicalProject::Stated(identity))
-    } else {
-        not_registered
+        })
+        .map(|loaded| &loaded.registration.identity)
+        .collect();
+    if holding.contains(&&identity) {
+        return Ok(LogicalProject::Stated(identity));
     }
+    // Registered for this owner under another name: the manifest name was
+    // changed since. The registration is the source of truth, so this is a
+    // refusal, never a silent re-label.
+    if let Some(registered) = holding.first() {
+        bail!(
+            "checkout_name_changed: checkout {} is registered as project {} but its manifest now \
+             says `name: {}`; register it again with `ryeos project register {}` if the rename \
+             is intended",
+            canonical.display(),
+            registered,
+            identity.name(),
+            canonical.display()
+        );
+    }
+    not_registered
 }
 
 /// [`live_signer_project`] for a caller of this node: the caller is the

@@ -646,7 +646,7 @@ pub fn current_head_logical_project(
             .map_err(other)?
             .ok_or_else(|| {
                 ProjectSourceError::Other(format!(
-                    "project_undeclared: snapshot {snapshot_hash} declares no project name"
+                    "project_manifest_missing: snapshot {snapshot_hash} has no .ai/manifest.yaml; a project's name is the `name:` of its manifest"
                 ))
             })?;
     let owner = ryeos_app::project_owner::owner_principal(state, principal_id).map_err(other)?;

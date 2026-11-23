@@ -1867,7 +1867,7 @@ mod tests {
             SignerRole::ProjectAuthor,
             vec![SignerSpace::Project],
             &["*"],
-            &["fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/listed"],
+            &["pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/listed"],
             SignerStatus::Active,
         );
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();

@@ -209,8 +209,9 @@ mod tests {
         let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
         let key = SigningKey::from_bytes(&[4u8; 32]);
         let fp = compute_fingerprint(&key.verifying_key());
-        let trust =
-            TrustStore::from_registry(node, vec![record(&key, SignerStatus::Active)]).unwrap();
+        let trust = TrustStore::from_registry(node, vec![record(&key, SignerStatus::Active)])
+            .unwrap()
+            .with_succession_chain(&[]);
         require_expected_owner_in(&trust, &fp, Some(&solo(&fp))).unwrap();
         let other: PrincipalId = format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
         let refused = require_expected_owner_in(&trust, &fp, Some(&other)).unwrap_err();

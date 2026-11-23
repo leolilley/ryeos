@@ -887,9 +887,9 @@ mod tests {
         _node: tempfile::TempDir,
     }
 
-    /// The bytes of a `.ai/project.yaml` declaring `name`.
+    /// The bytes of a `.ai/manifest.yaml` declaring `name`.
     fn declaration(name: &str) -> Vec<u8> {
-        format!("schema: 1\nname: {name}\n").into_bytes()
+        format!("name: {name}\n").into_bytes()
     }
 
     fn project_name(name: &str) -> ryeos_state::project_identity::ProjectName {
@@ -951,7 +951,7 @@ mod tests {
         let head = store_ai_only_snapshot(
             &state,
             &[
-                (".ai/project.yaml", &declaration(name.as_str())),
+                (".ai/manifest.yaml", &declaration(name.as_str())),
                 (".ai/config/gate/head.yaml", b"snapshot: head\n"),
             ],
         );
@@ -959,7 +959,7 @@ mod tests {
         let other_snapshot = store_ai_only_snapshot(
             &state,
             &[
-                (".ai/project.yaml", &declaration(name.as_str())),
+                (".ai/manifest.yaml", &declaration(name.as_str())),
                 (".ai/config/gate/other.yaml", b"snapshot: other\n"),
             ],
         );
@@ -1040,7 +1040,7 @@ mod tests {
         let name = project_name("other-project");
         let snapshot = store_ai_only_snapshot(
             &fixture.state,
-            &[(".ai/project.yaml", &declaration(name.as_str()))],
+            &[(".ai/manifest.yaml", &declaration(name.as_str()))],
         );
         let stranger = format!("fp:{}", "c".repeat(64));
         write_head(&fixture.state, &stranger, &name, &snapshot);
@@ -1091,7 +1091,7 @@ mod tests {
         assert!(
             matches!(&refused, HandlerError::BadRequest(message)
                 if message.starts_with("qualification_project_unresolvable:")
-                    && message.contains("project_undeclared")),
+                    && message.contains("project_manifest_missing")),
             "{refused:?}"
         );
     }
@@ -1240,7 +1240,7 @@ mod tests {
         let snapshot = store_ai_only_snapshot(
             &fixture.state,
             &[
-                (".ai/project.yaml", &declaration(name.as_str())),
+                (".ai/manifest.yaml", &declaration(name.as_str())),
                 (in_snapshot, b"snapshot: true\n"),
             ],
         );
@@ -1316,7 +1316,7 @@ mod tests {
         let name = project_name("release-project");
         let stranger_snapshot = store_ai_only_snapshot(
             &fixture.state,
-            &[(".ai/project.yaml", &declaration(name.as_str()))],
+            &[(".ai/manifest.yaml", &declaration(name.as_str()))],
         );
         let stranger = format!("fp:{}", "d".repeat(64));
         write_head(&fixture.state, &stranger, &name, &stranger_snapshot);

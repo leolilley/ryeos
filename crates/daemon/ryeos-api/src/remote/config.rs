@@ -870,7 +870,7 @@ pub fn push_project_name(
     ryeos_state::project_identity::ProjectDeclaration::declared_name(local_project_path)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "project_undeclared: {} declares no project name in {}; a pushed head is keyed by it",
+                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest; a pushed head is keyed by it",
                 local_project_path.display(),
                 ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             )
@@ -1278,7 +1278,7 @@ mod tests {
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
         std::fs::create_dir_all(project.join(".ai")).unwrap();
-        std::fs::write(project.join(".ai/project.yaml"), "schema: 1\nname: demo\n").unwrap();
+        std::fs::write(project.join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         write_remote_pin(
             tmp.path(),
             &key,
@@ -1608,7 +1608,7 @@ mod tests {
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
         std::fs::create_dir_all(project.join(".ai")).unwrap();
-        std::fs::write(project.join(".ai/project.yaml"), "schema: 1\nname: demo\n").unwrap();
+        std::fs::write(project.join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let descriptor = signed_descriptor(9, None, true);
         pin_remote(tmp.path(), &key, "origin", &descriptor, None).unwrap();
         let canonical = canonical_local_project_path(&project).unwrap();

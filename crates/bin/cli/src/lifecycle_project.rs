@@ -19,7 +19,7 @@ use crate::lifecycle_commands::parse_or_render_help;
 #[command(
     name = "ryeos project register",
     about = "Register a live checkout under its project name on a stopped node",
-    long_about = "Writes a node-signed registration of the checkout under pid:v1:<owner>/<name>. The checkout's .ai/project.yaml must declare the name. The owner defaults to the node's operator. The node must be stopped. Registrations are inert until the owner+name trust cut; at the cut they become what lets a live checkout state its project identity.",
+    long_about = "Writes a node-signed registration of the checkout under pid:v1:<owner>/<name>. The checkout's .ai/manifest.yaml must carry the name (its top-level `name:`). The owner defaults to the node's operator. The node must be stopped. Registrations are inert until the owner+name trust cut; at the cut they become what lets a live checkout state its project identity.",
     no_binary_name = true
 )]
 struct RegisterArgs {

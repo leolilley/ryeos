@@ -1008,13 +1008,14 @@ impl ExecutionProjectAuthority {
                 if let PinnedProjectRealization::Cow {
                     terminal_publication:
                         PinnedTerminalPublication::RetainCurrentHead {
-                            owner_component: principal_key,
+                            owner_component,
                             project_hash,
                             expected_hash,
                         },
                 } = realization
                 {
-                    validate_hash("explicit publication principal key", principal_key)?;
+                    crate::principal_id::PrincipalId::from_storage_component(owner_component)
+                        .context("explicit publication owner component")?;
                     validate_hash("explicit publication project hash", project_hash)?;
                     validate_hash("explicit publication expected hash", expected_hash)?;
                     if expected_hash != base_snapshot_hash {
@@ -1874,7 +1875,7 @@ mod tests {
     #[test]
     fn retained_current_head_freezes_exact_destination_and_admitted_base() {
         let base = "a".repeat(64);
-        let principal_key = "b".repeat(64);
+        let principal_key = format!("pid-v1-{}", "b".repeat(64));
         let project_hash = "c".repeat(64);
         let authority = ExecutionProjectAuthority::pinned(
             "remote-project".to_string(),

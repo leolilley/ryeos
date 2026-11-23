@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T19:08:16Z:8eb67065c84f37656be65bf6f8cde3bcc1171b779659cd00ff34b29456316b00:fuemaqa3ek4oS4zE/EwC7CR5Mm0xsWdn/tHeCN8F8rAlELSWa5+i4uvPIfF4BLa//yMqamkouq954e5evlzZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:c73a463688e4afe8404fcff35e7c4277e42ab09bc75ff5d80463011776c6bb70:MoJZSraPLT5S0B7Ps9mICzEXInPikptim7JEJyBoDMgKES+XFTKlhgdj6l4q18oJWW4rtMH0kKrwFrMy7L3yAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -291,9 +291,12 @@ registration under `.ai/node/projects/` and warns when one name lists more
 than one checkout (names are free text, so unrelated checkouts registered
 under one name would share its trust at the cut). It fails, naming the cure,
 for an unsigned, edited or stray entry. The `project_registration_declarations`
-row warns for each registered checkout that is gone or whose `.ai/project.yaml`
-no longer declares the registered name; the fix restores the declaration or
-unregisters the checkout.
+row warns for each registered checkout that is gone or whose `.ai/manifest.yaml`
+`name:` is no longer the registered name; the fix restores the name or
+unregisters the checkout. The `project_manifest_name_drift` row warns when a
+registered checkout's `.ai/manifest.source.yaml` names a different project
+than its `.ai/manifest.yaml`; re-populate the manifest (`ryeos manifest
+build`/`sign`) before registering.
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
@@ -966,7 +969,7 @@ Each change appends a node-signed, hash-chained key event under
 
 | Verb | Effect |
 |---|---|
-| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/project.yaml` (`schema: 1`, `name: <name>`) must declare the name, and `--name` defaults to it. The owner defaults to the node's operator and is never the node key or the authoring key |
+| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/manifest.yaml` must carry the name (its top-level `name:`), and `--name` defaults to it and must equal it. The owner defaults to the node's operator and is never the node key or the authoring key |
 | `ryeos project unregister <path> [--name <name>] [--owner fp:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
 
 Both are signed offline operations (`node.project.register`,
@@ -974,7 +977,7 @@ Both are signed offline operations (`node.project.register`,
 `node_running_trust_change`. A path that is `/`, the node app root, an ancestor
 of it or inside it is refused. Each registration is a node-signed record at
 `<app_root>/.ai/node/projects/<owner-hex>/<name>.yaml` listing the canonical
-checkout paths. Refusal codes: `project_undeclared`, `project_name_mismatch`,
+checkout paths. Refusal codes: `project_manifest_missing`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
 
@@ -1001,8 +1004,8 @@ After installing, on a stopped node:
    --schema-cut-from <N-1> --schema-cut-to <N>`, then `ryeos node
    allow-restart` and `ryeos start`. Heads keyed by path are retired; pushed
    heads are keyed `projects/<owner>/<sha256(name)>/head`.
-2. Add `.ai/project.yaml` (`schema: 1`, `name: <name>`) to each project that
-   uses scoped signers, pushed heads or remote bindings.
+2. Make sure each project that uses scoped signers, pushed heads or remote bindings
+   has a `.ai/manifest.yaml` whose `name:` is its project name.
 3. `ryeos project register <checkout>` for each checkout a scoped signer must
    be trusted in.
 4. Re-bind remote projects (`ryeos remote bind-project ...`): a binding now

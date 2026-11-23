@@ -4301,11 +4301,7 @@ mod tests {
     fn target_site_plan_rejects_ai_only_binding() {
         let tmpdir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
-        std::fs::write(
-            tmpdir.path().join(".ai/project.yaml"),
-            "schema: 1\nname: demo\n",
-        )
-        .unwrap();
+        std::fs::write(tmpdir.path().join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()
@@ -4345,11 +4341,7 @@ mod tests {
     fn target_site_plan_uses_full_project_binding_for_pinned_source() {
         let tmpdir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
-        std::fs::write(
-            tmpdir.path().join(".ai/project.yaml"),
-            "schema: 1\nname: demo\n",
-        )
-        .unwrap();
+        std::fs::write(tmpdir.path().join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()

@@ -5334,8 +5334,8 @@ async fn run_production_tls_candidate(
     // name the source checkout declares.
     std::fs::create_dir_all(workspace_project.join(".ai")).unwrap();
     std::fs::write(
-        workspace_project.join(".ai/project.yaml"),
-        "schema: 1\nname: composed-controller\n",
+        workspace_project.join(".ai/manifest.yaml"),
+        "name: composed-controller\n",
     )
     .unwrap();
     if publication == PublicationScenario::StaleBase {

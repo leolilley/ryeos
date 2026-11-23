@@ -353,7 +353,7 @@ pub fn compile_command_invocation(
                 .map_err(|error| Invalid(format!("{error:#}")))?
                 .ok_or_else(|| {
                     Invalid(format!(
-                        "project_undeclared: --current-head needs {} to declare its name in {}",
+                        "project_manifest_missing: --current-head needs {} to have a {} whose `name:` is the project's name",
                         root.display(),
                         ryeos_state::project_identity::PROJECT_DECLARATION_PATH
                     ))

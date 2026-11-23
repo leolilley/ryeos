@@ -27,13 +27,13 @@ fn typed_refusal(error: &anyhow::Error) -> Option<(&str, &str)> {
     }
 }
 
-/// Stores a snapshot whose tree declares `name` in `.ai/project.yaml` and
+/// Stores a snapshot whose tree declares `name` in `.ai/manifest.yaml` and
 /// holds one more file carrying `marker`, and returns its hash.
 fn store_declared_snapshot(cas: &lillux::CasStore, name: &str, marker: &str) -> String {
-    let declaration = format!("schema: 1\nname: {name}\n");
+    let declaration = format!("name: {name}\n");
     let mut files = BTreeMap::new();
     for (path, bytes) in [
-        (".ai/project.yaml", declaration.as_bytes()),
+        (".ai/manifest.yaml", declaration.as_bytes()),
         (".ai/config/gate/marker.yaml", marker.as_bytes()),
     ] {
         let file = ProjectFile {
