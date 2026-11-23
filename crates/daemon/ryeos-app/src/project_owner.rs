@@ -204,6 +204,32 @@ mod tests {
         );
     }
 
+    /// A store that never loaded the node's registry cannot say whose
+    /// project a key acts in: it refuses, never falls back to a solo owner.
+    #[test]
+    fn a_store_without_the_node_registry_refuses_owner_resolution() {
+        let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let fp = compute_fingerprint(&key.verifying_key());
+        let owner = solo(&fp);
+        for trust in [
+            TrustStore::empty(),
+            TrustStore::from_registry(node, vec![record(&key, SignerStatus::Active)]).unwrap(),
+        ] {
+            let refused = owner_for_in(&trust, &fp).unwrap_err();
+            assert!(
+                format!("{refused:#}").starts_with("owner_resolution_unavailable"),
+                "{refused:#}"
+            );
+            let refused = head_advancer_in(&trust, &fp, &owner).unwrap_err();
+            assert!(
+                format!("{refused:#}").starts_with("owner_resolution_unavailable"),
+                "{refused:#}"
+            );
+            assert!(!speaks_for_in(&trust, &fp, &owner));
+        }
+    }
+
     #[test]
     fn a_key_with_no_succession_matches_only_its_own_principal() {
         let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
