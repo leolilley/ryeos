@@ -956,6 +956,21 @@ impl ObservedHooks {
     }
 }
 
+#[cfg(test)]
+mod observed_hooks_tests {
+    use super::ObservedHooks;
+
+    #[test]
+    fn a_turn_admits_its_cap_and_a_new_turn_starts_over() {
+        let mut observed = ObservedHooks::default();
+        assert!(observed.admit(3, 2));
+        assert!(observed.admit(3, 2));
+        assert!(!observed.admit(3, 2));
+        assert!(!observed.admit(3, 2));
+        assert!(observed.admit(4, 2), "a new turn has its own cap");
+    }
+}
+
 /// The two states a `context_pressure` hook chooses between.
 struct PressureHook {
     compact: State,

@@ -1660,6 +1660,18 @@ mod tool_concurrency_tests {
     use super::ExecutionConfig;
 
     #[test]
+    fn observing_hooks_per_turn_defaults_to_64_and_refuses_values_that_cannot_work() {
+        let config: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.observing_hooks_per_turn, 64);
+        assert!(config.validate().is_ok());
+        for bad in [0, 1025] {
+            let config: ExecutionConfig =
+                serde_yaml::from_str(&format!("observing_hooks_per_turn: {bad}")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn tool_concurrency_defaults_to_four_and_validates_range() {
         let config = ExecutionConfig::default();
         assert_eq!(config.tool_concurrency, 4);
