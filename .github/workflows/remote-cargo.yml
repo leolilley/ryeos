@@ -78,11 +78,11 @@ on:
       sccache:
         description: "auto uses sccache and falls back to plain rustc if its server does not start; off builds with plain rustc from the start"
         required: false
-        default: auto
+        default: "auto"
         type: choice
         options:
-          - auto
-          - off
+          - "auto"
+          - "off"
 
 run-name: "remote cargo ${{ inputs.command }} ${{ inputs.label }} (${{ github.ref_name }})"
 
