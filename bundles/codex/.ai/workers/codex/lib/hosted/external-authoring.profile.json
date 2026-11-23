@@ -246,6 +246,14 @@
         ]
       },
       {
+        "name": "persistence:durable_state",
+        "accept": [
+          "measured",
+          "provider_attested",
+          "trusted"
+        ]
+      },
+      {
         "name": "recovery:enclosure_trusted_init",
         "accept": [
           "measured",
@@ -256,14 +264,6 @@
         "name": "termination:enclosure_trusted_init",
         "accept": [
           "measured",
-          "trusted"
-        ]
-      },
-      {
-        "name": "persistence:durable_state",
-        "accept": [
-          "measured",
-          "provider_attested",
           "trusted"
         ]
       },

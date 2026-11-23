@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn floor_admits_only_exact_named_capabilities() {
         let host = view(
-            &["accounting", "limits:enclosure", "time"],
+            &["accounting", "storage:durable_root", "time"],
             &[("termination:scope", "no writable cgroup subtree")],
         );
         let admitted = match_floor(&floor(&["accounting", "time"]), &host);
@@ -1442,7 +1442,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("can prove: accounting, limits:enclosure, time"),
+            text.contains("can prove: accounting, storage:durable_root, time"),
             "{text}"
         );
     }
