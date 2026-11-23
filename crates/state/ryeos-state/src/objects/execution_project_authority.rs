@@ -1502,7 +1502,7 @@ mod tests {
             LogicalProject::Absent(LogicalProjectAbsence::NotStated)
         );
         let identity: crate::project_identity::ProjectIdentity =
-            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
+            format!("pid:v1:{}/alpha", "a".repeat(64)).parse().unwrap();
         let sealed = pinned
             .with_signer_project(LogicalProject::Stated(identity.clone()))
             .unwrap();

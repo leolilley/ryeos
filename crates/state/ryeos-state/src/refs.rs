@@ -3250,6 +3250,22 @@ mod tests {
             "the crashed attempt never moved the head"
         );
         assert!(records[1].applied);
+
+        // The same key moving the head away and back within one second sees
+        // a head ref byte-identical to one an earlier record observed (whole-
+        // second timestamps, deterministic signatures). Order, not the
+        // observed bytes, decides: it writes a new occurrence, and every
+        // swapped record reads applied.
+        advance(&c, &b, &two).unwrap();
+        advance(&b, &c, &two).unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].record.occurrence, 3);
+        assert!(!records[0].applied);
+        assert!(records[1].applied && records[2].applied);
+        let sequences: Vec<u64> = records.iter().map(|read| read.record.sequence).collect();
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[cfg(target_os = "linux")]

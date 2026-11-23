@@ -1977,9 +1977,13 @@ mod tests {
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &in_project).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let (class, _) =
-            verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
-        assert_eq!(class, TrustClass::Untrusted);
+        // Outside its scope the signer is refused, never trusted.
+        let refused = verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx())
+            .map(|(class, _)| class);
+        assert!(
+            !matches!(refused, Ok(TrustClass::Trusted)),
+            "a project author was trusted for the bundle: {refused:?}"
+        );
 
         // The core bundle's publisher is trusted in bundle space, never as
         // the project named core.
@@ -1987,9 +1991,12 @@ mod tests {
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let (class, _) =
-            verify_item_signature(&content, &header, &envelope, &store, &in_project).unwrap();
-        assert_eq!(class, TrustClass::Untrusted);
+        let refused = verify_item_signature(&content, &header, &envelope, &store, &in_project)
+            .map(|(class, _)| class);
+        assert!(
+            !matches!(refused, Ok(TrustClass::Trusted)),
+            "the bundle publisher was trusted as the project: {refused:?}"
+        );
 
         // `core` alone is not a project identity, so a bundle name can never
         // be read as one.

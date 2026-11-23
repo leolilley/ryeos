@@ -3526,11 +3526,11 @@ mod managed_advance_owner_tests {
     fn advance_as(
         status: SignerStatus,
     ) -> (
-        Result<()>,
-        ProjectHeadKey,
-        ryeos_app::state::AppState,
         tempfile::TempDir,
         ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+        Result<()>,
+        ProjectHeadKey,
     ) {
         let (temp, store_owner, state) =
             crate::augmentations::compose_context_positions::tests::lifecycle_test_state();
@@ -3564,12 +3564,14 @@ mod managed_advance_owner_tests {
             &"b".repeat(64),
             &generation,
         );
-        (result, head, state, temp, store_owner)
+        // Destructured in this order, the application drops before the Store
+        // owner closes, as the fixture requires.
+        (temp, store_owner, state, result, head)
     }
 
     #[test]
     fn a_launcher_key_retired_before_the_advance_is_refused_with_no_head_written() {
-        let (result, head, state, _temp, _store_owner) = advance_as(SignerStatus::Retired);
+        let (_temp, _store_owner, state, result, head) = advance_as(SignerStatus::Retired);
         let error = result.expect_err("a retired launcher key must not advance HEAD");
         assert!(
             format!("{error:#}").contains("owner_key_not_active"),
@@ -3589,7 +3591,7 @@ mod managed_advance_owner_tests {
 
     #[test]
     fn an_active_launcher_key_passes_the_owner_check() {
-        let (result, _head, _state, _temp, _store_owner) = advance_as(SignerStatus::Active);
+        let (_temp, _store_owner, _state, result, _head) = advance_as(SignerStatus::Active);
         // The fixture holds no CAS objects, so the advance may still refuse
         // later; it must not refuse on ownership.
         if let Err(error) = result {

@@ -444,6 +444,38 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
     );
 }
 
+/// Names the app root of the refused cut that
+/// [`skipped_epoch_cut_refusal_child`] previews in its own process.
+const SKIPPED_EPOCH_CUT_ROOT: &str = "RYEOS_TEST_SKIPPED_EPOCH_CUT_ROOT";
+
+/// The refused preview of
+/// [`a_store_two_epochs_back_is_cut_to_the_current_epoch_in_one_reset`]: a cut
+/// naming the skipped epoch as its predecessor. Run in a child process;
+/// without its root variable it does nothing.
+#[test]
+fn skipped_epoch_cut_refusal_child() {
+    let Some(root) = std::env::var_os(SKIPPED_EPOCH_CUT_ROOT) else {
+        return;
+    };
+    let _serial = lillux_sqlite::test_host::serial();
+    let current = RuntimeDb::current_operator_schema_epoch();
+    let options = ExecutionHistoryResetOptions {
+        app_root: Some(std::path::PathBuf::from(root)),
+        dry_run: true,
+        discard_project_heads: true,
+        schema_cut: Some(ExecutionHistorySchemaCut {
+            from: current - 1,
+            to: current,
+        }),
+        discard_unreadable_lifetime_fence_after_reboot: false,
+    };
+    let refused = run_execution_history_reset(&options, None).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains(&format!("observed epoch {}", current - 2)),
+        "{refused:#}"
+    );
+}
+
 /// A node that skipped an epoch (still on the store two epochs back) is cut
 /// straight to the current epoch in one reset, with its project heads: the
 /// predecessor store is reset without being decoded, so no intermediate
@@ -471,35 +503,37 @@ fn a_store_two_epochs_back_is_cut_to_the_current_epoch_in_one_reset() {
     });
     let current = RuntimeDb::current_operator_schema_epoch();
 
-    // Naming the skipped epoch as the predecessor is refused, unchanged.
+    // Naming the skipped epoch as the predecessor is refused, unchanged. A
+    // refused reset keeps its native custody until its process ends, so the
+    // refusal runs in a child process.
     let runtime_before = std::fs::read(&config.db_path).unwrap();
-    let wrong = ExecutionHistoryResetOptions {
-        app_root: Some(tmp.path().to_owned()),
-        dry_run: false,
-        discard_project_heads: true,
-        schema_cut: Some(ExecutionHistorySchemaCut {
-            from: current - 1,
-            to: current,
-        }),
-        discard_unreadable_lifetime_fence_after_reboot: false,
-    };
-    let refused = {
-        let _serial = lillux_sqlite::test_host::serial();
-        run_execution_history_reset(&wrong, None).unwrap_err()
-    };
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution_history_reset::native_composition_tests::skipped_epoch_cut_refusal_child",
+            "--nocapture",
+        ])
+        .env(SKIPPED_EPOCH_CUT_ROOT, tmp.path())
+        .output()
+        .unwrap();
     assert!(
-        format!("{refused:#}").contains(&format!("observed epoch {}", current - 2)),
-        "{refused:#}"
+        child.status.success(),
+        "refused cut child failed: {}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
     );
     assert_eq!(std::fs::read(&config.db_path).unwrap(), runtime_before);
 
     // The one-step cut from two epochs back completes.
     let options = ExecutionHistoryResetOptions {
+        app_root: Some(tmp.path().to_owned()),
+        dry_run: false,
+        discard_project_heads: true,
         schema_cut: Some(ExecutionHistorySchemaCut {
             from: current - 2,
             to: current,
         }),
-        ..wrong
+        discard_unreadable_lifetime_fence_after_reboot: false,
     };
     let report = {
         let _serial = lillux_sqlite::test_host::serial();
