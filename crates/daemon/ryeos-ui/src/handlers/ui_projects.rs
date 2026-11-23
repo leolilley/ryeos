@@ -1932,25 +1932,17 @@ pub(crate) fn authorize_launch_project(
         return Ok((authority, registered_project_id));
     }
 
-    // Non-operator principals may select only a project already recorded in
-    // their private principal space. The request path is never itself project
-    // authority.
-    let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
-    let store = PrincipalStore::resolve_with(&resolver, &ctx.fingerprint)?;
-    let projects = store.load_projects()?;
-    let registered_project_id = projects
-        .projects
-        .into_iter()
-        .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
-        .map(|project| project.local_id);
-    if let Some(registered_project_id) = registered_project_id {
-        Ok((authority, Some(registered_project_id)))
-    } else {
-        Err(HandlerError::Forbidden(
-            "requested UI project is not admitted by the caller's project registry".into(),
-        )
-        .into())
+    // A non-operator seat has no project identity until the identity cut
+    // lands; the request path is never project authority, so refuse.
+    Err(HandlerError::Structured {
+        code: "project_seat_requires_identity_cut".into(),
+        status: 403,
+        body: serde_json::json!({
+            "code": "project_seat_requires_identity_cut",
+            "error": "project roots are not available to this seat until project identity is cut over",
+        }),
     }
+    .into())
 }
 
 /// Revalidate a registered launch project after binding compilation and keep
