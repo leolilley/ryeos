@@ -242,7 +242,8 @@ pub struct IsolationPolicy {
     /// Executable names of inits trusted to exit when their only child
     /// exits, sorted and unique. When the node's parent is pid 1 and pid 1
     /// is one of these, the node's exit is trusted to end its container
-    /// enclosure; the host proves that only when the node is pid 1 itself.
+    /// enclosure. This is the only enclosure proof: a node that is pid 1
+    /// itself is refused, since process identity refuses pid 1.
     pub enclosure_inits: Vec<String>,
     /// The hard lifetime the hosting provider imposes on this node's host
     /// class, when it imposes one. Nothing inside the host can measure it,

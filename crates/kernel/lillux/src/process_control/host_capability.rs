@@ -481,13 +481,11 @@ const WEAKER_RESIDENCY: [&str; 2] = [RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT
 
 /// Pairs of names where the first is a weaker grade of the second: every
 /// guarantee the first gives, the second gives at least as firmly.
-const WEAKER_GRADES: [(&str, &str); 6] = [
+const WEAKER_GRADES: [(&str, &str); 4] = [
     (RESIDENCY_SWAP_ABSENT, ACCOUNTING),
     (RESIDENCY_SWAP_ABSENT, RESIDENCY_LOCKED),
     (RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT),
     (RESIDENCY_SWAP_LIMIT, RESIDENCY_LOCKED),
-    (RECOVERY_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE),
-    (TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE),
 ];
 
 /// Whether `name` is a weaker grade of `than`.
@@ -508,6 +506,24 @@ pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
 /// Nested sandboxing of a job: user, pid and mount namespaces can be
 /// unshared on this host.
 pub const ISOLATION_NAMESPACES: &str = "isolation:namespaces";
+
+/// Why a list that signed data keeps strictly ascending (sorted and unique,
+/// so one list has one spelling) is not, or `None`. Names the first key that
+/// repeats the one before it, or the first key that belongs before its
+/// predecessor, so an author sees which entry to move. Keys compare byte-wise.
+pub fn ascending_refusal<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut previous: Option<&str> = None;
+    for key in keys {
+        match previous {
+            Some(earlier) if earlier == key => return Some(format!("`{key}` is listed twice")),
+            Some(earlier) if earlier > key => {
+                return Some(format!("`{key}` must come before `{earlier}`"));
+            }
+            _ => previous = Some(key),
+        }
+    }
+    None
+}
 
 /// Why one floor entry is malformed in its shape or in what it names, or
 /// `None` when it is well formed and well placed. A per-scope name decides
@@ -615,24 +631,21 @@ pub const IDENTITY_PEER_PIDFD: &str = "identity:peer_pidfd";
 /// exact process-group cancellation, recovery and shutdown rely on.
 pub const SIGNAL_PIDFD_PROCESS_GROUP: &str = "signal:pidfd_process_group";
 
-/// Jobs die with the node because the node is pid 1 of its pid namespace.
-pub const TERMINATION_ENCLOSURE: &str = "termination:enclosure";
-/// Jobs die with the node because the node is pid 1, or because its parent
-/// is a pid 1 that node policy trusts to exit when its only child exits.
+/// Jobs die with the node because its parent is pid 1 of a private pid
+/// namespace, and node policy trusts that init to exit when its only child
+/// exits. The node itself is never pid 1: process identity refuses pid 1 and
+/// process group 1, so a node that is a namespace's init cannot start.
 pub const TERMINATION_ENCLOSURE_TRUSTED_INIT: &str = "termination:enclosure_trusted_init";
 /// A new container enclosure on the same boot proves the old one's jobs
-/// dead, with the termination grade of `TERMINATION_ENCLOSURE`.
-pub const RECOVERY_ENCLOSURE: &str = "recovery:enclosure";
-/// As `RECOVERY_ENCLOSURE`, with the grade of
-/// `TERMINATION_ENCLOSURE_TRUSTED_INIT`.
+/// dead, with the grade of `TERMINATION_ENCLOSURE_TRUSTED_INIT`.
 pub const RECOVERY_ENCLOSURE_TRUSTED_INIT: &str = "recovery:enclosure_trusted_init";
 
 static ENCLOSURE_INITS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 /// Admit the executable names of inits that the node's signed policy trusts
 /// to exit when their only child exits, replacing any earlier list in this
-/// process. Until this is called no init is trusted, so only a node that is
-/// itself pid 1 can prove its exit ends its enclosure.
+/// process. Until this is called no init is trusted, so no node can prove its
+/// exit ends its enclosure.
 pub fn admit_enclosure_inits(names: &[String]) -> Result<(), String> {
     for name in names {
         if name.is_empty() || name.len() > 255 || name.contains('/') || name.contains('\0') {
@@ -678,13 +691,15 @@ fn decide_enclosure_exit(
         Some(true) => {}
     }
     if node_pid == 1 {
-        return Ok(CapabilityEvidence {
-            source: ProofSource::Measured,
-            provider: HOST_PROVIDER.to_owned(),
-            basis: "the node is pid 1 of its private pid namespace, so the namespace ends when \
-                    the node exits"
-                .to_owned(),
-        });
+        return Err(format!(
+            "the node is pid 1 of its private pid namespace, which process identity refuses; \
+             run it as the only child of an init that node policy trusts to exit with it ({})",
+            if trusted_inits.is_empty() {
+                "node policy names none".to_owned()
+            } else {
+                trusted_inits.join(", ")
+            }
+        ));
     }
     if parent_pid != 1 {
         return Err(format!(
@@ -1684,9 +1699,9 @@ pub struct HostFacts {
     /// the link is unreadable to this process.
     pub pid1_executable: Option<String>,
     /// Why the node's exit ends its pid namespace and every job in it:
-    /// measured when the node is pid 1, trusted when its parent is pid 1
-    /// and node policy names that init as one that exits with its only
-    /// child. Exactly one of this and `enclosure_exit_refusal` is set.
+    /// trusted when its parent is pid 1 and node policy names that init as
+    /// one that exits with its only child. Exactly one of this and
+    /// `enclosure_exit_refusal` is set.
     pub enclosure_exit: Option<CapabilityEvidence>,
     pub enclosure_exit_refusal: Option<String>,
     pub uid_map: Option<String>,
@@ -2091,43 +2106,22 @@ impl HostFacts {
         }
         #[cfg(not(target_os = "linux"))]
         view.refuse(EXEC_SEALED_MEMFD, "executable memfds exist only on Linux");
-        // The grade each enclosure name may carry, or why it cannot.
-        let unproven = || {
-            self.enclosure_exit_refusal.clone().unwrap_or_else(|| {
+        // The grade the enclosure names carry, or why they cannot. The only
+        // proof is trust in the init whose only child the node is.
+        let trusted_exit: Result<(ProofSource, String), String> = match &self.enclosure_exit {
+            Some(evidence) => Ok((trusted.clone(), emulated(evidence.basis.clone()))),
+            None => Err(self.enclosure_exit_refusal.clone().unwrap_or_else(|| {
                 "nothing proves the node's exit ends its pid namespace".to_owned()
-            })
+            })),
         };
-        let (measured_exit, trusted_exit): (
-            Result<(ProofSource, String), String>,
-            Result<(ProofSource, String), String>,
-        ) = match &self.enclosure_exit {
-            Some(evidence) if evidence.source == ProofSource::Measured => (
-                Ok((observed.clone(), emulated(evidence.basis.clone()))),
-                Ok((observed.clone(), emulated(evidence.basis.clone()))),
+        match &trusted_exit {
+            Ok((source, basis)) => view.provide(
+                TERMINATION_ENCLOSURE_TRUSTED_INIT,
+                source.clone(),
+                HOST_PROVIDER,
+                format!("{basis}; when the pid namespace ends the kernel kills every job"),
             ),
-            Some(evidence) if evidence.source == ProofSource::Trusted => (
-                Err(format!(
-                    "the node is not pid 1 of its pid namespace; its enclosure ends with it only \
-                         by trust in pid 1 ({})",
-                    evidence.basis
-                )),
-                Ok((trusted.clone(), emulated(evidence.basis.clone()))),
-            ),
-            _ => (Err(unproven()), Err(unproven())),
-        };
-        for (name, exit) in [
-            (TERMINATION_ENCLOSURE, &measured_exit),
-            (TERMINATION_ENCLOSURE_TRUSTED_INIT, &trusted_exit),
-        ] {
-            match exit {
-                Ok((source, basis)) => view.provide(
-                    name,
-                    source.clone(),
-                    HOST_PROVIDER,
-                    format!("{basis}; when the pid namespace ends the kernel kills every job"),
-                ),
-                Err(reason) => view.refuse(name, reason.clone()),
-            }
+            Err(reason) => view.refuse(TERMINATION_ENCLOSURE_TRUSTED_INIT, reason.clone()),
         }
         match &self.cgroup.memory_max {
             Some(limit) if !limit.writable_by_node => view.provide(
@@ -2154,45 +2148,40 @@ impl HostFacts {
                 ),
             ),
         }
-        for (name, exit) in [
-            (RECOVERY_ENCLOSURE, &measured_exit),
-            (RECOVERY_ENCLOSURE_TRUSTED_INIT, &trusted_exit),
-        ] {
-            match (self.container_enclosure, exit) {
-                (Some(inode), Ok((source, basis))) => view.provide(
-                    name,
-                    source.clone(),
-                    HOST_PROVIDER,
-                    format!(
-                        "boot {} and container enclosure cgroup inode {inode}; {basis}, so a \
-                         different inode on this boot is a new generation whose jobs all died \
-                         with the old one",
-                        self.boot_id
-                    ),
+        match (self.container_enclosure, &trusted_exit) {
+            (Some(inode), Ok((source, basis))) => view.provide(
+                RECOVERY_ENCLOSURE_TRUSTED_INIT,
+                source.clone(),
+                HOST_PROVIDER,
+                format!(
+                    "boot {} and container enclosure cgroup inode {inode}; {basis}, so a \
+                     different inode on this boot is a new generation whose jobs all died \
+                     with the old one",
+                    self.boot_id
                 ),
-                (_, Err(reason)) => view.refuse(
-                    name,
-                    format!(
-                        "jobs are not proven to die with the node's enclosure ({reason}), so the \
-                         generation is undecided beyond the boot"
-                    ),
+            ),
+            (_, Err(reason)) => view.refuse(
+                RECOVERY_ENCLOSURE_TRUSTED_INIT,
+                format!(
+                    "jobs are not proven to die with the node's enclosure ({reason}), so the \
+                     generation is undecided beyond the boot"
                 ),
-                (None, Ok(_)) => view.refuse(
-                    name,
-                    format!(
-                        "the node is not the whole of a container enclosure (cgroup namespace {}, \
-                         membership {}, /sys/fs/cgroup is {}), so a restart cannot be told apart \
-                         from the same generation",
-                        if self.initial_cgroup_namespace {
-                            "initial"
-                        } else {
-                            "private"
-                        },
-                        self.cgroup.membership.as_deref().unwrap_or("unreadable"),
-                        self.cgroup.filesystem
-                    ),
+            ),
+            (None, Ok(_)) => view.refuse(
+                RECOVERY_ENCLOSURE_TRUSTED_INIT,
+                format!(
+                    "the node is not the whole of a container enclosure (cgroup namespace {}, \
+                     membership {}, /sys/fs/cgroup is {}), so a restart cannot be told apart \
+                     from the same generation",
+                    if self.initial_cgroup_namespace {
+                        "initial"
+                    } else {
+                        "private"
+                    },
+                    self.cgroup.membership.as_deref().unwrap_or("unreadable"),
+                    self.cgroup.filesystem
                 ),
-            }
+            ),
         }
         match decide_durable_root(&self.app_root_storage) {
             Ok(evidence) => view.provide(
@@ -2261,8 +2250,8 @@ pub(super) fn read_cgroup_enclosure() -> Result<Option<u64>, String> {
 }
 
 /// The enclosure inode a lifetime witness may record: the visible enclosure,
-/// only when the node's exit is proven to end it (the node is pid 1, or its
-/// parent is a trusted init). Otherwise `None`, so the witness decides by
+/// only when the node's exit is proven to end it (its parent is a trusted
+/// init). Otherwise `None`, so the witness decides by
 /// boot alone and a same-boot restart is never taken as proof of death.
 #[cfg(target_os = "linux")]
 pub(super) fn read_witnessed_enclosure() -> Result<Option<u64>, String> {
@@ -4495,9 +4484,20 @@ mod tests {
     }
 
     #[test]
-    fn enclosure_exit_is_measured_only_for_pid_one() {
-        let measured = decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]).unwrap();
-        assert_eq!(measured.source, ProofSource::Measured);
+    fn enclosure_exit_is_trusted_only_under_a_named_init() {
+        // A node that is pid 1 is refused by name, with the inits to run under.
+        let pid_one =
+            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &inits()).unwrap_err();
+        assert!(
+            pid_one.contains("pid 1 of its private pid namespace"),
+            "{pid_one}"
+        );
+        assert!(pid_one.contains("catatonit, dumb-init, tini"), "{pid_one}");
+        let none_named = decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]).unwrap_err();
+        assert!(
+            none_named.contains("node policy names none"),
+            "{none_named}"
+        );
         let trusted = decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()).unwrap();
         assert_eq!(trusted.source, ProofSource::Trusted);
         assert!(trusted.basis.contains("tini"), "{}", trusted.basis);
@@ -4682,38 +4682,26 @@ mod tests {
     #[test]
     fn enclosure_capabilities_follow_the_exit_grade() {
         let pid_one = facts(
-            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]),
+            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &inits()),
             Some(42),
         );
         let view = pid_one.capabilities();
         for name in [
-            TERMINATION_ENCLOSURE,
             TERMINATION_ENCLOSURE_TRUSTED_INIT,
-            RECOVERY_ENCLOSURE,
             RECOVERY_ENCLOSURE_TRUSTED_INIT,
         ] {
-            assert_eq!(view.provided[name].source, ProofSource::Measured, "{name}");
-            satisfies(
-                &CapabilityRequirement::from(name),
-                name,
-                &view.provided[name],
-            )
-            .unwrap();
+            assert!(!view.provided.contains_key(name), "{name}");
         }
+        assert!(
+            view.missing[TERMINATION_ENCLOSURE_TRUSTED_INIT].contains("process identity refuses"),
+            "{view:?}"
+        );
 
         let under_tini = facts(
             decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
             Some(42),
         );
         let view = under_tini.capabilities();
-        assert!(
-            view.missing[TERMINATION_ENCLOSURE].contains("not pid 1"),
-            "{view:?}"
-        );
-        assert!(
-            view.missing[RECOVERY_ENCLOSURE].contains("undecided"),
-            "{view:?}"
-        );
         assert_eq!(
             view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].source,
             ProofSource::Trusted
@@ -4769,9 +4757,7 @@ mod tests {
         );
         let view = other.capabilities();
         for name in [
-            TERMINATION_ENCLOSURE,
             TERMINATION_ENCLOSURE_TRUSTED_INIT,
-            RECOVERY_ENCLOSURE,
             RECOVERY_ENCLOSURE_TRUSTED_INIT,
         ] {
             assert!(!view.provided.contains_key(name), "{name}");
@@ -4779,12 +4765,17 @@ mod tests {
         assert!(view.missing[RECOVERY_ENCLOSURE_TRUSTED_INIT].contains("undecided"));
 
         let not_whole = facts(
-            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]),
+            decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
             None,
         );
         let view = not_whole.capabilities();
-        assert!(view.provided.contains_key(TERMINATION_ENCLOSURE));
-        assert!(view.missing[RECOVERY_ENCLOSURE].contains("not the whole of a container"));
+        assert!(
+            view.provided
+                .contains_key(TERMINATION_ENCLOSURE_TRUSTED_INIT)
+        );
+        assert!(
+            view.missing[RECOVERY_ENCLOSURE_TRUSTED_INIT].contains("not the whole of a container")
+        );
     }
 
     #[test]
@@ -5098,7 +5089,7 @@ mod tests {
             CapabilityRequirement::from(STORAGE_DURABLE_ROOT),
             any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]),
             any_of(&[ACCOUNTING, RESIDENCY_SWAP_LIMIT]),
-            any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]),
+            CapabilityRequirement::from(TERMINATION_ENCLOSURE_TRUSTED_INIT),
         ] {
             assert_eq!(floor_entry_refusal(&entry), None, "{}", entry.label());
         }
@@ -5137,12 +5128,30 @@ mod tests {
         let residency = any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]);
         assert!(met_by_strongest(&residency, ACCOUNTING));
         assert!(!met_by_strongest(&residency, RESIDENCY_SWAP_ABSENT));
-        let enclosure = any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]);
-        assert!(met_by_strongest(&enclosure, TERMINATION_ENCLOSURE));
-        assert!(!met_by_strongest(
-            &enclosure,
-            TERMINATION_ENCLOSURE_TRUSTED_INIT
-        ));
+    }
+
+    #[test]
+    fn an_unsorted_list_names_the_entry_to_move() {
+        assert_eq!(ascending_refusal([]), None);
+        assert_eq!(ascending_refusal(["a", "b", "c"]), None);
+        assert_eq!(
+            ascending_refusal(["a", "c", "b"]).as_deref(),
+            Some("`b` must come before `c`")
+        );
+        assert_eq!(
+            ascending_refusal(["a", "b", "b"]).as_deref(),
+            Some("`b` is listed twice")
+        );
+        // The first fault is named, and keys compare byte-wise.
+        assert_eq!(
+            ascending_refusal(["time", "persistence:durable_state", "time"]).as_deref(),
+            Some("`persistence:durable_state` must come before `time`")
+        );
+        assert_eq!(
+            ascending_refusal(["any_of(accounting, residency:swap_absent)", "accounting"])
+                .as_deref(),
+            Some("`accounting` must come before `any_of(accounting, residency:swap_absent)`")
+        );
     }
 
     #[test]

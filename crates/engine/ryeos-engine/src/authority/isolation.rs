@@ -6663,10 +6663,19 @@ fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError
             CapabilityRequirement::Name(_) => false,
             CapabilityRequirement::Spec(spec) => !spec.any_of.is_empty(),
         };
-        if is_set && (names.len() < 2 || names.windows(2).any(|pair| pair[0] >= pair[1])) {
+        if is_set && names.len() < 2 {
             return Err(refused(format!(
-                "isolation requires_capabilities entry {} must list at least two names, \
-                 sorted and unique",
+                "isolation requires_capabilities entry {} must list at least two names",
+                entry.label()
+            )));
+        }
+        if is_set
+            && let Some(reason) =
+                lillux::process_control::ascending_refusal(names.iter().map(String::as_str))
+        {
+            return Err(refused(format!(
+                "isolation requires_capabilities entry {} must list its names sorted and \
+                 unique: {reason}",
                 entry.label()
             )));
         }
@@ -6696,9 +6705,12 @@ fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError
                     entry.label()
                 )));
             }
-            if tokens.windows(2).any(|pair| pair[0] >= pair[1]) {
+            if let Some(reason) =
+                lillux::process_control::ascending_refusal(tokens.iter().map(String::as_str))
+            {
                 return Err(refused(format!(
-                    "isolation requires_capabilities entry {} must list {field} sorted and unique",
+                    "isolation requires_capabilities entry {} must list {field} sorted and \
+                     unique: {reason}",
                     entry.label()
                 )));
             }
@@ -6710,19 +6722,21 @@ fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError
             return Err(refused(format!("isolation requires_capabilities {reason}")));
         }
     }
-    if entries
-        .windows(2)
-        .any(|pair| pair[0].names()[0] >= pair[1].names()[0])
-    {
-        return Err(refused(
-            "isolation requires_capabilities must be sorted and unique".to_owned(),
-        ));
+    if let Some(reason) = lillux::process_control::ascending_refusal(
+        entries.iter().map(|entry| entry.names()[0].as_str()),
+    ) {
+        return Err(refused(format!(
+            "isolation requires_capabilities must be sorted and unique by each entry's first \
+             name: {reason}"
+        )));
     }
     let inits = &policy.enclosure_inits;
-    if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(refused(
-            "isolation enclosure_inits must be sorted and unique".to_owned(),
-        ));
+    if let Some(reason) =
+        lillux::process_control::ascending_refusal(inits.iter().map(String::as_str))
+    {
+        return Err(refused(format!(
+            "isolation enclosure_inits must be sorted and unique: {reason}"
+        )));
     }
     for init in inits {
         let file_name = !init.is_empty()
@@ -13608,7 +13622,7 @@ mod tests {
             ),
             (
                 vec![any_of(&["residency:swap_absent", "accounting"])],
-                "at least two names",
+                "names sorted and unique: `accounting` must come before `residency:swap_absent`",
             ),
             (
                 vec![any_of(&["accounting", "termination:scope"])],
@@ -13638,7 +13652,7 @@ mod tests {
                     "time".into(),
                     any_of(&["accounting", "residency:swap_absent"]),
                 ],
-                "sorted and unique",
+                "first name: `accounting` must come before `time`",
             ),
         ] {
             let mut invalid = policy.clone();
@@ -13930,7 +13944,7 @@ mod tests {
                     &["provider_attested", "measured"],
                     &[],
                 )],
-                "accept sorted and unique",
+                "accept sorted and unique: `measured` must come before `provider_attested`",
             ),
             (
                 vec![spec(Some("time"), &[], &["measured", "measured"], &[])],
@@ -13938,7 +13952,7 @@ mod tests {
             ),
             (
                 vec![spec(Some("time"), &[], &[], &["host_service", "host"])],
-                "providers sorted and unique",
+                "providers sorted and unique: `host` must come before `host_service`",
             ),
             (
                 vec![spec(Some("time"), &[], &[], &["external controller"])],

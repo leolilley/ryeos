@@ -946,3 +946,69 @@ mod revisions {
         assert_eq!(refusal.code(), "seat_read_result_too_large");
     }
 }
+
+/// `items/revised` is a write the operator's own process makes after it has
+/// changed an item; no seat may call it and no seat may read it. No shipped
+/// profile grants it to a browser session, lists it as a seat read, or grants
+/// it through a pattern.
+#[test]
+fn no_shipped_profile_lets_a_seat_reach_the_item_announcement_service() {
+    const CAPABILITY: &str = "ryeos.execute.service.items/revised";
+    fn find<'a>(value: &'a serde_yaml::Value, key: &str, out: &mut Vec<&'a serde_yaml::Value>) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (name, inner) in map {
+                    if name.as_str() == Some(key) {
+                        out.push(inner);
+                    }
+                    find(inner, key, out);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for inner in items {
+                    find(inner, key, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let profiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../bundles/.ai/node/init/profiles");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&profiles).expect("profiles directory") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        let mut scopes = Vec::new();
+        find(&document, "session_scopes", &mut scopes);
+        for list in scopes {
+            for scope in list.as_sequence().expect("scope list") {
+                let scope = scope.as_str().expect("scope text");
+                let covers = match scope.strip_suffix('*') {
+                    Some(prefix) => CAPABILITY.starts_with(prefix),
+                    None => scope == CAPABILITY,
+                };
+                assert!(!covers, "{}: session scope `{scope}`", path.display());
+            }
+        }
+        let mut reads = Vec::new();
+        find(&document, "ui_seat_reads", &mut reads);
+        for policy in reads {
+            let mut targets = Vec::new();
+            find(policy, "target", &mut targets);
+            for target in targets {
+                assert_ne!(
+                    target.as_str(),
+                    Some("service:items/revised"),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked >= 10, "profiles were not found under {profiles:?}");
+}
