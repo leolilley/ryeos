@@ -281,3 +281,64 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
     // The standing endorsement covers the knowledge kind in this project.
     assert_eq!(trust_class(&h, project.path()).await, "trusted_project");
 }
+
+/// What `ryeos endorse` does after the endorsement is recorded: tell the node,
+/// which finds the endorsement in its ledger and announces the items it covers
+/// so a seat that shows one can pick up its new trust.
+#[tokio::test(flavor = "multi_thread")]
+async fn recording_an_endorsement_announces_the_items_it_covers() {
+    let (h, fixture) = start().await;
+    let project = tempfile::tempdir().expect("project");
+    let digest = plant_note(project.path(), "one", &fixture.authoring);
+    let project_path = project
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, recorded) = endorse_items(&h, &fixture.user, project.path(), &digest).await;
+    assert_eq!(status, 200, "{recorded:#}");
+    let endorsement = recorded["result"]["endorsement_digest"]
+        .as_str()
+        .expect("digest")
+        .to_owned();
+
+    let (status, announced) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 200, "{announced:#}");
+    let items = announced["result"]["announced"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{announced:#}");
+    assert_eq!(items[0]["item_ref"], KNOWLEDGE_REF, "{announced:#}");
+    assert_eq!(items[0]["digest"], json!(digest), "{announced:#}");
+
+    // A digest the ledger does not hold announces nothing.
+    let (status, unknown) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": "0".repeat(64) }),
+    )
+    .await;
+    assert_eq!(status, 404, "{unknown:#}");
+
+    // A withdrawn endorsement announces nothing either.
+    let (status, revoked) = service(
+        &h,
+        "service:endorsements/revoke",
+        json!({ "endorsement": endorsement, "reason": "withdrawn in test" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{revoked:#}");
+    let (status, withdrawn) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 409, "{withdrawn:#}");
+}

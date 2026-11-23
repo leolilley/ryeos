@@ -24,6 +24,7 @@ pub const SESSION_CURRENT_PATH: &str = "/ui/api/session/current";
 pub const LAUNCH_MINT_PATH: &str = "/ui/api/launch/mint";
 pub const INVOCATION_DISPATCH_PATH: &str = "/ui/api/invocations/dispatch";
 pub const ATTACHMENT_DETACH_PATH: &str = "/ui/api/session/attachments/detach";
+pub const ATTACHMENT_REVISE_PATH: &str = "/ui/api/session/attachments/revise";
 
 pub const SEAT_OPEN_PATH: &str = "/ui/api/session/seat/open";
 pub const SEAT_APPEND_PATH: &str = "/ui/api/session/seat/append";
@@ -276,6 +277,23 @@ pub fn detach_request(
     encode_exact(&body)
 }
 
+pub fn revise_request(
+    producer: &UiPresentationProducer,
+    presentation_id: &str,
+    binding_attachment_id: &str,
+    binding_generation: u64,
+    binding_digest: &str,
+) -> Result<String, RuntimeError> {
+    let body = json!({
+        "producer": serde_json::to_value(producer)?,
+        "presentation_id": presentation_id,
+        "binding_attachment_id": binding_attachment_id,
+        "binding_generation": binding_generation,
+        "binding_digest": binding_digest,
+    });
+    encode_exact(&body)
+}
+
 /// Add the current producer to a body bound for a producer-authenticated
 /// route: `invocations/dispatch` takes a binding request and wraps it in an
 /// invocation; `attachments/detach` takes a record and gains a `producer`
@@ -285,7 +303,10 @@ pub fn wrap_with_producer(
     body: &Value,
     producer: Option<&UiPresentationProducer>,
 ) -> Result<Value, RuntimeError> {
-    if path != INVOCATION_DISPATCH_PATH && path != ATTACHMENT_DETACH_PATH {
+    if path != INVOCATION_DISPATCH_PATH
+        && path != ATTACHMENT_DETACH_PATH
+        && path != ATTACHMENT_REVISE_PATH
+    {
         return Ok(body.clone());
     }
     let producer = producer.ok_or_else(|| {

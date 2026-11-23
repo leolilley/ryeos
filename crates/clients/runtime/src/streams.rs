@@ -207,6 +207,17 @@ async fn read_hints<P: Platform>(
                     return false;
                 }
             }
+            // An item revision prompts a recompile of held attachments. It
+            // joins no dirty set: no source subscribes to it.
+            "item.hint" => {
+                let Ok(Value::Object(mut payload)) = decode_strict(&frame.data) else {
+                    continue;
+                };
+                payload.insert("kind".into(), Value::from("item.hint"));
+                if !inbox.push(tag.clone(), InboxPayload::Hint(Value::Object(payload))) {
+                    return false;
+                }
+            }
             "thread.hint" => {
                 let Ok(payload) = decode_strict(&frame.data) else {
                     continue;
