@@ -466,43 +466,46 @@ fn verify_object(kind: &UsableKind, found: &Found) -> Value {
 }
 
 /// The derived lists of a verified body: one array per declared collection, and
-/// whether the body held that map at all, so an absent map reads as "not
-/// reported" and not as an empty list.
+/// per collection a coverage word: `present`, `not_reported` (the body has no
+/// such map), `not_a_map` (the pointer names an array or a scalar) or
+/// `key_field_collision` (an entry has a field named like the key field; that
+/// field is left out of its row, and this word says so).
 fn collections_of(kind: &UsableKind, body: &Value) -> (Value, Value) {
     let mut lists = serde_json::Map::new();
     let mut coverage = serde_json::Map::new();
     for collection in &kind.decl.collections {
-        let (rows, present) = match body.pointer(&collection.from) {
-            Some(Value::Object(entries)) => (
-                entries
-                    .iter()
-                    .map(|(key, entry)| {
-                        let mut row = serde_json::Map::new();
-                        row.insert(collection.key_field.clone(), Value::String(key.clone()));
-                        match entry {
-                            Value::Object(fields) => {
-                                for (name, value) in fields {
-                                    if name != &collection.key_field {
-                                        row.insert(name.clone(), value.clone());
-                                    }
+        let mut rows = Vec::new();
+        // `present` is the normal case; the others say why the list is what it
+        // is, so a format change reads as a shape error and a dropped field is
+        // never silent.
+        let mut state = "present";
+        match body.pointer(&collection.from) {
+            Some(Value::Object(entries)) => {
+                for (key, entry) in entries {
+                    let mut row = serde_json::Map::new();
+                    row.insert(collection.key_field.clone(), Value::String(key.clone()));
+                    match entry {
+                        Value::Object(fields) => {
+                            for (name, value) in fields {
+                                if name == &collection.key_field {
+                                    state = "key_field_collision";
+                                } else {
+                                    row.insert(name.clone(), value.clone());
                                 }
                             }
-                            other => {
-                                row.insert("value".to_owned(), other.clone());
-                            }
                         }
-                        Value::Object(row)
-                    })
-                    .collect::<Vec<_>>(),
-                true,
-            ),
-            _ => (Vec::new(), false),
-        };
+                        other => {
+                            row.insert("value".to_owned(), other.clone());
+                        }
+                    }
+                    rows.push(Value::Object(row));
+                }
+            }
+            Some(_) => state = "not_a_map",
+            None => state = "not_reported",
+        }
         lists.insert(collection.name.clone(), Value::Array(rows));
-        coverage.insert(
-            collection.name.clone(),
-            Value::String(if present { "present" } else { "not_reported" }.to_owned()),
-        );
+        coverage.insert(collection.name.clone(), Value::String(state.to_owned()));
     }
     (Value::Object(lists), Value::Object(coverage))
 }
@@ -908,6 +911,19 @@ mod tests {
         assert_eq!(lists["gone"], json!([]));
         assert_eq!(coverage["provided"], "present");
         assert_eq!(coverage["gone"], "not_reported");
+
+        let shaped = json!({
+            "provided": ["not", "a", "map"],
+            "capacity": {"memory_bytes": {"name": "clash", "bytes": 1}},
+        });
+        let (lists, coverage) = collections_of(&kind, &shaped);
+        assert_eq!(coverage["provided"], "not_a_map");
+        assert_eq!(lists["provided"], json!([]));
+        assert_eq!(coverage["capacity"], "key_field_collision");
+        assert_eq!(
+            lists["capacity"],
+            json!([{"name": "memory_bytes", "bytes": 1}])
+        );
     }
 
     #[test]
