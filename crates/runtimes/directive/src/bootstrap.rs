@@ -886,7 +886,7 @@ mod fired_hook_events_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let schema: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-        let mut declared: Vec<String> = schema["hooks"]["events"]
+        let mut declared: Vec<String> = schema["execution"]["hooks"]["events"]
             .as_mapping()
             .unwrap()
             .keys()

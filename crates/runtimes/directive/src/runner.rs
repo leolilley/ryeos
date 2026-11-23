@@ -2395,7 +2395,7 @@ impl Runner {
             "idle_turns": config.idle_turns,
             "grace_turns": config.grace_turns,
         });
-        self.observe_hooks("idle", turn, json!({"event": event}))
+        self.observe_hooks("idle", turn, None, json!({"event": event}))
             .await;
     }
 
@@ -2416,7 +2416,7 @@ impl Runner {
             "outcome": outcome,
             "streak": streak,
         });
-        self.observe_hooks("turn_incomplete", turn, json!({"event": event}))
+        self.observe_hooks("turn_incomplete", turn, None, json!({"event": event}))
             .await;
     }
 
@@ -2434,8 +2434,19 @@ impl Runner {
             "index": occurrence.call_index,
             "batch_size": batch_size,
         });
-        self.observe_hooks("before_tool", occurrence.turn, json!({"event": event}))
-            .await;
+        let call = occurrence
+            .call
+            .id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| format!("index-{}", occurrence.call_index));
+        self.observe_hooks(
+            "before_tool",
+            occurrence.turn,
+            Some(&call),
+            json!({"event": event}),
+        )
+        .await;
     }
 
     /// Run the hooks declared for an observation-only event, inline. Nothing a
@@ -2443,7 +2454,11 @@ impl Runner {
     /// the accounting bounds, is warned about and the run goes on. With no hook
     /// declared for the event nothing is dispatched or recorded. A turn that
     /// has used its cap of observing dispatches skips the rest and warns once.
-    async fn observe_hooks(&mut self, event: &str, turn: u32, context: Value) {
+    ///
+    /// `call` tells two dispatches of one event in one turn apart (the tool
+    /// events); without it the daemon would see them as one occurrence and run
+    /// the hook once.
+    async fn observe_hooks(&mut self, event: &str, turn: u32, call: Option<&str>, context: Value) {
         if !self.hooks.iter().any(|hook| hook.event() == event) {
             return;
         }
@@ -2466,6 +2481,10 @@ impl Runner {
             self.effective_definition_digest.clone(),
         )
         .with_counter_coordinate("turn", turn);
+        let occurrence = match call {
+            Some(call) => occurrence.with_text_coordinate("call", call),
+            None => occurrence,
+        };
         let dispatcher = self.hook_dispatcher();
         let hook_run = ryeos_runtime::hooks_eval::run_hooks(
             occurrence,
@@ -6752,7 +6771,7 @@ impl Runner {
             "spilled": rendered.spilled.is_some(),
             "duplicate": rendered.duplicate_of.is_some(),
         });
-        self.observe_hooks("after_tool", turn, json!({"event": event}))
+        self.observe_hooks("after_tool", turn, Some(&call_id), json!({"event": event}))
             .await;
         Ok(())
     }
