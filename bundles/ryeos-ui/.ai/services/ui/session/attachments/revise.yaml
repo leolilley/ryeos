@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-22T00:20:41Z:bc5c5ac37c0eeaff74f2995f5a2fcebc36e746aface9d5d975e4405f15d92934:kAev9RJonM3dPUsLXX/vq5SJZEWdrNJNoG/3V0gz5m3us3vuvWE8+YvssoennthWhMU1R0c6tq6vaKb//vAoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: session-attachment-revise
+version: "1.0.0"
+description: Recompile one presentation-owned non-root binding attachment from its own origin and publish its successor beside it.
+endpoint: ui.session.attachments.revise
+# Lifecycle routes preserve the authenticated browser context directly.
+ui_dispatch: verified
+record_thread: false
+availability: daemon_only

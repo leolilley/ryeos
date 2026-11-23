@@ -132,9 +132,14 @@ async fn wait_chain_settled(
             stable = 0;
         }
         last_count = chain.len();
-        if stable >= 8 || Instant::now() >= deadline {
+        if stable >= 8 {
             return (chain, respawns);
         }
+        // A chain that has not settled is a timeout, said as one.
+        assert!(
+            Instant::now() < deadline,
+            "chain did not settle within {seconds} s: {chain:?}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }

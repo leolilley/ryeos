@@ -400,7 +400,7 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
     body.validate_shape().map_err(local_error)?;
     let signature = signer.sign_bytes_base64(&body.signing_bytes().map_err(local_error)?);
     let signed = SignedEndorsement::with_signature(body, signature);
-    execute_service(
+    let mut recorded = execute_service(
         app_root,
         &signer,
         json!({
@@ -410,7 +410,64 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
             "parameters": { "endorsement": signed },
         }),
     )
-    .await
+    .await?;
+    if let Some(digest) = recorded
+        .get("endorsement_digest")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        let announcement = announce_revised(
+            app_root,
+            json!({ "project_path": project_text, "endorsement": digest }),
+        )
+        .await;
+        recorded["announcement"] = announcement;
+    }
+    Ok(recorded)
+}
+
+/// Tell a running node about a change this process made, so seats that show
+/// the changed items can pick it up. The node verifies the change against the
+/// revision record or the endorsement ledger before it announces anything.
+/// Nothing needs announcing when no node runs here (no seat exists, and the
+/// node announces what it finds on its next start), so that case, like any
+/// failure to reach the node, is reported in the result and never fails the
+/// command: the change itself is already made.
+async fn announce_revised(app_root: &Path, parameters: Value) -> Value {
+    if std::env::var_os("RYEOSD_URL").is_some() {
+        return json!({ "status": "skipped", "reason": "the node is not this machine's own" });
+    }
+    let running = match ryeos_node::LocalLifecycleEnv::load(Some(app_root.to_path_buf())) {
+        Ok(env) => matches!(
+            ryeos_node::LifecycleController::from_env(env)
+                .status()
+                .await,
+            Ok(ryeos_node::LifecycleStatus::Running { .. })
+        ),
+        Err(_) => false,
+    };
+    if !running {
+        return json!({ "status": "skipped", "reason": "the node is not running" });
+    }
+    let announced: Result<Value, CliError> = async {
+        let signer = crate::transport::signing::Signer::resolve(app_root)?;
+        execute_service(
+            app_root,
+            &signer,
+            json!({
+                "item_ref": "service:items/revised",
+                "ref_bindings": {},
+                "product_selections": [],
+                "parameters": parameters,
+            }),
+        )
+        .await
+    }
+    .await;
+    match announced {
+        Ok(result) => json!({ "status": "announced", "result": result }),
+        Err(error) => json!({ "status": "failed", "reason": error.to_string() }),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -430,6 +487,8 @@ pub(crate) async fn sign_items(app_root: &Path, parameters: &Value) -> Result<Va
     if params.item_refs.is_empty() {
         return Err(local("sign requires at least one item ref"));
     }
+    let app_root_for_announce = app_root.to_path_buf();
+    let project_path_for_announce = params.project_path.clone();
     let app_root = app_root.to_path_buf();
     let report = tokio::task::spawn_blocking(move || {
         ryeos_core_tools::actions::sign::run_sign_batch(
@@ -461,7 +520,20 @@ pub(crate) async fn sign_items(app_root: &Path, parameters: &Value) -> Result<Va
             report.total()
         )));
     }
-    serde_json::to_value(report).map_err(local_error)
+    let signed: Vec<String> = report
+        .signed
+        .iter()
+        .map(|outcome| outcome.item_ref.clone())
+        .collect();
+    let mut value = serde_json::to_value(report).map_err(local_error)?;
+    if !signed.is_empty() {
+        value["announcement"] = announce_revised(
+            &app_root_for_announce,
+            json!({ "project_path": project_path_for_announce, "item_refs": signed }),
+        )
+        .await;
+    }
+    Ok(value)
 }
 
 #[derive(serde::Deserialize)]
@@ -477,6 +549,8 @@ struct ItemRemoveParameters {
 pub(crate) async fn item_remove(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
     let params: ItemRemoveParameters = serde_json::from_value(parameters.clone())
         .map_err(|error| local(format!("item remove parameters are invalid: {error}")))?;
+    let app_root_for_announce = app_root.to_path_buf();
+    let project_path = params.project_path.clone();
     let app_root = app_root.to_path_buf();
     let report = tokio::task::spawn_blocking(move || {
         ryeos_core_tools::actions::revision::run_item_remove(
@@ -488,7 +562,14 @@ pub(crate) async fn item_remove(app_root: &Path, parameters: &Value) -> Result<V
     .await
     .map_err(|error| local(format!("item remove worker stopped: {error}")))?
     .map_err(|error| local(format!("{error:#}")))?;
-    serde_json::to_value(report).map_err(local_error)
+    let item_ref = report.item_ref.clone();
+    let mut value = serde_json::to_value(report).map_err(local_error)?;
+    value["announcement"] = announce_revised(
+        &app_root_for_announce,
+        json!({ "project_path": project_path, "item_refs": [item_ref] }),
+    )
+    .await;
+    Ok(value)
 }
 
 #[derive(serde::Deserialize)]
@@ -1014,6 +1095,23 @@ mod tests {
         )
         .for_issuer(issuer)
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_change_is_announced_only_to_a_node_that_is_running() {
+        // No node runs under a fresh directory: the announcement is skipped and
+        // says so, and nothing is raised, because the change is already made.
+        if std::env::var_os("RYEOSD_URL").is_some() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let outcome = announce_revised(
+            root.path(),
+            json!({ "project_path": "/nowhere", "item_refs": ["graph:a/b"] }),
+        )
+        .await;
+        assert_eq!(outcome["status"], "skipped", "{outcome}");
+        assert_eq!(outcome["reason"], "the node is not running", "{outcome}");
     }
 
     #[test]

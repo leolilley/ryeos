@@ -411,6 +411,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     let presentation = UiCompositionPresentation::from_effective_surface(surface_json)
         .map_err(|error| format!("surface fixture: {error}"))?;
     let surface_attachment = UiBindingAttachment {
+        named_items: Vec::new(),
         binding_attachment_id: "surface-attachment".into(),
         binding_generation: 1,
         binding_digest: "surface-binding".into(),

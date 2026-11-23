@@ -6830,72 +6830,201 @@ pub struct SessionStatePolicy {
     /// worker is dead and reaped before the session leaves `recovering` for
     /// the candidate path), so the refusal is a guard, not a behaviour.
     pub worker_fence_moves_session: bool,
-}
-
-const fn session_policy(
-    state: &'static str,
-    retires_before_capture: bool,
-    root_resume: SessionRootResume,
-    settles_without_worker: bool,
-    worker_fence_moves_session: bool,
-) -> SessionStatePolicy {
-    SessionStatePolicy {
-        state,
-        retires_before_capture,
-        root_resume,
-        settles_without_worker,
-        worker_fence_moves_session,
-    }
+    /// A session of this state that names no worker identity may be settled
+    /// terminal by the unattached settlement. It is `settles_without_worker`
+    /// less `binding`: a binding session has already recorded the worker it is
+    /// binding, so it is never unattached.
+    pub settles_unattached: bool,
+    /// A session of this state keeps its credential profile's lock against the
+    /// boot orphan release even when no worker row, session worker identity or
+    /// reservation names the lock: its start may have contacted a worker it
+    /// has not recorded yet (`admitted`, `binding`) or never settled whether it
+    /// did (`outcome_unknown`). A `recovering` session recorded its worker, so
+    /// its claim on the lock is through that worker identity.
+    pub start_claims_profile_lock: bool,
 }
 
 /// One row per dedicated-session state, pinned to the runtime schema's state
 /// set by a test. Every state-keyed decision reads this table.
 pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
-    session_policy("admitted", true, SessionRootResume::Resume, true, true),
-    session_policy("binding", true, SessionRootResume::Resume, true, true),
-    session_policy("idle", true, SessionRootResume::Resume, false, true),
-    session_policy("turn_running", true, SessionRootResume::Resume, false, true),
-    session_policy(
-        "awaiting_approval",
-        true,
-        SessionRootResume::Resume,
-        false,
-        true,
-    ),
-    session_policy("recovering", true, SessionRootResume::Resume, true, true),
-    session_policy(
-        "outcome_unknown",
-        true,
-        SessionRootResume::Resume,
-        true,
-        true,
-    ),
-    session_policy("draining", true, SessionRootResume::Resume, false, true),
-    session_policy("freezing", false, SessionRootResume::Hold, false, false),
-    session_policy("frozen", false, SessionRootResume::Hold, false, false),
-    session_policy("verifying", false, SessionRootResume::Hold, false, false),
-    session_policy("qualifying", false, SessionRootResume::Hold, false, false),
-    session_policy(
-        "publish_ready",
-        false,
-        SessionRootResume::Hold,
-        false,
-        false,
-    ),
-    session_policy("publishing", false, SessionRootResume::Hold, false, false),
-    session_policy("discarding", false, SessionRootResume::Hold, false, false),
-    session_policy("terminal", false, SessionRootResume::Finalise, false, false),
+    SessionStatePolicy {
+        state: "admitted",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "binding",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "idle",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "turn_running",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "awaiting_approval",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "recovering",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "outcome_unknown",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "draining",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "freezing",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "frozen",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "verifying",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "qualifying",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "publish_ready",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "publishing",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "discarding",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "terminal",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Finalise,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
 ];
 
-/// The SQL list of states the abandoned-worker fence moves, read from the
-/// table. Every element is a static state name from [`SESSION_STATE_POLICY`].
-pub fn worker_fence_moved_states_sql() -> String {
+/// The states a policy column selects, as an SQL list. Every element is a
+/// static state name from [`SESSION_STATE_POLICY`], so the list needs no
+/// escaping.
+fn states_sql(selected: impl Fn(&SessionStatePolicy) -> bool) -> String {
     SESSION_STATE_POLICY
         .iter()
-        .filter(|policy| policy.worker_fence_moves_session)
+        .filter(|policy| selected(policy))
         .map(|policy| format!("'{}'", policy.state))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The SQL list of states the abandoned-worker fence moves.
+pub fn worker_fence_moved_states_sql() -> String {
+    states_sql(|policy| policy.worker_fence_moves_session)
+}
+
+/// The SQL list of states a failed start may settle: a session with no live
+/// worker settles from local rows.
+pub fn failed_start_settled_states_sql() -> String {
+    states_sql(|policy| policy.settles_without_worker)
+}
+
+/// The SQL list of states the unattached settlement may settle.
+pub fn unattached_settled_states_sql() -> String {
+    states_sql(|policy| policy.settles_unattached)
+}
+
+/// The SQL list of states whose start keeps the profile lock against the boot
+/// orphan release.
+pub fn start_claimed_lock_states_sql() -> String {
+    states_sql(|policy| policy.start_claims_profile_lock)
 }
 
 fn session_state_policy(session_state: &str) -> Option<&'static SessionStatePolicy> {
@@ -7257,6 +7386,39 @@ mod tests {
             settleable,
             ["admitted", "binding", "recovering", "outcome_unknown"]
         );
+    }
+
+    #[test]
+    fn every_generated_settle_list_is_exactly_the_states_it_names() {
+        // Each list was a literal in its SQL before the table generated it;
+        // these are those literals, in table order.
+        assert_eq!(
+            worker_fence_moved_states_sql(),
+            "'admitted','binding','idle','turn_running','awaiting_approval','recovering',\
+             'outcome_unknown','draining'"
+        );
+        assert_eq!(
+            failed_start_settled_states_sql(),
+            "'admitted','binding','recovering','outcome_unknown'"
+        );
+        assert_eq!(
+            unattached_settled_states_sql(),
+            "'admitted','recovering','outcome_unknown'"
+        );
+        assert_eq!(
+            start_claimed_lock_states_sql(),
+            "'admitted','binding','outcome_unknown'"
+        );
+        // The unattached settlement is the worker-less settlement less the one
+        // state that has always recorded its worker.
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(
+                policy.settles_unattached,
+                policy.settles_without_worker && policy.state != "binding",
+                "{}",
+                policy.state
+            );
+        }
     }
 
     fn bounded(

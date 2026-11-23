@@ -37,6 +37,7 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `OpenUrl` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
 | [x] `ReplaceSession` | native | native | Both redeem the one-shot successor session. |
 | [x] `ReleaseBindingAttachment` | native | native | Same exact session-bound attachment triple; explicit release only. |
+| [x] `ReviseBindingAttachment` | native | native | Same exact session-bound attachment triple; the daemon recompiles and publishes the successor. |
 <!-- parity:RyeOsEffectKind:end -->
 
 ## Root events

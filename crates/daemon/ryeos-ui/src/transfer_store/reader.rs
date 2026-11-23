@@ -2452,7 +2452,7 @@ mod tests {
                             "binding_digest":"a".repeat(64)},
                         "binding_attachments":[{"binding_attachment_id":"root",
                             "binding_generation":1,"binding_digest":"a".repeat(64),
-                            "binding_request_bounds":{"max_request_bytes":4096,
+                            "named_items": [], "binding_request_bounds":{"max_request_bytes":4096,
                                 "max_input_bytes":1024,"max_seat_append_bytes":65536}}]}
                 }),
             ),

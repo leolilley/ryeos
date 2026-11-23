@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T21:33:14Z:5ef54a206888e7cd7ca54fa4027ddf6f9c047d36a3604f406b44e81606e9d181:2H754MFHvna23rcN8SS2u+pkvNjG45xlSEqy8PffTe1KciPrm7S14xx/sgQCeJNbT5YYR3VEwerWhmZClQ+iDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T01:03:46Z:d2782fac5c33f73012612a3e0eca70eaccbbafbda8b84a36fa7c88a0a85a9075:yM2+3l3uY0rb/2124v40gLTgu+RtG1y10Rr4V44l8vJctRooJ52gcwgWAKKWxesKxY0237T4qvaIgz5Bz89vAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -319,7 +319,9 @@ over `window_turns`), is refused at load.
 When the run has a turn limit, the last turn it allows is a wrap-up turn: before
 that turn the model is told, once, as a durable harness input (kind
 `limit_wrap_up`), that it is the last and to finish. The limit stays a hard cap:
-a run that does not finish on that turn still ends with `turn limit exceeded`.
+a run that does not finish on that turn still ends with the typed failure `turn_limit_exceeded`. The other limits fail the
+same way, each with its own code: `token_limit_exceeded`, `spend_limit_exceeded`,
+`spawn_limit_exceeded`, `duration_limit_exceeded` and `depth_limit_exceeded`.
 With a limit of one turn the first turn carries the notice. When the run
 deadline's wrap-up phase falls on the same turn, one input (kind
 `deadline_limit_wrap_up`) names both reasons.

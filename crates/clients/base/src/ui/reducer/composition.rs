@@ -530,6 +530,51 @@ impl RyeOsCore {
                 }
             }
         }
+        // A settled rebind keeps every tile identity. Rebind the previous
+        // composition the same way so "unchanged mount" checks below still
+        // hold, and re-key drafts from the old binding scope to the new one.
+        let rebinds = replay
+            .completed_rebinds()
+            .iter()
+            .filter(|(id, _, _)| {
+                self.presentation_operations.dirty.contains(id)
+                    && !self.presentation_operations.applied.contains(id)
+            })
+            .map(|(_, from, to)| (from.clone(), to.clone()))
+            .collect::<Vec<_>>();
+        let previous_rebound;
+        let previous = if rebinds.is_empty() {
+            previous
+        } else {
+            let mut rebound = previous.clone();
+            for (from, to) in &rebinds {
+                let descriptor = replay
+                    .binding_descriptors()
+                    .get(&to.binding_attachment_id)
+                    .ok_or("rebind successor descriptor is absent")?;
+                let surfaces = rebound.surfaces().keys().cloned().collect::<Vec<_>>();
+                for surface in surfaces {
+                    let _ = rebound.rebind_attachment(&surface, from, to, &|view_ref| {
+                        descriptor.presentation.views.contains_key(view_ref)
+                    });
+                }
+            }
+            previous_rebound = rebound;
+            &previous_rebound
+        };
+        let mut rebound_buffers = Vec::new();
+        for (encoded, buffer) in &self.input_buffers {
+            let Some(mut key) = InputBufferKey::from_storage_key(encoded) else {
+                continue;
+            };
+            for (from, to) in &rebinds {
+                if key.binding_scope == InputBufferKey::binding_scope(from) {
+                    key.binding_scope = InputBufferKey::binding_scope(to);
+                    rebound_buffers.push((encoded.clone(), key.storage_key(), buffer.clone()));
+                    break;
+                }
+            }
+        }
         let mut destinations = BTreeSet::new();
         for (old, new) in &mount_remaps {
             let source = previous.mount(old).ok_or("completed remap source absent")?;
@@ -658,6 +703,10 @@ impl RyeOsCore {
         }
         let staged: &mut RyeOsCore = self;
         for (old, new, buffer) in remapped_buffers {
+            staged.input_buffers.remove(&old);
+            staged.input_buffers.insert(new, buffer);
+        }
+        for (old, new, buffer) in rebound_buffers {
             staged.input_buffers.remove(&old);
             staged.input_buffers.insert(new, buffer);
         }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T15:50:37Z:45b9993dda5757f73a71a02697a806f8aa6cbc751681c6484e0e2aa555121769:wVI37xMSSI90q2VzbSBFD2MOXzhaDTrNk/9BlY7ViTasz6Bazs6PHOpwn/XoMa/grkoBV4aFkXq+YYuR/PDGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T02:38:30Z:25b110acd310cf91a93708845e68253b7b130484aeae92fb81fd0c5a75849118:QyGxtg3DaOkNqij7OLak+XdVlXL2XLYdaVblBMOvqDaANwoICrtiRHl6atHrMkESxzIv539jwai73vUzqEruCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -232,7 +232,8 @@ are appended after the parent's.
 ### Hooks
 
 Directive frontmatter may declare `hooks` for `after_step`, `continuation`,
-`provider_error` and `context_pressure`.
+`provider_error`, `context_pressure`, `before_tool`, `after_tool`,
+`turn_incomplete` and `idle`.
 Each hook has `id`, `event`, required `result`, optional `condition`, and
 `action`. `discard` and `observation` are observers; `control` is accepted only
 where the signed event and layer permit directive control.
@@ -255,6 +256,35 @@ continuation boundary still applies, on an overflow the typed refusal stands);
 with no action the policy decides. Both actions are invalid on any other event,
 and `retry` is refused here. A hook that fails, or whose cost violates the
 accounting bounds, leaves the policy's default.
+
+`before_tool`, `after_tool`, `turn_incomplete` and `idle` only observe the
+run. They admit `discard` and `observation` results, which are validated and
+dropped: no result can block a call, retry a turn, end the run or reach the
+model. Each context root is `event` and carries names, counts and codes, never
+a call's arguments or result text:
+
+| Event | Fires | `event` fields |
+|-------|-------|----------------|
+| `before_tool` | once per tool call about to be dispatched (not `directive_return`) | `turn`, `tool`, `call_id`, `index`, `batch_size` |
+| `after_tool` | once per call after its result is recorded; every call that fired `before_tool` fires it | `turn`, `tool`, `call_id`, `status` (`ok`, `error`, `refused`), `raw_size`, `truncated`, `spilled`, `duplicate` |
+| `turn_incomplete` | a provider turn ended without a usable answer | `turn`, `reason` (`output_limit`, `empty_reply`, `malformed_reply`), `outcome` (`corrected`, `failed`, `retried`), `streak` |
+| `idle` | the loop guard's idle finding warns the model, and stops the run | `turn`, `phase` (`warned`, `stopped`), `idle_turns`, `grace_turns` |
+
+A call refused before it ran (a limit, the deadline, a failed preflight, or a
+sibling of a failed `directive_return`) has `status: refused`. `outcome:
+retried` is an empty reply no `empty_replies` policy counts, retried as before,
+with `streak` 0. With `empty_replies` declared, corrected empty replies leave no
+loop-guard digest, so `idle` does not fire for them and `turn_incomplete` does.
+
+A hook's own action runs as a child dispatch; it never fires the parent run's
+tool hooks. A hook that fails, or whose cost violates the accounting bounds, is
+warned about in the process log and the run goes on. Hook cost counts against
+the run's limits. The signed `execution.observing_hooks_per_turn` (default 64,
+range 1..=1024) caps how many dispatches these events make in one provider turn;
+past it the turn's remaining observations are skipped and warned about once.
+After a crash an event can fire again (at least once). These events ship with the
+directive kind-schema; a runtime older than the schema never fires them, so a
+hook on one is silently inert until the runtime is updated with it.
 
 Authored hook inheritance is atomic. Omitting `hooks` inherits the nearest
 ancestor's complete list. `hooks: []` clears it. A declared non-empty list
@@ -403,3 +433,7 @@ A reply that writes a tool call as text is not a result when the provider entry
 declares `malformed_replies` (see the model provider guide): the runtime takes a
 corrected turn, and fails with `malformed_reply_retries_exhausted` when the
 corrections run out.
+
+A reply with no tool call and no text is retried silently unless the provider entry
+declares `empty_replies`: the runtime then takes a corrected turn, and fails with
+`empty_reply_retries_exhausted` when the corrections run out.

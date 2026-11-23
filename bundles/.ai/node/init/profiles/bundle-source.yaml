@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:28:11Z:034f5224ae9273386cfe4de97a8bbc3c5f9807de658efb5169e47c8a2d1921c4:HK0Vx0hY4RzfdgxwNO9SGrCN++aXc5DdoGf3RNQCZTpnVlb4HmSqMqPCi68EMSFtOB+8/eCJOgJ6qLoqhny8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T07:10:43Z:0311b4a6c0cfac0dac8ecec9fcca381d6a1829aa81be786fea53199d1a8842a0:h/Ok6CxWWD/qJxxUg4hL1eH1++lbu3i5zpv9BE/7L56JXg6AjJxFhSdn/ueswrFWnHE2F53c2SJgdL7bpRsXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -249,11 +249,12 @@ policies:
           # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
           # floor accepts a resident region proven only by the absence of swap
           # at startup (residency:swap_absent). Jobs die with the node because
-          # the node is pid 1 of its container, or its parent is a pid 1 named
-          # in enclosure_inits. Jobs run without a sandbox: the catalog
-          # services are daemon endpoints that execute no captured source, and
-          # consumers verify publisher evidence under their own policy, so the
-          # host can withhold or delay a catalog head but cannot forge one.
+          # its parent is a pid 1 named in enclosure_inits; the node itself
+          # cannot be pid 1, since process identity refuses pid 1. Jobs run
+          # without a sandbox: the catalog services are daemon endpoints that
+          # execute no captured source, and consumers verify publisher
+          # evidence under their own policy, so the host can withhold or delay
+          # a catalog head but cannot forge one.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
           process_scopes:
             mode: unconfigured
@@ -665,9 +666,12 @@ policies:
           - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints. Thread lifecycle hints keep
-      # the thread, its event name, status and time. Activity hints keep only
-      # their kind, so no thread list rides on them.
+      # The session stream carries thread hints and item hints. Thread
+      # lifecycle hints keep the thread, its event name, status and time.
+      # Activity hints keep only their kind, so no thread list rides on them.
+      # An item hint keeps the item ref, digest, revision and change set id;
+      # the daemon sends it only to a session whose own bindings name that
+      # item, and it carries no item content.
       - target: route:ui/events/session
         classes: [local_operator, hosted_principal]
         keep:
@@ -677,6 +681,10 @@ policies:
           - /payload/event_type
           - /payload/status
           - /payload/updated_at
+          - /payload/item_ref
+          - /payload/digest
+          - /payload/revision
+          - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
       # The pending approvals of a hosted work chain, as the Approvals view
