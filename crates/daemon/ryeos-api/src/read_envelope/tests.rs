@@ -314,3 +314,18 @@ fn a_filter_digest_is_stable_for_a_fixed_field_struct() {
     };
     assert_eq!(filter_digest(&one).unwrap(), filter_digest(&two).unwrap());
 }
+
+#[test]
+fn coverage_states_are_the_shared_closed_five() {
+    for (state, word) in [
+        (CoverageState::Complete, "complete"),
+        (CoverageState::Observed, "observed"),
+        (CoverageState::Partial, "partial"),
+        (CoverageState::Failed, "failed"),
+        (CoverageState::Unavailable, "unavailable"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), json!(word));
+    }
+    assert_eq!(Coverage::complete().state, CoverageState::Complete);
+    assert_eq!(Coverage::observed().state, CoverageState::Observed);
+}
