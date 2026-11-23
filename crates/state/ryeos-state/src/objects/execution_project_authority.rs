@@ -1015,7 +1015,9 @@ impl ExecutionProjectAuthority {
                 } = realization
                 {
                     crate::principal_id::PrincipalId::from_storage_component(owner_component)
-                        .context("explicit publication owner component")?;
+                        .map_err(|error| {
+                            anyhow::anyhow!("explicit publication owner component: {error:#}")
+                        })?;
                     validate_hash("explicit publication project hash", project_hash)?;
                     validate_hash("explicit publication expected hash", expected_hash)?;
                     if expected_hash != base_snapshot_hash {
