@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:33:07Z:7d9764b6cc1d9ad653507dea3ad991140664ecee6962f80d1f123a12652aed76:zFRbIxvNN+0vOeHHKg/sttuEP2028n+s7vvgqZZNpM0aV2phponOE1Abnjy2ANM9joJR4fAAmeFH7q5PcbSbDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:35:29Z:4a5dc5ad62b9770a9089f0d439288eb86a4d70637e201ecf0dd679d48f8ed6c3:4UEOhiLWJ64CCyup3kQYfbUutQQhzlDRwuvbmI8/XVCDtBFXooGmcXJSX0TYhbOt+WzVl/q/supmGv8/X7w6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -411,7 +411,8 @@ ryeos endorse revoke --endorsement <digest> --reason "no longer wanted"
 daemon never holds that key. The project is the checkout's declared name owned
 by the endorsing operator, `pid:v1:<owner>/<name>` with the operator's principal as owner; the CLI prints it before
 signing and refuses a checkout that declares no name, and the node refuses an
-endorsement for a project another key owns. An endorsement covers items only
+endorsement for a project not owned by the principal the endorser speaks for
+(`endorsement_project_not_endorsers`). An endorsement covers items only
 where that identity is established (a registration or a held head), the same
 gate a scoped signer meets; `ryeos node doctor` lists endorsements that cover
 nothing on the node under `endorsements_covering_nothing`. It reads the node's endorsement ledger head, signs

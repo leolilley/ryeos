@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:33:07Z:b6b5ce058bd3c5f4e2c265df7133fe7925fcbe3630146d5b4bec6587ad2b37c9:eaoxwrUu5AhWqrGIk8AY8LMxG9cMZK1DQ5QjCt/N7s8bZiJJCxpTYzLJl+XNPEcVWBApA+Cn5BpqKvUb/KtgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:35:29Z:467bd87cd3d7da3d846f06106437f18568004106c0dc6db6f16e28d94e443ca8:6QJo5ADVgXkqQ2o6U/1qYOK8anrmpDGu+O55jTrryYNT2Syw5GDaVYaV6ucY/Pv5Ov4UDNnMoLcsXjEVKGllBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1045,7 +1045,8 @@ Both are signed offline operations (`node.project.register`,
 `node_running_trust_change`. A path that is `/`, the node app root, an ancestor
 of it or inside it is refused. Each registration is a node-signed record at
 `<app_root>/.ai/node/projects/pid-v1-<hex>/<name>.yaml` listing the canonical
-checkout paths. Refusal codes: `project_manifest_missing`, `project_name_mismatch`,
+checkout paths. Refusal codes: `project_manifest_missing`, `project_manifest_name_missing`,
+`project_manifest_name_invalid`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
 
