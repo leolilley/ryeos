@@ -560,6 +560,15 @@ pub(crate) struct RyeOsTimelineSourceCache {
 // of the thread-execution-stream concern in `super::timeline`.
 pub use super::timeline::RyeOsLiveDelta;
 
+impl RyeOsDataState {
+    /// The signed bound on rows one source shows, if the wording carries one.
+    pub fn source_row_limit(&self) -> Option<usize> {
+        self.coverage_wording
+            .as_ref()
+            .and_then(|wording| wording.limits.source_rows)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRuntimeState {
     pub viewport: BrowserViewport,
@@ -2967,14 +2976,17 @@ impl RyeOsCore {
             Some(ViewLocalState::GenericList { cursor, .. }) => *cursor,
             _ => return,
         };
-        let total = super::content::source_collection(binding, new).len();
+        let limit = self.data.source_row_limit();
+        let total = super::content::source_collection_limited(binding, new, limit)
+            .0
+            .len();
         let (start, end) = row_signature_window(total, cursor);
-        let new_rows = projected_row_signatures(binding, new, start, end);
+        let new_rows = projected_row_signatures(binding, new, start, end, limit);
         if new_rows.is_empty() {
             return;
         }
         let old_rows = old
-            .map(|value| projected_row_signatures(binding, value, start, end))
+            .map(|value| projected_row_signatures(binding, value, start, end, limit))
             .unwrap_or_default();
         let now_ms = self.runtime.now_ms;
         let Some(ViewLocalState::GenericList { changed_rows, .. }) =
@@ -3126,7 +3138,11 @@ impl RyeOsCore {
             super::source_key::RyeOsSourceInstanceKey::named(tile.instance_key.clone(), channel)
                 .encode();
         let response = self.data.sources.get(&source_key)?;
-        let records = super::content::source_collection(binding, response);
+        let (records, _) = super::content::source_collection_limited(
+            binding,
+            response,
+            self.data.source_row_limit(),
+        );
         let (cursor, collapsed_tree_rows) = match &tile.local {
             ViewLocalState::GenericList {
                 cursor,
@@ -3239,16 +3255,25 @@ impl RyeOsCore {
                 .encode();
         let response = self.data.sources.get(&source_key)?;
         match binding.widget.as_str() {
-            "rows" => super::content::source_collection(binding, response)
-                .get(cursor)
-                .map(|record| {
-                    (
-                        projected_row_key(record, cursor, &binding.projections),
-                        record.clone(),
-                    )
-                }),
+            "rows" => super::content::source_collection_limited(
+                binding,
+                response,
+                self.data.source_row_limit(),
+            )
+            .0
+            .get(cursor)
+            .map(|record| {
+                (
+                    projected_row_key(record, cursor, &binding.projections),
+                    record.clone(),
+                )
+            }),
             "table" => {
-                let records = super::content::source_collection(binding, response);
+                let (records, _) = super::content::source_collection_limited(
+                    binding,
+                    response,
+                    self.data.source_row_limit(),
+                );
                 let collapsed_tree_rows = match &tile.local {
                     ViewLocalState::GenericList {
                         collapsed_tree_rows,
@@ -3350,7 +3375,8 @@ impl RyeOsCore {
             )
             .encode();
             let response = self.data.sources.get(&source_key)?;
-            let records = super::content::source_collection_for_section(section, response);
+            let mut records = super::content::source_collection_for_section(section, response);
+            records.truncate(self.data.source_row_limit().unwrap_or(usize::MAX));
             if cursor < flat.saturating_add(records.len()) {
                 let index = cursor - flat;
                 let record = records.get(index)?.clone().into_owned();
@@ -3410,8 +3436,9 @@ fn projected_row_signatures(
     response: &serde_json::Value,
     start: usize,
     end: usize,
+    limit: Option<usize>,
 ) -> std::collections::BTreeMap<String, (String, Option<String>)> {
-    let records = super::content::source_collection(binding, response);
+    let (records, _) = super::content::source_collection_limited(binding, response, limit);
     let start = start.min(records.len());
     let end = end.min(records.len()).max(start);
     match binding.widget.as_str() {

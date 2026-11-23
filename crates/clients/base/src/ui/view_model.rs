@@ -620,6 +620,30 @@ fn collection_shape_status(
     })
 }
 
+/// The stated partial coverage of a source cut at the shared row limit. The
+/// sentence is the signed wording's `source_row_limit` reason, with `{limit}`
+/// and `{total}` filled in. Without loaded wording there is no limit to cut at.
+fn row_cut_status(
+    core: &RyeOsCore,
+    cut: Option<super::content::RowCut>,
+) -> Option<RyeOsSourceStatusVm> {
+    let cut = cut?;
+    let wording = core.data.coverage_wording.as_ref()?;
+    let message = wording
+        .resolve("partial", ROW_CUT_REASON)
+        .label
+        .replace("{limit}", &cut.limit.to_string())
+        .replace("{total}", &cut.total.to_string());
+    Some(RyeOsSourceStatusVm {
+        state: "partial".into(),
+        message,
+        stale: false,
+    })
+}
+
+/// The signed wording reason for a source cut at the row limit.
+const ROW_CUT_REASON: &str = "source_row_limit";
+
 /// What the `unresolved` state says: nothing can be read until a subject,
 /// selection or project the view needs is there.
 const UNRESOLVED_MESSAGE: &str = "Source subject or required context is unresolved";
@@ -1603,7 +1627,13 @@ fn bound_view_vm_keyed(
                     .data
                     .sources
                     .get(&key)
-                    .map(|response| super::content::project_section(section, response))
+                    .map(|response| {
+                        super::content::project_section_limited(
+                            section,
+                            response,
+                            core.data.source_row_limit(),
+                        )
+                    })
                     .unwrap_or_default();
                 let expand_fields =
                     super::content::expand_fields_from_projection(&section.projection);
@@ -1685,11 +1715,18 @@ fn bound_view_vm_keyed(
                     cursor: section_cursor,
                     title: section.title.clone(),
                     source_status: source_status(core, &key).or_else(|| {
-                        collection_shape_status(
-                            core,
-                            section.collection.as_ref(),
-                            core.data.sources.get(&key)?,
-                        )
+                        let response = core.data.sources.get(&key)?;
+                        collection_shape_status(core, section.collection.as_ref(), response)
+                            .or_else(|| {
+                                row_cut_status(
+                                    core,
+                                    super::content::section_row_cut(
+                                        section,
+                                        response,
+                                        core.data.source_row_limit(),
+                                    ),
+                                )
+                            })
                     }),
                     count,
                     collapsed: is_collapsed,
@@ -1725,13 +1762,29 @@ fn bound_view_vm_keyed(
             .as_deref()
             .and_then(|key| source_status(core, key))
             .or_else(|| {
+                let response = response?;
                 collection_shape_status(
                     core,
                     binding
                         .primary_source()
                         .and_then(|(_, source)| source.collection.as_ref()),
-                    response?,
+                    response,
                 )
+                .or_else(|| {
+                    // A timeline is windowed by its own `older` count, not cut.
+                    (binding.widget != "timeline")
+                        .then(|| {
+                            row_cut_status(
+                                core,
+                                super::content::source_row_cut(
+                                    binding,
+                                    response,
+                                    core.data.source_row_limit(),
+                                ),
+                            )
+                        })
+                        .flatten()
+                })
             })
     };
     let title = view_title(core, instance_key, view_ref).to_owned();
@@ -1800,7 +1853,11 @@ fn bound_view_vm_keyed(
         ("rows", Some(response)) => {
             let activate_affordance = activate_affordance(binding);
             let expand_fields = super::content::expand_fields(binding);
-            let records = super::content::source_collection(binding, response);
+            let (records, _) = super::content::source_collection_limited(
+                binding,
+                response,
+                core.data.source_row_limit(),
+            );
             let total_rows = records.len();
             let (start, end) = row_render_window(total_rows, cursor);
             let selected_index = clamped_row_cursor(total_rows, cursor);
@@ -2052,7 +2109,11 @@ fn bound_view_vm_keyed(
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
             let column_roles = columns.iter().map(|col| col.role).collect();
-            let records = super::content::source_collection(binding, response);
+            let (records, _) = super::content::source_collection_limited(
+                binding,
+                response,
+                core.data.source_row_limit(),
+            );
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
                 binding,
@@ -2523,7 +2584,11 @@ pub(crate) fn view_pointer_tree_fold(
     let (channel, _) = binding.primary_source()?;
     let source =
         super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel).encode();
-    let records = super::content::source_collection(binding, core.data.sources.get(&source)?);
+    let (records, _) = super::content::source_collection_limited(
+        binding,
+        core.data.sources.get(&source)?,
+        core.data.source_row_limit(),
+    );
     // Rendering may provide a positional fallback for malformed source rows;
     // that fallback cannot establish a stable identity for a delayed event.
     if records

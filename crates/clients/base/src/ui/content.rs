@@ -1370,6 +1370,60 @@ pub fn source_collection<'a>(
     }
 }
 
+/// The rows a source holds beyond the shared row limit. `total` is how many
+/// rows exist; the first `limit` of them (array order, or key byte order for a
+/// map) are the ones kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowCut {
+    pub limit: usize,
+    pub total: usize,
+}
+
+/// `source_collection` with the shared row limit applied alike to an array and
+/// a map. Returns the kept rows and, when rows were cut, the cut.
+pub fn source_collection_limited<'a>(
+    binding: &ViewBinding,
+    response: &'a Value,
+    limit: Option<usize>,
+) -> (std::borrow::Cow<'a, [Value]>, Option<RowCut>) {
+    use std::borrow::Cow;
+    let rows = source_collection(binding, response);
+    match limit {
+        Some(limit) if rows.len() > limit => {
+            let total = rows.len();
+            let kept = match rows {
+                Cow::Borrowed(rows) => Cow::Borrowed(&rows[..limit]),
+                Cow::Owned(mut rows) => {
+                    rows.truncate(limit);
+                    Cow::Owned(rows)
+                }
+            };
+            (kept, Some(RowCut { limit, total }))
+        }
+        _ => (rows, None),
+    }
+}
+
+/// The cut, if any, the shared row limit makes to a section's rows.
+pub fn section_row_cut(
+    section: &SectionBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Option<RowCut> {
+    let limit = limit?;
+    let total = source_collection_for_section(section, response).len();
+    (total > limit).then_some(RowCut { limit, total })
+}
+
+/// The cut, if any, the shared row limit makes to a binding's primary source.
+pub fn source_row_cut(
+    binding: &ViewBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Option<RowCut> {
+    source_collection_limited(binding, response, limit).1
+}
+
 pub fn project_record_for_binding(binding: &ViewBinding, record: &Value) -> ProjectedRecord {
     let default_projection = binding
         .projections
@@ -1453,8 +1507,18 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// record — one row — so a sections view can carry a singular status line
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    project_section_limited(section, response, None)
+}
+
+/// `project_section` with the shared row limit applied.
+pub fn project_section_limited(
+    section: &SectionBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Vec<ProjectedRecord> {
     source_collection_for_section(section, response)
         .iter()
+        .take(limit.unwrap_or(usize::MAX))
         .map(|record| project_record(record, &section.projection))
         .collect()
 }
@@ -2664,6 +2728,66 @@ mod tests {
         let rows = project_section(&section, &json!({"by_name": {"k": {"v": 1}}}));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary, "k");
+    }
+
+    fn limited_rows(
+        binding: &ViewBinding,
+        response: &Value,
+        limit: usize,
+    ) -> (Vec<Value>, Option<RowCut>) {
+        let (rows, cut) = source_collection_limited(binding, response, Some(limit));
+        (rows.into_owned(), cut)
+    }
+
+    #[test]
+    fn row_limit_leaves_arrays_below_and_at_the_limit_whole() {
+        let binding = map_binding(json!("rows"));
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        let (rows, cut) = limited_rows(&binding, &response, 4);
+        assert_eq!((rows.len(), cut), (3, None));
+        let (rows, cut) = limited_rows(&binding, &response, 3);
+        assert_eq!((rows.len(), cut), (3, None));
+    }
+
+    #[test]
+    fn row_limit_cuts_an_array_and_says_how_many_exist() {
+        let binding = map_binding(json!("rows"));
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        let (rows, cut) = limited_rows(&binding, &response, 2);
+        assert_eq!(rows, vec![json!({"name": "a"}), json!({"name": "b"})]);
+        assert_eq!(cut, Some(RowCut { limit: 2, total: 3 }));
+    }
+
+    #[test]
+    fn row_limit_cuts_a_map_after_key_byte_order() {
+        let binding = map_binding(map_form());
+        let response = json!({"by_name": {"d": {}, "b": {}, "a": {}, "C": {}, "c": {}}});
+        let (rows, cut) = limited_rows(&binding, &response, 3);
+        let names: Vec<_> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["C", "a", "b"]);
+        assert_eq!(cut, Some(RowCut { limit: 3, total: 5 }));
+        let (rows, cut) = limited_rows(&binding, &response, 5);
+        assert_eq!((rows.len(), cut), (5, None));
+    }
+
+    #[test]
+    fn row_limit_applies_to_sections_and_no_limit_keeps_everything() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "t", "source_channel": "default",
+            "collection": "rows", "projection": {"primary": "name"}
+        }))
+        .unwrap();
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        assert_eq!(
+            project_section_limited(&section, &response, Some(2)).len(),
+            2
+        );
+        assert_eq!(project_section_limited(&section, &response, None).len(), 3);
+        assert_eq!(
+            section_row_cut(&section, &response, Some(2)),
+            Some(RowCut { limit: 2, total: 3 })
+        );
+        assert_eq!(section_row_cut(&section, &response, Some(3)), None);
     }
 
     #[test]

@@ -282,6 +282,19 @@ pub struct RyeOsCoverageWordingDto {
     pub states: std::collections::BTreeMap<String, RyeOsWordingEntry>,
     /// The sentence for a reason, whichever state reports it.
     pub reasons: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+    /// Signed bounds the client applies to what a source shows.
+    #[serde(default)]
+    pub limits: RyeOsCoverageLimitsDto,
+}
+
+/// The signed bounds that ride with the coverage wording.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RyeOsCoverageLimitsDto {
+    /// The most rows one source shows, whether it is an array or a map. Absent
+    /// means no bound.
+    #[serde(default)]
+    pub source_rows: Option<usize>,
 }
 
 impl RyeOsCoverageWordingDto {
@@ -312,6 +325,9 @@ impl RyeOsCoverageWordingDto {
                     entry.tone
                 ));
             }
+        }
+        if wording.limits.source_rows == Some(0) {
+            return Err("coverage wording has a zero source row limit".into());
         }
         Ok(wording)
     }
