@@ -422,7 +422,7 @@ impl SyncInclude {
         Self::new(entries)
     }
 
-    /// The 19 rows the core bundle's manifest composes to, for tests that need
+    /// The 18 rows the core bundle's manifest composes to, for tests that need
     /// a populated table without composing one from bundles.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests() -> Self {

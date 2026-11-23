@@ -2036,6 +2036,6 @@ isolation_backends:
             ryeos_state::project_sync::SyncInclude::for_tests(),
             "the composed table must equal SyncInclude::for_tests"
         );
-        assert_eq!(composed.entries().len(), 19);
+        assert_eq!(composed.entries().len(), 18);
     }
 }

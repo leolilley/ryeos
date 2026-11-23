@@ -287,7 +287,11 @@ fn text_list(value: Option<&Value>, flag: &str) -> Result<Vec<String>, CliError>
 /// `--lifetime-secs` pass when given. The node verifies the signature against
 /// its signer registry, countersigns and stores it; the key never leaves this
 /// process.
-pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+pub(crate) async fn endorse_items(
+    app_root: &Path,
+    console: &crate::tty::Console,
+    parameters: &Value,
+) -> Result<Value, CliError> {
     let project_path = parameters
         .get("project_path")
         .and_then(Value::as_str)
@@ -385,7 +389,11 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .map_err(|error| local(format!("{error:#}")))?
         .principal;
     let project_identity = ryeos_state::project_identity::ProjectIdentity::new(owner, declared);
-    eprintln!("endorsing in project {project_identity}");
+    console
+        .info(&crate::tty::Diagnostic::info(format!(
+            "endorsing in project {project_identity}"
+        )))
+        .map_err(CliError::Io)?;
     let nonce: [u8; 16] = rand::random();
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let now = lillux::time::unix_secs_now();
@@ -1081,7 +1089,10 @@ mod tests {
             json!({ "project_path": path, "item": ["view:a"], "lifetime_secs": 5 }),
             json!({ "project_path": path, "standing": true, "kind": ["view"], "lifetime_secs": 0 }),
         ] {
-            let error = endorse_items(root.path(), &parameters).await.unwrap_err();
+            let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
+            let error = endorse_items(root.path(), &console, &parameters)
+                .await
+                .unwrap_err();
             assert!(
                 matches!(error, CliError::Local { .. }),
                 "{parameters}: {error:?}"
