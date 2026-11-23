@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:35:29Z:467bd87cd3d7da3d846f06106437f18568004106c0dc6db6f16e28d94e443ca8:6QJo5ADVgXkqQ2o6U/1qYOK8anrmpDGu+O55jTrryYNT2Syw5GDaVYaV6ucY/Pv5Ov4UDNnMoLcsXjEVKGllBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:36:15Z:37c9a47e4c3a0b2c859007a45993ae2b317c73ce88c6203159201d40d5f5642d:C1qF9JZW7P5awms4He7zGEwiJMR3E71wk4UMgNEtX2uctUYorGPLzbHW47wQKF85e0zkRbHWOXgenuUPINEmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -351,7 +351,7 @@ cure; see [`retire`](#ryeos-node-external-execution-retire).
 
 Operator note for the owner+name project identity cut, epoch 144.
 
-Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 143 --schema-cut-to 144 --include-project-heads --confirm-project-heads` on its next upgrade. Project heads are reset too, because their keys change shape.
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 143 --schema-cut-to 144 --include-project-heads --confirm-project-heads` on its next upgrade. Project heads are reset too, because their keys change shape. The reset discards all thread history, so the head refs threads sealed for fold-back (pending head advances, keyed by the old shape) go with it and no resumed run meets a pre-cut ref; `--include-project-heads` removes the head directories, with their head-advance records.
 
 A node still on epoch 142 goes straight to 144 with one reset, in place of the 143 reset and this one: `ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 144 --include-project-heads --confirm-project-heads`. The reset accepts any earlier stored epoch named exactly as `--schema-cut-from`, and clears that store without reading it, so no 143 build is needed in between. Such a node still carries the 143 cut's own ordering, described in the epoch 143 note below:
 - Drain before stopping: settle or terminate every lease, qualification occurrence and termination in flight.
