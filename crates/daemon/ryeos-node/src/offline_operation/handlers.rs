@@ -1010,7 +1010,7 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
     )
     .context("commit updated node policy generation into initialized state")?;
     // The generation replaced is the one the request was checked against;
-    // the reader of the ledger shows the pair without re-deriving either.
+    // a receipt reader sees the pair without re-deriving either.
     Ok(json!({
         "section": arguments.section,
         "signer_fingerprint": ctx.node.fingerprint(),
@@ -1728,7 +1728,7 @@ pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
         archive: ctx.inputs.require("archive")?,
         preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
     })?;
-    // The registration digests before and after, so the ledger's reader shows
+    // The registration digests before and after, so a receipt reader sees
     // what was replaced without re-deriving it.
     let after = registration_digest()?;
     if let Value::Object(map) = &mut result {

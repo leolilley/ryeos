@@ -300,7 +300,7 @@ fn the_type_vocabulary_is_closed() {
     let record = fx.journal().append(draft(1)).unwrap();
     let mut body = serde_json::to_value(&record.body).unwrap();
     serde_json::from_value::<JournalBody>(body.clone()).unwrap();
-    body["type"] = "bundle.installed".into();
+    body["type"] = "node.unheard_of".into();
     assert!(serde_json::from_value::<JournalBody>(body).is_err());
     assert_eq!(JournalType::NodeStarted.as_str(), "node.started");
     assert_eq!(
