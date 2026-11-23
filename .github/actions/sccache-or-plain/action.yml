@@ -4,8 +4,10 @@ description: >-
   When sccache cannot be installed or its server does not start (the
   "Timed out waiting for server startup" outage), the job clears
   RUSTC_WRAPPER for every later step and builds with plain rustc: the same
-  builds and tests run, only uncached and slower. The fallback is announced
-  as a warning and in the step summary; it never fails the job.
+  builds and tests run, only uncached and slower. When the server starts,
+  compiles run through rustc-wrapper.sh, which moves the rest of the job to
+  plain rustc if the server is lost later and cannot restart. Either fallback
+  is announced as a warning and in the step summary; neither fails the job.
 inputs:
   off:
     description: "'true' skips sccache and builds with plain rustc (operator switch for a known outage)."
