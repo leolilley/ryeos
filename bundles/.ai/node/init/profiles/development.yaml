@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T05:13:27Z:a79e4bc4ddf65dc18661a468ca846d6d498675690255d9351fa125449314ec88:P6+JeKMSWh1NZuvJT2IiKEvpfjzALgKJJKhl99Dpv9vlxmTaCnccN2RHen5ZS57CmT5x8f5EVL0SYUhL5AoQAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T07:10:43Z:24f3907d3a9a6fbd3307ff3b3c999aff7e4d2e1797387e9925b27c6d1490f392:NjRtJ7Ulya75T/go0BbIp4r81sLyP1OT0BojEOyPVsisYHQpNDOv82vYaYBLAdmcacv796YhfS5j0PDOKHGLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -341,9 +341,10 @@ policies:
           # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
           # floor accepts a resident region proven only by the absence of swap
           # at startup (residency:swap_absent). Jobs die with the node because
-          # the node is pid 1 of its container, or its parent is a pid 1 named
-          # in enclosure_inits. Jobs run without a sandbox; the development
-          # qualification and authoring workers run on this trusted lane.
+          # its parent is a pid 1 named in enclosure_inits; the node itself
+          # cannot be pid 1, since process identity refuses pid 1. Jobs run
+          # without a sandbox; the development qualification and authoring
+          # workers run on this trusted lane.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
           process_scopes:
             mode: unconfigured

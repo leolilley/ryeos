@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T06:02:28Z:26c5e45b61c0eb1c7a46a5710ba222eec2a686e0633f7901f0fa2fcdbe997a32:izQ6yjTq8LRNZCYpeJA0to/gw7O9Iy4XRBJlZ0k2UXw9d5f1FoHGZITKkFKhUfh1CDSWPNilu+/30Vtyq2OABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T00:13:15Z:7b0bbd3e9483dad2b2591a9a8c7569df4479a57b29809e197c6173010a1d0009:RyNewP/r4hmG40A6Xxj+pVfO9tiGAAMKKirlPtOyV0XvGDosxtYwL9FuKClf7pEp3pt89CtPavewQVCOmProAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Independent consumer qualification of the exact Codex guest runtime.
@@ -55,7 +55,7 @@ product_qualification_policy:
       requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
       schema: ryeos.external_candidate_qualification_context.v3
       source_binding_hash: f284ed8e16cc6dd818cb84e2234ad861d45e783db124bab9419cbdd08c613f1e
-      source_content_manifest_hash: 62e7d653ef0dbc99104d600c97927605a35dd2bde2ab086b064bd1f6d63115bd
+      source_content_manifest_hash: a53e5280a9eabf606338db1ef16df13db0f8439057e097e79d288f1d19a6428f
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
     product_declaration_id: guest-runtime

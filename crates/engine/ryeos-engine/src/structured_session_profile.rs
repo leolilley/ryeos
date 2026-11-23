@@ -1655,8 +1655,10 @@ fn requirement_list(path: &str, value: &Value) -> Result<Vec<Requirement>> {
         bail!("structured-session `{path}`: {reason}");
     }
     let labels: Vec<String> = entries.iter().map(|entry| entry.label()).collect();
-    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
-        bail!("structured-session `{path}` entries must be sorted and unique");
+    if let Some(reason) =
+        lillux::process_control::ascending_refusal(labels.iter().map(String::as_str))
+    {
+        bail!("structured-session `{path}` entries must be sorted and unique by label: {reason}");
     }
     Ok(entries)
 }
@@ -2580,7 +2582,7 @@ mod tests {
             (
                 "/requires/controller",
                 json!(["time", "accounting"]),
-                "sorted and unique",
+                "sorted and unique by label: `accounting` must come before `time`",
             ),
             ("/requires/controller", json!(too_many), "outside its bound"),
             ("/requires/credential_kinds", json!({}), "between 1 and"),

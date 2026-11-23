@@ -381,6 +381,13 @@ pub struct ExecutionConfig {
     /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
+    /// The most dispatches the observing hook events (`before_tool`,
+    /// `after_tool`, `turn_incomplete`, `idle`) may make in one provider turn.
+    /// Past it the turn's remaining observations are skipped and warned about
+    /// once; the run is not affected. Range 1..=1024. Each dispatch's cost
+    /// counts against the run's limits like any hook's.
+    #[serde(default = "default_observing_hooks_per_turn")]
+    pub observing_hooks_per_turn: u32,
     /// Upper bound, in milliseconds, on the delay before any provider retry.
     /// The delay is `backoff_base_ms * 2^attempt`, capped here.
     #[serde(default = "default_backoff_max_ms")]
@@ -756,6 +763,10 @@ fn default_tool_concurrency() -> u32 {
     4
 }
 
+fn default_observing_hooks_per_turn() -> u32 {
+    64
+}
+
 fn default_retries() -> u32 {
     2
 }
@@ -806,6 +817,7 @@ impl Default for ExecutionConfig {
             max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
             tool_concurrency: default_tool_concurrency(),
+            observing_hooks_per_turn: default_observing_hooks_per_turn(),
             backoff_max_ms: default_backoff_max_ms(),
             retry_after_max_ms: default_retry_after_max_ms(),
             unknown_outcome_retry: None,
@@ -824,6 +836,12 @@ impl ExecutionConfig {
             anyhow::bail!(
                 "execution.tool_concurrency must be between 1 and 16, got {}",
                 self.tool_concurrency
+            );
+        }
+        if self.observing_hooks_per_turn == 0 || self.observing_hooks_per_turn > 1024 {
+            anyhow::bail!(
+                "execution.observing_hooks_per_turn must be between 1 and 1024, got {}",
+                self.observing_hooks_per_turn
             );
         }
         if self.backoff_max_ms < self.backoff_base_ms {
@@ -1640,6 +1658,18 @@ mod tests {
 #[cfg(test)]
 mod tool_concurrency_tests {
     use super::ExecutionConfig;
+
+    #[test]
+    fn observing_hooks_per_turn_defaults_to_64_and_refuses_values_that_cannot_work() {
+        let config: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.observing_hooks_per_turn, 64);
+        assert!(config.validate().is_ok());
+        for bad in [0, 1025] {
+            let config: ExecutionConfig =
+                serde_yaml::from_str(&format!("observing_hooks_per_turn: {bad}")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn tool_concurrency_defaults_to_four_and_validates_range() {
