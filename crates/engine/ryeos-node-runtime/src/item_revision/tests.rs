@@ -498,3 +498,96 @@ fn an_inline_signed_item_round_trips_with_its_own_signature_line() {
     assert_eq!(body.content.as_deref(), Some(signed_item.as_str()));
     assert_eq!(body.after_digest, Some(file_digest(signed_item.as_bytes())));
 }
+
+#[test]
+fn the_tip_summary_names_the_newest_record_and_the_removal() {
+    let f = fixture();
+    let item = ChainItem::parse("directive:greet").unwrap();
+    assert_eq!(tip_summary(f.root(), &item).unwrap(), None);
+
+    f.authored("value: 1\n");
+    let second = f.authored("value: 2\n");
+    let tip = tip_summary(f.root(), &item).unwrap().unwrap();
+    assert_eq!(tip.seq, 2);
+    assert_eq!(tip.record_digest, second.digest);
+    assert_eq!(
+        tip.after_digest.as_deref(),
+        Some(file_digest(b"value: 2\n").as_str())
+    );
+    assert_eq!(tip.role, ActorRole::Authoring);
+
+    let removed = f.change(&f.operator, ActorRole::Operator, None);
+    let tip = tip_summary(f.root(), &item).unwrap().unwrap();
+    assert_eq!(tip.seq, removed.seq);
+    assert_eq!(tip.after_digest, None);
+    assert_eq!(tip.role, ActorRole::Operator);
+}
+
+#[test]
+fn a_verified_tip_checks_what_the_node_has_not_attested() {
+    let f = fixture();
+    let item = ChainItem::parse("directive:greet").unwrap();
+    f.authored("value: 1\n");
+    // An operator change made while the node was away: recorded, not attested.
+    let operator = f.change(&f.operator, ActorRole::Operator, Some("value: 2\n"));
+    let tip = verified_tip(f.root(), &item, &f.trust, &f.heads())
+        .unwrap()
+        .unwrap();
+    assert_eq!(tip.seq, operator.seq);
+    assert_eq!(tip.role, ActorRole::Operator);
+
+    // The same record re-signed by a key that is not pinned does not verify,
+    // so nothing is announced from it.
+    let stranger = key(99);
+    let path = f.record_path(2);
+    let record = std::fs::read_to_string(&path).unwrap();
+    let body = signed_body(&record).unwrap();
+    let forged = lillux::signature::sign_content(body, &stranger, "#", None);
+    std::fs::write(&path, forged).unwrap();
+    assert!(verified_tip(f.root(), &item, &f.trust, &f.heads()).is_err());
+    // An unverified read still sees it: it is only a prompt to look again.
+    assert_eq!(tip_summary(f.root(), &item).unwrap().unwrap().seq, 2);
+}
+
+#[test]
+fn a_project_lists_every_chain_it_holds_across_kinds() {
+    let f = fixture();
+    assert!(list_project_chains(f.root()).unwrap().is_empty());
+    f.authored("value: 1\n");
+    let other = ChainItem::parse("knowledge:notes/deep/page").unwrap();
+    append(
+        f.root(),
+        &f.authoring,
+        ActorRole::Authoring,
+        Change {
+            item: &other,
+            file_ext: ".md",
+            before: None,
+            after: Some("text\n"),
+            provenance: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let refs: Vec<String> = list_project_chains(f.root())
+        .unwrap()
+        .iter()
+        .map(ChainItem::item_ref)
+        .collect();
+    assert_eq!(refs, vec!["directive:greet", "knowledge:notes/deep/page"]);
+    let knowledge: Vec<String> = list_chain_items(f.root(), "knowledge")
+        .unwrap()
+        .iter()
+        .map(ChainItem::item_ref)
+        .collect();
+    assert_eq!(knowledge, vec!["knowledge:notes/deep/page"]);
+}
+
+#[test]
+fn the_node_lists_the_projects_it_holds_a_valid_head_for() {
+    let f = fixture();
+    let heads = f.heads();
+    assert!(heads.attested_projects().unwrap().is_empty());
+    f.authored("value: 1\n");
+    let canonical = RevisionHeads::project_key(f.root()).unwrap();
+    assert_eq!(heads.attested_projects().unwrap(), vec![canonical]);
+}
