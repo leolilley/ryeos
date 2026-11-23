@@ -56,6 +56,12 @@ pub struct ResumeState {
     /// Malformed replies in a row, ending at the newest recorded one that the
     /// run has not yet moved past: the position its correction names.
     pub trailing_malformed_replies: u32,
+    /// Empty replies in a row, ending at the newest recorded one that the run
+    /// has not yet moved past: the position its correction names.
+    pub trailing_empty_replies: u32,
+    /// Whether the newest final turn of this exact native thread ended at a
+    /// normal stop finish.
+    pub last_final_stopped: bool,
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
@@ -355,6 +361,8 @@ pub async fn load_resume_state(
     // pinned inputs, then the most recent turns.
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let trailing_malformed_replies = trailing_malformed_replies(&events[own_start..])?;
+    let trailing_empty_replies = trailing_empty_replies(&events[own_start..])?;
+    let last_final_stopped = last_final_stopped(&events[own_start..])?;
     let frame = latest_frame(&events)?;
     let (messages, wrap_up_delivered, loop_warned, start_over_ceiling, guard_prefix, guard_history) =
         match anchor.as_ref() {
@@ -362,7 +370,7 @@ pub async fn load_resume_state(
             // again. A successor's start must still fit the window.
             Some(anchor) => {
                 let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
-                let kept_at_record = turns_before_event(&events, anchor.chain_seq);
+                let kept_at_record = turns_before_event(&events, anchor.chain_seq)?;
                 let signals = anchored_signals(
                     mode,
                     anchor.payload.guard_carry.as_ref(),
@@ -472,6 +480,8 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         trailing_malformed_replies,
+        trailing_empty_replies,
+        last_final_stopped,
         frame,
         wrap_up_delivered,
         loop_warned,
@@ -955,8 +965,10 @@ fn anchored_signals(
 
 /// The turns the window holds before the compaction event at `anchor_seq`: the
 /// kept turns the record kept whole. Counts the same finals the fold turns into
-/// assistant messages.
-fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> u32 {
+/// assistant messages, so a reply a correction removed is not a turn: the live
+/// run popped it before it measured how long ago a warning was given.
+fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> Result<u32> {
+    let corrected = corrected_replies(events)?;
     let end = events
         .iter()
         .position(|event| {
@@ -965,14 +977,16 @@ fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> u32 {
         .unwrap_or(events.len());
     let turns = events[..end]
         .iter()
-        .filter(|event| {
+        .enumerate()
+        .filter(|(index, event)| {
             event.event_type == "cognition_out"
                 && !is_stream_fragment(event)
                 && !is_compaction_summary_turn(event)
                 && !is_refusal_final(event)
+                && !corrected.contains(index)
         })
         .count();
-    u32::try_from(turns).unwrap_or(u32::MAX)
+    Ok(u32::try_from(turns).unwrap_or(u32::MAX))
 }
 
 /// The history before a successor's conversation: the predecessors' turns its
@@ -1026,29 +1040,49 @@ fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
     Ok(count)
 }
 
-/// The turn and run position a `cognition_in` event's kind names, when the
-/// event is the correction of a malformed reply.
-fn malformed_reply_input(event: &ReplayedEventRecord) -> Option<(u32, u32)> {
+/// The correction, turn and run position a `cognition_in` event's kind names,
+/// when the event is the correction of a reply.
+fn reply_correction_input(
+    event: &ReplayedEventRecord,
+) -> Option<(ryeos_runtime::cognition::ReplyCorrection, u32, u32)> {
     if event.event_type != "cognition_in" {
         return None;
     }
-    ryeos_runtime::cognition::malformed_reply_of_kind(
+    ryeos_runtime::cognition::reply_correction_of_kind(
         event.payload.get("kind").and_then(Value::as_str)?,
     )
 }
 
-/// The run position of the newest malformed-reply correction, while the run
-/// has not moved past it. At most one final turn may follow it, and only one
-/// that proposed no tool call: that turn is the reply the run was about to
-/// judge, so the correction still counts. Any later turn means the run went on
-/// and the run starts over. Derived from the record so resume needs no
-/// separate counter.
-fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+/// Whether a final turn is an empty reply the empty-reply correction applies
+/// to: a normal stop finish with nothing to act on.
+fn final_is_correctable_empty(event: &ReplayedEventRecord) -> Result<bool> {
+    if event.payload.get("finish").and_then(Value::as_str) != Some("stop") {
+        return Ok(false);
+    }
+    Ok(crate::directive::is_empty_reply(
+        &replayed_cognition_out(event)?.message(),
+    ))
+}
+
+/// The run position of the newest correction of `which`, while the run has not
+/// moved past it. At most one final turn may follow it, and only one that
+/// proposed no tool call and is the kind of reply `which` corrects: that turn
+/// is the reply the run was about to judge, so the correction still counts.
+/// Any later turn means the run went on and the run starts over. Derived from
+/// the record so resume needs no separate counter.
+fn trailing_corrections(
+    events: &[ReplayedEventRecord],
+    which: ryeos_runtime::cognition::ReplyCorrection,
+) -> Result<u32> {
+    use ryeos_runtime::cognition::ReplyCorrection;
     let mut finals_after = 0u32;
     let mut calls_after = false;
+    let mut shape_ok = true;
     for event in events.iter().rev() {
-        if let Some((_, position)) = malformed_reply_input(event) {
-            let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after);
+        if let Some((kind, _, position)) = reply_correction_input(event)
+            && kind == which
+        {
+            let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after && shape_ok);
             return Ok(if still_counts { position } else { 0 });
         }
         // A compaction's summary call and a recorded refusal are not replies
@@ -1064,23 +1098,55 @@ fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
                 .tool_calls()
                 .next()
                 .is_some();
+            let empty = final_is_correctable_empty(event)?;
+            // An empty reply is never malformed, and a malformed reply is
+            // never empty, so the reply after a correction must be of the
+            // corrected shape for its run to continue.
+            shape_ok = match which {
+                ReplyCorrection::Empty => empty,
+                ReplyCorrection::Malformed => !empty,
+            };
         }
     }
     Ok(0)
 }
 
-/// The positions of the final `cognition_out` events that a later
-/// malformed-reply correction names. The live run removed such a reply from
-/// the conversation, so a fold must not include it.
+/// Whether the newest final turn ended at a normal stop finish.
+fn last_final_stopped(events: &[ReplayedEventRecord]) -> Result<bool> {
+    for event in events.iter().rev() {
+        if final_cognition_turn(event)?.is_some() {
+            return Ok(event.payload.get("finish").and_then(Value::as_str) == Some("stop"));
+        }
+    }
+    Ok(false)
+}
+
+fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+    trailing_corrections(events, ryeos_runtime::cognition::ReplyCorrection::Malformed)
+}
+
+fn trailing_empty_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+    trailing_corrections(events, ryeos_runtime::cognition::ReplyCorrection::Empty)
+}
+
+/// The positions of the final `cognition_out` events that a later reply
+/// correction names. The live run removed such a reply from the conversation,
+/// so a fold must not include it. A correction names its turn, and only the
+/// latest final turn before it can be that turn; an empty-reply correction
+/// also removes only a reply that is an empty normal stop, so a record that
+/// names any other reply leaves it in.
 fn corrected_replies(events: &[ReplayedEventRecord]) -> Result<std::collections::HashSet<usize>> {
+    use ryeos_runtime::cognition::ReplyCorrection;
     let mut corrected = std::collections::HashSet::new();
     let mut latest_final: Option<(usize, u32)> = None;
     for (index, event) in events.iter().enumerate() {
         if let Some(turn) = final_cognition_turn(event)? {
             latest_final = Some((index, turn));
-        } else if let Some((named, _)) = malformed_reply_input(event)
+        } else if let Some((kind, named, _)) = reply_correction_input(event)
             && let Some((final_index, turn)) = latest_final
             && turn == named
+            && (kind == ReplyCorrection::Malformed
+                || final_is_correctable_empty(&events[final_index])?)
         {
             corrected.insert(final_index);
         }
@@ -4825,6 +4891,198 @@ mod tests {
         );
     }
 
+    fn empty_correction(turn: u32, position: u32) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({
+                "origin": "harness",
+                "kind": ryeos_runtime::cognition::empty_reply_kind(turn, position),
+                "parts": text_parts("answer or call"),
+            }),
+            chain_seq: 0,
+        }
+    }
+
+    /// A reply holding only reasoning, ending as `finish`.
+    fn reasoning_only(turn: u32, finish: &str) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: json!({
+                "turn": turn,
+                "parts": [{"type": "reasoning", "text": "thinking"}],
+                "finish": finish,
+            }),
+            chain_seq: 0,
+        }
+    }
+
+    fn texts_of(events: &[ReplayedEventRecord]) -> Vec<String> {
+        reconstruct_messages(events)
+            .unwrap()
+            .iter()
+            .map(|message| message.joined_text())
+            .collect()
+    }
+
+    #[test]
+    fn the_fold_drops_an_empty_reply_a_later_correction_names() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+            chain_seq: 0,
+        };
+        let events = vec![
+            event("cognition_in", input("Do task")),
+            reasoning_only(1, "stop"),
+            empty_correction(1, 1),
+            event("cognition_out", out(2, "the answer")),
+        ];
+        assert_eq!(
+            texts_of(&events),
+            vec!["Do task", "answer or call", "the answer"]
+        );
+
+        // A whitespace-only text reply is empty too.
+        let mut spaced = events.clone();
+        spaced[1] = event("cognition_out", out(1, "  \n "));
+        assert_eq!(texts_of(&spaced).len(), 3);
+
+        // A correction naming another turn removes nothing.
+        let other = vec![
+            event("cognition_in", input("Do task")),
+            reasoning_only(1, "stop"),
+            empty_correction(5, 1),
+        ];
+        assert_eq!(texts_of(&other).len(), 3);
+
+        // An empty-reply correction never removes a reply that is not an empty
+        // normal stop: a text reply, or an empty one with another finish.
+        let text_reply = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "kept")),
+            empty_correction(1, 1),
+        ];
+        assert!(texts_of(&text_reply).contains(&"kept".to_string()));
+        for finish in ["content_filter", "other", "length"] {
+            let filtered = vec![
+                event("cognition_in", input("Do task")),
+                reasoning_only(1, finish),
+                empty_correction(1, 1),
+            ];
+            // The reply stays in the fold: it carries no text, so the visible
+            // difference is the message count (task, reply, correction).
+            assert_eq!(
+                reconstruct_messages(&filtered).unwrap().len(),
+                3,
+                "{finish}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_run_position_is_derived_from_the_record() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+            chain_seq: 0,
+        };
+        let empty = |turn: u32| reasoning_only(turn, "stop");
+        assert_eq!(trailing_empty_replies(&[]).unwrap(), 0);
+        assert_eq!(trailing_empty_replies(&[empty(1)]).unwrap(), 0);
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1)]).unwrap(),
+            1
+        );
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                empty(2),
+                empty_correction(2, 2)
+            ])
+            .unwrap(),
+            2
+        );
+        // The next reply, not yet judged, still counts the correction before it.
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1), empty(2)]).unwrap(),
+            1
+        );
+        // A later reply that is not an empty stop (text, or another finish)
+        // ends the run, as does a second later turn.
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                event("cognition_out", out(2, "text"))
+            ])
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                reasoning_only(2, "content_filter")
+            ])
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1), empty(2), empty(3)])
+                .unwrap(),
+            0
+        );
+        // The last final's finish is read for the retained-response path.
+        assert!(!last_final_stopped(&[]).unwrap());
+        assert!(last_final_stopped(&[empty(1)]).unwrap());
+        assert!(!last_final_stopped(&[empty(1), reasoning_only(2, "content_filter")]).unwrap());
+        assert!(!last_final_stopped(&[empty(1), reasoning_only(2, "other")]).unwrap());
+    }
+
+    #[test]
+    fn both_correction_kinds_in_one_run_fold_and_count_independently() {
+        let (event, malformed_correction) = malformed_fixture();
+        let events = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "<|channel|>leak")),
+            malformed_correction(1, 1),
+            reasoning_only(2, "stop"),
+            empty_correction(2, 1),
+            event("cognition_out", out(3, "the answer")),
+        ];
+        // Each named reply is dropped; the other kind's reply is not touched.
+        assert_eq!(
+            texts_of(&events),
+            vec!["Do task", "fix it", "answer or call", "the answer"]
+        );
+        // Streaks are derived per kind: the empty correction ends the
+        // malformed run, and the malformed reply never counted for the empty.
+        assert_eq!(trailing_malformed_replies(&events[..3]).unwrap(), 1);
+        assert_eq!(trailing_malformed_replies(&events[..5]).unwrap(), 0);
+        assert_eq!(trailing_empty_replies(&events[..5]).unwrap(), 1);
+        assert_eq!(trailing_empty_replies(&events[..3]).unwrap(), 0);
+        // The reply after an empty correction is malformed: the empty run
+        // is over, and the malformed correction after it starts its own.
+        let mixed = vec![
+            reasoning_only(1, "stop"),
+            empty_correction(1, 1),
+            event("cognition_out", out(2, "<|channel|>leak")),
+            malformed_correction(2, 1),
+        ];
+        assert_eq!(trailing_malformed_replies(&mixed).unwrap(), 1);
+        assert_eq!(trailing_empty_replies(&mixed).unwrap(), 0);
+        // A malformed correction naming the empty reply's turn removes the
+        // latest final only when the turn matches, and an empty correction
+        // naming a malformed reply's turn leaves the reply in.
+        let crossed = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "<|channel|>leak")),
+            empty_correction(1, 1),
+        ];
+        assert_eq!(texts_of(&crossed).len(), 3);
+    }
+
     #[test]
     fn retry_supersedes_counts_live_fragments_and_recovery_checks_it() {
         let mut advance = retry_advance(1, 1, "cut");
@@ -5813,12 +6071,64 @@ mod tests {
     }
 
     #[test]
+    fn corrected_replies_are_not_kept_turns_of_a_compaction_window() {
+        // Turn 3 was a malformed reply and turn 4 an empty one; each was popped
+        // by the live run. Only turn 5 is a kept turn.
+        fn push(events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value) {
+            let seq = 20 + events.len() as i64;
+            events.push(event_at(kind, seq, payload));
+        }
+        fn correct(events: &mut Vec<ReplayedEventRecord>, kind: &str) {
+            for mut input in kinded_input(kind) {
+                input.chain_seq = 20 + events.len() as i64;
+                events.push(input);
+            }
+        }
+        let mut events = Vec::new();
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 3, "purpose": "turn"}),
+        );
+        push(
+            &mut events,
+            "cognition_out",
+            out(3, "a call written as text"),
+        );
+        correct(&mut events, "malformed_reply_turn_3_streak_1");
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 4, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(4, "  "));
+        correct(&mut events, "empty_reply_turn_4_streak_1");
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 5, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(5, "kept"));
+        let anchor = 20 + events.len() as i64;
+        push(
+            &mut events,
+            "cognition_compaction",
+            serde_json::to_value(compaction_record("pressure")).unwrap(),
+        );
+        assert_eq!(turns_before_event(&events, anchor).unwrap(), 1);
+        // Without the empty reply's correction, that reply is a kept turn again.
+        let mut only_malformed = events.clone();
+        only_malformed.remove(5);
+        assert_eq!(turns_before_event(&only_malformed, anchor).unwrap(), 2);
+    }
+
+    #[test]
     fn the_record_tells_a_same_thread_recovery_what_a_compaction_dropped() {
         // The compacted conversation holds no notice and no warning (both were
         // summarised away), the record carries them.
         let window = windowed_events();
         let folded = fold_messages_anchored(&window, Some(26)).unwrap();
-        assert_eq!(turns_before_event(&window, 26), 2);
+        assert_eq!(turns_before_event(&window, 26).unwrap(), 2);
         let signals = anchored_signals(
             ResumeMode::NativeSameThread,
             Some(&carry_record()),
