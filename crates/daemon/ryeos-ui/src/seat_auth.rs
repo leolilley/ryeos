@@ -601,7 +601,8 @@ mod tests {
         .expect("the configured operator's seat passes");
 
         // A signed caller that is not the configured local operator is refused.
-        let stranger = HandlerContext::new("fp:".to_string() + &"ab".repeat(32), vec!["*".into()], true);
+        let stranger =
+            HandlerContext::new("fp:".to_string() + &"ab".repeat(32), vec!["*".into()], true);
         let signed = SeatCaller::Operator {
             principal_id: stranger.fingerprint.clone(),
         };
