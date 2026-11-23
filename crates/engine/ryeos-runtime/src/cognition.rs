@@ -101,11 +101,50 @@ pub fn malformed_reply_kind(turn: u32, streak: u32) -> String {
 /// The turn a malformed-reply kind corrects and its position in the run, or
 /// `None` for any other kind.
 pub fn malformed_reply_of_kind(kind: &str) -> Option<(u32, u32)> {
-    let rest = kind.strip_prefix(KIND_MALFORMED_REPLY_PREFIX)?;
+    correction_position(kind.strip_prefix(KIND_MALFORMED_REPLY_PREFIX)?)
+}
+
+/// Prefix of the kind of the harness input that replaces an empty reply (no
+/// tool call, no text). The kind names the turn it corrects and the reply's
+/// position in the run of empty replies: `empty_reply_turn_<turn>_streak_<position>`.
+pub const KIND_EMPTY_REPLY_PREFIX: &str = "empty_reply_turn_";
+
+/// The kind of the input that corrects `turn`, the `streak`th empty reply in
+/// a row (counting from 1).
+pub fn empty_reply_kind(turn: u32, streak: u32) -> String {
+    format!("{KIND_EMPTY_REPLY_PREFIX}{turn}{MALFORMED_REPLY_STREAK_SEPARATOR}{streak}")
+}
+
+/// The turn an empty-reply kind corrects and its position in the run, or
+/// `None` for any other kind.
+pub fn empty_reply_of_kind(kind: &str) -> Option<(u32, u32)> {
+    correction_position(kind.strip_prefix(KIND_EMPTY_REPLY_PREFIX)?)
+}
+
+fn correction_position(rest: &str) -> Option<(u32, u32)> {
     let (turn, streak) = rest.split_once(MALFORMED_REPLY_STREAK_SEPARATOR)?;
     let turn = turn.parse::<u32>().ok().filter(|turn| *turn > 0)?;
     let streak = streak.parse::<u32>().ok().filter(|streak| *streak > 0)?;
     Some((turn, streak))
+}
+
+/// The closed set of reply corrections. Each has its own kind prefix, its own
+/// policy and its own streak; the prefixes are matched exactly, so a kind of
+/// one never reads as the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplyCorrection {
+    Malformed,
+    Empty,
+}
+
+/// Which correction a kind is, the turn it names and its position in that
+/// correction's run, or `None` for any other kind.
+pub fn reply_correction_of_kind(kind: &str) -> Option<(ReplyCorrection, u32, u32)> {
+    if let Some((turn, streak)) = malformed_reply_of_kind(kind) {
+        Some((ReplyCorrection::Malformed, turn, streak))
+    } else {
+        empty_reply_of_kind(kind).map(|(turn, streak)| (ReplyCorrection::Empty, turn, streak))
+    }
 }
 
 /// One input to cognition: what the model is given as a user message.
@@ -972,6 +1011,36 @@ mod tests {
             "malformed_reply_turn_3",
         ] {
             assert_eq!(malformed_reply_of_kind(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn an_empty_reply_kind_names_its_turn_and_position_and_is_not_malformed() {
+        let kind = empty_reply_kind(7, 2);
+        assert_eq!(kind, "empty_reply_turn_7_streak_2");
+        validate_token("kind", &kind).unwrap();
+        assert_eq!(empty_reply_of_kind(&kind), Some((7, 2)));
+        assert_eq!(
+            reply_correction_of_kind(&kind),
+            Some((ReplyCorrection::Empty, 7, 2))
+        );
+        assert_eq!(malformed_reply_of_kind(&kind), None);
+        let malformed = malformed_reply_kind(7, 2);
+        assert_eq!(empty_reply_of_kind(&malformed), None);
+        assert_eq!(
+            reply_correction_of_kind(&malformed),
+            Some((ReplyCorrection::Malformed, 7, 2))
+        );
+        for other in [
+            "empty_reply_turn_0_streak_1",
+            "empty_reply_turn_3_streak_0",
+            "empty_reply_turn_x_streak_1",
+            "empty_reply_turn_3",
+            "xempty_reply_turn_3_streak_1",
+            "output_limit",
+        ] {
+            assert_eq!(empty_reply_of_kind(other), None, "{other}");
+            assert_eq!(reply_correction_of_kind(other), None, "{other}");
         }
     }
 
