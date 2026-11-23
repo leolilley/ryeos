@@ -652,10 +652,9 @@ pub fn requirement_entries_refusal(
         return Some(format!("requires.{list}: {reason}"));
     }
     let labels: Vec<String> = entries.iter().map(|entry| entry.label()).collect();
-    labels
-        .windows(2)
-        .any(|pair| pair[0] >= pair[1])
-        .then(|| format!("requires.{list} entries must be sorted and unique"))
+    lillux::process_control::ascending_refusal(labels.iter().map(String::as_str)).map(|reason| {
+        format!("requires.{list} entries must be sorted and unique by label: {reason}")
+    })
 }
 
 /// Why an item's `requires.credential_kinds` is malformed, or `None`: at
@@ -1519,9 +1518,12 @@ mod tests {
         for (value, refusal) in [
             (
                 json!({ "node": ["time", "persistence:durable_state"] }),
-                "sorted and unique",
+                "sorted and unique by label: `persistence:durable_state` must come before `time`",
             ),
-            (json!({ "node": ["time", "time"] }), "sorted and unique"),
+            (
+                json!({ "node": ["time", "time"] }),
+                "sorted and unique by label: `time` is listed twice",
+            ),
             (
                 json!({ "credential_kinds": { "credential_profile": [{ "any_of": [] }] } }),
                 "neither name nor any_of",

@@ -245,7 +245,7 @@ pub use host_capability::{
     RECOVERY_PID_NAMESPACE, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT,
     RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS, STORAGE_DURABLE_ROOT,
     STORAGE_IMMUTABLE_ROOT, TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_PID_NAMESPACE,
-    admit_enclosure_inits, admit_immutable_root_proof, current_host_generation,
+    admit_enclosure_inits, admit_immutable_root_proof, ascending_refusal, current_host_generation,
     decide_durable_root, decide_durable_state, decide_immutable_root, decide_private_directory,
     floor_entry_refusal, host_kernel_is_gvisor, immutable_root_requirement, is_scope_capability,
     is_weaker_grade, kernel_version_is_gvisor, met_by_strongest, satisfies,

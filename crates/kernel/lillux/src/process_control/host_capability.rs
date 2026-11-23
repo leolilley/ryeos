@@ -507,6 +507,24 @@ pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
 /// unshared on this host.
 pub const ISOLATION_NAMESPACES: &str = "isolation:namespaces";
 
+/// Why a list that signed data keeps strictly ascending (sorted and unique,
+/// so one list has one spelling) is not, or `None`. Names the first key that
+/// repeats the one before it, or the first key that belongs before its
+/// predecessor, so an author sees which entry to move. Keys compare byte-wise.
+pub fn ascending_refusal<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut previous: Option<&str> = None;
+    for key in keys {
+        match previous {
+            Some(earlier) if earlier == key => return Some(format!("`{key}` is listed twice")),
+            Some(earlier) if earlier > key => {
+                return Some(format!("`{key}` must come before `{earlier}`"));
+            }
+            _ => previous = Some(key),
+        }
+    }
+    None
+}
+
 /// Why one floor entry is malformed in its shape or in what it names, or
 /// `None` when it is well formed and well placed. A per-scope name decides
 /// how scopes are configured, so it is never conditional inside a set.
@@ -5110,6 +5128,30 @@ mod tests {
         let residency = any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]);
         assert!(met_by_strongest(&residency, ACCOUNTING));
         assert!(!met_by_strongest(&residency, RESIDENCY_SWAP_ABSENT));
+    }
+
+    #[test]
+    fn an_unsorted_list_names_the_entry_to_move() {
+        assert_eq!(ascending_refusal([]), None);
+        assert_eq!(ascending_refusal(["a", "b", "c"]), None);
+        assert_eq!(
+            ascending_refusal(["a", "c", "b"]).as_deref(),
+            Some("`b` must come before `c`")
+        );
+        assert_eq!(
+            ascending_refusal(["a", "b", "b"]).as_deref(),
+            Some("`b` is listed twice")
+        );
+        // The first fault is named, and keys compare byte-wise.
+        assert_eq!(
+            ascending_refusal(["time", "persistence:durable_state", "time"]).as_deref(),
+            Some("`persistence:durable_state` must come before `time`")
+        );
+        assert_eq!(
+            ascending_refusal(["any_of(accounting, residency:swap_absent)", "accounting"])
+                .as_deref(),
+            Some("`accounting` must come before `any_of(accounting, residency:swap_absent)`")
+        );
     }
 
     #[test]
