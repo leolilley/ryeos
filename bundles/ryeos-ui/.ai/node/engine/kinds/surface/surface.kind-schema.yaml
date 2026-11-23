@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:59Z:f33cfbbd0bafc0cc55d246aa43a7e067e2353ee6d91f62b5d95e8cb4b0d133b2:WGRGZqNOzST9VTFpT377Tq5lYgsgXuU5m9h+MUiV2sG6AIDHF1Ev7mGrEvhHS/STenm9iJ9Kvke4/JQSW54PCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:56:35Z:ab61ce83bc68fa556680f4a450e03698452e747eae73934c0849462511918042:8yHLWDFdntE+0Uz1evd5mXwtUPjiQdy2nAMIhGmuxXDpng22M2KhR+016eaZxKQX+goeuvwtb3ncqEvPwe3RBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "3.0.0"
 # A project file may not take the ref of a surface an installed bundle
@@ -217,7 +217,9 @@ composed_value_contract:
           optional:
             role: { type: single, prim: string }
             params: { type: single, prim: mapping }
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             refresh: { type: single, prim: mapping }
             dynamic_parameters:
               type: single

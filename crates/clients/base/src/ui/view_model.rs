@@ -598,6 +598,28 @@ pub struct RyeOsSourceStatusVm {
     pub stale: bool,
 }
 
+/// The stated condition of a map collection against its response, worded by the
+/// signed coverage wording. Without loaded wording it reads as the fixed
+/// "not known" sentence, never as a code.
+fn collection_shape_status(
+    core: &RyeOsCore,
+    collection: Option<&super::content::CollectionBinding>,
+    response: &Value,
+) -> Option<RyeOsSourceStatusVm> {
+    let state = super::content::collection_state(collection, response)?;
+    let message = core
+        .data
+        .coverage_wording
+        .as_ref()
+        .map(|wording| wording.resolve(state.code(), "").label.clone())
+        .unwrap_or_else(|| COVERAGE_UNKNOWN_LABEL.to_owned());
+    Some(RyeOsSourceStatusVm {
+        state: state.code().into(),
+        message,
+        stale: false,
+    })
+}
+
 /// What the `unresolved` state says: nothing can be read until a subject,
 /// selection or project the view needs is there.
 const UNRESOLVED_MESSAGE: &str = "Source subject or required context is unresolved";
@@ -1662,7 +1684,13 @@ fn bound_view_vm_keyed(
                     id: section_identity(view_ref, section),
                     cursor: section_cursor,
                     title: section.title.clone(),
-                    source_status: source_status(core, &key),
+                    source_status: source_status(core, &key).or_else(|| {
+                        collection_shape_status(
+                            core,
+                            section.collection.as_ref(),
+                            core.data.sources.get(&key)?,
+                        )
+                    }),
                     count,
                     collapsed: is_collapsed,
                     header_selected,
@@ -1696,6 +1724,15 @@ fn bound_view_vm_keyed(
         source_key
             .as_deref()
             .and_then(|key| source_status(core, key))
+            .or_else(|| {
+                collection_shape_status(
+                    core,
+                    binding
+                        .primary_source()
+                        .and_then(|(_, source)| source.collection.as_ref()),
+                    response?,
+                )
+            })
     };
     let title = view_title(core, instance_key, view_ref).to_owned();
     if binding.widget == "text"
@@ -1980,11 +2017,11 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
-                lane: super::timeline::timeline_lane(response, window_items),
+                lane: super::timeline::timeline_lane(response, &window_items),
                 dock: super::timeline::pending_asks(
                     binding,
                     response,
-                    window_items,
+                    &window_items,
                     instance_key,
                     view_ref,
                 ),
@@ -2019,7 +2056,7 @@ fn bound_view_vm_keyed(
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
                 binding,
-                records,
+                &records,
                 collapsed_tree_rows.unwrap_or(&empty_tree_folds),
             )
             .map(|rows| {
@@ -6010,7 +6047,13 @@ mod tests {
         assert_eq!(source.item_ref, "service:ui/ryeos-ui/threads/list");
         assert_eq!(source.params["limit"], 200);
         assert_eq!(source.params["sort"], "watch");
-        assert_eq!(source.collection.as_deref(), Some("threads"));
+        assert_eq!(
+            source
+                .collection
+                .as_ref()
+                .and_then(super::content::CollectionBinding::as_plain),
+            Some("threads")
+        );
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),

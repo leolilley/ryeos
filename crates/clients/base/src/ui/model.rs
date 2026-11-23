@@ -1551,24 +1551,44 @@ impl RyeOsCore {
             };
             if binding.widget == "sections" {
                 for section in &binding.sections {
-                    if is_thread_collection(section.collection.as_deref()) {
+                    if is_thread_collection(
+                        section
+                            .collection
+                            .as_ref()
+                            .and_then(super::content::CollectionBinding::as_plain),
+                    ) {
                         targets.push((
                             super::source_key::RyeOsSourceInstanceKey::named(
                                 instance_key.clone(),
                                 &section.source_channel,
                             )
                             .encode(),
-                            section.collection.clone().unwrap_or_default(),
+                            section
+                                .collection
+                                .as_ref()
+                                .and_then(super::content::CollectionBinding::as_plain)
+                                .unwrap_or_default()
+                                .to_owned(),
                         ));
                     }
                 }
             } else if let Some((channel, source)) = binding.primary_source()
-                && is_thread_collection(source.collection.as_deref())
+                && is_thread_collection(
+                    source
+                        .collection
+                        .as_ref()
+                        .and_then(super::content::CollectionBinding::as_plain),
+                )
             {
                 targets.push((
                     super::source_key::RyeOsSourceInstanceKey::named(instance_key, channel)
                         .encode(),
-                    source.collection.clone().unwrap_or_default(),
+                    source
+                        .collection
+                        .as_ref()
+                        .and_then(super::content::CollectionBinding::as_plain)
+                        .unwrap_or_default()
+                        .to_owned(),
                 ));
             }
         }
@@ -3115,7 +3135,7 @@ impl RyeOsCore {
             } => (*cursor, collapsed_tree_rows),
             ViewLocalState::None | ViewLocalState::Field(_) => return None,
         };
-        let rows = super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows)?;
+        let rows = super::content::table_hierarchy_rows(binding, &records, collapsed_tree_rows)?;
         let row = rows.get(cursor.min(rows.len().saturating_sub(1)))?;
         Some((row.has_children, row.collapsed))
     }
@@ -3236,7 +3256,7 @@ impl RyeOsCore {
                     } => collapsed_tree_rows,
                     ViewLocalState::None | ViewLocalState::Field(_) => return None,
                 };
-                match super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows) {
+                match super::content::table_hierarchy_rows(binding, &records, collapsed_tree_rows) {
                     Some(rows) => {
                         rows.get(cursor.min(rows.len().saturating_sub(1)))
                             .and_then(|row| {
@@ -3333,7 +3353,7 @@ impl RyeOsCore {
             let records = super::content::source_collection_for_section(section, response);
             if cursor < flat.saturating_add(records.len()) {
                 let index = cursor - flat;
-                let record = (*records.get(index)?).clone();
+                let record = records.get(index)?.clone().into_owned();
                 return Some((
                     format!(
                         "{section_index}:{}",

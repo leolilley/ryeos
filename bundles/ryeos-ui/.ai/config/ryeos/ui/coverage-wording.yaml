@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T20:02:52Z:4dbab443e1057aa2e6c10813b8a10a99d8431aa40408a5cac3641182a84d79d1:W/YD7/Dp2b0SMLs4MVYlE6W6sCboE37/K2aYFg1vDgk2d8cCwuhHMi6nk3PaiB/p+FhBW91KLzNVOzJ4v7b9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:56:35Z:404f1c1f9208205ec29fe564060cdb45fa07283b0da8fd6f309ceaa0f9c9cc4b:UVIgoLs1Kn1Cu2Lf924PvsAYj7/5hEE+f8kDNUltXAsM4xmbXCLpKGeLRXKiIFvndYlb6M0eyrKeVXvLiNS9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -32,6 +32,15 @@ states:
   unavailable:
     label: This source is not available.
     tone: warn
+  not_reported:
+    label: This source did not report this list.
+    tone: warn
+  wrong_shape:
+    label: This source reported this list in a form this page cannot read.
+    tone: warn
+  key_collision:
+    label: This list was not shown because an entry already has the field its name would be stored in.
+    tone: danger
 reasons:
   coverage_not_reported:
     label: This source did not say what it covers.

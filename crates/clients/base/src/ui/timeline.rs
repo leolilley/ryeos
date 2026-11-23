@@ -1043,7 +1043,7 @@ pub(crate) fn timeline_layout_for(
         ));
     }
     build_layout(
-        super::content::source_collection(binding, response),
+        &super::content::source_collection(binding, response),
         response
             .get("chain_root_id")
             .and_then(Value::as_str)

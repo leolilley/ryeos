@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T18:08:31Z:091892912004dada1fd8dbd80b19bbe2b5396c9189c07b36769d983e5206f232:eX9YLRDCqHcieD1KcQvoyA6iQPO+Sh1Bl3rE9AWFCqOFY2VtVZzpfJQZ4Xyr2QdmqyX6uQtc4XtJkdO901CsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:56:35Z:1642b306fe88f7d1c2687acd4aeb2069d31659b463499909027a194b0b239ac7:lmnts5oH7SWTC4EbfYMnyU/5LTAzPrOa6KVFXT54CMQX4k6AubAXW0aZC0zuvpphebeptyOqOpEGxRyIHX7MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.3.0"
 # A project file may not take the ref of a view an installed bundle
@@ -101,7 +101,9 @@ composed_value_contract:
           optional:
             role: { type: single, prim: string }
             params: { type: single, prim: mapping }
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             coverage: { type: single, prim: string }
             refresh: { type: single, prim: mapping }
             dynamic_parameters:
@@ -153,7 +155,9 @@ composed_value_contract:
             title: { type: single, prim: string }
             source_channel: { type: single, prim: string }
           optional:
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             projection: { type: single, prim: mapping }
             activate: { type: single, prim: string }
     body:
