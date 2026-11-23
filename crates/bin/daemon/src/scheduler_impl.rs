@@ -30,6 +30,26 @@ use ryeos_state::objects::{
 /// A schedule that authors a `live_direct` project policy is demanding the
 /// live project: a scheduled launch has no operator to notice a private copy,
 /// so the policy is sealed with explicit live intent whatever it spelled.
+/// Longest title a fire stamps, in Unicode scalar values: the title bound
+/// every title writer keeps.
+const SCHEDULED_TITLE_MAX_SCALARS: usize = 160;
+
+/// The title a scheduled fire gives its thread: the schedule's signed name,
+/// cut to the title bound on a scalar boundary.
+fn scheduled_title(schedule_id: &str) -> std::collections::BTreeMap<String, String> {
+    let title: String = schedule_id
+        .chars()
+        .take(SCHEDULED_TITLE_MAX_SCALARS)
+        .collect();
+    if title.trim().is_empty() {
+        return Default::default();
+    }
+    std::collections::BTreeMap::from([(
+        ryeos_app::thread_lifecycle::TITLE_FACET_KEY.to_owned(),
+        title,
+    )])
+}
+
 fn scheduled_policy(
     policy: &ryeos_app::execution_policy::ExecutionPolicy,
 ) -> ryeos_app::execution_policy::ExecutionPolicy {
@@ -573,6 +593,7 @@ impl SchedulerContext for AppSchedulerContext {
 
         let (handoff, receiver) = ryeos_executor::execution::launch::LaunchHandoff::channel();
         let item_ref = spec.item_ref.clone();
+        let schedule_id = spec.schedule_id.clone();
         let ref_bindings = spec.ref_bindings.clone();
         let acting_principal = spec.execution.principal_id().to_owned();
         let lifecycle_authority = spec.execution.policy.lifecycle_authority();
@@ -599,7 +620,7 @@ impl SchedulerContext for AppSchedulerContext {
                 usage_subject: None,
                 usage_subject_asserted_by: None,
                 previous_thread_id: None,
-                initial_facets: Default::default(),
+                initial_facets: scheduled_title(&schedule_id),
                 root_admission: Some(root_admission),
                 root_dispatch_evidence: Some(root_dispatch_evidence),
                 parent_execution_context: None,
@@ -656,5 +677,29 @@ impl SchedulerContext for AppSchedulerContext {
             thread_id: handed_thread_id,
             admitted_capsule_hash: capsule_hash,
         })
+    }
+}
+
+#[cfg(test)]
+mod scheduled_title_tests {
+    use super::*;
+
+    #[test]
+    fn a_fire_titles_its_thread_with_the_schedule_name() {
+        let facets = scheduled_title("nightly-digest");
+        assert_eq!(
+            facets.get(ryeos_app::thread_lifecycle::TITLE_FACET_KEY),
+            Some(&"nightly-digest".to_owned())
+        );
+        assert_eq!(facets.len(), 1);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_on_a_scalar_boundary_and_a_blank_one_gives_no_title() {
+        let long = "é".repeat(SCHEDULED_TITLE_MAX_SCALARS + 5);
+        let facets = scheduled_title(&long);
+        let title = &facets[ryeos_app::thread_lifecycle::TITLE_FACET_KEY];
+        assert_eq!(title.chars().count(), SCHEDULED_TITLE_MAX_SCALARS);
+        assert!(scheduled_title("  ").is_empty());
     }
 }
