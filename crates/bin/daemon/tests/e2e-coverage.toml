@@ -1,0 +1,433 @@
+# Maps each daemon end-to-end test binary (crates/bin/daemon/tests/*.rs) to the
+# workspace packages whose changes can break it. A merge gate compiles and runs
+# every test whose `covers` list names a changed package, or whose `paths`
+# globs match a changed file, before a branch merges.
+#
+# covers: cargo package names the test genuinely drives through the daemon it
+#         spawns (endpoints, services, runtimes, adapters, state stores).
+#         The daemon crate itself is never listed: a change there selects
+#         every test.
+# paths:  repo-relative globs for wide crates (lillux, ryeos-app, ryeos-api,
+#         ryeos-engine, ryeos-state and similar) that nearly every test
+#         depends on transitively. A wide crate is named in `covers` only
+#         where the test exists to exercise that crate; otherwise the specific
+#         modules the test drives are listed here.
+#
+# Tables are sorted by test name; lists are sorted.
+
+
+[tests.acting_principal_e2e]
+covers = ["ryeos-executor"]
+paths = ["crates/daemon/ryeos-app/src/env_contract.rs", "crates/daemon/ryeos-app/src/principal.rs"]
+
+[tests.auth_audience_e2e]
+covers = ["ryeos-request-signing"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]
+
+[tests.authoring_key_e2e]
+covers = ["ryeos-engine", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/engine/ryeos-engine/src/authority/**"]
+
+[tests.bundle_directive_canonical_refs]
+# reads shipped directive files only; no daemon code beyond the directive definition parser
+covers = ["ryeos-directive-definition"]
+
+[tests.bundle_parity]
+covers = ["ryeos-bundle", "ryeos-directive-definition", "ryeos-engine", "ryeos-graph-definition", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-parser-bins"]
+
+[tests.bundle_state_home_e2e]
+covers = ["ryeos-bundle"]
+paths = ["crates/daemon/ryeos-app/src/bundle_state_home.rs", "crates/daemon/ryeos-app/src/bundle_state_transfer.rs"]
+
+[tests.callback_probe_e2e]
+covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-node-runtime", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/callback_token.rs", "crates/daemon/ryeos-app/src/command_hub.rs"]
+
+[tests.cancel_follow_e2e]
+covers = ["lillux", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/federated_follow.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.cancel_running_tool_e2e]
+covers = ["lillux", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/process.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.capability_provider_e2e]
+covers = ["lillux", "ryeos-accounting", "ryeos-isolation-protocol", "ryeos-lillux-isolation-adapter", "ryeos-lillux-oci-hook", "ryeos-node"]
+
+[tests.capacity_rollover_e2e]
+covers = ["ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/native_headroom.rs", "crates/kernel/lillux/src/time/**"]
+
+[tests.central_auth_login_e2e]
+covers = ["ryeos-lillux-isolation-adapter", "ryeos-request-signing"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/operator_authority.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]
+
+[tests.claude_code_worker_follow_e2e]
+covers = ["lillux", "ryeos-accounting", "ryeos-claude-code-adapter", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-session-exec", "ryeos-structured-session", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/dedicated_session_service.rs", "crates/daemon/ryeos-app/src/external_*.rs"]
+
+[tests.cleanup_e2e]
+covers = ["ryeos-core-tools", "ryeos-node"]
+paths = ["crates/daemon/ryeos-app/src/temp_dir_guard.rs", "crates/kernel/lillux/src/atomic_fs.rs", "crates/kernel/lillux/src/locks.rs"]
+
+[tests.cleanup_invariants]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-graph-runtime", "ryeos-knowledge-runtime", "ryeos-scheduler"]
+paths = ["crates/daemon/ryeos-app/src/cascade.rs"]
+
+[tests.cli_execute_stream_e2e]
+covers = ["ryeos-cli", "ryeos-client-transport", "ryeos-http-egress"]
+paths = ["crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.config_schema_validation_e2e]
+covers = ["ryeos-engine", "ryeos-executor"]
+
+[tests.controller_grant_inventory_e2e]
+covers = ["ryeos-codex-external-configuration", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.directive_compaction_crash_e2e]
+covers = ["lillux", "ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/state/ryeos-state/src/chain/**", "crates/state/ryeos-state/src/projection/**"]
+
+[tests.directive_compaction_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.directive_context_pin_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/state/ryeos-state/src/chain/**", "crates/state/ryeos-state/src/projection/**"]
+
+[tests.directive_context_rendering_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.directive_crash_recovery_e2e]
+covers = ["lillux", "ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**", "crates/state/ryeos-state/src/chain/**", "crates/state/ryeos-state/src/projection/**"]
+
+[tests.directive_observing_hooks_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.directive_provider_secret_injection_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.directive_runtime_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-expression", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.dispatch_pin]
+covers = ["ryeos-engine", "ryeos-executor"]
+paths = ["crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.durable_effect_unproven_ceiling_e2e]
+covers = ["ryeos-effect-contract", "ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime"]
+paths = ["crates/engine/ryeos-engine/src/launch/**"]
+
+[tests.endorsement_e2e]
+covers = ["ryeos-engine", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/engine/ryeos-engine/src/authority/**"]
+
+[tests.endorsement_launch_e2e]
+covers = ["ryeos-directive-runtime", "ryeos-engine", "ryeos-knowledge-runtime"]
+paths = ["crates/engine/ryeos-engine/src/authority/**"]
+
+[tests.event_storage_policy_e2e]
+covers = ["ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/event_store_service.rs", "crates/state/ryeos-state/src/event_types.rs"]
+
+[tests.execute_launch_e2e]
+covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-knowledge-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.execution_history_reset_scheduler_e2e]
+covers = ["ryeos-effect-contract", "ryeos-knowledge-runtime", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service", "ryeos-state"]
+paths = ["crates/daemon/ryeos-app/src/execution_history_reset.rs", "crates/daemon/ryeos-app/src/execution_history_reset/**"]
+
+[tests.external_adapter_restart_e2e]
+covers = ["lillux", "ryeos-codex-external-configuration", "ryeos-codex-runtime-verifier", "ryeos-external-candidate-connector", "ryeos-external-candidate-launcher", "ryeos-external-candidate-supervisor", "ryeos-external-execution", "ryeos-external-execution-contract", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-state", "ryeos-synthetic-external-lifecycle-adapter"]
+paths = ["crates/daemon/ryeos-app/src/external_*.rs", "crates/daemon/ryeos-app/src/operator_external_content/**", "crates/daemon/ryeos-app/src/persistent_session*"]
+
+[tests.external_status_e2e]
+covers = ["ryeos-core-tools", "ryeos-external-execution", "ryeos-external-execution-contract"]
+paths = ["crates/daemon/ryeos-app/src/external_execution_status.rs", "crates/daemon/ryeos-app/src/provider_inventory.rs"]
+
+[tests.f4_reporter_revisions]
+covers = ["ryeos-core-tools", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/item_revised.rs"]
+
+[tests.fast_fixture_smoke]
+covers = ["ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/node_config/**"]
+
+[tests.grant_lifecycle_e2e]
+covers = ["ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/operator_authority.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.graph_action_completes_with_permitted_cap_e2e]
+covers = ["ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/callback_token.rs"]
+
+[tests.graph_crash_recovery_e2e]
+covers = ["lillux", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/offline_native.rs", "crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.graph_follow_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/federated_follow.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.graph_native_resume_after_restart_e2e]
+covers = ["ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime"]
+paths = ["crates/engine/ryeos-engine/src/runtime/**"]
+
+[tests.graph_segment_continuation_e2e]
+covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.graph_spawn_smoke]
+covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+
+[tests.handler_route_authority_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.handler_route_http_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.handoff_crash_recovery_e2e]
+covers = ["lillux", "ryeos-accounting", "ryeos-api", "ryeos-app", "ryeos-engine", "ryeos-node-runtime", "ryeos-state", "ryeos-structured-session"]
+
+[tests.hello_world_python]
+covers = ["ryeos-engine", "ryeos-executor", "ryeos-tracing"]
+
+[tests.host_access_e2e]
+covers = ["lillux", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-isolation-protocol", "ryeos-lillux-isolation-adapter", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/host_access.rs"]
+
+[tests.image_input_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.inline_in_process_child_lineage_e2e]
+covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime"]
+paths = ["crates/engine/ryeos-engine/src/launch/**"]
+
+[tests.install_boundary_guard]
+# static source-tree guard; mostly independent of runtime crates
+covers = ["ryeos-engine"]
+
+[tests.issued_attempt_kill_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**", "crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.item_revisions_e2e]
+covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-node-runtime", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/item_revised.rs", "crates/daemon/ryeos-app/src/runtime_item_author_service.rs"]
+
+[tests.large_object_quarantine_e2e]
+covers = ["ryeos-core-tools", "ryeos-state"]
+paths = ["crates/daemon/ryeos-app/src/state_store/**", "crates/state/ryeos-state/src/large_object_store.rs"]
+
+[tests.launch_trust_floor_e2e]
+covers = ["ryeos-engine", "ryeos-executor", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/admitted_program_trust.rs"]
+
+[tests.launch_trust_hook_e2e]
+covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime"]
+paths = ["crates/engine/ryeos-engine/src/hooks.rs"]
+
+[tests.launch_trust_scheduler_e2e]
+covers = ["ryeos-effect-contract", "ryeos-executor", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/scheduled_execution_authority.rs"]
+
+[tests.leased_session_startup_e2e]
+covers = ["lillux", "ryeos-external-candidate-supervisor", "ryeos-external-execution", "ryeos-external-execution-contract", "ryeos-node-runtime", "ryeos-state"]
+paths = ["crates/daemon/ryeos-app/src/dedicated_session_service.rs", "crates/daemon/ryeos-app/src/external_*.rs", "crates/daemon/ryeos-app/src/leased_session_rig.rs", "crates/daemon/ryeos-app/src/persistent_session*"]
+
+[tests.live_project_sourced_runtime_e2e]
+covers = ["ryeos-effect-contract", "ryeos-executor", "ryeos-project-capture", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/project_root_guard.rs", "crates/daemon/ryeos-app/src/runtime_project_snapshot_service.rs"]
+
+[tests.loop_guards_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.native_async_cancellation_e2e]
+covers = ["ryeos-engine", "ryeos-executor"]
+paths = ["crates/daemon/ryeos-app/src/launch_metadata.rs"]
+
+[tests.native_resume_after_restart_e2e]
+covers = ["ryeos-engine", "ryeos-executor", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/launch_metadata.rs", "crates/daemon/ryeos-app/src/offline_native.rs"]
+
+[tests.node_journal_e2e]
+covers = ["ryeos-node", "ryeos-node-runtime"]
+
+[tests.node_locality_e2e]
+covers = ["ryeos-api", "ryeos-effect-contract", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/remote_consumer_launch.rs"]
+
+[tests.objects_read_scope_e2e]
+covers = ["ryeos-api", "ryeos-knowledge-runtime", "ryeos-project-capture"]
+paths = ["crates/state/ryeos-state/src/object_closure/**", "crates/state/ryeos-state/src/objects/**"]
+
+[tests.offline_operation_delivery_e2e]
+covers = ["ryeos-node"]
+paths = ["crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.overlay_seal_unrepresentable_e2e]
+covers = ["lillux", "ryeos-isolation-protocol", "ryeos-lillux-isolation-adapter"]
+paths = ["crates/engine/ryeos-engine/src/execution_workspace.rs"]
+
+[tests.pinned_advance_head_e2e]
+covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-node-runtime", "ryeos-project-capture", "ryeos-runtime", "ryeos-state", "ryeos-vault"]
+paths = ["crates/state/ryeos-state/src/project_materialization.rs"]
+
+[tests.product_transport_large_content_e2e]
+covers = ["ryeos-api", "ryeos-http-transport", "ryeos-node", "ryeos-node-runtime", "ryeos-project-capture", "ryeos-state"]
+paths = ["crates/state/ryeos-state/src/large_object_store.rs", "crates/state/ryeos-state/src/sync.rs"]
+
+[tests.project_registration_e2e]
+covers = ["ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/state/ryeos-state/src/project_discovery.rs", "crates/state/ryeos-state/src/project_identity.rs"]
+
+[tests.project_schedule_deploy_e2e]
+covers = ["ryeos-api", "ryeos-expression", "ryeos-project-capture", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-api/src/project_deploy/**"]
+
+[tests.prompt_cache_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
+
+[tests.provider_bad_turn_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
+
+[tests.python_runtime_contract]
+covers = ["ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowledge-runtime"]
+
+[tests.qualification_testimony_transport_e2e]
+covers = ["ryeos-api", "ryeos-effect-contract", "ryeos-node", "ryeos-node-runtime", "ryeos-state"]
+paths = ["crates/daemon/ryeos-app/src/external_qualification_*.rs", "crates/daemon/ryeos-app/src/qualification_*.rs"]
+
+[tests.reasoning_roundtrip_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
+
+[tests.records_read_e2e]
+covers = ["ryeos-core-tools"]
+paths = ["crates/daemon/ryeos-api/src/handlers/**", "crates/daemon/ryeos-api/src/read_envelope/**", "crates/state/ryeos-state/src/locators.rs"]
+
+[tests.remote_delegation_e2e]
+covers = ["ryeos-api", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/remote/**", "crates/daemon/ryeos-app/src/remote_consumer_launch.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.remote_offline_operation_delivery_e2e]
+covers = ["ryeos-api", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.required_caps_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-executor"]
+paths = ["crates/engine/ryeos-engine/src/launch/**"]
+
+[tests.restart_resume_retry_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**", "crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.root_admission_e2e]
+covers = ["ryeos-executor", "ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/admission_events.rs", "crates/daemon/ryeos-app/src/prospective_admission.rs"]
+
+[tests.route_principal_authority_e2e]
+covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/operator_authority.rs"]
+
+[tests.run_deadline_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/run_deadline.rs"]
+
+[tests.runtime_e2e]
+covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-knowledge-runtime", "ryeos-runtime"]
+paths = ["crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
+
+[tests.scheduler_authority_e2e]
+covers = ["ryeos-expression", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/scheduled_execution_authority.rs", "crates/daemon/ryeos-app/src/scheduler_boundary.rs"]
+
+[tests.scheduler_e2e]
+covers = ["ryeos-effect-contract", "ryeos-expression", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/scheduler_boundary.rs"]
+
+[tests.service_data_e2e]
+covers = ["ryeos-client-base", "ryeos-core-tools", "ryeos-knowledge-runtime", "ryeos-timeline", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/handlers/**"]
+
+[tests.service_data_standalone_e2e]
+covers = ["ryeos-bundle", "ryeos-core-tools"]
+paths = ["crates/daemon/ryeos-app/src/bundle_set_transaction.rs", "crates/daemon/ryeos-app/src/bundle_transaction.rs", "crates/daemon/ryeos-app/src/projection_repair.rs"]
+
+[tests.service_dispatch_gates]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowledge-runtime", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-app/src/service_registry.rs"]
+
+[tests.service_not_installed_e2e]
+covers = ["ryeos-executor", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
+paths = ["crates/daemon/ryeos-app/src/service_registry.rs"]
+
+[tests.service_window_status_e2e]
+covers = ["ryeos-core-tools", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-app/src/build_info.rs"]
+
+[tests.session_secret_delivery_e2e]
+covers = ["lillux", "ryeos-session-exec", "ryeos-structured-session", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/dedicated_session_service.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/scoped_producer_*.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.sse_chain_tail_e2e]
+covers = ["ryeos-api", "ryeos-directive-runtime"]
+paths = ["crates/daemon/ryeos-app/src/event_stream.rs", "crates/daemon/ryeos-app/src/stream_envelope.rs", "crates/state/ryeos-state/src/chain/**", "crates/state/ryeos-state/src/projection/**"]
+
+[tests.sse_dispatch_launch_e2e]
+covers = ["ryeos-api", "ryeos-directive-runtime", "ryeos-knowledge-runtime", "ryeos-state"]
+paths = ["crates/daemon/ryeos-app/src/event_stream.rs", "crates/daemon/ryeos-app/src/stream_envelope.rs"]
+
+[tests.sse_live_streaming_e2e]
+covers = ["ryeos-api", "ryeos-directive-runtime"]
+paths = ["crates/daemon/ryeos-app/src/event_stream.rs", "crates/daemon/ryeos-app/src/stream_envelope.rs"]
+
+[tests.sse_thread_events_e2e]
+covers = ["ryeos-api", "ryeos-directive-runtime"]
+paths = ["crates/daemon/ryeos-app/src/event_stream.rs", "crates/daemon/ryeos-app/src/stream_envelope.rs"]
+
+[tests.state_span_tree]
+covers = ["ryeos-state", "ryeos-tracing"]
+paths = ["crates/daemon/ryeos-app/src/state_store/**"]
+
+[tests.state_store_integration]
+covers = ["ryeos-app", "ryeos-engine", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-state"]
+
+[tests.stub_probes_e2e]
+# every test is #[ignore] (measurements, not gates); mapped by the substrate it probes
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime", "ryeos-timeline"]
+
+[tests.thread_projection_authority]
+covers = ["ryeos-app", "ryeos-engine", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-knowledge-runtime", "ryeos-runtime", "ryeos-state"]
+
+[tests.thread_tail_descriptor_e2e]
+covers = ["ryeos-api", "ryeos-client-transport", "ryeos-directive-runtime"]
+paths = ["crates/daemon/ryeos-app/src/event_stream.rs"]
+
+[tests.tool_spill_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
+[tests.trust_registry_e2e]
+covers = ["ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/engine/ryeos-engine/src/authority/**", "crates/state/ryeos-state/src/signer.rs"]
+
+[tests.ui_session_auth_e2e]
+covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]
+
+[tests.vault_name_ceiling_e2e]
+covers = ["ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[tests.vault_provider_narrow_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]

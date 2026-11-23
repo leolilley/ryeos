@@ -22,6 +22,7 @@ pub mod objects_read_scope;
 pub mod project_deploy;
 pub(crate) mod project_namespace;
 pub mod publisher_server;
+pub mod read_envelope;
 pub mod registry;
 pub mod remote;
 pub mod route_error;

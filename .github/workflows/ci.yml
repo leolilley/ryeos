@@ -81,6 +81,9 @@ env:
   # Incremental compilation is off because its artifacts cannot be shared.
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: sccache
+  # A compile whose sccache server dies mid-job runs rustc directly instead
+  # of failing; .github/actions/sccache-or-plain covers a server that never starts.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
   CARGO_INCREMENTAL: "0"
   # A hosted runner is dedicated to one job, so cargo and nextest use every core
   # (0 selects their own defaults). The gate's half-the-cores defaults are for
@@ -93,7 +96,7 @@ jobs:
   # any doubt (unknown path, no merge base, script fault), gets the full gate.
   # The UI-only gate skips the workspace test archive, the crash qualification
   # build and the scheduler composition checks, and runs the UI crates' tests
-  # (ui-gate job) instead; secret scan, static policy and rust-policy always run.
+  # (ui-gate job) instead; secret scan, static policy, rust-policy and browser-policy always run.
   classify:
     name: Gate classification
     runs-on: ubuntu-latest
@@ -104,6 +107,10 @@ jobs:
       # JSON list of the packages whose tests the touched-tests job runs. An unset or
       # unreadable value is ERROR, which fails that job; it is never read as "none".
       test_packages: ${{ steps.classify.outputs.test_packages || 'ERROR' }}
+      # JSON list of the daemon e2e test binaries the e2e jobs build and run, chosen by
+      # crates/bin/daemon/tests/e2e-coverage.toml; ERROR fails the e2e archive job.
+      e2e_tests: ${{ steps.classify.outputs.e2e_tests || 'ERROR' }}
+      e2e_shards: ${{ steps.classify.outputs.e2e_shards || '[1]' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -130,7 +137,11 @@ jobs:
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed|test_packages)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          # A changed package no coverage-map entry names runs no daemon e2e test; say so.
+          sed -n 's/^e2e_uncovered=//p' "$RUNNER_TEMP/classification" | jq -r '.[]?' | while IFS= read -r package; do
+            echo "::warning title=No daemon e2e coverage::$package changed, but no entry in crates/bin/daemon/tests/e2e-coverage.toml covers it, so no daemon e2e test runs for it."
+          done
           {
             echo "### Gate: $(sed -n 's/^mode=//p' "$RUNNER_TEMP/classification")"
             echo '```'
@@ -361,6 +372,11 @@ jobs:
       - name: Check the browser asset registry matches the code
         run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
 
+      # Every daemon e2e test binary must have an entry in the coverage map the merge gate selects
+      # from, naming real packages and globs that match files. Packages no test covers are listed.
+      - name: Check the daemon e2e coverage map
+        run: python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --check-e2e-coverage
+
       # The browser renderer is its own Cargo workspace; every package its lock shares with the
       # root lock must resolve identically.
       - name: Check the browser renderer lock agrees with the root lock
@@ -390,8 +406,10 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -401,9 +419,6 @@ jobs:
           key: workspace-crates-v1
           cache-workspace-crates: true
           cache-on-failure: true
-          workspaces: |
-            . -> target
-            crates/clients/rune -> target
 
       - name: Check formatting
         run: |
@@ -422,6 +437,55 @@ jobs:
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Check dependency advisories, licenses, and sources
+        run: |
+          cargo deny check
+          cargo deny --manifest-path crates/clients/rune/Cargo.toml --config deny.toml check
+
+      - name: Check client and daemon-side crate layering
+        run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
+
+  # The browser renderer half of the Rust lint: its own job so the two halves run in parallel and
+  # neither reaches the time limit under runner load.
+  browser-policy:
+    name: Browser renderer lint and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.process_scope_probe && !inputs.run_tests && !inputs.merge_gates) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Correction runs should reuse compiled RyeOS crates, not only third-party
+          # dependencies, and a failing gate must still publish its valid artifacts.
+          # Its own key: the root lint job saves workspace-crates-v1 at the same time.
+          key: browser-crates-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            crates/clients/rune -> target
+
       # The browser renderer is its own Cargo workspace (crates/clients/rune), so the root
       # workspace commands above do not reach it. Its page entry and the runtime's web platform
       # compile only for wasm32; the native build carries its tests (tests/headless.rs).
@@ -438,14 +502,6 @@ jobs:
       # drops one fails here instead of at the next manual package build.
       - name: Check Rune JS snippets match the declared list
         run: python3 -I .ai/tools/ryeos/development/browser-assets-production/lib/check-rune-snippets.py
-
-      - name: Check dependency advisories, licenses, and sources
-        run: |
-          cargo deny check
-          cargo deny --manifest-path crates/clients/rune/Cargo.toml --config deny.toml check
-
-      - name: Check client and daemon-side crate layering
-        run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
 
   secrets:
     name: Secret scan
@@ -519,8 +575,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Prepare the runner
         run: ./scripts/ci/prepare-runner.sh
@@ -572,8 +630,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Prepare the runner
         # Places TMPDIR on a loop-mounted volume: a mount distinct from the
@@ -624,8 +684,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -831,8 +893,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -920,8 +984,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       # Read the crate cache the other jobs save; never save from here.
       - name: Restore cargo artifacts
@@ -938,7 +1004,7 @@ jobs:
         run: 'cargo test --locked -p ryeos-ui --lib assets::'
 
   # The UI-only merge gate's tests (see the classify job): the client crates and the UI
-  # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
+  # daemon crate. The Rune workspace tests run in browser-policy and the package freshness
   # check in static-policy, both of which every merge gate runs.
   ui-gate:
     name: UI targeted tests
@@ -960,8 +1026,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       # Read the crate cache the other jobs save; never save from here.
       - name: Restore cargo artifacts
@@ -977,84 +1045,11 @@ jobs:
       # A branch that changes bundle sources tests against its own refresh. Otherwise next's
       # bundle state is restored (it refuses when it would hide a branch change); if no usable
       # state exists the branch refresh runs instead.
-      - name: Restore next's bundle state
-        id: restore
-        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
-        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
-        # on any path the state would write or delete, or anywhere under bundles/, because the
-        # run would then test next's version of those files; the step after this one then
-        # refreshes the bundles from the branch instead.
-        run: |
-          set -euo pipefail
-
-          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
-          : "${GH_TOKEN:?GH_TOKEN is required}"
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
-
-          run_id=""
-          sha=""
-          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
-              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
-          while read -r id head; do
-              [[ -n "$id" ]] || continue
-              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
-                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
-              [[ "$ok" -gt 0 ]] || continue
-              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
-                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
-              if [[ "$live" -gt 0 ]]; then
-                  run_id="$id"
-                  sha="$head"
-                  break
-              fi
-          done <<<"$runs"
-
-          if [[ -z "$run_id" ]]; then
-              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
-              exit 1
-          fi
-          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
-          echo "https://github.com/$repo/actions/runs/$run_id"
-
-          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
-          state="$work/dl/bundle-state.tar.zst"
-
-          # Paths the state would write or delete.
-          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
-          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
-          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
-
-          git fetch --no-tags --depth=1 origin "$sha"
-          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
-
-          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
-          conflicts="$(cat "$work/conflicts")"
-          if [[ -n "$conflicts" ]]; then
-              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
-              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
-              exit 1
-          fi
-
-          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
-              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
-          fi
-
-          ./scripts/ci/unpack-bundle-state.sh "$state"
-          {
-              echo "### Bundle state"
-              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-
-      - name: Refresh the bundles from this branch
-        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
-        env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
-        run: ./scripts/gate.sh --refresh-bundles --no-tests
+      - name: Restore or refresh the bundle state
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: ${{ needs.classify.outputs.bundles_changed }}
+          github-token: ${{ github.token }}
 
       - name: Test the client crates and the UI crate
         env:
@@ -1065,7 +1060,8 @@ jobs:
   # only adds tests, or changes a crate the skipped shards would have covered, otherwise merged
   # with those tests never run. The classify job picks the packages (see
   # classify-merge-gate.py: --rule wide = every crate with a changed file, minus the daemon's
-  # end-to-end test binaries, which the next-branch shards run; --rule narrow = crates with
+  # end-to-end test binaries, which the e2e-archive and e2e-shard jobs select from their
+  # coverage map; --rule narrow = crates with
   # changed test code only). Tests run through gate.sh so they get the same composition
   # features as the shards, on next's restored bundle state, because many crates' tests need
   # populated bundle binaries.
@@ -1102,8 +1098,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       # Read the crate cache the other jobs save; never save from here.
       - name: Restore cargo artifacts
@@ -1119,84 +1117,11 @@ jobs:
       # A branch that changes bundle sources tests against its own refresh. Otherwise next's
       # bundle state is restored (it refuses when it would hide a branch change); if no usable
       # state exists the branch refresh runs instead.
-      - name: Restore next's bundle state
-        id: restore
-        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
-        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
-        # on any path the state would write or delete, or anywhere under bundles/, because the
-        # run would then test next's version of those files; the step after this one then
-        # refreshes the bundles from the branch instead.
-        run: |
-          set -euo pipefail
-
-          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
-          : "${GH_TOKEN:?GH_TOKEN is required}"
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
-
-          run_id=""
-          sha=""
-          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
-              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
-          while read -r id head; do
-              [[ -n "$id" ]] || continue
-              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
-                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
-              [[ "$ok" -gt 0 ]] || continue
-              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
-                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
-              if [[ "$live" -gt 0 ]]; then
-                  run_id="$id"
-                  sha="$head"
-                  break
-              fi
-          done <<<"$runs"
-
-          if [[ -z "$run_id" ]]; then
-              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
-              exit 1
-          fi
-          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
-          echo "https://github.com/$repo/actions/runs/$run_id"
-
-          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
-          state="$work/dl/bundle-state.tar.zst"
-
-          # Paths the state would write or delete.
-          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
-          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
-          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
-
-          git fetch --no-tags --depth=1 origin "$sha"
-          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
-
-          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
-          conflicts="$(cat "$work/conflicts")"
-          if [[ -n "$conflicts" ]]; then
-              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
-              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
-              exit 1
-          fi
-
-          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
-              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
-          fi
-
-          ./scripts/ci/unpack-bundle-state.sh "$state"
-          {
-              echo "### Bundle state"
-              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-
-      - name: Refresh the bundles from this branch
-        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
-        env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
-        run: ./scripts/gate.sh --refresh-bundles --no-tests
+      - name: Restore or refresh the bundle state
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: ${{ needs.classify.outputs.bundles_changed }}
+          github-token: ${{ github.token }}
 
       # The synthetic lifecycle adapter's remote-lease test runs real guests in an enclosure with
       # no host libraries, so it needs the statically linked guest executables the workspace
@@ -1241,6 +1166,174 @@ jobs:
           done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
           exit "$failed"
 
+  # Daemon end-to-end binaries (crates/bin/daemon/tests) for a merge_gates run. The classifier
+  # picks them from the coverage map: binaries covering a changed package or path, a changed
+  # test binary itself, or all of them when the daemon's sources or shared test helpers change.
+  # One job compiles just those binaries plus every workspace binary they run beside; shards
+  # (1, 2 or 4 by count) run them against restored or refreshed bundles.
+  e2e-archive:
+    name: Daemon e2e archive
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.e2e_tests != '[]' }}
+    steps:
+      - name: Require a readable test list
+        env:
+          E2E_TESTS: ${{ needs.classify.outputs.e2e_tests }}
+        run: |
+          if [[ "$E2E_TESTS" == ERROR ]]; then
+            echo "::error::The classifier could not decide which daemon e2e tests to run; refusing to treat that as none."
+            exit 1
+          fi
+          printf '%s\n' "$E2E_TESTS" | jq -r '.[]'
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      # Read the crate cache the workspace archive saves; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh --no-scratch
+
+      # Same features and profile as the workspace archive. Every workspace binary is built
+      # first so the archive's companion carries the CLI and the sibling binaries the tests
+      # run from beside ryeosd.
+      - name: Build the selected daemon e2e binaries
+        env:
+          E2E_TESTS: ${{ needs.classify.outputs.e2e_tests }}
+        run: |
+          set -euo pipefail
+          mapfile -t selected < <(printf '%s\n' "$E2E_TESTS" | jq -r '.[] | "--test", .')
+          mkdir -p "$RUNNER_TEMP/e2e-archive"
+          ./scripts/gate.sh --nextest-archive "$RUNNER_TEMP/e2e-archive/e2e.tar.zst" \
+            --with-workspace-bins -p ryeosd "${selected[@]}"
+
+      - name: Build the static guest executables and carry them with the archive
+        # Tests that run the real guest owner in an enclosure with no host libraries need these
+        # statically linked; same build as the workspace archive job.
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+          target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+          (
+            cd "$target_dir"
+            for guest in \
+              ryeos-synthetic-mounted-candidate-supervisor \
+              ryeos-synthetic-external-candidate-launcher \
+              ryeos-synthetic-external-candidate-connector; do
+              test -f "x86_64-unknown-linux-gnu/debug/$guest"
+              printf '%s\0' "x86_64-unknown-linux-gnu/debug/$guest"
+            done | tar --null --files-from=- -rf "$RUNNER_TEMP/e2e-archive/e2e.tar.zst.extras.tar"
+          )
+
+      - name: Upload the daemon e2e archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/e2e-archive
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  e2e-shard:
+    name: Daemon e2e shard ${{ matrix.shard }}/${{ strategy.job-total }}
+    needs: [classify, e2e-archive]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.e2e_tests != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.classify.outputs.e2e_shards) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      # A branch refresh compiles the bundle binaries, so the cache stays available here.
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the root disk, so this
+        # also places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Restore or refresh the bundle state
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: ${{ needs.classify.outputs.bundles_changed }}
+          github-token: ${{ github.token }}
+
+      - name: Download the daemon e2e archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: e2e-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/e2e-archive
+
+      # A binary gated on a crash-qualification feature compiles empty here (its own job runs it),
+      # and a shard may draw only such binaries.
+      - name: Run this shard of the daemon e2e tests
+        env:
+          # Same stack as the workspace shards (deep admission futures in debug builds).
+          RUST_MIN_STACK: 8388608
+          SHARDS: ${{ strategy.job-total }}
+        run: >-
+          ./scripts/gate.sh
+          --nextest-run-archive "$RUNNER_TEMP/e2e-archive/e2e.tar.zst"
+          --partition "hash:${{ matrix.shard }}/$SHARDS"
+          --no-tests=pass
+
   test:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
@@ -1280,8 +1373,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1441,8 +1536,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1665,8 +1762,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1932,8 +2031,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1973,8 +2074,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -2037,8 +2140,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T05:13:27Z:a6b4132bc72fbe5ac51e98b5e1a0a63b34129471eabdcb3b65d3adc5f159a5b1:3vDfFHBmBkSb3j5wns7YNFve0g2FfYlfh8jtqHfeJk3/iZShTG4nZ7hPBMntiIMqtvNPAZyzls68b4EbcWj4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T07:10:43Z:0311b4a6c0cfac0dac8ecec9fcca381d6a1829aa81be786fea53199d1a8842a0:h/Ok6CxWWD/qJxxUg4hL1eH1++lbu3i5zpv9BE/7L56JXg6AjJxFhSdn/ueswrFWnHE2F53c2SJgdL7bpRsXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -249,11 +249,12 @@ policies:
           # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
           # floor accepts a resident region proven only by the absence of swap
           # at startup (residency:swap_absent). Jobs die with the node because
-          # the node is pid 1 of its container, or its parent is a pid 1 named
-          # in enclosure_inits. Jobs run without a sandbox: the catalog
-          # services are daemon endpoints that execute no captured source, and
-          # consumers verify publisher evidence under their own policy, so the
-          # host can withhold or delay a catalog head but cannot forge one.
+          # its parent is a pid 1 named in enclosure_inits; the node itself
+          # cannot be pid 1, since process identity refuses pid 1. Jobs run
+          # without a sandbox: the catalog services are daemon endpoints that
+          # execute no captured source, and consumers verify publisher
+          # evidence under their own policy, so the host can withhold or delay
+          # a catalog head but cannot forge one.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
           process_scopes:
             mode: unconfigured
