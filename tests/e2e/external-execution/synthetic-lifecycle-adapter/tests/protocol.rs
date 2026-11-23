@@ -6102,6 +6102,15 @@ async fn evaluate_integrate_and_publish_candidate(
     .unwrap();
     let tree_hash = base.snapshot().project_tree_hash.clone();
     let policy_hash = base.snapshot().effective_policy_hash.clone();
+    // The name the source checkout declared, read from base B: the session's
+    // workspace is torn down by now, and B is exactly what it held.
+    let base_declared_name =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(
+            &cas,
+            base.tree().tree(),
+        )
+        .unwrap()
+        .expect("base B declares the source checkout's project name");
     drop(guard);
     drop(authority);
     let candidate_validation_hash = frozen_session
@@ -6128,14 +6137,8 @@ async fn evaluate_integrate_and_publish_candidate(
 
     // The owner's head of the source checkout, under the name it declares.
     let head_owner = ryeos_app::project_owner::owner_principal(state, &service_owner).unwrap();
-    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &head_owner,
-        &ryeos_state::project_identity::ProjectDeclaration::declared_name(Path::new(
-            source_display_path,
-        ))
-        .unwrap()
-        .expect("the source checkout declares its project name"),
-    );
+    let head_key =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&head_owner, &base_declared_name);
     let head_advancer =
         ryeos_app::project_owner::head_advancer(state, &service_owner, head_key.owner()).unwrap();
     let state_authority = state.state_store.pinned_state_authority().unwrap();
