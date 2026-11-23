@@ -946,3 +946,415 @@ mod revisions {
         assert_eq!(refusal.code(), "seat_read_result_too_large");
     }
 }
+
+// ── signed record read: the capability report ────────────────────────────
+
+mod records {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, SeatClass, UiSeatReadsPolicy, UiSeatReadsPolicySection,
+    };
+    use ryeos_ui::seat_read_policy::{RequestFacts, SeatReadRefusal, SessionFacts, decide};
+
+    const GET: &str = "service:records/get";
+    const KINDS: &str = "service:records/kinds";
+    const LIST: &str = "service:records/list";
+
+    fn profile_paths() -> Vec<std::path::PathBuf> {
+        let dir =
+            ryeos_engine::test_support::workspace_root().join("bundles/.ai/node/init/profiles");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn profile(path: &std::path::Path) -> Value {
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn policy_of(path: &std::path::Path) -> UiSeatReadsPolicy {
+        let record = UiSeatReadsPolicySection
+            .parse(
+                &NodePolicyContext {
+                    section: SECTION_NAME.to_owned(),
+                    source_file: path.to_owned(),
+                    signer_fingerprint: "test".to_owned(),
+                },
+                &profile(path)["policies"][SECTION_NAME],
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        record
+            .as_any()
+            .downcast_ref::<UiSeatReadsPolicy>()
+            .unwrap()
+            .clone()
+    }
+
+    fn standard() -> UiSeatReadsPolicy {
+        policy_of(
+            &ryeos_engine::test_support::workspace_root()
+                .join("bundles/.ai/node/init/profiles/standard.yaml"),
+        )
+    }
+
+    /// The parameters the service's own descriptor declares.
+    fn declared(name: &str) -> BTreeMap<String, String> {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join(format!("bundles/core/.ai/services/records/{name}.yaml"));
+        let service: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        service["schema"]
+            .as_object()
+            .expect("the service declares its parameters")
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    fn call(
+        policy: &UiSeatReadsPolicy,
+        class: SeatClass,
+        target: &str,
+        params: Value,
+    ) -> Result<ryeos_ui::seat_read_policy::DetachedShaping, SeatReadRefusal> {
+        let name = target.rsplit('/').next().unwrap();
+        let admitted = decide(
+            policy,
+            class,
+            target,
+            &declared(name),
+            Some(RequestFacts {
+                params,
+                session: SessionFacts {
+                    principal_id: "fp:test",
+                    project_root: None,
+                },
+            }),
+        )?;
+        Ok(admitted
+            .shaping
+            .expect("a policy read has shaping")
+            .detach())
+    }
+
+    fn report_request() -> Value {
+        json!({"record_kind": "capability_report"})
+    }
+
+    /// What `records/get` answers for the capability report, with fields a seat
+    /// must not see: free-text reasons, paths, addresses, a failure detail and a
+    /// field a later release might add.
+    fn answer() -> Value {
+        json!({
+            "record_kind": "capability_report",
+            "key": "singleton",
+            "hash": "d1",
+            "stored_as": "file",
+            "bytes": 1234,
+            "truncated": false,
+            "verify": {
+                "status": "verified",
+                "scheme": "node_signed_json_digest",
+                "signer": "fp:node",
+                "signer_status": "node",
+                "reason": null,
+                "detail": "/home/operator/.ai/state/node-capability-report.json",
+                "fresh": false,
+                "new_verify_field": 1
+            },
+            "body": {
+                "schema": "ryeos.node.capability-report/v9",
+                "generated_at": "2026-11-23T00:00:00Z",
+                "node_fingerprint": "node",
+                "subject": "node",
+                "daemon_digest": "dd",
+                "generation": {"boot_id": "b"},
+                "credential_home": {"path": "/home/operator/.credentials"},
+                "in_place_roots": {"r": {"path": "/srv/root"}},
+                "composition": {
+                    "host_class": "container",
+                    "profile": "standard",
+                    "policy_generation": "pg",
+                    "bundles": ["core", "standard"],
+                    "compiled_features": ["scheduling"]
+                },
+                "exposure": {
+                    "listeners": ["0.0.0.0:8080"],
+                    "ingress": {"source": "attested", "provider": "edge", "basis": "https://edge.internal"}
+                },
+                "host": {"kernel_kind": "native", "kernel_release": "6.9.1", "node_pid": 42, "uid_map": "0 1000 1"},
+                "provided": {
+                    "isolation:pid_ns": {
+                        "source": "measured",
+                        "provider": "pid_namespace_init",
+                        "basis": "probe failed at /proc/self/ns/pid",
+                        "new_field": "leak"
+                    }
+                },
+                "missing": {"quiescence:pid_namespace": "never provided: /proc/x"},
+                "capacity": {"enclosure_memory_max_bytes": 4096},
+                "floor": {
+                    "requires": ["x"],
+                    "admitted": true,
+                    "met_by": {"isolation": {"name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init", "extra": 1}},
+                    "unmet": {"quiescence": "never provided: /proc/x"}
+                }
+            },
+            "collections": {
+                "provided": [{"name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init", "basis": "probe failed at /proc/self/ns/pid", "new_field": "leak"}],
+                "missing": [{"name": "quiescence:pid_namespace", "value": "never provided: /proc/x"}],
+                "floor_met": [{"label": "isolation", "name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init", "extra": 1}],
+                "floor_unmet": [{"label": "quiescence", "value": "never provided: /proc/x"}],
+                "capacity": [{"name": "enclosure_memory_max_bytes", "value": 4096}]
+            },
+            "collections_coverage": {"provided": "present", "missing": "present", "floor_met": "present", "floor_unmet": "present", "capacity": "present"}
+        })
+    }
+
+    fn shown(policy: &UiSeatReadsPolicy, class: SeatClass) -> Value {
+        call(policy, class, GET, report_request())
+            .expect("the report read is admitted")
+            .apply(answer())
+            .expect("the answer fits its bounds")
+    }
+
+    #[test]
+    fn every_profile_admits_the_report_read_for_both_classes_and_nothing_else() {
+        for path in profile_paths() {
+            let policy = policy_of(&path);
+            for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
+                assert!(
+                    call(&policy, class, GET, report_request()).is_ok(),
+                    "{}",
+                    path.display()
+                );
+                assert!(
+                    call(&policy, class, KINDS, json!({})).is_ok(),
+                    "{}",
+                    path.display()
+                );
+                // Another record kind is not admitted.
+                assert!(
+                    matches!(
+                        call(&policy, class, GET, json!({"record_kind": "other"})),
+                        Err(SeatReadRefusal::NoMatchingEntry { .. })
+                    ),
+                    "{}",
+                    path.display()
+                );
+                // A seat reads the singleton only and cannot ask for a body
+                // that failed verification.
+                for denied in ["include_unverified", "holder", "key", "hash"] {
+                    let mut params = report_request();
+                    params[denied] = json!("x");
+                    assert!(
+                        matches!(
+                            call(&policy, class, GET, params),
+                            Err(SeatReadRefusal::ParameterDenied { .. })
+                        ),
+                        "{}: {denied}",
+                        path.display()
+                    );
+                }
+                // There is no list read for a seat.
+                assert!(
+                    call(&policy, class, LIST, report_request()).is_err(),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_profile_lets_a_session_hold_the_record_read_capabilities() {
+        for path in profile_paths() {
+            let scopes =
+                profile(&path)["policies"]["ui_browser_sessions"]["session_scopes"].clone();
+            let scopes: Vec<&str> = scopes
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|scope| scope.as_str().unwrap())
+                .collect();
+            for needed in [
+                "ryeos.execute.service.records/get",
+                "ryeos.execute.service.records/kinds",
+            ] {
+                assert!(scopes.contains(&needed), "{}: {needed}", path.display());
+            }
+            assert!(
+                !scopes.contains(&"ryeos.execute.service.records/list"),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosted_seat_sees_names_grades_and_providers_and_no_free_text() {
+        let policy = standard();
+        let shown = shown(&policy, SeatClass::HostedPrincipal);
+        let text = serde_json::to_string(&shown).unwrap();
+        // What is kept, including a report from an earlier policy generation
+        // arriving marked not fresh.
+        assert_eq!(shown["verify"]["status"], "verified");
+        assert_eq!(shown["verify"]["signer_status"], "node");
+        assert_eq!(shown["verify"]["fresh"], false);
+        assert_eq!(shown["body"]["subject"], "node");
+        assert_eq!(shown["body"]["host"]["kernel_kind"], "native");
+        assert_eq!(
+            shown["collections"]["provided"],
+            json!([{"name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init"}])
+        );
+        assert_eq!(
+            shown["collections"]["missing"],
+            json!([{"name": "quiescence:pid_namespace"}])
+        );
+        assert_eq!(
+            shown["collections"]["floor_unmet"],
+            json!([{"label": "quiescence"}])
+        );
+        // What is left out: reasons, probe text, paths, addresses, capacity,
+        // kernel release, lists of what is installed, the verify detail, and any
+        // field no entry names, in the body and in the rows alike.
+        for gone in [
+            "/proc/",
+            "/home/operator",
+            "/srv/root",
+            "0.0.0.0",
+            "edge.internal",
+            "6.9.1",
+            "leak",
+            "new_field",
+            "new_verify_field",
+            "never provided",
+            "standard",
+            "scheduling",
+            "daemon_digest",
+            "credential_home",
+            "in_place_roots",
+            "enclosure_memory_max_bytes",
+            "node_pid",
+            "uid_map",
+            "bytes",
+        ] {
+            assert!(!text.contains(gone), "hosted view leaks `{gone}`: {text}");
+        }
+        assert!(shown["collections"].get("capacity").is_none());
+    }
+
+    #[test]
+    fn the_operator_also_sees_the_why_text_and_capacity_but_never_an_unnamed_field() {
+        let policy = standard();
+        let shown = shown(&policy, SeatClass::LocalOperator);
+        let text = serde_json::to_string(&shown).unwrap();
+        assert_eq!(
+            shown["body"]["missing"]["quiescence:pid_namespace"],
+            "never provided: /proc/x"
+        );
+        assert_eq!(
+            shown["body"]["capacity"]["enclosure_memory_max_bytes"],
+            4096
+        );
+        assert_eq!(shown["body"]["host"]["kernel_release"], "6.9.1");
+        assert_eq!(
+            shown["body"]["exposure"]["listeners"],
+            json!(["0.0.0.0:8080"])
+        );
+        assert_eq!(
+            shown["body"]["composition"]["bundles"],
+            json!(["core", "standard"])
+        );
+        assert_eq!(
+            shown["collections"]["provided"][0]["basis"],
+            "probe failed at /proc/self/ns/pid"
+        );
+        assert_eq!(
+            shown["collections"]["capacity"],
+            json!([{"name": "enclosure_memory_max_bytes", "value": 4096}])
+        );
+        // Even the operator's entry names leaves: nothing a later release adds,
+        // no verify detail, no private directory facts.
+        for gone in [
+            "new_field",
+            "new_verify_field",
+            "leak",
+            "daemon_digest",
+            "credential_home",
+            "in_place_roots",
+            "node_pid",
+            "uid_map",
+            "/home/operator",
+            "/srv/root",
+        ] {
+            assert!(!text.contains(gone), "operator view leaks `{gone}`: {text}");
+        }
+    }
+
+    #[test]
+    fn a_record_that_failed_verification_reaches_a_seat_without_a_body() {
+        let policy = standard();
+        let failed = json!({
+            "record_kind": "capability_report",
+            "key": "singleton",
+            "hash": null,
+            "stored_as": "file",
+            "bytes": null,
+            "truncated": false,
+            "verify": {"status": "failed", "scheme": "node_signed_json_digest", "signer": null, "signer_status": null, "reason": "stale_format", "detail": "/home/operator/x", "fresh": null}
+        });
+        for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
+            let shown = call(&policy, class, GET, report_request())
+                .unwrap()
+                .apply(failed.clone())
+                .unwrap();
+            assert_eq!(shown["verify"]["status"], "failed");
+            assert_eq!(shown["verify"]["reason"], "stale_format");
+            assert!(shown.get("body").is_none());
+            assert!(
+                !serde_json::to_string(&shown)
+                    .unwrap()
+                    .contains("/home/operator")
+            );
+        }
+    }
+
+    #[test]
+    fn the_kinds_read_hides_a_load_error_from_a_hosted_seat() {
+        let policy = standard();
+        let kinds = json!({"kinds": [
+            {"record_kind": "capability_report", "usable": true, "reason": null, "storage": "node_file", "verifier": "node_signed_json_digest", "key": "singleton", "holder": null, "freshness": "node_policy_generation", "max_bytes": 1048576},
+            {"record_kind": "broken", "usable": false, "reason": "the declaration did not load: /home/operator/.ai/x"}
+        ]});
+        let hosted = call(&policy, SeatClass::HostedPrincipal, KINDS, json!({}))
+            .unwrap()
+            .apply(kinds.clone())
+            .unwrap();
+        assert_eq!(
+            hosted,
+            json!({"kinds": [
+                {"record_kind": "capability_report", "usable": true},
+                {"record_kind": "broken", "usable": false}
+            ]})
+        );
+        let local = call(&policy, SeatClass::LocalOperator, KINDS, json!({}))
+            .unwrap()
+            .apply(kinds)
+            .unwrap();
+        assert_eq!(
+            local["kinds"][1]["reason"],
+            "the declaration did not load: /home/operator/.ai/x"
+        );
+        assert!(local["kinds"][0].get("storage").is_none());
+        assert!(local["kinds"][0].get("max_bytes").is_none());
+    }
+}

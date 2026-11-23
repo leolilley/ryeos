@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:28:11Z:6f6035bbee856b79fa0519f0cf6d33013f96587357c099e8af4620438025b45d:WfvDzWYx5cGaqcO24djVvAdGhhdf7HJWXIuUhsru6y5NtKbO6/b4GGmVy9wURbyidn8S+orUdcIQjTTBcQsEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:08:16Z:e436beb3131c202403731977500b2563d751769f932691ad92f9eeff0bc4728d:8FE8jCQsOT9acMUPuyaL9W5DIe4rcLEjDqpULDWGky0T6qx4gcdIZBoPMgQorRrjdRk1y+0fFn2J9AnqwzlyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -438,6 +438,8 @@ policies:
       - ryeos.execute.service.worker-executions/approvals
       - ryeos.execute.service.revisions/list
       - ryeos.execute.service.revisions/get
+      - ryeos.execute.service.records/get
+      - ryeos.execute.service.records/kinds
       - ryeos.execute.service.worker-executions/resolve-approval
       - ryeos.execute.directive.*
       - ryeos.execute.graph.*
@@ -778,3 +780,142 @@ policies:
           - /record/body/content
         max_result_bytes: 1048576
         max_items: 16
+      # The node's signed capability report, read through the general signed
+      # record read. A seat reads this one record kind, the singleton only: it
+      # may not name a key, a hash or a holder, and it may not ask for the body
+      # of a record that failed verification. The `collections` rows are the
+      # body's maps as lists, kept by leaf like the body itself, so a field a
+      # later release adds is dropped until an entry names it.
+      #
+      # The hosted entry leaves out everything free-text or machine-identifying:
+      # probe `basis` text, `missing` and `unmet` reasons, capacity, kernel
+      # release, bundle and feature lists, exposure.
+      - target: service:records/get
+        classes: [hosted_principal]
+        when:
+          record_kind: [capability_report]
+        deny_params: [include_unverified, holder, key, hash]
+        keep:
+          - /record_kind
+          - /key
+          - /hash
+          - /stored_as
+          - /truncated
+          - /verify/status
+          - /verify/scheme
+          - /verify/signer
+          - /verify/signer_status
+          - /verify/reason
+          - /verify/fresh
+          - /body/schema
+          - /body/generated_at
+          - /body/node_fingerprint
+          - /body/subject
+          - /body/composition/host_class
+          - /body/composition/policy_generation
+          - /body/provided/*/source
+          - /body/provided/*/provider
+          - /body/floor/admitted
+          - /body/floor/met_by/*/name
+          - /body/floor/met_by/*/source
+          - /body/floor/met_by/*/provider
+          - /body/host/kernel_kind
+          - /collections/provided/*/name
+          - /collections/provided/*/source
+          - /collections/provided/*/provider
+          - /collections/missing/*/name
+          - /collections/floor_met/*/label
+          - /collections/floor_met/*/name
+          - /collections/floor_met/*/source
+          - /collections/floor_met/*/provider
+          - /collections/floor_unmet/*/label
+          - /collections_coverage/provided
+          - /collections_coverage/missing
+          - /collections_coverage/floor_met
+          - /collections_coverage/floor_unmet
+        max_result_bytes: 65536
+        max_items: 256
+      # The operator's own entry. Its `*` subtrees (missing, floor/unmet,
+      # capacity, bundles, features, listeners) are for an operator who can read
+      # the report file on their own node. Never copy one into a hosted entry.
+      - target: service:records/get
+        classes: [local_operator]
+        when:
+          record_kind: [capability_report]
+        deny_params: [include_unverified, holder, key, hash]
+        keep:
+          - /record_kind
+          - /key
+          - /hash
+          - /stored_as
+          - /truncated
+          - /verify/status
+          - /verify/scheme
+          - /verify/signer
+          - /verify/signer_status
+          - /verify/reason
+          - /verify/fresh
+          - /body/schema
+          - /body/generated_at
+          - /body/node_fingerprint
+          - /body/subject
+          - /body/composition/host_class
+          - /body/composition/policy_generation
+          - /body/provided/*/source
+          - /body/provided/*/provider
+          - /body/floor/admitted
+          - /body/floor/met_by/*/name
+          - /body/floor/met_by/*/source
+          - /body/floor/met_by/*/provider
+          - /body/host/kernel_kind
+          - /collections/provided/*/name
+          - /collections/provided/*/source
+          - /collections/provided/*/provider
+          - /collections/missing/*/name
+          - /collections/floor_met/*/label
+          - /collections/floor_met/*/name
+          - /collections/floor_met/*/source
+          - /collections/floor_met/*/provider
+          - /collections/floor_unmet/*/label
+          - /body/composition/profile
+          - /body/composition/bundles/*
+          - /body/composition/compiled_features/*
+          - /body/provided/*/basis
+          - /body/missing/*
+          - /body/floor/unmet/*
+          - /body/capacity/*
+          - /body/host/kernel_release
+          - /body/exposure/ingress/source
+          - /body/exposure/ingress/provider
+          - /body/exposure/ingress/basis
+          - /body/exposure/ingress_unattested
+          - /body/exposure/listeners/*
+          - /collections/provided/*/basis
+          - /collections/missing/*/value
+          - /collections/floor_unmet/*/value
+          - /collections/capacity/*/name
+          - /collections/capacity/*/value
+          - /collections_coverage/*
+        max_result_bytes: 65536
+        max_items: 256
+      # Which record kinds this node can serve. The hosted entry keeps the kind
+      # name and whether it is usable; `reason` is a free-text load error that
+      # can carry a path, so only the operator sees it.
+      - target: service:records/kinds
+        classes: [hosted_principal]
+        keep:
+          - /kinds/*/record_kind
+          - /kinds/*/usable
+        max_result_bytes: 16384
+        max_items: 64
+      - target: service:records/kinds
+        classes: [local_operator]
+        keep:
+          - /kinds/*/record_kind
+          - /kinds/*/usable
+          - /kinds/*/reason
+          - /kinds/*/verifier
+          - /kinds/*/key
+          - /kinds/*/freshness
+        max_result_bytes: 16384
+        max_items: 64
