@@ -40,12 +40,13 @@ on:
         type: choice
         options:
           - test
+          - gate
           - clippy
           - check
           - build
           - fmt
       args:
-        description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings"
+        description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings. gate passes them to scripts/gate.sh (nextest, one process per test, the merge gate's composition features), e.g. -p ryeosd --test node_journal_e2e; plain test is cargo test, all tests as threads of one process, so suites sharing the in-process TestNativeHost lock need -- --test-threads 1 there"
         required: true
         type: string
       bundles:
@@ -127,6 +128,10 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+
+      - name: Install cargo-nextest
+        if: ${{ inputs.command == 'gate' }}
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
       - name: Set up sccache (plain rustc if it is down)
         uses: ./.github/actions/sccache-or-plain
@@ -271,6 +276,18 @@ jobs:
           manifest=()
           if [[ "$CARGO_WORKSPACE" == rune ]]; then
             manifest=(--manifest-path crates/clients/rune/Cargo.toml)
+          fi
+          if [[ "$CARGO_SUBCOMMAND" == gate ]]; then
+            # As the merge gate's changed-crates job runs it.
+            [[ "$CARGO_WORKSPACE" == root ]] || { echo "::error::gate runs the root workspace only"; exit 2; }
+            staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+            if [[ -d "$staged" ]]; then
+              export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+            fi
+            export RUST_MIN_STACK=8388608
+            echo "./scripts/gate.sh ${extra[*]}"
+            ./scripts/gate.sh "${extra[@]}"
+            exit 0
           fi
           echo "cargo $CARGO_SUBCOMMAND ${manifest[*]} ${extra[*]}"
           cargo "$CARGO_SUBCOMMAND" "${manifest[@]}" "${extra[@]}"
