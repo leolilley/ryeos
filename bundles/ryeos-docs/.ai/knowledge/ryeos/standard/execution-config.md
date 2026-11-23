@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T11:43:18Z:4dca5ee5ae794fe2cb61b430082a6bd1ba62c3276032539065b4eb598959b472:JTSQVO/wY9ul13lPcqkE/0RG4XHtLz/8YdkM40YD/rTb4jpvsJBD4A49vKXAlePtFIQq8VRuL0dOtIdO6+hLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T21:33:14Z:5ef54a206888e7cd7ca54fa4027ddf6f9c047d36a3604f406b44e81606e9d181:2H754MFHvna23rcN8SS2u+pkvNjG45xlSEqy8PffTe1KciPrm7S14xx/sgQCeJNbT5YYR3VEwerWhmZClQ+iDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -179,6 +179,17 @@ An image that fails a check is dropped and the result names a stable code:
 `image_oversize`, `image_media_type`, `image_decode`, `image_dimensions`,
 `image_limit` or `image_input_unsupported`. A malformed envelope is an error result,
 `tool_result_parts_invalid`.
+
+What the model is shown. A tool's own result is shown as the tool returned it;
+the runtime's completion record is not shown. A tool that fails (a non-zero
+exit, a soft failure, a timeout) is shown as
+`{"error": {"code": ..., "message": ...}}`, the same shape every other failed
+call has, and its result is recorded with status `error`. A successful tool
+must not return a top-level `error` key: it reads like a failure to the model
+and, on providers with no tool-error flag, is indistinguishable from one. A
+tool that wants plain-text output returns
+`{"result_parts": [{"type": "text", "text": "..."}]}`, which the model receives
+as that text; no other key may sit beside `result_parts`.
 
 ```yaml
 tool_images:
