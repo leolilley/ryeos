@@ -14,6 +14,15 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
+# Next commits are fetched shallowly into a separate throwaway repository, never
+# into the checkout's own .git. It borrows the checkout's objects (alternates) so
+# the branch head can be diffed against the fetched commit there.
+scratch="$work/scratch.git"
+git init -q --bare "$scratch"
+printf '%s\n' "$(git rev-parse --absolute-git-dir)/objects" > "$scratch/objects/info/alternates"
+head_sha="$(git rev-parse HEAD)"
+remote_url="https://x-access-token:${GH_TOKEN}@github.com/${repo}.git"
+
 # gh api with backoff: a rate limit or a transient error is retried a few times
 # with growing sleeps, never in a tight loop.
 gh_retry() {
@@ -65,11 +74,11 @@ while read -r id head; do
         echo "next $head (run $id): no retained bundle state"
         continue
     fi
-    if ! git fetch --no-tags --depth=1 origin "$head"; then
+    if ! git --git-dir="$scratch" fetch -q --no-tags --depth=1 "$remote_url" "$head" 2>/dev/null; then
         echo "next $head (run $id): could not fetch the commit, skipped"
         continue
     fi
-    git diff --name-only "$head" HEAD | sort -u > "$work/differs"
+    git --git-dir="$scratch" diff --name-only "$head" "$head_sha" | sort -u > "$work/differs"
     if grep -q '^bundles/' "$work/differs"; then
         echo "next $head (run $id): branch differs under bundles/, skipped"
         skipped="$skipped $head"
