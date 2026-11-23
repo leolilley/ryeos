@@ -317,19 +317,13 @@ fn hosted_no_volume() -> Host {
     }
 }
 
-/// A gVisor sandbox with no persistent disk; the node is its pid 1.
+/// A gVisor sandbox with no persistent disk; the node runs under tini as
+/// everywhere else.
 fn hosted_ephemeral() -> Host {
-    let mut base = with_storage(
+    let base = with_storage(
         facts(volume()),
         storage("overlay", 0x794c7630, 20, "gvisor", true),
     );
-    base.parent_pid = 0;
-    base.node_pid = 1;
-    base.enclosure_exit = Some(CapabilityEvidence {
-        source: ProofSource::Measured,
-        provider: HOST_PROVIDER.to_owned(),
-        basis: "the node is pid 1 of its pid namespace".to_owned(),
-    });
     Host {
         name: "hosted-ephemeral",
         facts: base,
@@ -373,8 +367,8 @@ const NO_ACCOUNTING: &[&str] = &["accounting"];
 /// What bare runit lacks of the controller's `local` floor: a container
 /// enclosure to recover and terminate jobs through.
 const NO_LOCAL_ENCLOSURE: &[&str] = &[
-    "any_of(recovery:enclosure, recovery:enclosure_trusted_init)",
-    "any_of(termination:enclosure, termination:enclosure_trusted_init)",
+    "recovery:enclosure_trusted_init",
+    "termination:enclosure_trusted_init",
 ];
 /// The same, for the controller's `hosted` floor.
 const NO_HOSTED_ENCLOSURE: &[&str] = &[
@@ -861,8 +855,11 @@ fn the_codex_controller_launch_is_refused_on_bare_runit() {
     let node = node_reporting(runit().capabilities_with_credential_home());
     let text = refusal_text(admit_structured_session_controller(&node, &contract).unwrap_err());
     assert!(text.contains("requires.controller"), "{text}");
-    assert!(text.contains("recovery:enclosure"), "{text}");
-    assert!(text.contains("termination:enclosure"), "{text}");
+    assert!(text.contains("recovery:enclosure_trusted_init"), "{text}");
+    assert!(
+        text.contains("termination:enclosure_trusted_init"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -875,8 +872,11 @@ fn a_controller_whose_enclosure_is_unproven_refuses_the_codex_launch() {
     let node = node_reporting(host.capabilities_with_credential_home());
     let text = refusal_text(admit_structured_session_controller(&node, &contract).unwrap_err());
     assert!(text.contains("requires.controller"), "{text}");
-    assert!(text.contains("recovery:enclosure"), "{text}");
-    assert!(text.contains("termination:enclosure"), "{text}");
+    assert!(text.contains("recovery:enclosure_trusted_init"), "{text}");
+    assert!(
+        text.contains("termination:enclosure_trusted_init"),
+        "{text}"
+    );
 }
 
 #[test]
