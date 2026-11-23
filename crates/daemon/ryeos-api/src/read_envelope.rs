@@ -62,6 +62,11 @@ pub const MAX_CURSOR_BYTES: usize = 1024;
 
 /// How complete an answer is. A closed set, shared with the client's
 /// wording table.
+///
+/// `complete` is a claim the read must prove: every source read and
+/// verified, nothing rotated away, nothing hidden before authorization. A
+/// read that cannot prove it says `observed`. `failed` carries a reason code
+/// and never comes with rows presented as authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageState {
