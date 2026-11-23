@@ -8287,8 +8287,14 @@ mod tests {
     fn a_tool_that_exits_zero_with_a_failure_result_shows_its_own_message() {
         let soft = json!({"exit_code": 0, "soft_failure": true, "stdout": "{\"ok\": false}", "stderr": ""});
         for (result, want) in [
-            (json!({"ok": false, "error": "no such file: a.txt"}), "no such file: a.txt"),
-            (json!({"ok": false, "error": {"message": "bad path"}}), "bad path"),
+            (
+                json!({"ok": false, "error": "no such file: a.txt"}),
+                "no such file: a.txt",
+            ),
+            (
+                json!({"ok": false, "error": {"message": "bad path"}}),
+                "bad path",
+            ),
         ] {
             let body = failed_body(json!({
                 "outcome_code": "exit:0", "result": result, "error": soft, "artifacts": []
