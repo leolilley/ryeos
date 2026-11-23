@@ -273,3 +273,18 @@ pub fn kill(pid: u32, grace: f64) -> Result<String, String> {
 pub fn is_alive(pid: u32) -> bool {
     exec::lib_is_alive(pid)
 }
+
+/// A production build carries no test-only controller spawn.
+///
+/// `ProcessScopeConfiguration::spawn_controller_with_inherited_document` is
+/// compiled only under the `test-support` feature. This item exists, and its
+/// doctest therefore runs, only when that feature is off, and the doctest must
+/// fail to compile because the method is absent.
+///
+/// ```compile_fail
+/// fn absent(configuration: &lillux::ProcessScopeConfiguration) {
+///     let _ = configuration.spawn_controller_with_inherited_document;
+/// }
+/// ```
+#[cfg(not(feature = "test-support"))]
+pub const NO_TEST_CONTROLLER_SPAWN_IN_PRODUCTION: () = ();

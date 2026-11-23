@@ -41,14 +41,18 @@
 //! no delegated cgroup subtree exists and no per-scope capability can
 //! qualify. The fast fixture therefore signs an isolation member derived
 //! from the authored profile without its per-scope contract (see
-//! `fast_fixture::direct_host_isolation`). Per-scope containment is
-//! qualified only against an administrator-prepared host-backed node.
+//! `fast_fixture::direct_host_isolation`), and the suites that need an
+//! exclusive session skip. `RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1` selects the
+//! real mode instead (see [`process_scopes`]): the authored isolation member
+//! is kept, the node starts under a protected host-runtime binding inside a
+//! delegated cgroup subtree, and an unqualified host fails rather than skips.
 
 pub mod callback_probe;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod dedicated_command_cut;
 pub mod fast_fixture;
 pub mod mock_provider;
+pub mod process_scopes;
 pub mod remote_delegation;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod runtime_phase_cut;
@@ -1287,18 +1291,50 @@ impl DaemonHarness {
         fast_fixture::write_harness_bootstrap_config(&state_path, bind, &uds_path)?;
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
-        let mut cmd = ryeosd_command();
-        // NOTE: NO . The fast fixture is the init.
-        cmd.arg("--app-root")
-            .arg(&state_path)
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &state_path)
-            .env("HOME", user_space.path())
-            .stdout(Stdio::null())
+        let scoped = process_scopes::required();
+        // A hosted-class node's floor asks for the enclosure, not for
+        // per-execution scopes, so it starts as the init of its own enclosure;
+        // every other node starts in a delegated cgroup subtree.
+        let placement = if matches!(bundle_selection, FastBundleSelection::DevelopmentHosted) {
+            process_scopes::Placement::Enclosure
+        } else {
+            process_scopes::Placement::Controller
+        };
+        if scoped {
+            process_scopes::prepare(
+                &state_path,
+                &[
+                    state_dir_outer.path(),
+                    user_space.path(),
+                    core_bundle_tmp.path(),
+                ],
+                placement,
+            )?;
+        }
+        let mut cmd = match process_scopes::launch_command(&state_path)? {
+            Some(mut cmd) => {
+                cmd.env("HOSTNAME", "testhost").env(
+                    "RUST_MIN_STACK",
+                    std::env::var_os("RUST_MIN_STACK").unwrap_or_else(|| "4194304".into()),
+                );
+                cmd
+            }
+            None => {
+                let mut cmd = ryeosd_command();
+                // NOTE: NO . The fast fixture is the init.
+                cmd.arg("--app-root")
+                    .arg(&state_path)
+                    .arg("--bind")
+                    .arg(bind.to_string())
+                    .arg("--uds-path")
+                    .arg(&uds_path)
+                    .env("HOSTNAME", "testhost")
+                    .env("RYEOS_APP_ROOT", &state_path)
+                    .env("HOME", user_space.path());
+                cmd
+            }
+        };
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
@@ -1315,7 +1351,14 @@ impl DaemonHarness {
             "daemon (fast fixture path)",
             startup_deadline,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if scoped {
+                error.context(process_scopes::describe_missing(&state_path))
+            } else {
+                error
+            }
+        })?;
 
         let actual_bind = read_actual_bind(&daemon_json)?;
 
@@ -1327,6 +1370,16 @@ impl DaemonHarness {
             startup_deadline,
         )
         .await?;
+        if scoped {
+            match placement {
+                process_scopes::Placement::Controller => {
+                    process_scopes::assert_scope_capabilities_provided(&state_path)?
+                }
+                process_scopes::Placement::Enclosure => {
+                    process_scopes::assert_enclosure_capabilities_provided(&state_path)?
+                }
+            }
+        }
 
         let harness = Self {
             _state_dir_outer: state_dir_outer,
@@ -1659,6 +1712,16 @@ impl DaemonHarness {
         self.state_path.join(".ai/state/audit/standalone.ndjson")
     }
 
+    /// A replacement daemon needs the node's state lock, its endpoint and (in
+    /// the real process-scope mode) its controller leaf, each of which the
+    /// running daemon still holds. Replace means the old one is gone first.
+    async fn stop_live_daemon_before_respawn(&mut self) -> anyhow::Result<()> {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            self.kill_daemon().await?;
+        }
+        Ok(())
+    }
+
     /// SIGKILL the daemon child and wait for it to exit and for the
     /// UDS socket to disappear. Does **not** re-spawn — call
     /// [`respawn_with`] afterward.
@@ -1741,27 +1804,23 @@ impl DaemonHarness {
         Ok(())
     }
 
-    /// Re-spawn the daemon against the same `state_path`, `user_space`,
-    /// `bind`, and `uds_path`. The caller passes a `tweak` closure to
-    /// set env vars or args (e.g. `RUST_LOG`).
-    ///
-    /// Must be called after [`kill_daemon`]. The reconciler runs
-    /// automatically at startup and picks up any orphaned threads.
-    ///
-    /// **No ``** is passed — state is already initialized.
-    pub async fn respawn_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
-        // A restarted node keeps the same configured endpoint. Cross-node
-        // recovery peers must not need an out-of-band route rewrite merely
-        // because this test process replaced the daemon generation.
-        let bind = self.bind;
-        let harness_id = next_harness_id();
-        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
-
-        // Remove the old daemon.json so we can detect when the new
-        // daemon writes its own (with the new bind address).
-        let daemon_json = self.state_path.join("daemon.json");
-        let _ = std::fs::remove_file(&daemon_json);
-
+    /// The command that starts this harness's node again on its resolved
+    /// endpoint: a direct child normally, a node under its protected
+    /// host-runtime binding in the real process-scope mode.
+    fn respawn_command(&self, bind: SocketAddr) -> anyhow::Result<Command> {
+        if process_scopes::required() {
+            // The controller hands the node only its app root, so the
+            // resolved endpoint a restart must keep goes into the node's own
+            // bootstrap config instead of flags.
+            fast_fixture::write_harness_bootstrap_config(&self.state_path, bind, &self.uds_path)?;
+            let mut cmd = process_scopes::launch_command(&self.state_path)?
+                .context("this node was not prepared for the real process-scope mode")?;
+            cmd.env("HOSTNAME", "testhost").env(
+                "RUST_MIN_STACK",
+                std::env::var_os("RUST_MIN_STACK").unwrap_or_else(|| "4194304".into()),
+            );
+            return Ok(cmd);
+        }
         let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.state_path)
@@ -1775,8 +1834,34 @@ impl DaemonHarness {
             .arg(&self.uds_path)
             .env("HOSTNAME", "testhost")
             .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
-            .stdout(Stdio::null())
+            .env("HOME", self.user_space.path());
+        Ok(cmd)
+    }
+
+    /// Re-spawn the daemon against the same `state_path`, `user_space`,
+    /// `bind`, and `uds_path`. The caller passes a `tweak` closure to
+    /// set env vars or args (e.g. `RUST_LOG`).
+    ///
+    /// Must be called after [`kill_daemon`]. The reconciler runs
+    /// automatically at startup and picks up any orphaned threads.
+    ///
+    /// **No ``** is passed — state is already initialized.
+    pub async fn respawn_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
+        self.stop_live_daemon_before_respawn().await?;
+        // A restarted node keeps the same configured endpoint. Cross-node
+        // recovery peers must not need an out-of-band route rewrite merely
+        // because this test process replaced the daemon generation.
+        let bind = self.bind;
+        let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
+
+        // Remove the old daemon.json so we can detect when the new
+        // daemon writes its own (with the new bind address).
+        let daemon_json = self.state_path.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json);
+
+        let mut cmd = self.respawn_command(bind)?;
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
@@ -1818,24 +1903,15 @@ impl DaemonHarness {
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
         tweak: impl FnOnce(&mut Command),
     ) -> anyhow::Result<HandoffCrashGate> {
+        self.stop_live_daemon_before_respawn().await?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
         let (gate, writer) = HandoffCrashGate::pair(boundary)?;
-        let mut cmd = ryeosd_command();
-        cmd.arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
-            .stdout(Stdio::null())
+        let mut cmd = self.respawn_command(bind)?;
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
         HandoffCrashGate::attach_writer(&mut cmd, writer, boundary)?;
@@ -1876,6 +1952,7 @@ impl DaemonHarness {
         &mut self,
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
     ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
+        self.stop_live_daemon_before_respawn().await?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
@@ -1883,18 +1960,8 @@ impl DaemonHarness {
         let _ = std::fs::remove_file(&daemon_json);
         let (mut gate, writer) = HandoffCrashGate::pair(boundary)?;
 
-        let mut command = ryeosd_command();
+        let mut command = self.respawn_command(bind)?;
         command
-            .arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
@@ -1969,18 +2036,8 @@ impl DaemonHarness {
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
-        let mut cmd = ryeosd_command();
-        cmd.arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
-            .stdout(Stdio::null())
+        let mut cmd = self.respawn_command(bind)?;
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 

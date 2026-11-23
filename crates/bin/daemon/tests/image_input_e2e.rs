@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use stub_rig::{
-    Rig, RigOptions, chain_payloads, launch_on, start_rig, thread_detail, wait_terminal,
+    Rig, RigOptions, chain_payloads, launch_on, plant_python_function_tool, start_rig,
+    thread_detail, wait_terminal,
 };
 
 const MAX_WAIT: Duration = Duration::from_secs(150);
@@ -452,4 +453,26 @@ async fn a_subprocess_tool_image_just_under_the_per_image_default_arrives() {
         results[0]["parts"][1]["byte_length"],
         2 * 1024 * 1024 - 1024
     );
+}
+
+// 9 ── a text-only envelope from the python function runtime is bare text ─
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_function_runtime_tool_returning_a_text_part_reaches_the_model_as_bare_text() {
+    let rig = start_rig(&calls(&["plain_plain"]), RigOptions::default())
+        .await
+        .expect("start rig");
+    plant_python_function_tool(
+        rig.project.path(),
+        "plain",
+        "def execute(params, project_path):\n    return {'result_parts': [{'type': 'text', 'text': 'hello from the function runtime'}]}",
+        &rig.publisher,
+    )
+    .expect("plant function tool");
+    run_to_completion(&rig).await;
+    let bodies = rig.stub.request_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let tool = messages(&bodies[1]).last().expect("last message");
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(tool["content"], "hello from the function runtime");
 }
