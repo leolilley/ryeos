@@ -17,10 +17,12 @@ fi
 err="$(mktemp)"
 "${SCCACHE_PATH:-sccache}" "$@" 2>"$err"
 status=$?
-# Only sccache's own client errors about its server count; a compile error is
-# passed through untouched.
+# Only sccache's own client error about its server counts: it is the first
+# line sccache writes, before any compiler runs. Compiler diagnostics (JSON
+# objects, or rendered text with a gutter) never start the stream with it, so
+# a compile error is passed through untouched.
 if [[ "$status" -ne 0 ]] \
-    && grep -qE '^sccache: error: (Timed out waiting for server startup|Server startup failed)' "$err"; then
+    && head -n 1 "$err" | grep -qE '^sccache: error: (Timed out waiting for server startup|Server startup failed)'; then
     rm -f "$err"
     if (set -o noclobber; : > "$mark") 2>/dev/null; then
         echo "::warning title=sccache lost mid-job: building without the cache::The sccache server stopped and could not restart; the rest of this job compiles with plain rustc." >&2
