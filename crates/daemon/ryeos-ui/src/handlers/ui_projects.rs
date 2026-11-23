@@ -675,7 +675,8 @@ pub async fn handle_projects_add(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    require_seat_caller(&ctx, &state)?;
+    let caller = require_seat_caller(&ctx, &state)?;
+    crate::seat_auth::require_local_operator_seat(&caller, &ctx, &state)?;
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root, &state.config.app_root)?;
     let root_text = root.display().to_string();

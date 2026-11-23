@@ -57,19 +57,10 @@ async fn opening_another_project_admits_an_independent_surface_without_replacing
     let session = ui.browser_sessions.get_session(&session_id).unwrap();
     let second = tempfile::TempDir::new().expect("second project");
     // The session's principal is not the node operator: its registry is the
-    // principal-owned one, reached only through its retained root attachment.
-    let root_attachment = session.attachments[&session.root_attachment_id].clone();
-    let added = ryeos_ui::seat_auth::with_compiled_ui_attachment(
-        root_attachment,
-        ryeos_ui::handlers::ui_projects::handle_projects_add(
-            json!({"root":second.path()}),
-            ctx.clone(),
-            state.clone(),
-        ),
-    )
-    .await
-    .expect("register project for the same retained principal");
-    let local_id = added["project"]["local_id"].as_str().unwrap();
+    // principal-owned one, and `projects/add` is a local-operator act, so the
+    // registry is seeded directly.
+    let local_id = test_state::add_fixture_project(&state, second.path()).await;
+    let local_id = local_id.as_str();
     let membership = &session.presentations[&producer.presentation_id];
     let origin = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
         &ryeos_client_base::ids::PresentationId::try_new(producer.presentation_id.clone()).unwrap(),

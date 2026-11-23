@@ -138,6 +138,33 @@ pub async fn register_fixture_project(state: &AppState, project_root: &std::path
     principal
 }
 
+/// Append `project_root` to the verified non-operator fixture principal's
+/// private registry (beside the one `register_fixture_project` wrote) and
+/// return its local id. Seat registration through `projects/add` is a
+/// local-operator act, so a non-operator fixture seeds its registry here.
+pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let project_root = project_root.canonicalize().unwrap();
+    let resolver =
+        ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
+    let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
+        .await
+        .unwrap();
+    let mut projects = store.load_projects().unwrap();
+    let local_id = format!("prj_{}", uuid::Uuid::new_v4().simple());
+    projects
+        .projects
+        .push(crate::handlers::ui_projects::ProjectEntry {
+            local_id: local_id.clone(),
+            name: "Second".into(),
+            root: project_root.display().to_string(),
+            added_at: lillux::time::iso8601_now(),
+            tags: vec![],
+        });
+    store.write_projects(&projects).unwrap();
+    local_id
+}
+
 /// A presentation under the shipped shared Config bound to `project_root`,
 /// registered for a verified non-operator principal. Its dialogs carry the
 /// real project registry and Surface affordances, and the session retains the

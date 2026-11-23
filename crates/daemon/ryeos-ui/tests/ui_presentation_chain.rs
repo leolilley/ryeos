@@ -685,24 +685,9 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
 
     // projects/open: a registered project opens its own Surface in seat A.
     let second_project = tempfile::TempDir::new().expect("second project");
-    let root_attachment = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .get_session(&session_id)
-        .unwrap()
-        .attachments[&chain.root.binding_attachment_id]
-        .clone();
-    let added = ryeos_ui::seat_auth::with_compiled_ui_attachment(
-        root_attachment,
-        ryeos_ui::handlers::ui_projects::handle_projects_add(
-            json!({"root": second_project.path()}),
-            chain.ctx.clone(),
-            state.clone(),
-        ),
-    )
-    .await
-    .expect("register the second project for the session principal");
-    let local_id = added["project"]["local_id"].as_str().unwrap().to_owned();
+    // Registering a host folder through `projects/add` is a local-operator
+    // act, so the non-operator session principal's registry is seeded directly.
+    let local_id = test_state::add_fixture_project(&state, second_project.path()).await;
     let project_opened = admit(
         &chain,
         &mut seat_a,
