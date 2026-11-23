@@ -72,6 +72,21 @@ async fn every_dispatched_call_fires_before_and_after() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn calls_sharing_one_provider_id_each_fire_their_hooks() {
+    // The occurrence is told apart by the call's ordinal, never by the model's
+    // id text, which providers repeat. Both calls carry the same id, one that
+    // looks like a positional fallback.
+    let script = "steps:\n  - tool_calls:\n      - id: index-1\n        name: noop\n        arguments: {}\n      - id: index-1\n        name: noop\n        arguments: {}\n  - text: done\n";
+    let (rig, status) = run(script, options(BEFORE_AND_AFTER)).await;
+    assert_eq!(status, "completed");
+    assert_eq!(
+        rig.marker_count(),
+        4,
+        "a repeated id does not merge two calls' hooks"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_hooks_own_tool_call_does_not_fire_the_runs_tool_hooks() {
     // The model calls the marker tool once; each of its two hooks runs the
     // marker tool too. Were a hook's call to re-enter the run's hooks the

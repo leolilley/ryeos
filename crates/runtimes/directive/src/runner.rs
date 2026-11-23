@@ -2434,16 +2434,11 @@ impl Runner {
             "index": occurrence.call_index,
             "batch_size": batch_size,
         });
-        let call = occurrence
-            .call
-            .id
-            .clone()
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| format!("index-{}", occurrence.call_index));
+        let call = u32::try_from(occurrence.call_index).unwrap_or(u32::MAX);
         self.observe_hooks(
             "before_tool",
             occurrence.turn,
-            Some(&call),
+            Some(call),
             json!({"event": event}),
         )
         .await;
@@ -2455,10 +2450,12 @@ impl Runner {
     /// declared for the event nothing is dispatched or recorded. A turn that
     /// has used its cap of observing dispatches skips the rest and warns once.
     ///
-    /// `call` tells two dispatches of one event in one turn apart (the tool
-    /// events); without it the daemon would see them as one occurrence and run
-    /// the hook once.
-    async fn observe_hooks(&mut self, event: &str, turn: u32, call: Option<&str>, context: Value) {
+    /// `call` is the call's ordinal in the turn's batch. It tells two
+    /// dispatches of one tool event in one turn apart, as a bounded counter
+    /// that is the same after a resume; the model's call id is text it may
+    /// repeat and is never part of the occurrence identity. Without it the
+    /// daemon would see two calls as one occurrence and run the hook once.
+    async fn observe_hooks(&mut self, event: &str, turn: u32, call: Option<u32>, context: Value) {
         if !self.hooks.iter().any(|hook| hook.event() == event) {
             return;
         }
@@ -2482,7 +2479,7 @@ impl Runner {
         )
         .with_counter_coordinate("turn", turn);
         let occurrence = match call {
-            Some(call) => occurrence.with_text_coordinate("call", call),
+            Some(call) => occurrence.with_counter_coordinate("call", call),
             None => occurrence,
         };
         let dispatcher = self.hook_dispatcher();
@@ -5234,6 +5231,7 @@ impl Runner {
                                     occurrence.operation_id,
                                     call_id,
                                     turn,
+                                    occurrence.call_index,
                                     true,
                                     rendered,
                                 )
@@ -5263,6 +5261,7 @@ impl Runner {
                                     occurrence.operation_id,
                                     call_id,
                                     turn,
+                                    occurrence.call_index,
                                     true,
                                     rendered,
                                 )
@@ -5355,7 +5354,14 @@ impl Runner {
                     };
 
                     if let Err(error) = self
-                        .settle_tool_result(operation_id, call_id, turn, refused, tool_result)
+                        .settle_tool_result(
+                            operation_id,
+                            call_id,
+                            turn,
+                            pending[index].call_index,
+                            refused,
+                            tool_result,
+                        )
                         .await
                     {
                         state = State::RecoveryRequired { error };
@@ -5603,7 +5609,14 @@ impl Runner {
                             },
                         };
                         if let Err(error) = self
-                            .settle_tool_result(operation_id, call_id, turn, refused, rendered)
+                            .settle_tool_result(
+                                operation_id,
+                                call_id,
+                                turn,
+                                pending[index].call_index,
+                                refused,
+                                rendered,
+                            )
                             .await
                         {
                             recovery_required.get_or_insert(error);
@@ -6666,6 +6679,7 @@ impl Runner {
             occurrence.operation_id.clone(),
             tc.id.clone().unwrap_or_default(),
             occurrence.turn,
+            occurrence.call_index,
             true,
             rendered,
         )
@@ -6681,6 +6695,7 @@ impl Runner {
         operation_id: String,
         call_id: String,
         turn: u32,
+        call_index: usize,
         refused: bool,
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
@@ -6771,7 +6786,8 @@ impl Runner {
             "spilled": rendered.spilled.is_some(),
             "duplicate": rendered.duplicate_of.is_some(),
         });
-        self.observe_hooks("after_tool", turn, Some(&call_id), json!({"event": event}))
+        let call = u32::try_from(call_index).unwrap_or(u32::MAX);
+        self.observe_hooks("after_tool", turn, Some(call), json!({"event": event}))
             .await;
         Ok(())
     }
