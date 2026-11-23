@@ -282,20 +282,42 @@ async fn status(
     Ok(result)
 }
 
-/// The owner's head of a checkout on this node, keyed by the name the tree
-/// declares now. The owner is the principal the node resolves the session
-/// owner's key to, never input.
-fn owner_checkout_head_key(
+/// The owner's head of a pinned source, keyed by the name its base generation
+/// declares. A pinned source's checkout is a session workspace that is gone
+/// by integration and publication, and the base is exactly what it held. The
+/// owner is the principal the node resolves the session owner's key to.
+fn owner_base_head_key(
     state: &AppState,
     owner_key: &str,
-    checkout: &std::path::Path,
+    base_snapshot_hash: &str,
 ) -> Result<ryeos_state::project_identity::ProjectHeadKey, HandlerError> {
-    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(checkout)
+    let authority = state
+        .state_store
+        .pinned_state_authority()
+        .map_err(internal)?;
+    let _guard = authority.acquire_shared_guard().map_err(internal)?;
+    let cas = authority.cas_store().map_err(internal)?;
+    let snapshot = cas
+        .get_object(base_snapshot_hash)
+        .map_err(internal)?
+        .ok_or_else(|| internal(format!("base snapshot {base_snapshot_hash} is missing")))?;
+    let snapshot =
+        ryeos_state::objects::ProjectSnapshot::from_value(&snapshot).map_err(internal)?;
+    let tree = cas
+        .get_object(&snapshot.project_tree_hash)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            internal(format!(
+                "project tree {} is missing",
+                snapshot.project_tree_hash
+            ))
+        })?;
+    let tree = ryeos_state::objects::ProjectTree::from_value(&tree).map_err(internal)?;
+    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)
         .map_err(internal)?
         .ok_or_else(|| {
             HandlerError::BadRequest(format!(
-                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest",
-                checkout.display(),
+                "project_manifest_missing: base {base_snapshot_hash} has no {}; a project's name is the `name:` of its manifest",
                 ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             ))
         })?;
@@ -7715,8 +7737,7 @@ async fn start_candidate_operation(
         &req.purpose,
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
     ) {
-        let head =
-            owner_checkout_head_key(&state, &session.owner_principal, &original_project_path)?;
+        let head = owner_base_head_key(&state, &session.owner_principal, &base_snapshot_hash)?;
         let principal_key = head.owner_component();
         let project_hash = head.name_hash().to_owned();
         let current = state
@@ -9035,8 +9056,7 @@ fn verify_candidate_integration_terminal(
             ));
         }
     };
-    let expected_head =
-        owner_checkout_head_key(state, &session.owner_principal, source_display_path)?;
+    let expected_head = owner_base_head_key(state, &session.owner_principal, &base_snapshot_hash)?;
     let expected_principal_key = expected_head.owner_component();
     let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(
