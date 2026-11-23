@@ -1,18 +1,27 @@
 //! `node.journal`: one read over the node's signed histories (the node
-//! journal, offline-operation receipts, trust key events), newest first.
-//! The merge and its rules live in [`ryeos_node::journal_view`].
+//! journal, offline-operation receipts, trust key events), newest first, in
+//! the shared read envelope. The merge and its rules live in
+//! [`ryeos_node::journal_view`].
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::read_envelope::{
+    Coverage, CoverageState, CursorCodec, Page, ReadEnvelope, TotalBasis, authorization_digest,
+    filter_digest, not_modified, page_limit, revision_of, signers_table,
+};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node::journal_view::{JournalQuery, read};
+use ryeos_node::journal_view::{JournalQuery, ORDER, read};
+
+pub const SCHEMA: &str = "ryeos.read.node.journal/v1";
+const CURSOR: CursorCodec = CursorCodec::new("node_journal");
 
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -21,23 +30,18 @@ pub struct Request {
     pub since: Option<String>,
     pub until: Option<String>,
     pub subject: Option<String>,
-    pub after: Option<String>,
+    pub cursor: Option<String>,
     pub limit: Option<usize>,
+    pub if_revision: Option<String>,
 }
 
-impl Request {
-    fn query(self) -> JournalQuery {
-        JournalQuery {
-            types: self
-                .types
-                .map(|types| types.into_iter().collect::<BTreeSet<_>>()),
-            since: self.since,
-            until: self.until,
-            subject: self.subject,
-            after: self.after,
-            limit: self.limit,
-        }
-    }
+/// The part of a request a cursor and a revision bind to.
+#[derive(Serialize)]
+struct Filter<'a> {
+    types: Option<&'a BTreeSet<String>>,
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+    subject: Option<&'a str>,
 }
 
 pub async fn handle(
@@ -46,14 +50,84 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    let limit = page_limit(req.limit)?;
+    let types = req
+        .types
+        .map(|types| types.into_iter().collect::<BTreeSet<_>>());
+    let filter = filter_digest(&Filter {
+        types: types.as_ref(),
+        since: req.since.as_deref(),
+        until: req.until.as_deref(),
+        subject: req.subject.as_deref(),
+    })?;
+    let position = req
+        .cursor
+        .as_deref()
+        .map(|cursor| CURSOR.decode(cursor, &filter, ORDER))
+        .transpose()?;
+    let query = JournalQuery {
+        types,
+        since: req.since,
+        until: req.until,
+        subject: req.subject,
+        position,
+        limit: Some(limit),
+    };
     let app_root = state.config.app_root.clone();
     let identity = Arc::clone(&state.identity);
-    let query = req.query();
-    let page = tokio::task::spawn_blocking(move || read(&app_root, &identity, &query))
-        .await
-        .map_err(|error| HandlerError::Internal(format!("node journal read stopped: {error}")))?
-        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
-    serde_json::to_value(page).map_err(|error| HandlerError::Internal(error.to_string()))
+    let (page, view) = tokio::task::spawn_blocking(move || {
+        let page = read(&app_root, &identity, &query)?;
+        let view = ryeos_node::trust_registry::load_view(&app_root)?;
+        anyhow::Ok((page, view))
+    })
+    .await
+    .map_err(|error| HandlerError::Internal(format!("node journal read stopped: {error}")))?
+    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
+
+    let authorization = authorization_digest(
+        &ctx.fingerprint,
+        &ctx.scopes,
+        state.node_policy.generation_digest(),
+    );
+    let tips: Vec<(&str, &str)> = page
+        .tips
+        .iter()
+        .map(|(name, tip)| (*name, tip.as_str()))
+        .collect();
+    let revision = revision_of(CURSOR.read, &authorization, &tips, &filter);
+    if let Some(unchanged) = not_modified(req.if_revision.as_deref(), &revision) {
+        return serde_json::to_value(unchanged)
+            .map_err(|error| HandlerError::Internal(error.to_string()));
+    }
+
+    let signers = signers_table(
+        page.keys().iter().map(String::as_str),
+        &view,
+        state.identity.fingerprint(),
+    )?;
+    let coverage = if page.truncations.is_empty() {
+        Coverage::observed()
+    } else {
+        Coverage::with_reason(CoverageState::Partial, "history_rotated")
+    }
+    .with_extra("truncations", json!(page.truncations));
+    let next_cursor = page
+        .next_position
+        .as_deref()
+        .map(|position| CURSOR.encode(&filter, ORDER, position));
+    let envelope = ReadEnvelope::rows(
+        SCHEMA,
+        revision,
+        coverage,
+        page.rows,
+        Page {
+            next_cursor,
+            total: Some(page.total),
+            total_basis: TotalBasis::Exact,
+        },
+        signers,
+    );
+    serde_json::to_value(envelope).map_err(|error| HandlerError::Internal(error.to_string()))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -17,7 +17,7 @@ fn row(
         subject_ref: subject.map(str::to_owned),
         before_ref: None,
         after_ref: None,
-        actor: None,
+        actor_key: None,
         actor_basis: None,
         attested_by: Some("node".to_owned()),
         detail: BTreeMap::new(),
@@ -65,7 +65,7 @@ fn sample() -> Vec<JournalRow> {
 
 #[test]
 fn rows_are_newest_first_with_a_stable_order_at_equal_times() {
-    let page = page(sample(), Vec::new(), &JournalQuery::default()).unwrap();
+    let page = page(sample(), Vec::new(), Vec::new(), &JournalQuery::default()).unwrap();
     // Equal times order by source, descending: trust chain before the
     // offline ledger.
     assert_eq!(
@@ -77,13 +77,15 @@ fn rows_are_newest_first_with_a_stable_order_at_equal_times() {
             "node_journal:1:d"
         ]
     );
-    assert_eq!(page.next, None);
+    assert_eq!(page.next_position, None);
+    assert_eq!(page.total, 4);
 }
 
 #[test]
 fn a_cursor_pages_older_rows_without_repeating_or_skipping() {
     let first = page(
         sample(),
+        Vec::new(),
         Vec::new(),
         &JournalQuery {
             limit: Some(2),
@@ -92,25 +94,30 @@ fn a_cursor_pages_older_rows_without_repeating_or_skipping() {
     )
     .unwrap();
     assert_eq!(ids(&first), ["node_journal:2:d", "trust_chain:3:d"]);
-    let cursor = first.next.clone().expect("a next page");
+    let cursor = first.next_position.clone().expect("a next page");
     let second = page(
         sample(),
         Vec::new(),
+        Vec::new(),
         &JournalQuery {
             limit: Some(2),
-            after: Some(cursor),
+            position: Some(cursor),
             ..JournalQuery::default()
         },
     )
     .unwrap();
     assert_eq!(ids(&second), ["offline_ledger:1:d", "node_journal:1:d"]);
-    assert_eq!(second.next, None);
+    assert_eq!(second.next_position, None);
+    // The total counts the filter, never the page.
+    assert_eq!(first.total, 4);
+    assert_eq!(second.total, 4);
 }
 
 #[test]
 fn filters_select_by_type_window_and_subject() {
     let by_type = page(
         sample(),
+        Vec::new(),
         Vec::new(),
         &JournalQuery {
             types: Some(BTreeSet::from([
@@ -126,6 +133,7 @@ fn filters_select_by_type_window_and_subject() {
     let window = page(
         sample(),
         Vec::new(),
+        Vec::new(),
         &JournalQuery {
             since: Some("2026-11-20T00:00:05Z".to_owned()),
             until: Some("2026-11-20T00:00:05Z".to_owned()),
@@ -137,6 +145,7 @@ fn filters_select_by_type_window_and_subject() {
 
     let subject = page(
         sample(),
+        Vec::new(),
         Vec::new(),
         &JournalQuery {
             subject: Some("k1".to_owned()),
@@ -180,20 +189,22 @@ fn malformed_queries_are_refused() {
         ),
         (
             JournalQuery {
-                after: Some("1.nowhere.2".to_owned()),
+                position: Some("1.nowhere.2".to_owned()),
                 ..JournalQuery::default()
             },
             "names no source",
         ),
         (
             JournalQuery {
-                after: Some("garbage".to_owned()),
+                position: Some("garbage".to_owned()),
                 ..JournalQuery::default()
             },
-            "not a cursor this read returned",
+            "not one this read returned",
         ),
     ] {
-        let error = page(sample(), Vec::new(), &query).unwrap_err().to_string();
+        let error = page(sample(), Vec::new(), Vec::new(), &query)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(refusal), "{error}");
     }
 }
@@ -218,7 +229,7 @@ fn journal_records_become_rows_attested_by_the_daemon() {
     let started = &rows[0];
     assert_eq!(started.row_type, "node.started");
     assert_eq!(started.at_basis, AtBasis::Body);
-    assert_eq!(started.actor, None);
+    assert_eq!(started.actor_key, None);
     assert_eq!(started.actor_basis, None);
     assert_eq!(started.detail["pid"], json!(7));
     let accepted = &rows[1];
@@ -227,6 +238,7 @@ fn journal_records_become_rows_attested_by_the_daemon() {
         format!("node_journal:2:{}", written.digest().unwrap())
     );
     assert_eq!(accepted.actor_basis, Some(ActorBasis::DaemonAttestation));
+    assert_eq!(accepted.actor_key, Some(format!("fp:{}", "a".repeat(64))));
     assert_eq!(accepted.attested_by.as_deref(), Some("node"));
     assert_eq!(accepted.subject_ref.as_deref(), Some("item"));
 }
@@ -282,8 +294,20 @@ fn trust_events_become_rows_timed_by_the_node() {
     assert_eq!(rows[0].at_basis, AtBasis::RecordedByNode);
     assert_eq!(rows[0].actor_basis, Some(ActorBasis::RecordedByNode));
     assert_eq!(rows[1].row_type, "trust.succeeded");
-    assert_eq!(rows[1].subject_ref.as_deref(), Some("k2"));
-    assert_eq!(rows[1].detail["predecessor"], json!("k1"));
+    assert_eq!(rows[1].subject_ref.as_deref(), Some("fp:k2"));
+    assert_eq!(rows[1].detail["predecessor"], json!("fp:k1"));
+    assert_eq!(rows[1].actor_key.as_deref(), Some("fp:op"));
+    let page = page(
+        rows.clone(),
+        Vec::new(),
+        Vec::new(),
+        &JournalQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        page.keys().into_iter().collect::<Vec<_>>(),
+        ["fp:k1", "fp:k2", "fp:op"]
+    );
     assert!(!rows[0].detail.contains_key("predecessor"));
 
     let mut uneven = view;

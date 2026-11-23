@@ -98,7 +98,8 @@ pub struct JournalRow {
     pub subject_ref: Option<String>,
     pub before_ref: Option<String>,
     pub after_ref: Option<String>,
-    pub actor: Option<String>,
+    /// The acting key, typed `fp:<hex>`.
+    pub actor_key: Option<String>,
     pub actor_basis: Option<ActorBasis>,
     pub attested_by: Option<String>,
     pub detail: BTreeMap<String, Value>,
@@ -132,18 +133,54 @@ pub struct JournalQuery {
     pub since: Option<String>,
     pub until: Option<String>,
     pub subject: Option<String>,
-    /// The `next` of a previous page: rows strictly older than it.
-    pub after: Option<String>,
+    /// The position after which the page starts (from the envelope cursor
+    /// a previous page returned): rows strictly older than it.
+    pub position: Option<String>,
     pub limit: Option<usize>,
 }
+
+/// The order this read pages in, named so a cursor binds to it.
+pub const ORDER: &str = "at_desc_source_desc_sequence_desc";
 
 /// One page of rows, newest first.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct JournalPage {
     pub rows: Vec<JournalRow>,
-    /// Cursor for the next older page; absent when this page reached the end.
-    pub next: Option<String>,
+    /// Position of the next older page; absent when this page reached the end.
+    pub next_position: Option<String>,
+    /// Rows the whole filter admits, not just this page.
+    pub total: u64,
     pub truncations: Vec<Truncation>,
+    /// The tip of each source, named, as read: a change in any of them is a
+    /// new revision.
+    pub tips: Vec<(&'static str, String)>,
+}
+
+impl JournalPage {
+    /// Every key fingerprint the page names, typed: actors, trust subjects
+    /// and succession predecessors.
+    pub fn keys(&self) -> BTreeSet<String> {
+        let mut keys = BTreeSet::new();
+        for row in &self.rows {
+            keys.extend(row.actor_key.clone());
+            if row.source == Source::TrustChain {
+                keys.extend(row.subject_ref.clone());
+                if let Some(Value::String(predecessor)) = row.detail.get("predecessor") {
+                    keys.insert(predecessor.clone());
+                }
+            }
+        }
+        keys
+    }
+}
+
+/// A key fingerprint as a typed `fp:<hex>` reference.
+fn typed_key(fingerprint: &str) -> String {
+    if fingerprint.starts_with("fp:") {
+        fingerprint.to_owned()
+    } else {
+        format!("fp:{fingerprint}")
+    }
 }
 
 fn unix_secs(field: &str, value: &str) -> Result<u64> {
@@ -160,16 +197,16 @@ fn decode_cursor(cursor: &str) -> Result<(u64, Source, u64)> {
     let (Some(at), Some(source), Some(sequence), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        bail!("journal cursor {cursor:?} is not a cursor this read returned");
+        bail!("journal position {cursor:?} is not one this read returned");
     };
     let at = at
         .parse::<u64>()
-        .with_context(|| format!("journal cursor {cursor:?} is not a cursor this read returned"))?;
+        .with_context(|| format!("journal position {cursor:?} is not one this read returned"))?;
     let source = Source::parse(source)
-        .with_context(|| format!("journal cursor {cursor:?} names no source"))?;
+        .with_context(|| format!("journal position {cursor:?} names no source"))?;
     let sequence = sequence
         .parse::<u64>()
-        .with_context(|| format!("journal cursor {cursor:?} is not a cursor this read returned"))?;
+        .with_context(|| format!("journal position {cursor:?} is not one this read returned"))?;
     Ok((at, source, sequence))
 }
 
@@ -202,7 +239,7 @@ pub fn journal_rows(journal: &NodeJournal) -> Result<(Vec<JournalRow>, Option<Tr
                 before_ref: body.before_ref,
                 after_ref: body.after_ref,
                 actor_basis: body.actor.as_ref().map(|_| ActorBasis::DaemonAttestation),
-                actor: body.actor,
+                actor_key: body.actor.as_deref().map(typed_key),
                 attested_by: Some(body.attested_by.unwrap_or_else(|| "node".to_owned())),
                 detail: body.detail,
                 sequence: body.sequence,
@@ -240,7 +277,7 @@ pub fn receipt_rows(
                 subject_ref: Some(body.request_digest),
                 before_ref: result_ref(&body.result, "before_ref"),
                 after_ref: result_ref(&body.result, "after_ref"),
-                actor: Some(request.signer_fingerprint),
+                actor_key: Some(typed_key(&request.signer_fingerprint)),
                 actor_basis: Some(ActorBasis::OperatorSignatureCheckedAtApply),
                 attested_by: Some("node".to_owned()),
                 detail: BTreeMap::from([("operation".to_owned(), json!(request.operation))]),
@@ -266,7 +303,7 @@ pub fn trust_rows(view: &crate::trust_registry::RegistryView) -> Result<Vec<Jour
             let mut detail =
                 BTreeMap::from([("request_digest".to_owned(), json!(event.request_digest))]);
             if let Some(predecessor) = &event.predecessor {
-                detail.insert("predecessor".to_owned(), json!(predecessor));
+                detail.insert("predecessor".to_owned(), json!(typed_key(predecessor)));
             }
             Ok(JournalRow {
                 id: digest_ref(Source::TrustChain, event.seq, &event.digest()),
@@ -275,10 +312,10 @@ pub fn trust_rows(view: &crate::trust_registry::RegistryView) -> Result<Vec<Jour
                 unix_secs: unix_secs("signed_at", signed_at)?,
                 at: signed_at.clone(),
                 at_basis: AtBasis::RecordedByNode,
-                subject_ref: Some(event.signer.clone()),
+                subject_ref: Some(typed_key(&event.signer)),
                 before_ref: None,
                 after_ref: Some(event.record_digest.clone()),
-                actor: Some(event.operator.clone()),
+                actor_key: Some(typed_key(&event.operator)),
                 actor_basis: Some(ActorBasis::RecordedByNode),
                 attested_by: Some("node".to_owned()),
                 detail,
@@ -292,6 +329,7 @@ pub fn trust_rows(view: &crate::trust_registry::RegistryView) -> Result<Vec<Jour
 pub fn page(
     mut rows: Vec<JournalRow>,
     truncations: Vec<Truncation>,
+    tips: Vec<(&'static str, String)>,
     query: &JournalQuery,
 ) -> Result<JournalPage> {
     let limit = query.limit.unwrap_or(DEFAULT_PAGE_ROWS);
@@ -315,7 +353,7 @@ pub fn page(
         .as_deref()
         .map(|value| unix_secs("until", value))
         .transpose()?;
-    let after = query.after.as_deref().map(decode_cursor).transpose()?;
+    let after = query.position.as_deref().map(decode_cursor).transpose()?;
     rows.retain(|row| {
         query
             .types
@@ -327,20 +365,23 @@ pub fn page(
                 .subject
                 .as_ref()
                 .is_none_or(|subject| row.subject_ref.as_ref() == Some(subject))
-            && after.is_none_or(|after| row.key() < after)
     });
+    let total = u64::try_from(rows.len())?;
+    rows.retain(|row| after.is_none_or(|after| row.key() < after));
     rows.sort_by_key(|row| std::cmp::Reverse(row.key()));
     let more = rows.len() > limit;
     rows.truncate(limit);
-    let next = if more {
+    let next_position = if more {
         rows.last().map(|row| encode_cursor(row.key()))
     } else {
         None
     };
     Ok(JournalPage {
         rows,
-        next,
+        next_position,
+        total,
         truncations,
+        tips,
     })
 }
 
@@ -349,11 +390,14 @@ pub fn read(app_root: &Path, node: &NodeIdentity, query: &JournalQuery) -> Resul
     let mut rows = Vec::new();
     let mut truncations = Vec::new();
 
-    let (journal, truncation) = journal_rows(&NodeJournal::for_app_root(app_root, node.clone()))?;
-    rows.extend(journal);
+    let journal = NodeJournal::for_app_root(app_root, node.clone());
+    let journal_head = journal.load().context("verify the node journal")?.head;
+    let (journal_records, truncation) = journal_rows(&journal)?;
+    rows.extend(journal_records);
     truncations.extend(truncation);
 
     let ledger = crate::offline_operation::read_receipts(app_root, node)?;
+    let ledger_head = ledger.head;
     let ledger_truncation = ledger.truncated_before.map(|truncated_before| Truncation {
         source: Source::OfflineLedger,
         truncated_before,
@@ -366,8 +410,19 @@ pub fn read(app_root: &Path, node: &NodeIdentity, query: &JournalQuery) -> Resul
     let view =
         crate::trust_registry::load_view(app_root).context("read the node signer registry")?;
     rows.extend(trust_rows(&view)?);
+    let trust_head = view
+        .chain
+        .last()
+        .map(|event| event.digest())
+        .unwrap_or_default();
 
-    page(rows, truncations, query)
+    let tips = vec![
+        ("node_journal", journal_head),
+        ("offline_ledger", ledger_head),
+        ("trust_registry", view.registry_digest.clone()),
+        ("trust_chain", trust_head),
+    ];
+    page(rows, truncations, tips, query)
 }
 
 #[cfg(test)]

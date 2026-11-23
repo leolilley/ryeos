@@ -1504,6 +1504,8 @@ pub struct ReceiptsRead {
     /// rotation has dropped earlier ones.
     pub truncated_before: Option<String>,
     pub dropped: u64,
+    /// Digest of the last receipt (or the checkpoint's tip, or the genesis).
+    pub head: String,
 }
 
 /// Read and verify the whole retained ledger of `node`.
@@ -1524,6 +1526,7 @@ pub fn read_receipts(app_root: &Path, node: &NodeIdentity) -> Result<ReceiptsRea
             })
             .flatten(),
         dropped: state.dropped_receipts,
+        head: state.head.clone(),
     })
 }
 
