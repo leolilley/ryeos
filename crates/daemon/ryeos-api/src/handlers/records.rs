@@ -180,6 +180,22 @@ struct KindDecl {
     max_bytes: u64,
     #[serde(default)]
     freshness: Option<String>,
+    /// Named lists the answer derives from maps in the body, so a client that
+    /// can bind a list but not a map still reads them row by row.
+    #[serde(default)]
+    collections: Vec<CollectionDecl>,
+}
+
+/// One derived list: the object at `from` becomes one row per entry, the entry's
+/// key in `key_field`, the entry's own fields beside it (a scalar entry rides
+/// in `value`). A mechanism over the declared pointer; it names no record
+/// field of its own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionDecl {
+    name: String,
+    from: String,
+    key_field: String,
 }
 
 /// A record kind whose declaration this build can serve.
@@ -257,6 +273,27 @@ fn resolve_decl(name: &str, value: Value) -> Result<UsableKind, String> {
         .find(|pointer| !pointer_is_valid(pointer))
     {
         return Err(format!("summary entry `{bad}` is not a JSON pointer"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for collection in &decl.collections {
+        let name_ok = !collection.name.is_empty()
+            && collection.name.len() <= 64
+            && collection
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        if !name_ok || !seen.insert(collection.name.as_str()) {
+            return Err(format!(
+                "collection name `{}` must be unique lowercase letters, digits and underscores",
+                collection.name
+            ));
+        }
+        if !collection.from.starts_with('/') || collection.key_field.is_empty() {
+            return Err(format!(
+                "collection `{}` needs a JSON pointer in `from` and a `key_field`",
+                collection.name
+            ));
+        }
     }
     Ok(UsableKind {
         decl,
@@ -390,6 +427,18 @@ fn signer_of(found: &Found) -> Option<&str> {
     }
 }
 
+/// The signer's standing at read time. The node's own key is `node`: the
+/// verifier pins that signer to this node's identity. A signer whose standing
+/// can change (an operator or a publisher key) reports `active`, `retired` or
+/// `revoked` once such a kind exists and its resolver is in; no kind that needs
+/// it is declared yet.
+fn signer_status_of(kind: &UsableKind, found: &Found) -> Option<&'static str> {
+    match (found, kind.verifier) {
+        (Found::Verified { .. }, Verifier::NodeSignedJsonDigest) => Some("node"),
+        _ => None,
+    }
+}
+
 fn verify_object(kind: &UsableKind, found: &Found) -> Value {
     let (status, reason, detail, fresh) = match found {
         Found::Verified {
@@ -409,10 +458,53 @@ fn verify_object(kind: &UsableKind, found: &Found) -> Value {
         "status": status,
         "scheme": kind.verifier.name(),
         "signer": signer_of(found),
+        "signer_status": signer_status_of(kind, found),
         "reason": reason,
         "detail": detail,
         "fresh": fresh,
     })
+}
+
+/// The derived lists of a verified body: one array per declared collection, and
+/// whether the body held that map at all, so an absent map reads as "not
+/// reported" and not as an empty list.
+fn collections_of(kind: &UsableKind, body: &Value) -> (Value, Value) {
+    let mut lists = serde_json::Map::new();
+    let mut coverage = serde_json::Map::new();
+    for collection in &kind.decl.collections {
+        let (rows, present) = match body.pointer(&collection.from) {
+            Some(Value::Object(entries)) => (
+                entries
+                    .iter()
+                    .map(|(key, entry)| {
+                        let mut row = serde_json::Map::new();
+                        row.insert(collection.key_field.clone(), Value::String(key.clone()));
+                        match entry {
+                            Value::Object(fields) => {
+                                for (name, value) in fields {
+                                    if name != &collection.key_field {
+                                        row.insert(name.clone(), value.clone());
+                                    }
+                                }
+                            }
+                            other => {
+                                row.insert("value".to_owned(), other.clone());
+                            }
+                        }
+                        Value::Object(row)
+                    })
+                    .collect::<Vec<_>>(),
+                true,
+            ),
+            _ => (Vec::new(), false),
+        };
+        lists.insert(collection.name.clone(), Value::Array(rows));
+        coverage.insert(
+            collection.name.clone(),
+            Value::String(if present { "present" } else { "not_reported" }.to_owned()),
+        );
+    }
+    (Value::Object(lists), Value::Object(coverage))
 }
 
 fn summary_of(kind: &UsableKind, body: &Value) -> Value {
@@ -485,6 +577,7 @@ fn unverified_kind_answer(name: &str, reason: &str) -> Value {
             "status": "unverified_kind",
             "scheme": null,
             "signer": null,
+            "signer_status": null,
             "reason": reason,
             "fresh": null,
         },
@@ -523,6 +616,11 @@ fn record_answer(kind: &UsableKind, found: &Found, unverified: Option<Value>) ->
     });
     if let Found::Verified { body, .. } = found {
         answer["body"] = body.clone();
+        if !kind.decl.collections.is_empty() {
+            let (collections, coverage) = collections_of(kind, body);
+            answer["collections"] = collections;
+            answer["collections_coverage"] = coverage;
+        }
     } else if let Some(body) = unverified {
         answer["body"] = body;
     }
@@ -771,6 +869,68 @@ mod tests {
         let mut decl = declaration();
         decl[field] = value;
         decl
+    }
+
+    #[test]
+    fn a_collection_turns_a_map_into_rows_with_the_key_as_a_field() {
+        let kind = usable(with(
+            "collections",
+            json!([
+                {"name": "provided", "from": "/provided", "key_field": "name"},
+                {"name": "capacity", "from": "/capacity", "key_field": "name"},
+                {"name": "unmet", "from": "/floor/unmet", "key_field": "label"},
+                {"name": "gone", "from": "/nothing", "key_field": "name"},
+            ]),
+        ));
+        let body = json!({
+            "provided": {
+                "isolation:pid_ns": {"source": "kernel", "provider": "p1", "basis": "probe"},
+            },
+            "capacity": {"memory_bytes": 4096},
+            "floor": {"unmet": {"quiescence": "never provided", "other": "reason"}},
+        });
+        let (lists, coverage) = collections_of(&kind, &body);
+        assert_eq!(
+            lists["provided"],
+            json!([{"name": "isolation:pid_ns", "source": "kernel", "provider": "p1", "basis": "probe"}])
+        );
+        assert_eq!(
+            lists["capacity"],
+            json!([{"name": "memory_bytes", "value": 4096}])
+        );
+        assert_eq!(
+            lists["unmet"],
+            json!([
+                {"label": "other", "value": "reason"},
+                {"label": "quiescence", "value": "never provided"}
+            ])
+        );
+        assert_eq!(lists["gone"], json!([]));
+        assert_eq!(coverage["provided"], "present");
+        assert_eq!(coverage["gone"], "not_reported");
+    }
+
+    #[test]
+    fn a_collection_with_a_bad_name_or_pointer_makes_the_kind_unusable() {
+        for bad in [
+            json!([{"name": "Bad", "from": "/a", "key_field": "name"}]),
+            json!([{"name": "a", "from": "a", "key_field": "name"}]),
+            json!([{"name": "a", "from": "/a", "key_field": ""}]),
+            json!([
+                {"name": "a", "from": "/a", "key_field": "n"},
+                {"name": "a", "from": "/b", "key_field": "n"}
+            ]),
+        ] {
+            assert!(resolve_decl("capability_report", with("collections", bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_failed_read_has_no_signer_standing_and_no_signing_principal() {
+        let kind = usable(declaration());
+        let verify = verify_object(&kind, &Found::Absent);
+        assert!(verify["signer_status"].is_null());
+        assert!(verify.get("signing_principal").is_none());
     }
 
     #[test]

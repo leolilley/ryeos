@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:48:38Z:15556f56f9de621c3de269ba458fb2d422c2874b0e1fce532d670953b96ef13e:3Nyx8HkA3CvsGFxshaq9TN1QTb35SEynlqCE7m7hRgdrhBFEpstLqdaWkR0bZew54CtucjnBulRBPDp6EL2uCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:04:20Z:e5fb097bff3edd16373034d516a44a6e5680d04b4bacaab77c5f2a56c29c7755:dJ+sVT4Og5IRrJRaBC4OH/m/2ePFsO7pu6BhhAB563EZAzCffnDDpqVmB0R9Qb/J2lR5nfB/GcqHc5VoixPhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/core/records
 version: "1.0.0"
 description: The node's signed capability report, a single record signed by the node key.
@@ -19,3 +19,19 @@ summary:
   - /composition/host_class
 max_bytes: 1048576
 freshness: node_policy_generation
+collections:
+  - name: provided
+    from: /provided
+    key_field: name
+  - name: missing
+    from: /missing
+    key_field: name
+  - name: floor_met
+    from: /floor/met_by
+    key_field: label
+  - name: floor_unmet
+    from: /floor/unmet
+    key_field: label
+  - name: capacity
+    from: /capacity
+    key_field: name
