@@ -135,14 +135,21 @@ pub fn load_installed(state: &AppState) -> Result<InstalledThemes> {
         .kinds
         .get(THEME_KIND)
         .ok_or_else(|| HandlerError::Internal("the theme kind is not installed".into()))?;
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     let refs = ryeos_engine::item_resolution::enumerate_kind_refs(&roots, schema, THEME_KIND);
     let bodies = engine.with_checked_bundle_generation(|generation| -> Result<_> {
         let mut bodies = Vec::new();
         for item_ref in refs {
             let theme_ref = item_ref.to_string();
             let request = EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
                 expected_kind: Some(THEME_KIND.to_string()),
                 item_ref,
                 project_root: None,
