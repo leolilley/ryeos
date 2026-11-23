@@ -80,11 +80,13 @@ fn the_revision_changes_with_any_source_tip_and_with_the_filter() {
     for changed in [
         revision_of(
             "node_journal",
+            "auth",
             &[("journal", "a"), ("ledger", "b"), ("trust", "x")],
             "f",
         ),
         revision_of(
             "node_journal",
+            "auth",
             &[("journal", "x"), ("ledger", "b"), ("trust", "c")],
             "f",
         ),
@@ -92,6 +94,7 @@ fn the_revision_changes_with_any_source_tip_and_with_the_filter() {
         revision_of("threads", "auth", &tips, "f"),
         revision_of(
             "node_journal",
+            "auth",
             &[
                 ("journal", "a"),
                 ("ledger", "b"),
@@ -187,7 +190,7 @@ fn the_envelope_serializes_in_the_shared_shape() {
     assert_eq!(value["page"]["total_basis"], "exact");
     assert_eq!(value["signers"]["fp:ab"]["status"], "retired");
     assert!(value.get("record").is_none());
-    assert!(lillux::time::unix_secs_from_iso8601(value["as_of"].as_str().unwrap()).is_ok());
+    assert!(lillux::time::unix_secs_from_iso8601(value["as_of"].as_str().unwrap()).is_some());
 
     let single = ReadEnvelope::record(
         "ryeos.read.records.get/v1",
