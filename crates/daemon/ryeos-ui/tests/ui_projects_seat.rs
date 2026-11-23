@@ -27,6 +27,46 @@ async fn verified_operator_passes_projects_read_gate() {
 }
 
 #[tokio::test]
+async fn a_non_operator_seat_cannot_launch_into_a_project_root() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let project = tempfile::TempDir::new().expect("project");
+    let principal = format!("fp:{}", "ab".repeat(32));
+    // Even a project already recorded in the principal's own registry is not
+    // authority for a non-operator seat.
+    let state = Arc::new(state);
+    test_state::add_fixture_project(&state, project.path()).await;
+
+    let refused = ryeos_ui::handlers::ui_launch_mint::handle(
+        ryeos_ui::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+            root_ref: "config:ryeos/ui/presentation".into(),
+            project_path: Some(project.path().display().to_string()),
+            user_principal_id: Some(principal.clone()),
+            scopes: None,
+        },
+        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        state.clone(),
+    )
+    .await;
+    let error = match refused {
+        Ok(_) => panic!("a non-operator seat must not launch into a project root"),
+        Err(error) => error,
+    };
+    match ryeos_app::handler_error::extract_handler_error(&error) {
+        Some(ryeos_app::handler_error::HandlerError::Structured { code, status, .. }) => {
+            assert_eq!(code, "project_seat_requires_identity_cut");
+            assert_eq!(*status, 403);
+        }
+        other => panic!("expected the typed identity-cut refusal, got {other:?}: {error:#}"),
+    }
+    let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
+    assert!(
+        ui.browser_sessions.session_ids().is_empty(),
+        "a refused launch mints nothing"
+    );
+}
+
+#[tokio::test]
 async fn request_project_path_does_not_create_project_authority() {
     let (_tmp, _state_owner, state) = build_test_state();
     let requested = tempfile::TempDir::new().expect("request project");

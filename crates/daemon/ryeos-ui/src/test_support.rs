@@ -89,7 +89,8 @@ async fn live_presentation_in_project(
     let fixture_id = NEXT_FIXTURE_CONFIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let config_name = format!("test/presentation-{fixture_id}");
     write_fixture_bundle_item(state, &format!("config/{config_name}.yaml"), &body);
-    let principal = register_fixture_project(state, project_root).await;
+    let operator = operator_launch_context(state);
+    let principal = operator.fingerprint.clone();
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
@@ -98,7 +99,7 @@ async fn live_presentation_in_project(
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await
@@ -106,41 +107,17 @@ async fn live_presentation_in_project(
     claim_minted_presentation(state, &minted).await
 }
 
-/// Register `project_root` as the one project of the verified non-operator
-/// fixture principal, returning that principal.
-pub async fn register_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
-    let principal = format!("fp:{}", "ab".repeat(32));
-    let project_root = project_root.canonicalize().unwrap();
-    // This verified non-operator principal selects only its private, explicitly
-    // registered temporary project; no test touches the user's local registry.
-    let resolver =
-        ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
-    {
-        let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
-            .await
-            .unwrap();
-        store
-            .write_yaml(
-                &store.paths().projects_config(),
-                &crate::handlers::ui_projects::ProjectsFile {
-                    version: 1,
-                    projects: vec![crate::handlers::ui_projects::ProjectEntry {
-                        local_id: "prj_fixture".into(),
-                        name: "Fixture".into(),
-                        root: project_root.display().to_string(),
-                        added_at: lillux::time::iso8601_now(),
-                        tags: vec![],
-                    }],
-                },
-            )
-            .unwrap();
-    }
-    principal
+/// The node operator's launch authority: the context a project-bound launch
+/// mints under. A non-operator seat is refused project roots until the
+/// identity cut, so project-bound fixtures run as the configured operator.
+/// The project is not registered: the operator's registry is node-global and
+/// a launch only retains the directory it names.
+pub fn operator_launch_context(state: &AppState) -> ryeos_app::handler_context::HandlerContext {
+    local_operator_context(state, vec!["*".into()])
 }
 
 /// Append `project_root` to the verified non-operator fixture principal's
-/// private registry (beside the one `register_fixture_project` wrote) and
-/// return its local id. Seat registration through `projects/add` is a
+/// private registry and return its local id. Seat registration through `projects/add` is a
 /// local-operator act, so a non-operator fixture seeds its registry here.
 pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
     let principal = format!("fp:{}", "ab".repeat(32));
@@ -166,7 +143,7 @@ pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Pat
 }
 
 /// A presentation under the shipped shared Config bound to `project_root`,
-/// registered for a verified non-operator principal. Its dialogs carry the
+/// launched by the node operator. Its dialogs carry the
 /// real project registry and Surface affordances, and the session retains the
 /// pinned project directory.
 pub async fn live_shipped_presentation_in_project(
@@ -178,7 +155,8 @@ pub async fn live_shipped_presentation_in_project(
     ryeos_client_base::ui::UiPresentationProducer,
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
-    let principal = register_fixture_project(state, project_root).await;
+    let operator = operator_launch_context(state);
+    let principal = operator.fingerprint.clone();
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
@@ -187,7 +165,7 @@ pub async fn live_shipped_presentation_in_project(
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await
