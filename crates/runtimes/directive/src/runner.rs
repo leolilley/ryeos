@@ -914,6 +914,9 @@ pub struct Runner {
     resume_summary_trigger: Option<String>,
     /// What a `context_pressure` hook's action chooses between.
     pressure_hook: Option<PressureHook>,
+    /// Dispatches the observing hook events have made in the turn they were
+    /// last counted for, and whether the turn's cap was already warned about.
+    observed: ObservedHooks,
     /// The compaction's summary call in flight.
     summary_job: Option<SummaryJob>,
     /// No compaction is attempted before this many turns have been used: a
@@ -926,6 +929,31 @@ pub struct Runner {
     /// The compacted start of this thread is still over the continuation
     /// threshold: it compacts again before its first request.
     start_over_ceiling: bool,
+}
+
+/// The observing hook events' dispatch count for one turn.
+#[derive(Debug, Default)]
+struct ObservedHooks {
+    turn: u32,
+    dispatched: u32,
+    capped: bool,
+}
+
+impl ObservedHooks {
+    /// Count one more dispatch in `turn`; false once the turn's cap is spent.
+    fn admit(&mut self, turn: u32, cap: u32) -> bool {
+        if self.turn != turn {
+            *self = Self {
+                turn,
+                ..Self::default()
+            };
+        }
+        if self.dispatched >= cap {
+            return false;
+        }
+        self.dispatched += 1;
+        true
+    }
 }
 
 /// The two states a `context_pressure` hook chooses between.
@@ -2034,6 +2062,7 @@ impl Runner {
             refused_code: None,
             resume_summary_trigger: None,
             pressure_hook: None,
+            observed: ObservedHooks::default(),
             summary_job: None,
             compaction_retry_at_turn: 0,
             chain_depth: 0,
@@ -2296,6 +2325,168 @@ impl Runner {
             return OverflowRecovery::Exhausted;
         }
         OverflowRecovery::Allowed
+    }
+
+    /// The dispatcher a hook's action runs through: the hook's own action is
+    /// dispatched over the callback with the hook's dispatch identity.
+    fn hook_dispatcher(&self) -> ryeos_runtime::hooks_eval::HookDispatcher {
+        let callback = self.callback.clone();
+        let thread_id = self.thread_id.clone();
+        Box::new(move |action, _project_path, hook_dispatch| {
+            let cb = callback.clone();
+            let tid = thread_id.clone();
+            Box::pin(async move {
+                let payload =
+                    ryeos_runtime::callback::parse_hook_action(action).map_err(|message| {
+                        ryeos_runtime::callback::CallbackError::ActionFailed {
+                            code: "invalid_hook_action".to_string(),
+                            message,
+                            retryable: false,
+                        }
+                    })?;
+                let response = cb
+                    .dispatch_action(ryeos_runtime::callback::DispatchActionRequest {
+                        thread_id: tid,
+                        action: payload,
+                        hook_dispatch: Some(hook_dispatch),
+                        effect_dispatch: None,
+                    })
+                    .await?;
+                // Hooks run on the leaf result only —
+                // the parent-thread snapshot has no
+                // bearing on hook control flow.
+                normalize_hook_dispatch_result(response.result).map_err(|message| {
+                    ryeos_runtime::callback::CallbackError::ActionFailed {
+                        code: ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE.to_string(),
+                        message: message.to_string(),
+                        retryable: false,
+                    }
+                })
+            })
+        })
+    }
+
+    /// Fire `idle` for the idle finding's warning or stop.
+    async fn observe_idle(
+        &mut self,
+        turn: u32,
+        phase: &str,
+        config: &crate::directive::LoopGuardsConfig,
+    ) {
+        let event = json!({
+            "name": "idle",
+            "turn": turn,
+            "phase": phase,
+            "idle_turns": config.idle_turns,
+            "grace_turns": config.grace_turns,
+        });
+        self.observe_hooks("idle", turn, json!({"event": event}))
+            .await;
+    }
+
+    /// Fire `turn_incomplete` for a provider turn that ended without a usable
+    /// answer. `streak` is the length of the run of such turns the policy
+    /// counts, 0 when no policy counts it.
+    async fn observe_turn_incomplete(
+        &mut self,
+        turn: u32,
+        reason: &str,
+        outcome: &str,
+        streak: u32,
+    ) {
+        let event = json!({
+            "name": "turn_incomplete",
+            "turn": turn,
+            "reason": reason,
+            "outcome": outcome,
+            "streak": streak,
+        });
+        self.observe_hooks("turn_incomplete", turn, json!({"event": event}))
+            .await;
+    }
+
+    /// Fire `before_tool` for a call whose dispatch was just recorded.
+    /// `directive_return` is a lifecycle signal, not a tool, and has no event.
+    async fn observe_before_tool(&mut self, occurrence: &ToolOccurrence, batch_size: usize) {
+        if occurrence.call.name == DIRECTIVE_RETURN_TOOL {
+            return;
+        }
+        let event = json!({
+            "name": "before_tool",
+            "turn": occurrence.turn,
+            "tool": occurrence.call.name,
+            "call_id": occurrence.call.id.clone().unwrap_or_default(),
+            "index": occurrence.call_index,
+            "batch_size": batch_size,
+        });
+        self.observe_hooks("before_tool", occurrence.turn, json!({"event": event}))
+            .await;
+    }
+
+    /// Run the hooks declared for an observation-only event, inline. Nothing a
+    /// hook returns changes the run: a hook that fails, or whose cost violates
+    /// the accounting bounds, is warned about and the run goes on. With no hook
+    /// declared for the event nothing is dispatched or recorded. A turn that
+    /// has used its cap of observing dispatches skips the rest and warns once.
+    async fn observe_hooks(&mut self, event: &str, turn: u32, context: Value) {
+        if !self.hooks.iter().any(|hook| hook.event() == event) {
+            return;
+        }
+        let cap = self.execution.observing_hooks_per_turn;
+        if !self.observed.admit(turn, cap) {
+            if !std::mem::replace(&mut self.observed.capped, true) {
+                tracing::warn!(
+                    turn,
+                    cap,
+                    "observing hook dispatches for this turn are capped; the rest are skipped"
+                );
+            }
+            return;
+        }
+        let occurrence = ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "directive",
+            event,
+            self.definition_ref.clone(),
+            self.root_raw_content_digest.clone(),
+            self.effective_definition_digest.clone(),
+        )
+        .with_counter_coordinate("turn", turn);
+        let dispatcher = self.hook_dispatcher();
+        let hook_run = ryeos_runtime::hooks_eval::run_hooks(
+            occurrence,
+            &context,
+            &self.hooks,
+            "",
+            &dispatcher,
+        )
+        .await;
+        let cost = match &hook_run {
+            Ok(result) => result.cost.as_ref(),
+            Err(error) => error.cost.as_ref(),
+        };
+        if let Some(cost) = cost
+            && let Err(error) = self.budget.accumulate(cost)
+        {
+            tracing::warn!(%error, event, "observing hook cost violates accounting bounds; the run goes on");
+            return;
+        }
+        match hook_run {
+            Ok(result) => {
+                if let Err(error) = self
+                    .callback
+                    .append_runtime_event(
+                        RuntimeEventType::CognitionReasoning,
+                        json!({"hook_event": event, "hook_result": result.control}),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, event, "recording an observing hook's result failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, event, "observing hook failed; the run goes on")
+            }
+        }
     }
 
     fn pressure_occurrence(&self, turn: u32) -> ryeos_runtime::callback::HookDispatchOccurrence {
@@ -2614,7 +2805,7 @@ impl Runner {
     /// model has not been warned about gets a durable harness warning; the same
     /// finding still present `grace_turns` turns after its warning stops the run
     /// with the typed failure `loop_detected`. Returns the stop's error text.
-    async fn loop_guard_boundary(&mut self) -> Result<Option<String>, String> {
+    async fn loop_guard_boundary(&mut self, turn: u32) -> Result<Option<String>, String> {
         let config = self.execution.loop_guards.clone();
         if !config.enabled || self.resume_active_provider_turn.is_some() {
             return Ok(None);
@@ -2649,9 +2840,15 @@ impl Runner {
                         })?;
                     self.messages.push(ProviderMessage::user(text));
                     self.loop_warned.insert(finding.kind, turns);
+                    if finding.kind == crate::loop_guards::FindingKind::Idle {
+                        self.observe_idle(turn, "warned", &config).await;
+                    }
                     return Ok(None);
                 }
                 Some(warned_at) if turns >= warned_at + config.grace_turns => {
+                    if finding.kind == crate::loop_guards::FindingKind::Idle {
+                        self.observe_idle(turn, "stopped", &config).await;
+                    }
                     return Ok(Some(format!(
                         "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
                         finding.kind.code(),
@@ -2905,7 +3102,7 @@ impl Runner {
                             continue;
                         }
                     }
-                    match self.loop_guard_boundary().await {
+                    match self.loop_guard_boundary(turn).await {
                         Ok(None) => {}
                         Ok(Some(error)) => {
                             state = State::Errored { error };
@@ -4708,6 +4905,19 @@ impl Runner {
                                     .on_output_limit
                                     .as_ref()
                                     .map(|policy| policy.message.clone());
+                                let outcome = if message.is_some() && self.can_start_another_turn()
+                                {
+                                    "corrected"
+                                } else {
+                                    "failed"
+                                };
+                                self.observe_turn_incomplete(
+                                    turn,
+                                    "output_limit",
+                                    outcome,
+                                    self.consecutive_length_turns,
+                                )
+                                .await;
                                 match message {
                                     Some(message) if self.can_start_another_turn() => {
                                         let input = ryeos_runtime::CognitionInput::text(
@@ -4760,6 +4970,20 @@ impl Runner {
                                     max_consecutive = policy.max_consecutive,
                                     "provider reply is malformed"
                                 );
+                                let outcome = if streak <= policy.max_consecutive
+                                    && self.can_start_another_turn()
+                                {
+                                    "corrected"
+                                } else {
+                                    "failed"
+                                };
+                                self.observe_turn_incomplete(
+                                    turn,
+                                    "malformed_reply",
+                                    outcome,
+                                    streak,
+                                )
+                                .await;
                                 if streak <= policy.max_consecutive && self.can_start_another_turn()
                                 {
                                     let input = ryeos_runtime::CognitionInput::text(
@@ -4817,6 +5041,15 @@ impl Runner {
                                     max_consecutive = policy.max_consecutive,
                                     "provider reply is empty"
                                 );
+                                let outcome = if streak <= policy.max_consecutive
+                                    && self.can_start_another_turn()
+                                {
+                                    "corrected"
+                                } else {
+                                    "failed"
+                                };
+                                self.observe_turn_incomplete(turn, "empty_reply", outcome, streak)
+                                    .await;
                                 if streak <= policy.max_consecutive && self.can_start_another_turn()
                                 {
                                     let input = ryeos_runtime::CognitionInput::text(
@@ -4879,6 +5112,13 @@ impl Runner {
                                 }
                             } else {
                                 self.consecutive_empty_replies = 0;
+                                if self.last_reply_stopped && crate::directive::is_empty_reply(&msg)
+                                {
+                                    // No `empty_replies` policy: the empty reply
+                                    // is retried as it always was.
+                                    self.observe_turn_incomplete(turn, "empty_reply", "retried", 0)
+                                        .await;
+                                }
                                 State::CheckingContinuation
                             }
                         }
@@ -4921,6 +5161,7 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            self.observe_before_tool(&occurrence, pending.len()).await;
                             if tc.name != DIRECTIVE_RETURN_TOOL
                                 && !self.harness.tool_calls_available()
                             {
@@ -4955,7 +5196,13 @@ impl Runner {
                                 tool_deadline_elapsed_error(),
                             );
                             if let Err(error) = self
-                                .settle_tool_result(occurrence.operation_id, call_id, rendered)
+                                .settle_tool_result(
+                                    occurrence.operation_id,
+                                    call_id,
+                                    turn,
+                                    true,
+                                    rendered,
+                                )
                                 .await
                             {
                                 state = State::RecoveryRequired { error };
@@ -4978,7 +5225,13 @@ impl Runner {
                             let rendered =
                                 Self::rendered_error_envelope(&tool_name, tool_call_limit_error());
                             if let Err(error) = self
-                                .settle_tool_result(occurrence.operation_id, call_id, rendered)
+                                .settle_tool_result(
+                                    occurrence.operation_id,
+                                    call_id,
+                                    turn,
+                                    true,
+                                    rendered,
+                                )
                                 .await
                             {
                                 state = State::RecoveryRequired { error };
@@ -5024,6 +5277,7 @@ impl Runner {
                     // never reaches the daemon.
                     let local_report =
                         (tool_name == TIME_LEFT_TOOL).then(|| self.time_left_report());
+                    let mut refused = false;
                     let tool_result: RenderedToolResult = match local_report {
                         Some(report) => self.rendered_success(&tool_name, &report),
                         None => match self
@@ -5059,12 +5313,15 @@ impl Runner {
                                     callback_error_envelope(&e),
                                 ),
                             },
-                            Err(body) => Self::rendered_error_envelope(&tool_name, body),
+                            Err(body) => {
+                                refused = true;
+                                Self::rendered_error_envelope(&tool_name, body)
+                            }
                         },
                     };
 
                     if let Err(error) = self
-                        .settle_tool_result(operation_id, call_id, tool_result)
+                        .settle_tool_result(operation_id, call_id, turn, refused, tool_result)
                         .await
                     {
                         state = State::RecoveryRequired { error };
@@ -5132,6 +5389,7 @@ impl Runner {
                                 ));
                                 break;
                             }
+                            self.observe_before_tool(occurrence, pending.len()).await;
                             if tc.name != DIRECTIVE_RETURN_TOOL
                                 && !self.harness.tool_calls_available()
                             {
@@ -5263,8 +5521,10 @@ impl Runner {
                     for (index, (operation_id, call_id, tool_name, work)) in
                         prepared.into_iter().enumerate()
                     {
+                        let mut refused = false;
                         let rendered = match work {
                             BatchWork::Immediate(body) => {
+                                refused = true;
                                 Self::rendered_error_envelope(&tool_name, body)
                             }
                             BatchWork::Local(report) => self.rendered_success(&tool_name, &report),
@@ -5297,6 +5557,7 @@ impl Runner {
                                     .unwrap_or_else(|_| {
                                         "{\"error\":\"not dispatched\"}".to_string()
                                     });
+                                    refused = true;
                                     Self::rendered_error_envelope(&tool_name, body)
                                 }
                                 None => {
@@ -5308,7 +5569,7 @@ impl Runner {
                             },
                         };
                         if let Err(error) = self
-                            .settle_tool_result(operation_id, call_id, rendered)
+                            .settle_tool_result(operation_id, call_id, turn, refused, rendered)
                             .await
                         {
                             recovery_required.get_or_insert(error);
@@ -5467,8 +5728,14 @@ impl Runner {
 
                 State::SettlingOwedSiblings { siblings } => {
                     let mut recovery_required = None;
+                    let batch_size = siblings
+                        .last()
+                        .map_or(0, |last| last.call_index.saturating_add(1));
                     for sibling in &siblings {
-                        if let Err(error) = self.refuse_sibling_of_failed_return(sibling).await {
+                        if let Err(error) = self
+                            .refuse_sibling_of_failed_return(sibling, batch_size)
+                            .await
+                        {
                             recovery_required = Some(error);
                             break;
                         }
@@ -5491,45 +5758,7 @@ impl Runner {
                     } else {
                         None
                     };
-                    let callback = self.callback.clone();
-                    let thread_id = self.thread_id.clone();
-
-                    let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher =
-                        Box::new(move |action, _project_path, hook_dispatch| {
-                            let cb = callback.clone();
-                            let tid = thread_id.clone();
-                            Box::pin(async move {
-                                let payload = ryeos_runtime::callback::parse_hook_action(action)
-                                    .map_err(|message| {
-                                        ryeos_runtime::callback::CallbackError::ActionFailed {
-                                            code: "invalid_hook_action".to_string(),
-                                            message,
-                                            retryable: false,
-                                        }
-                                    })?;
-                                let response = cb
-                                    .dispatch_action(
-                                        ryeos_runtime::callback::DispatchActionRequest {
-                                            thread_id: tid,
-                                            action: payload,
-                                            hook_dispatch: Some(hook_dispatch),
-                                            effect_dispatch: None,
-                                        },
-                                    )
-                                    .await?;
-                                // Hooks run on the leaf result only —
-                                // the parent-thread snapshot has no
-                                // bearing on hook control flow.
-                                normalize_hook_dispatch_result(response.result).map_err(|message| {
-                                    ryeos_runtime::callback::CallbackError::ActionFailed {
-                                        code: ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
-                                            .to_string(),
-                                        message: message.to_string(),
-                                        retryable: false,
-                                    }
-                                })
-                            })
-                        });
+                    let dispatcher = self.hook_dispatcher();
 
                     let hook_run = ryeos_runtime::hooks_eval::run_hooks(
                         occurrence,
@@ -6380,6 +6609,7 @@ impl Runner {
     async fn refuse_sibling_of_failed_return(
         &mut self,
         occurrence: &ToolOccurrence,
+        batch_size: usize,
     ) -> Result<(), String> {
         let tc = &occurrence.call;
         if !occurrence.start_recorded {
@@ -6395,12 +6625,15 @@ impl Runner {
                 })
                 .await
                 .map_err(|e| format!("resume-critical callback emit_tool_dispatch failed: {e}"))?;
+            self.observe_before_tool(occurrence, batch_size).await;
         }
         let rendered =
             Self::rendered_error_envelope(&tc.name, tool_not_run_after_failed_return_error());
         self.settle_tool_result(
             occurrence.operation_id.clone(),
             tc.id.clone().unwrap_or_default(),
+            occurrence.turn,
+            true,
             rendered,
         )
         .await
@@ -6414,6 +6647,8 @@ impl Runner {
         &mut self,
         operation_id: String,
         call_id: String,
+        turn: u32,
+        refused: bool,
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
         let mut rendered = rendered;
@@ -6485,6 +6720,26 @@ impl Runner {
         }
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
         self.messages.push(payload.message());
+        let status = if refused {
+            "refused"
+        } else if rendered.status == ToolResultStatus::Ok {
+            "ok"
+        } else {
+            "error"
+        };
+        let event = json!({
+            "name": "after_tool",
+            "turn": turn,
+            "tool": rendered.tool,
+            "call_id": call_id,
+            "status": status,
+            "raw_size": rendered.raw_size,
+            "truncated": rendered.truncated,
+            "spilled": rendered.spilled.is_some(),
+            "duplicate": rendered.duplicate_of.is_some(),
+        });
+        self.observe_hooks("after_tool", turn, json!({"event": event}))
+            .await;
         Ok(())
     }
 
@@ -10743,7 +10998,7 @@ mod tests {
         record_same_turn(&store, &mut runner, 1);
         record_same_turn(&store, &mut runner, 2);
         // Two turns that only repeat what was seen: warned, at turn count 2.
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&2));
         // The deadline notice is given too.
         let notice = ryeos_runtime::CognitionInput::text("harness", "Deadline notice")
@@ -10797,13 +11052,13 @@ mod tests {
             Some(&2)
         );
         // Still found, not warned afresh, and not stopped yet.
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
         runner.messages.push(ProviderMessage::new(
             ryeos_provider_contract::Role::Assistant,
             vec![Part::text("same")],
         ));
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         // Two turns after the compaction (history of 7 = 2 + grace) the run is
         // stopped: the same two turns it had left without the compaction.
         runner.messages.push(ProviderMessage::new(
@@ -10811,7 +11066,7 @@ mod tests {
             vec![Part::text("same")],
         ));
         let stop = runner
-            .loop_guard_boundary()
+            .loop_guard_boundary(1)
             .await
             .unwrap()
             .expect("stopped");
@@ -10892,10 +11147,10 @@ mod tests {
         for index in 1..=4 {
             push_turn(&mut runner, index, "read", "same");
         }
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         // The fifth identical turn crosses the repeat threshold.
         push_turn(&mut runner, 5, "read", "same");
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         let appended = mock.recorded("append_event");
         assert_eq!(appended.len(), 1);
         assert_eq!(appended[0]["payload"]["kind"], "loop_warning_repetition");
@@ -10910,12 +11165,12 @@ mod tests {
         );
         // Not repeated while the grace turns run.
         push_turn(&mut runner, 6, "read", "same");
-        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         assert_eq!(mock.recorded("append_event").len(), 1);
         // Two turns after the warning (grace_turns = 2) the run is stopped.
         push_turn(&mut runner, 7, "read", "same");
         let stop = runner
-            .loop_guard_boundary()
+            .loop_guard_boundary(1)
             .await
             .unwrap()
             .expect("stopped");
@@ -10931,13 +11186,13 @@ mod tests {
         for index in 1..=5 {
             push_turn(&mut runner, index, "read", "same");
         }
-        runner.loop_guard_boundary().await.unwrap();
+        runner.loop_guard_boundary(1).await.unwrap();
         // Different calls with new results: the repetition is out of the window
         // eventually; here a different tool starts, the count of the same
         // call stays at five, so keep going until it leaves the window.
         for index in 6..=24 {
             push_turn(&mut runner, index, "write", &format!("new{index}"));
-            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+            assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         }
     }
 
@@ -10948,7 +11203,7 @@ mod tests {
         runner.execution.loop_guards.enabled = false;
         for index in 1..=20 {
             push_turn(&mut runner, index, "read", "same");
-            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+            assert_eq!(runner.loop_guard_boundary(1).await.unwrap(), None);
         }
         assert!(mock.recorded("append_event").is_empty());
     }
