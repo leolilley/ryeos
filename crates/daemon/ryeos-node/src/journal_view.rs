@@ -12,7 +12,10 @@
 //! does not cover (`at_basis = recorded_by_node`: trust events).
 //!
 //! `actor` is a key fingerprint. Its basis says what stands behind it: an
-//! operator's signature over the request (`operator_signature`), the
+//! operator's signature over the request, checked when the node applied it
+//! (`operator_signature_checked_at_apply`; the receipt carries the request
+//! but not its signer's key, and an authorization reset can discard the
+//! grant that held it, so the read does not check it again), the
 //! daemon's statement of who authenticated (`daemon_attestation`), or the
 //! operator a node-signed trust event names (`recorded_by_node`).
 
@@ -77,7 +80,7 @@ pub enum AtBasis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorBasis {
-    OperatorSignature,
+    OperatorSignatureCheckedAtApply,
     DaemonAttestation,
     RecordedByNode,
 }
@@ -238,7 +241,7 @@ pub fn receipt_rows(
                 before_ref: result_ref(&body.result, "before_ref"),
                 after_ref: result_ref(&body.result, "after_ref"),
                 actor: Some(request.signer_fingerprint),
-                actor_basis: Some(ActorBasis::OperatorSignature),
+                actor_basis: Some(ActorBasis::OperatorSignatureCheckedAtApply),
                 attested_by: Some("node".to_owned()),
                 detail: BTreeMap::from([("operation".to_owned(), json!(request.operation))]),
                 sequence: body.sequence,
