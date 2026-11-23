@@ -22,6 +22,9 @@ use ryeos_app::state::AppState;
 use ryeos_engine::trust::{EndorsementIndex, EndorsementLedger, EndorsementTarget};
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::item_revision::{self, ActorRole, ChainItem, RevisionHeads, TipSummary};
+use ryeos_state::project_identity::{
+    PROJECT_DECLARATION_PATH, ProjectDeclaration, ProjectIdentity,
+};
 use serde_json::{Value, json};
 
 use crate::handler_error::{HandlerError, HandlerResult};
@@ -51,6 +54,25 @@ fn refusal(code: &str, status: u16, detail: impl Into<String>) -> HandlerError {
         status,
         body: json!({ "code": code, "error": detail }),
     }
+}
+
+/// A refusal carrying the code the first cause of `error` leads with (the
+/// `code: detail` shape identity and owner refusals take), or `fallback`
+/// when no cause names one.
+fn coded_refusal(error: anyhow::Error, fallback: &str, status: u16) -> HandlerError {
+    let code = error
+        .chain()
+        .find_map(|cause| {
+            let text = cause.to_string();
+            let (code, _) = text.split_once(':')?;
+            (!code.is_empty()
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+            .then(|| code.to_owned())
+        })
+        .unwrap_or_else(|| fallback.to_owned());
+    refusal(&code, status, format!("{error:#}"))
 }
 
 fn require_operator_call(ctx: &HandlerContext) -> HandlerResult<()> {
@@ -125,11 +147,34 @@ fn recorded_changes(
     Ok(events)
 }
 
+/// The project identity an endorsement by `caller` names for the checkout at
+/// `root`: the principal the node registry resolves the caller's key to, and
+/// the checkout's declared name, as `ryeos endorse` derives it.
+fn endorsed_project(state: &AppState, root: &Path, caller: &str) -> HandlerResult<ProjectIdentity> {
+    let name = ProjectDeclaration::declared_name(root)
+        .map_err(|error| coded_refusal(error, "project_manifest_name_invalid", 409))?
+        .ok_or_else(|| {
+            refusal(
+                "project_manifest_missing",
+                409,
+                format!(
+                    "{} has no {}; a project's name is the `name:` of its manifest",
+                    root.display(),
+                    PROJECT_DECLARATION_PATH
+                ),
+            )
+        })?;
+    let owner = ryeos_app::project_owner::owner_principal(state, caller)
+        .map_err(|error| coded_refusal(error, "owner_key_not_active", 403))?;
+    Ok(ProjectIdentity::new(owner, name))
+}
+
 /// The events for the items a recorded, in-force endorsement covers.
 fn endorsed_changes(
     state: &AppState,
     root: &Path,
     project: &str,
+    caller: &str,
     digest: &str,
 ) -> HandlerResult<Vec<ItemRevised>> {
     let ledger = EndorsementLedger::load(&state.config.app_root, state.identity.verifying_key())
@@ -141,9 +186,10 @@ fn endorsed_changes(
             "the endorsement was withdrawn",
         ));
     }
+    let identity = endorsed_project(state, root, caller)?;
     let index: Arc<EndorsementIndex> = state.engine.trust_store.endorsement_index();
     let Some((_, body)) = index
-        .for_project(project)
+        .for_project(&identity)
         .find(|(candidate, _)| *candidate == digest)
     else {
         return Err(refusal(
@@ -204,10 +250,11 @@ pub async fn handle(
         ));
     }
     let work_state = state.clone();
+    let caller = ctx.fingerprint.clone();
     let events = tokio::task::spawn_blocking(move || {
         let (root, project) = project_root(&req.project_path)?;
         match req.endorsement.as_deref() {
-            Some(digest) => endorsed_changes(&work_state, &root, &project, digest),
+            Some(digest) => endorsed_changes(&work_state, &root, &project, &caller, digest),
             None => recorded_changes(&work_state, &root, &project, &req.item_refs),
         }
     })

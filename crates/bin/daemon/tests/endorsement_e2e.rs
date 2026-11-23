@@ -62,6 +62,17 @@ async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project:
     h.respawn_with(|_| {}).await.expect("restart the daemon");
 }
 
+/// Give `project` a manifest declaring `name`.
+fn declare_name(project: &Path, name: &str) {
+    let ai = project.join(".ai");
+    std::fs::create_dir_all(&ai).expect("project .ai directory");
+    std::fs::write(ai.join("manifest.yaml"), format!("name: {name}\n")).expect("project manifest");
+}
+
+fn canonical(path: &Path) -> String {
+    path.canonicalize().unwrap().to_str().unwrap().to_owned()
+}
+
 fn envelope() -> SignatureEnvelope {
     SignatureEnvelope {
         prefix: "<!--".to_owned(),
@@ -323,16 +334,11 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
 async fn recording_an_endorsement_announces_the_items_it_covers() {
     let (h, fixture) = start().await;
     let project = tempfile::tempdir().expect("project");
+    declare_name(project.path(), PROJECT_NAME);
     let digest = plant_note(project.path(), "one", &fixture.authoring);
-    let project_path = project
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_owned();
+    let project_path = canonical(project.path());
 
-    let (status, recorded) = endorse_items(&h, &fixture.user, project.path(), &digest).await;
+    let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
     assert_eq!(status, 200, "{recorded:#}");
     let endorsement = recorded["result"]["endorsement_digest"]
         .as_str()
@@ -350,6 +356,36 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     assert_eq!(items.len(), 1, "{announced:#}");
     assert_eq!(items[0]["item_ref"], KNOWLEDGE_REF, "{announced:#}");
     assert_eq!(items[0]["digest"], json!(digest), "{announced:#}");
+
+    // The endorsement is found under the identity the checkout states, never
+    // by the path the caller names: a checkout that declares no name, or
+    // declares another name, announces nothing for it.
+    let unnamed = tempfile::tempdir().expect("unnamed project");
+    std::fs::create_dir_all(unnamed.path().join(".ai")).expect("unnamed .ai");
+    let (status, refused) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": canonical(unnamed.path()), "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 409, "{refused:#}");
+    assert!(
+        refused.to_string().contains("project_manifest_missing"),
+        "{refused:#}"
+    );
+    let other = tempfile::tempdir().expect("other project");
+    declare_name(other.path(), "other-project");
+    let (status, refused) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": canonical(other.path()), "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 404, "{refused:#}");
+    assert!(
+        refused.to_string().contains("endorsement_not_in_force"),
+        "{refused:#}"
+    );
 
     // A digest the ledger does not hold announces nothing.
     let (status, unknown) = service(
