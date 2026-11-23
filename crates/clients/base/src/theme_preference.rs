@@ -133,9 +133,7 @@ impl ThemePalette {
     }
 }
 
-/// The body of a signed `theme` item. `content` and `voice` are reserved for
-/// what a theme will say and how; nothing reads them yet and they are carried
-/// through untouched.
+/// The body of a signed `theme` item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeBody {
@@ -148,10 +146,6 @@ pub struct ThemeBody {
     /// The picture drawn behind a named Surface, by Surface ref.
     #[serde(default)]
     pub surface_grounds: BTreeMap<String, PictureBinding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice: Option<serde_json::Value>,
 }
 
 impl ThemeBody {
@@ -180,11 +174,6 @@ impl ThemeBody {
         for key in self.surface_grounds.keys() {
             if !is_surface_ref(key) {
                 return Err(format!("surface ground key `{key}` is not a surface ref"));
-            }
-        }
-        for object in [&self.content, &self.voice].into_iter().flatten() {
-            if !object.is_object() {
-                return Err("theme content and voice must be mappings".to_string());
             }
         }
         Ok(())
@@ -416,8 +405,7 @@ mod tests {
             "palette": {"bg": "#060708", "ink": "#f3f1ec", "accent": "#fe8019",
                         "good": "#9ccf8a", "warn": "#f2c24f", "danger": "#f0604d"},
             "grounds": {"project": [{"picture": "picture:ryeos/a", "role": "card"}]},
-            "surface_grounds": {"surface:ryeos/ui/lens": {"picture": "picture:ryeos/a"}},
-            "voice": {}
+            "surface_grounds": {"surface:ryeos/ui/lens": {"picture": "picture:ryeos/a"}}
         });
         let body: ThemeBody = serde_json::from_value(ok.clone()).unwrap();
         body.validate("night").unwrap();
@@ -433,11 +421,15 @@ mod tests {
                 v["grounds"] = serde_json::json!({"Project": [{"picture": "picture:ryeos/a"}]})
             }),
             mutate(&|v| v["grounds"] = serde_json::json!({"project": []})),
-            mutate(&|v| v["voice"] = serde_json::json!("loud")),
         ];
         for bad in bad_bodies {
             let parsed: ThemeBody = serde_json::from_value(bad).unwrap();
             assert!(parsed.validate("night").is_err());
+        }
+        for reserved in ["content", "voice"] {
+            let mut extra = ok.clone();
+            extra[reserved] = serde_json::json!({});
+            assert!(serde_json::from_value::<ThemeBody>(extra).is_err());
         }
         let mut surface = ok.clone();
         surface["surface_grounds"] =

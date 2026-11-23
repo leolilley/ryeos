@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:22:30Z:dd33e42ef31fdd1ebd4f8d2bb23216071e0dbdd06b1a87875ee3892b8c28264f:Hl1P191MwoQv+EA0i/iYqWGP9i2GndJg6h2UixvLnSu04pvhw7M4bqK+5+Eiv67+gBbbip5SS/knC9ZaIsykAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T21:25:55Z:0ba0df29ced7af3af5aebd6efec4c39bd47aace1d76b0ffeae7ef7a7991ebc7e:qlL8IybLdOLCTzRcEb2OpSCa/CR/J5WZ8GWog4reFadF1VjzNBU8LoJhZm8yQTKF79/5EOY47Z3jWWdp6FAYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/theme"
 version: "1.0.0"
 # A project file may not take the ref of a theme an installed bundle
@@ -30,10 +30,6 @@ formats:
 #   surface_grounds
 #                 the picture drawn behind a named Surface:
 #                 `<surface ref>: {picture, role?}`
-#   content, voice
-#                 reserved for what a theme will say and how it will say it.
-#                 Nothing reads them yet; they are accepted so a theme can
-#                 gain them as data without a change to this contract
 #
 # A picture is named by its `picture:` item ref and an optional rendition
 # role, never by hash: the daemon resolves the ref to the signed picture
@@ -60,8 +56,6 @@ composed_value_contract:
   optional:
     grounds: { type: single, prim: mapping }
     surface_grounds: { type: single, prim: mapping }
-    content: { type: single, prim: mapping }
-    voice: { type: single, prim: mapping }
 metadata:
   rules:
     name:

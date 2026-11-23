@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:22:30Z:09eeaf45578bb906be6d7b05933f8cb00eee2755f1d122179ea56bd8678eea32:3YLfzyk0bD9Y0JkCeE/ZHRAVT/LCg+X1sj2IlxrQjpDdFrbDd9MkZU1XU7YeYYcANxDhuczbQ4PqhUD3P9ykCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T21:25:55Z:9811fca06fb81821f404fb761108b5b77c049ee8d33ff05425a9a88cf7e65a15:XMiLxs7lCVCqke/iobcxaT9zFIEIKLXH39Ph4Nif2PrjycvRauuZV0r1mtiu4XdbBThH7kRR5NCIxJtsqN5pAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, theme, ui]
@@ -29,7 +29,6 @@ palette of its own.
 | `palette` | Six `#rrggbb` colours: `bg`, `ink`, `accent`, `good`, `warn`, `danger`. Every other colour a renderer draws is `ink` or `bg` at an opacity step. |
 | `grounds` | Pictures for a subject that has none of its own, by slot: `<slot>: [{picture, role?}]`. A slot is an opaque lowercase word that a view's `art_slot` meets by string equality. A subject takes the entry at `sha256(subject key) mod list length` (the digest read as a big-endian number), so a record keeps its picture across sessions and across nodes with the same theme. |
 | `surface_grounds` | The picture drawn behind a named Surface: `<surface ref>: {picture, role?}`, for example `surface:ryeos/ui/lens`. |
-| `content`, `voice` | Reserved, optional mappings for what a theme says and how it says it. Nothing reads them yet; they are accepted so a theme can gain them as data without a change to this contract. |
 
 A picture is named by its `picture:` item ref and an optional rendition `role`,
 never by hash. The daemon resolves the ref to the signed picture record and
