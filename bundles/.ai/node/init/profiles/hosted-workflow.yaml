@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:22:30Z:6c6be632ec95875621ed7fd2d373db436f9da14137cdf99604a16d0dddc509bb:nMZZslCpgP69Lk3NPlfK58gwl6Dz+WBwk9r5hHX9DGlkOOQ6IsW3VshkpT2agMrqVQLyXLk+vRuN2/I4Od6YAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T07:47:34Z:91e34b4a9f3925fbb5795af2e64428e5d70990185d629a0b0d6ef03e4ea813bd:bt/WflnETnburfeOuEHzH9OrdvFP2D+ES5YTLLwWiCuD77d6zluGozCowq2CFGgLlaeqpIs/mEFTuhDIBqIyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -188,6 +188,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
@@ -450,7 +451,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 6
+    schema: 5
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -460,8 +461,6 @@ policies:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.events/chain_replay
-      - ryeos.execute.service.projects/add
-      - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input
       - ryeos.execute.service.commands/dispatch
       - ryeos.execute.service.commands/submit
@@ -479,12 +478,10 @@ policies:
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log
-      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
-    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16
@@ -686,9 +683,12 @@ policies:
           - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints. Thread lifecycle hints keep
-      # the thread, its event name, status and time. Activity hints keep only
-      # their kind, so no thread list rides on them.
+      # The session stream carries thread hints and item hints. Thread
+      # lifecycle hints keep the thread, its event name, status and time.
+      # Activity hints keep only their kind, so no thread list rides on them.
+      # An item hint keeps the item ref, digest, revision and change set id;
+      # the daemon sends it only to a session whose own bindings name that
+      # item, and it carries no item content.
       - target: route:ui/events/session
         classes: [local_operator, hosted_principal]
         keep:
@@ -698,6 +698,10 @@ policies:
           - /payload/event_type
           - /payload/status
           - /payload/updated_at
+          - /payload/item_ref
+          - /payload/digest
+          - /payload/revision
+          - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
       # The pending approvals of a hosted work chain, as the Approvals view

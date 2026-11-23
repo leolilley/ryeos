@@ -241,12 +241,11 @@ pub use host_capability::{
     ImmutableRootFacts, LocalityObservation, MAX_CAPABILITY_ENTRIES, MAX_CAPABILITY_NAME_BYTES,
     MAX_CAPABILITY_TEXT_BYTES, MAX_IMMUTABLE_ROOT_DEPTH, MAX_IMMUTABLE_ROOT_FILES, MemlockFacts,
     PERSISTENCE_DURABLE_STATE, PID_NAMESPACE_PROVIDER, PrivateDirectoryFacts, ProbeOutcome,
-    ProcessCredentialFacts, ProofSource, QUIESCENCE_PID_NAMESPACE, RECOVERY_ENCLOSURE,
-    RECOVERY_ENCLOSURE_TRUSTED_INIT, RECOVERY_PID_NAMESPACE, RESIDENCY_CAPABILITIES,
-    RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof,
-    RootStorageFacts, SCOPE_LIMITS, STORAGE_DURABLE_ROOT, STORAGE_IMMUTABLE_ROOT,
-    TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_PID_NAMESPACE,
-    admit_enclosure_inits, admit_immutable_root_proof, current_host_generation,
+    ProcessCredentialFacts, ProofSource, QUIESCENCE_PID_NAMESPACE, RECOVERY_ENCLOSURE_TRUSTED_INIT,
+    RECOVERY_PID_NAMESPACE, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT,
+    RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS, STORAGE_DURABLE_ROOT,
+    STORAGE_IMMUTABLE_ROOT, TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_PID_NAMESPACE,
+    admit_enclosure_inits, admit_immutable_root_proof, ascending_refusal, current_host_generation,
     decide_durable_root, decide_durable_state, decide_immutable_root, decide_private_directory,
     floor_entry_refusal, host_kernel_is_gvisor, immutable_root_requirement, is_scope_capability,
     is_weaker_grade, kernel_version_is_gvisor, met_by_strongest, satisfies,
@@ -1992,7 +1991,17 @@ mod linux {
     }
 
     pub(super) fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
-        let raw = std::fs::read(format!("/proc/{pid}/stat"))?;
+        // A task that exits while its stat file is being read fails the read
+        // with ESRCH, which std does not classify as NotFound. Report it as
+        // the same absence an already-gone entry gives, so callers that skip
+        // vanished members handle both.
+        let raw = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(raw) => raw,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, error));
+            }
+            Err(error) => return Err(error),
+        };
         let fields = crate::process_control::proc_stat_fields_after_comm(&raw)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let state = fields
@@ -2033,7 +2042,12 @@ mod linux {
     pub(super) fn thread_group_of(pid: u32) -> Option<Result<u32, String>> {
         let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
             Ok(status) => status,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return None;
+            }
             Err(error) => return Some(Err(format!("read /proc/{pid}/status: {error}"))),
         };
         Some(
@@ -2189,6 +2203,19 @@ mod contained_identity_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A reaped child's pid answers neither `/proc/<pid>/stat` nor
+    /// `/proc/<pid>/status`; both reads report absence, never a procfs error.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_pid_is_absent_from_procfs_reads() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let error = super::linux::read_process_stat(pid).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(super::linux::thread_group_of(pid).is_none());
+    }
+
     #[test]
     fn fixed_process_digest_matches_canonical_protocol() {
         use sha2::Digest;

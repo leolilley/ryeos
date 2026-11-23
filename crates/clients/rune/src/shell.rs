@@ -4,6 +4,7 @@
 
 use rune::{El, Key, KeyEvent, ScrollSpec, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
     RyeOsChipMarkVm, RyeOsDialogVm, RyeOsEdgeVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
@@ -488,7 +489,7 @@ fn switcher_band(vm: &RyeOsViewModel, local: &Local) -> El {
 }
 
 /// A tag in the top switcher.
-const TAG_HEIGHT: f32 = 24.0;
+const TAG_HEIGHT: f32 = LAYOUT.px.shell.tag_height;
 
 /// One open Surface as a tag in the top switcher: number, name and its work
 /// dot. The current one is filled; pressing it twice renames it.
@@ -719,7 +720,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
 }
 
 /// How far the tab group fades at an edge where tabs run out of view.
-const TABS_FADE: f32 = 24.0;
+const TABS_FADE: f32 = LAYOUT.px.shell.tabs_fade;
 
 /// The inline name field with save and cancel; Escape cancels.
 /// An inline rename; when it closes, focus returns to the `trigger` slot's first control.
@@ -867,11 +868,11 @@ struct Splits<'a> {
 /// The room a window gives the tiles' row before the tiles: both sides'
 /// margins, and so an estimate of a tile's width. Tables use the estimate to
 /// decide which columns fit.
-const SIDE_RESERVE: f32 = 32.0;
+const SIDE_RESERVE: f32 = LAYOUT.px.shell.side_reserve;
 
 /// The least width a pane keeps beside another: a tile is read whole, and
 /// one the window has no room for is clipped rather than squeezed.
-const MIN_PANE: f32 = 400.0;
+const MIN_PANE: f32 = LAYOUT.px.shell.min_pane;
 
 /// The least width a layout node keeps: side by side, panes add up with the
 /// divider; stacked, the widest counts.
@@ -914,7 +915,7 @@ fn split_key(path: &[SplitBranch]) -> String {
 }
 
 /// The keyboard step of a focused divider.
-const SPLIT_STEP: f32 = 0.05;
+const SPLIT_STEP: f32 = LAYOUT.px.shell.split_step;
 
 /// The drag and keyboard handle between a split's panes. A drag previews
 /// the ratio and commits once on release; keys commit each step.
@@ -1008,7 +1009,7 @@ fn divider(
 /// A split divider's thickness, which is the gap between tiles, and the gap
 /// either side of it.
 const DIVIDER: f32 = theme::GAP_TILE;
-const SPLIT_GAP: f32 = 0.0;
+const SPLIT_GAP: f32 = LAYOUT.px.shell.split_gap;
 
 /// Whether the set's current tile is under `node`.
 fn holds_focus(node: &RyeOsLayoutNodeVm) -> bool {
@@ -1341,7 +1342,7 @@ fn status_bar(vm: &RyeOsViewModel, edges: Edges, narrow: bool) -> El {
 }
 
 /// How many key hints a narrow window keeps.
-const NARROW_HINTS: usize = 4;
+const NARROW_HINTS: usize = LAYOUT.px.shell.narrow_hints;
 
 fn notices(
     notices: &[RyeOsNoticeVm],
@@ -1784,15 +1785,15 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
 
 /// The composer's box: its widest, its padding, the gap between its input and
 /// its strip, and its fill as an opacity of `bg`.
-const COMPOSER_COLUMN: f32 = 720.0;
-const COMPOSER_PAD: f32 = 14.0;
-const COMPOSER_GAP: f32 = 16.0;
-const COMPOSER_FILL: f32 = 0.55;
+const COMPOSER_COLUMN: f32 = LAYOUT.px.shell.composer_column;
+const COMPOSER_PAD: f32 = LAYOUT.px.shell.composer_pad;
+const COMPOSER_GAP: f32 = LAYOUT.px.shell.composer_gap;
+const COMPOSER_FILL: f32 = LAYOUT.px.shell.composer_fill;
 /// A chip in the strip, and the send button's diameter.
-const CHIP_HEIGHT: f32 = 24.0;
-const SEND_SIZE: f32 = 30.0;
+const CHIP_HEIGHT: f32 = LAYOUT.px.shell.chip_height;
+const SEND_SIZE: f32 = LAYOUT.px.shell.send_size;
 /// A pending draft's chip: its border as an opacity of `accent`, and its dot.
-const PENDING_BORDER: f32 = 0.6;
-const PENDING_DOT: f32 = 5.0;
+const PENDING_BORDER: f32 = LAYOUT.px.shell.pending_border;
+const PENDING_DOT: f32 = LAYOUT.px.shell.pending_dot;
 /// The filter line's height.
-const FILTER_HEIGHT: f32 = 30.0;
+const FILTER_HEIGHT: f32 = LAYOUT.px.shell.filter_height;

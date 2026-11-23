@@ -544,7 +544,9 @@ pub fn prepare_current_guest_owner_runtime(
 
     state.engine.with_checked_bundle_generation(|generation| {
         let resolution = generation.effective_resolution_output(EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             item_ref: canonical,
             expected_kind: Some("config".into()),
             project_root: None,

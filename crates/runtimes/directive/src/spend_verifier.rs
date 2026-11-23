@@ -352,6 +352,8 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         }
     }

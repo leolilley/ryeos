@@ -99,6 +99,12 @@ impl Harness {
         self.interrupted.swap(false, Ordering::Relaxed)
     }
 
+    /// Whether the next turn is the last the turn limit allows. With a limit of
+    /// one, that is the first turn.
+    pub fn final_turn_next(&self) -> bool {
+        self.limits.turns > 0 && self.turns_used.saturating_add(1) == self.limits.turns
+    }
+
     pub fn check_limits(&self) -> Result<(), String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err("cancelled".to_string());
@@ -106,21 +112,21 @@ impl Harness {
 
         if self.limits.turns > 0 && self.turns_used >= self.limits.turns {
             return Err(format!(
-                "turn limit exceeded: {} >= {}",
+                "turn_limit_exceeded: {} >= {}",
                 self.turns_used, self.limits.turns
             ));
         }
 
         if self.limits.tokens > 0 && self.tokens_used >= self.limits.tokens {
             return Err(format!(
-                "token limit exceeded: {} >= {}",
+                "token_limit_exceeded: {} >= {}",
                 self.tokens_used, self.limits.tokens
             ));
         }
 
         if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded: ${} >= ${}",
+                "spend_limit_exceeded: ${} >= ${}",
                 self.spend_used.to_canonical_string(),
                 self.limits.spend_usd.to_canonical_string()
             ));
@@ -128,7 +134,7 @@ impl Harness {
 
         if self.limits.spawns > 0 && self.spawns_used >= self.limits.spawns {
             return Err(format!(
-                "spawn limit exceeded: {} >= {}",
+                "spawn_limit_exceeded: {} >= {}",
                 self.spawns_used, self.limits.spawns
             ));
         }
@@ -137,7 +143,7 @@ impl Harness {
             let elapsed = self.start.elapsed().as_secs();
             if elapsed >= self.limits.duration_seconds {
                 return Err(format!(
-                    "duration limit exceeded: {}s >= {}s",
+                    "duration_limit_exceeded: {}s >= {}s",
                     elapsed, self.limits.duration_seconds
                 ));
             }
@@ -145,7 +151,7 @@ impl Harness {
 
         if self.limits.depth > 0 && self.depth >= self.limits.depth {
             return Err(format!(
-                "depth limit exceeded: {} >= {}",
+                "depth_limit_exceeded: {} >= {}",
                 self.depth, self.limits.depth
             ));
         }
@@ -163,13 +169,13 @@ impl Harness {
         }
         if self.limits.tokens > 0 && self.tokens_used >= self.limits.tokens {
             return Err(format!(
-                "token limit exceeded before retry: {} >= {}",
+                "token_limit_exceeded: before retry, {} >= {}",
                 self.tokens_used, self.limits.tokens
             ));
         }
         if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded before retry: ${} >= ${}",
+                "spend_limit_exceeded: before retry, ${} >= ${}",
                 self.spend_used.to_canonical_string(),
                 self.limits.spend_usd.to_canonical_string()
             ));
@@ -178,20 +184,20 @@ impl Harness {
             let elapsed = self.start.elapsed().as_secs();
             if elapsed >= self.limits.duration_seconds {
                 return Err(format!(
-                    "duration limit exceeded before retry: {}s >= {}s",
+                    "duration_limit_exceeded: before retry, {}s >= {}s",
                     elapsed, self.limits.duration_seconds
                 ));
             }
         }
         if self.limits.spawns > 0 && self.spawns_used >= self.limits.spawns {
             return Err(format!(
-                "spawn limit exceeded before retry: {} >= {}",
+                "spawn_limit_exceeded: before retry, {} >= {}",
                 self.spawns_used, self.limits.spawns
             ));
         }
         if self.limits.depth > 0 && self.depth >= self.limits.depth {
             return Err(format!(
-                "depth limit exceeded before retry: {} >= {}",
+                "depth_limit_exceeded: before retry, {} >= {}",
                 self.depth, self.limits.depth
             ));
         }
@@ -264,12 +270,14 @@ impl Harness {
             output_tokens: 0,
             total_usd: self.spend_used,
             basis: None,
+            usage_status: Default::default(),
         };
         accumulated.checked_accumulate(&RuntimeCost {
             input_tokens: 0,
             output_tokens: 0,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         })?;
         self.spend_used = accumulated.total_usd;
         Ok(())
@@ -382,6 +390,10 @@ pub enum HookAction {
     Suspend,
     Escalate,
     Continue,
+    /// Compact the conversation now. Valid only on `context_pressure`.
+    Compact,
+    /// Do not compact this time. Valid only on `context_pressure`.
+    SkipCompaction,
 }
 
 impl HookAction {
@@ -399,6 +411,8 @@ impl HookAction {
             "suspend" => Ok(HookAction::Suspend),
             "escalate" => Ok(HookAction::Escalate),
             "continue" => Ok(HookAction::Continue),
+            "compact" => Ok(HookAction::Compact),
+            "skip_compaction" => Ok(HookAction::SkipCompaction),
             other => Err(format!("unknown hook control action `{other}`")),
         }
     }
@@ -461,6 +475,21 @@ pub struct RiskAssessment {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_compaction_actions_parse_and_unknown_actions_do_not() {
+        use super::HookAction;
+        use serde_json::json;
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "compact"})),
+            Ok(HookAction::Compact)
+        );
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "skip_compaction"})),
+            Ok(HookAction::SkipCompaction)
+        );
+        assert!(HookAction::from_value(&json!({"action": "compacting"})).is_err());
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 
@@ -514,7 +543,8 @@ mod tests {
         );
         harness.record_turn();
         harness.record_turn();
-        assert!(harness.check_limits().is_err());
+        let error = harness.check_limits().expect_err("turn limit reached");
+        assert!(error.starts_with("turn_limit_exceeded: "), "{error}");
     }
 
     #[test]
@@ -579,7 +609,7 @@ mod tests {
             harness
                 .check_retry_limits()
                 .unwrap_err()
-                .contains("token limit")
+                .contains("token_limit_exceeded: before retry")
         );
     }
 

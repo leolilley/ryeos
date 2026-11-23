@@ -16,6 +16,7 @@ mod egress;
 mod facts;
 mod lease;
 mod operation;
+mod termination;
 
 pub use egress::{
     AllowListCapability, EgressHostSyntax, EgressPolicy, EgressProtocol, EgressRule,
@@ -33,3 +34,4 @@ pub use operation::{
     admit_lease, await_lease_ready, operation_deadline, read_credential, read_sealed_env,
     request_deadline, write_response, write_response_bounded,
 };
+pub use termination::{LEASE_END_GRACE_MS, lease_end_passed, lease_end_passed_at};

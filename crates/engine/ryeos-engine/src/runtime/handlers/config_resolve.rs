@@ -310,6 +310,7 @@ fn resolve_single(spec: &ConfigSpec, ctx: &CompileContext<'_>) -> Result<Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::LogicalProject;
 
     use crate::config_loading::deep_merge;
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
@@ -427,7 +428,7 @@ metadata:
         let parsers = dispatcher_with_canonical_bundle_descriptors();
 
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {

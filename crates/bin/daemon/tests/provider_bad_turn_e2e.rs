@@ -1,7 +1,8 @@
 //! A directive surviving a bad provider turn, end to end against the scripted
 //! chat stub: unknown-outcome retries (a stream cut, a request timeout), a
 //! directive that does not declare repeatable contact, an exhausted retry
-//! allowance, a 504, a malformed tool call, and a turn cut at the output limit.
+//! allowance, a 504, a malformed tool call, an empty reply, and a turn cut at
+//! the output limit.
 //!
 //! These need the bundle bins, so run them with a bundle state that matches
 //! the branch.
@@ -337,4 +338,415 @@ async fn consecutive_output_limit_turns_are_bounded() {
     assert_eq!(status, "failed");
     // Two recovered turns, then the third ends the thread.
     assert_eq!(rig.stub.requests().await.len(), 3);
+}
+
+fn retry_after_script(header: &str) -> String {
+    format!(
+        "steps:\n  - fail: {{ status: 429, body: \"slow down\", retry_after: \"{header}\" }}\n  - text: \"done\"\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_longer_than_the_backoff_is_waited_out_and_recorded() {
+    let rig = start_rig(
+        &retry_after_script("3"),
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let thread_id = launch_on(&rig).await.expect("launch");
+    let (status, elapsed) = wait_terminal(&rig.h, &thread_id, MAX_WAIT).await;
+    assert_eq!(status, "completed");
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "the retry came before the provider's Retry-After: {elapsed:?}"
+    );
+    assert_eq!(rig.stub.requests().await.len(), 2);
+    let retries = chain_payloads(&rig.h, &thread_id, "provider_retry").await;
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let decision = &retries[0]["retry_advance"]["decision"];
+    assert_eq!(decision["backoff_ms"], 3000, "{decision}");
+    assert_eq!(decision["retry_after_ms"], 3000, "{decision}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_over_the_cap_is_refused_with_its_typed_reason() {
+    let rig = start_rig(
+        &retry_after_script("120"),
+        RigOptions {
+            exec_yaml: Some(execution("retry_after_max_ms: 5000\n")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    assert!(
+        chain_payloads(&rig.h, &thread_id, "provider_retry")
+            .await
+            .is_empty()
+    );
+    let detail = stub_rig::thread_detail(&rig.h, &thread_id, 4000).await;
+    assert!(
+        detail.contains("provider_retry_after_exceeds_cap"),
+        "{detail}"
+    );
+    assert!(detail.contains("120000"), "{detail}");
+    assert!(detail.contains("5000"), "{detail}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_cap_ignores_the_retry_after_header() {
+    let rig = start_rig(
+        &retry_after_script("120"),
+        RigOptions {
+            exec_yaml: Some(execution("retry_after_max_ms: 0\n")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+    let retries = chain_payloads(&rig.h, &thread_id, "provider_retry").await;
+    let decision = &retries[0]["retry_advance"]["decision"];
+    assert_eq!(decision["backoff_ms"], 100, "{decision}");
+    assert!(decision.get("retry_after_ms").is_none(), "{decision}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_that_would_outrun_the_run_deadline_is_refused() {
+    let rig = start_rig(
+        &retry_after_script("30"),
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            header_extra: "limits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n",
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let thread_id = stub_rig::launch_on_with(&rig, serde_json::json!({"run_timeout": 40}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &thread_id, MAX_WAIT).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    let detail = stub_rig::thread_detail(&rig.h, &thread_id, 4000).await;
+    assert!(
+        detail.contains("provider_retry_exceeds_run_deadline"),
+        "{detail}"
+    );
+}
+
+const LEAK: &str = "<|channel|>commentary LEAKED_CALL_TEXT";
+
+fn malformed_policy(max_consecutive: u32) -> String {
+    format!(
+        "malformed_replies:\n  markers: [\"<|channel|>\", \"<|message|>\"]\n  message: \"Reply with a structured tool call.\"\n  max_consecutive: {max_consecutive}\n"
+    )
+}
+
+fn leak_step(repeat: u32) -> String {
+    format!("  - repeat: {repeat}\n    text: \"{LEAK}\"\n")
+}
+
+/// The settled thread record, as text.
+async fn thread_record(rig: &stub_rig::Rig, thread_id: &str) -> String {
+    rig.h
+        .get_thread(thread_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|record| record.to_string())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_reply_is_corrected_and_never_resent() {
+    let script = format!("steps:\n{}  - text: \"the real answer\"\n", leak_step(1));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: malformed_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+
+    let bodies = rig.stub.request_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let second = bodies[1]["messages"].to_string();
+    assert!(!second.contains("LEAKED_CALL_TEXT"), "{second}");
+    assert!(second.contains("Reply with a structured tool call."));
+
+    let events = chain_event_list(&rig.h, &thread_id).await;
+    let correction = events
+        .iter()
+        .find(|(_, kind, payload)| {
+            kind == "cognition_in"
+                && payload["origin"] == "harness"
+                && payload["kind"] == "malformed_reply_turn_1_streak_1"
+        })
+        .expect("a correction input naming the turn and position");
+    assert!(
+        correction
+            .2
+            .to_string()
+            .contains("Reply with a structured tool call.")
+    );
+    let record = thread_record(&rig, &thread_id).await;
+    assert!(record.contains("the real answer"), "{record}");
+    assert!(!record.contains("LEAKED_CALL_TEXT"), "{record}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_that_looks_like_a_tool_call_runs_no_tool() {
+    let script = "steps:\n  - text: \"<|channel|>commentary<|message|>{\\\"tool\\\":\\\"marker_marker\\\",\\\"arguments\\\":{}}\"\n  - text: \"done\"\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: malformed_policy(2),
+            marker_sleep_seconds: 0,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (_, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+    assert_eq!(rig.marker_count(), 0, "the written call must not run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_allowed_number_of_malformed_replies_still_finishes() {
+    let script = format!("steps:\n{}  - text: \"done\"\n", leak_step(2));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: malformed_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (_, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+    assert_eq!(rig.stub.requests().await.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_corrections_fail_typed_and_leave_no_result() {
+    let script = format!("steps:\n{}", leak_step(5));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: malformed_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 3);
+    let record = thread_record(&rig, &thread_id).await;
+    assert!(
+        record.contains("malformed_reply_retries_exhausted"),
+        "{record}"
+    );
+    assert!(record.contains("<|channel|>"), "{record}");
+    assert!(!record.contains("LEAKED_CALL_TEXT"), "{record}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_turn_left_for_a_correction_fails_typed() {
+    let script = format!("steps:\n{}  - text: \"never served\"\n", leak_step(1));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            limits: Some((1, 5)),
+            provider_top_extra: malformed_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    let record = thread_record(&rig, &thread_id).await;
+    assert!(
+        record.contains("malformed_reply_retries_exhausted"),
+        "{record}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_policy_the_marker_text_finalizes_as_before() {
+    let script = format!("steps:\n{}", leak_step(1));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    assert!(
+        thread_record(&rig, &thread_id)
+            .await
+            .contains("LEAKED_CALL_TEXT")
+    );
+}
+
+fn empty_policy(max_consecutive: u32) -> String {
+    format!(
+        "empty_replies:\n  max_consecutive: {max_consecutive}\n  message: \"Call a tool or give your answer.\"\n"
+    )
+}
+
+/// A reply holding only reasoning: no text, no call, a normal stop.
+fn empty_step(repeat: u32) -> String {
+    format!("  - repeat: {repeat}\n    reasoning: \"EMPTY_REPLY_REASONING\"\n")
+}
+
+fn empty_reply_inputs(events: &[(String, String, Value)]) -> Vec<&Value> {
+    events
+        .iter()
+        .filter(|(_, kind, payload)| {
+            kind == "cognition_in"
+                && payload["origin"] == "harness"
+                && payload["kind"]
+                    .as_str()
+                    .is_some_and(|kind| kind.starts_with("empty_reply_turn_"))
+        })
+        .map(|(_, _, payload)| payload)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_reply_is_corrected_and_the_next_reply_finishes() {
+    let script = format!("steps:\n{}  - text: \"the real answer\"\n", empty_step(1));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: empty_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+
+    let bodies = rig.stub.request_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let second = bodies[1]["messages"].to_string();
+    assert!(
+        second.contains("Call a tool or give your answer."),
+        "{second}"
+    );
+
+    let events = chain_event_list(&rig.h, &thread_id).await;
+    let inputs = empty_reply_inputs(&events);
+    assert_eq!(inputs.len(), 1, "{inputs:?}");
+    assert_eq!(inputs[0]["kind"], "empty_reply_turn_1_streak_1");
+    assert!(
+        inputs[0]
+            .to_string()
+            .contains("Call a tool or give your answer.")
+    );
+    let record = thread_record(&rig, &thread_id).await;
+    assert!(record.contains("the real answer"), "{record}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_empty_corrections_fail_typed() {
+    let script = format!("steps:\n{}", empty_step(5));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            provider_top_extra: empty_policy(2),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 3);
+    let record = thread_record(&rig, &thread_id).await;
+    assert!(record.contains("empty_reply_retries_exhausted"), "{record}");
+    let events = chain_event_list(&rig.h, &thread_id).await;
+    assert_eq!(empty_reply_inputs(&events).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_policy_empty_replies_are_retried_silently_until_the_idle_guard() {
+    let script = format!("steps:\n{}", empty_step(12));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert!(rig.stub.requests().await.len() < 12);
+    let events = chain_event_list(&rig.h, &thread_id).await;
+    assert!(empty_reply_inputs(&events).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_filter_or_unknown_finish_is_never_nudged() {
+    for finish in ["content_filter", "weird_finish"] {
+        let script = format!(
+            "steps:\n  - reasoning: \"EMPTY_REPLY_REASONING\"\n    finish_reason: {finish}\n  - text: \"done\"\n"
+        );
+        let rig = start_rig(
+            &script,
+            RigOptions {
+                exec_yaml: Some(execution("")),
+                provider_top_extra: empty_policy(2),
+                ..RigOptions::default()
+            },
+        )
+        .await
+        .expect("start rig");
+        let (thread_id, status) = run_to_terminal(&rig).await;
+        assert_eq!(status, "completed", "{finish}");
+        let bodies = rig.stub.request_bodies().await;
+        assert_eq!(bodies.len(), 2, "{finish}");
+        assert!(
+            !bodies[1]["messages"]
+                .to_string()
+                .contains("Call a tool or give your answer."),
+            "{finish}"
+        );
+        let events = chain_event_list(&rig.h, &thread_id).await;
+        assert!(empty_reply_inputs(&events).is_empty(), "{finish}");
+    }
 }

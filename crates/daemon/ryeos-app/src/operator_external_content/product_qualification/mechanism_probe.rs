@@ -4,8 +4,8 @@
 use anyhow::{Context as _, Result, ensure};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
-    EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
-    SubjectResolutionAuthority, VerifiedItem,
+    EffectivePrincipal, ExecutionHints, LogicalProject, LogicalProjectAbsence, PlanContext,
+    Principal, ProjectContext, SubjectResolutionAuthority, VerifiedItem,
 };
 use ryeos_engine::engine::{CapturedSignedBundleItemSource, CheckedEngineGeneration};
 use ryeos_engine::resolution::ResolutionOutput;
@@ -248,7 +248,7 @@ pub fn capture_root_mechanism_probe_source(
         // execution capability; a signed selection must not invent one for
         // later compilation or dispatch.
         let context = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: purpose.owner_fingerprint().to_owned(),
                 scopes: vec![],

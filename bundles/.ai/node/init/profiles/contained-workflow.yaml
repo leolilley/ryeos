@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:22:30Z:bd4ff2e4a2e09d705a02dcc850803b8abb25ecba7f7c37a5ae4dc2459f6bec65:vu2zL+9PFyz+fLqChicjbJZnYS23RBTIFWBADJt9eObg13L9ldpqeMX1hM89devElNzQ3yb6jicPVObMqfjxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T05:13:27Z:6f7397352f14b69c0910b3ed31f4ca1709279d714695774b5e317b8c64e07b16:AHRm1nX2ITT2e0gaBy5hJUf0US2HXhlLW1T29STZTZ+wF8YLivel5tW4uaYLF9HbSGJEJ6xGZY2aArB5STD9DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -193,6 +193,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
@@ -452,7 +453,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 6
+    schema: 5
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -486,7 +487,6 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
-    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16
@@ -688,9 +688,12 @@ policies:
           - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints. Thread lifecycle hints keep
-      # the thread, its event name, status and time. Activity hints keep only
-      # their kind, so no thread list rides on them.
+      # The session stream carries thread hints and item hints. Thread
+      # lifecycle hints keep the thread, its event name, status and time.
+      # Activity hints keep only their kind, so no thread list rides on them.
+      # An item hint keeps the item ref, digest, revision and change set id;
+      # the daemon sends it only to a session whose own bindings name that
+      # item, and it carries no item content.
       - target: route:ui/events/session
         classes: [local_operator, hosted_principal]
         keep:
@@ -700,6 +703,10 @@ policies:
           - /payload/event_type
           - /payload/status
           - /payload/updated_at
+          - /payload/item_ref
+          - /payload/digest
+          - /payload/revision
+          - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
       # The pending approvals of a hosted work chain, as the Approvals view

@@ -965,7 +965,12 @@ fn selected_launch_is_target_local_without_erasing_remote_principal_origin() {
             policy_facts: Default::default(),
         },
     };
-    let roots = fixture.state.engine.resolution_roots(None);
+    let roots = fixture.state.engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     let subject = SubjectResolutionAuthority::PinnedGeneration {
         snapshot_hash: "d".repeat(64),
     };

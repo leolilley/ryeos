@@ -51,6 +51,102 @@ fn is_false(value: &bool) -> bool {
 /// time. Readers that do not know it treat it as any other harness input.
 pub const KIND_DEADLINE_WRAP_UP: &str = "deadline_wrap_up";
 
+/// Kind of the harness input that tells the model the next turn is the last
+/// the run's turn limit allows.
+pub const KIND_LIMIT_WRAP_UP: &str = "limit_wrap_up";
+
+/// Kind of the single harness input that gives both reasons at once, when the
+/// run deadline's wrap-up and the turn limit's fall on the same turn.
+pub const KIND_DEADLINE_LIMIT_WRAP_UP: &str = "deadline_limit_wrap_up";
+
+/// The kind of the wrap-up input that gives these reasons, if any is due.
+pub fn wrap_up_kind(deadline: bool, turn_limit: bool) -> Option<&'static str> {
+    match (deadline, turn_limit) {
+        (true, true) => Some(KIND_DEADLINE_LIMIT_WRAP_UP),
+        (true, false) => Some(KIND_DEADLINE_WRAP_UP),
+        (false, true) => Some(KIND_LIMIT_WRAP_UP),
+        (false, false) => None,
+    }
+}
+
+/// The reasons a wrap-up input of this kind gave, as (deadline, turn limit);
+/// `None` for any other kind. A recovered run reads its delivered flags from
+/// these.
+pub fn wrap_up_reasons(kind: &str) -> Option<(bool, bool)> {
+    match kind {
+        KIND_DEADLINE_WRAP_UP => Some((true, false)),
+        KIND_LIMIT_WRAP_UP => Some((false, true)),
+        KIND_DEADLINE_LIMIT_WRAP_UP => Some((true, true)),
+        _ => None,
+    }
+}
+
+/// Prefix of the kind of a harness input that warns the model its run is
+/// looping; the finding's code follows it.
+pub const KIND_LOOP_WARNING_PREFIX: &str = "loop_warning_";
+
+/// Prefix of the kind of the harness input that replaces a malformed reply.
+/// The kind names the turn it corrects and the reply's position in the run of
+/// malformed replies: `malformed_reply_turn_<turn>_streak_<position>`.
+pub const KIND_MALFORMED_REPLY_PREFIX: &str = "malformed_reply_turn_";
+
+const MALFORMED_REPLY_STREAK_SEPARATOR: &str = "_streak_";
+
+/// The kind of the input that corrects `turn`, the `streak`th malformed reply
+/// in a row (counting from 1).
+pub fn malformed_reply_kind(turn: u32, streak: u32) -> String {
+    format!("{KIND_MALFORMED_REPLY_PREFIX}{turn}{MALFORMED_REPLY_STREAK_SEPARATOR}{streak}")
+}
+
+/// The turn a malformed-reply kind corrects and its position in the run, or
+/// `None` for any other kind.
+pub fn malformed_reply_of_kind(kind: &str) -> Option<(u32, u32)> {
+    correction_position(kind.strip_prefix(KIND_MALFORMED_REPLY_PREFIX)?)
+}
+
+/// Prefix of the kind of the harness input that replaces an empty reply (no
+/// tool call, no text). The kind names the turn it corrects and the reply's
+/// position in the run of empty replies: `empty_reply_turn_<turn>_streak_<position>`.
+pub const KIND_EMPTY_REPLY_PREFIX: &str = "empty_reply_turn_";
+
+/// The kind of the input that corrects `turn`, the `streak`th empty reply in
+/// a row (counting from 1).
+pub fn empty_reply_kind(turn: u32, streak: u32) -> String {
+    format!("{KIND_EMPTY_REPLY_PREFIX}{turn}{MALFORMED_REPLY_STREAK_SEPARATOR}{streak}")
+}
+
+/// The turn an empty-reply kind corrects and its position in the run, or
+/// `None` for any other kind.
+pub fn empty_reply_of_kind(kind: &str) -> Option<(u32, u32)> {
+    correction_position(kind.strip_prefix(KIND_EMPTY_REPLY_PREFIX)?)
+}
+
+fn correction_position(rest: &str) -> Option<(u32, u32)> {
+    let (turn, streak) = rest.split_once(MALFORMED_REPLY_STREAK_SEPARATOR)?;
+    let turn = turn.parse::<u32>().ok().filter(|turn| *turn > 0)?;
+    let streak = streak.parse::<u32>().ok().filter(|streak| *streak > 0)?;
+    Some((turn, streak))
+}
+
+/// The closed set of reply corrections. Each has its own kind prefix, its own
+/// policy and its own streak; the prefixes are matched exactly, so a kind of
+/// one never reads as the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplyCorrection {
+    Malformed,
+    Empty,
+}
+
+/// Which correction a kind is, the turn it names and its position in that
+/// correction's run, or `None` for any other kind.
+pub fn reply_correction_of_kind(kind: &str) -> Option<(ReplyCorrection, u32, u32)> {
+    if let Some((turn, streak)) = malformed_reply_of_kind(kind) {
+        Some((ReplyCorrection::Malformed, turn, streak))
+    } else {
+        empty_reply_of_kind(kind).map(|(turn, streak)| (ReplyCorrection::Empty, turn, streak))
+    }
+}
+
 /// One input to cognition: what the model is given as a user message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,12 +225,57 @@ impl CognitionInput {
     }
 }
 
+/// What a provider turn is for. Required on every turn marker.
+///
+/// Schema note: the required `purpose` is a stored-shape change. A marker
+/// recorded before it lacks the field and is refused by the readers that parse
+/// markers (`resume_marker_without_purpose`); there is no reader for the old
+/// shape. The runtime operator schema epoch cut that carries this change is
+/// epoch 143 (the cut after epoch 142), shared with another change: an
+/// epoch-142 store holds markers without `purpose`, is a predecessor, and is
+/// reset without decoding with
+/// `ryeos node reset execution-history --schema-cut-from 142 --schema-cut-to 143`.
+/// The constant in the runtime database module is bumped by that cut's own
+/// commit, not by this change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPurpose {
+    /// An ordinary model turn.
+    Turn,
+    /// The summary call of a compaction started by context pressure.
+    CompactionSummaryPressure,
+    /// The summary call of a compaction started by a refused request.
+    CompactionSummaryOverflow,
+}
+
+impl TurnPurpose {
+    /// The purpose of the summary call of a compaction with this trigger.
+    pub fn for_summary(trigger: &str) -> Result<Self> {
+        match trigger {
+            "pressure" => Ok(Self::CompactionSummaryPressure),
+            "overflow" => Ok(Self::CompactionSummaryOverflow),
+            other => bail!("{other:?} is not a compaction trigger with a summary call"),
+        }
+    }
+
+    /// The trigger of the compaction a summary call serves.
+    pub fn summary_trigger(self) -> Option<&'static str> {
+        match self {
+            Self::Turn => None,
+            Self::CompactionSummaryPressure => Some("pressure"),
+            Self::CompactionSummaryOverflow => Some("overflow"),
+        }
+    }
+}
+
 /// The `cognition_in` payload that opens a provider turn. It carries no
 /// conversation content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnMarker {
     pub turn: u32,
+    /// What the turn is for. Required; see [`TurnPurpose`] for the schema cut.
+    pub purpose: TurnPurpose,
     /// The tool names offered on this turn, recorded only when the offered
     /// set differs from the tool inventory in force.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,6 +401,38 @@ pub struct ToolResultGuard {
     /// text from the notes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_images: Vec<DroppedImage>,
+    /// Set when the full result was stored beside this event and the model saw
+    /// a bounded preview. The preview is the recorded text; the stored bytes
+    /// are reachable through `attachment_refs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spill: Option<ToolResultSpill>,
+}
+
+/// The `truncated_reason` of a result whose full text was stored and replaced
+/// by a preview.
+pub const TOOL_RESULT_SPILLED: &str = "result_spilled";
+
+/// The first line of the model-visible text of a spilled result, up to the
+/// byte count. Context folding recognises a spilled result by this prefix.
+pub const TOOL_RESULT_PARTIAL_PREFIX: &str = "[tool result partial: ";
+
+/// Where the full text of a spilled tool result lives and what the preview
+/// kept of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResultSpill {
+    /// Object hash of the stored attachment; the last entry of the result's
+    /// `attachment_refs`.
+    pub attachment: String,
+    /// Bytes of the result the attachment holds; less than `total_bytes` when
+    /// the result exceeded the node's attachment size limit.
+    pub stored_bytes: u64,
+    /// Size of the result before the guard acted.
+    pub total_bytes: u64,
+    /// Leading bytes of the result shown in the preview.
+    pub preview_head_bytes: u64,
+    /// Trailing bytes of the result shown in the preview.
+    pub preview_tail_bytes: u64,
 }
 
 /// One image of a tool result that was dropped instead of used.
@@ -340,8 +513,29 @@ impl ToolResultPayload {
         if self.guard.duplicate_of.is_some() && self.status == ToolResultStatus::Error {
             bail!("an error tool result cannot be a duplicate");
         }
-        if self.attachment_refs != Self::image_attachment_hashes(&self.parts) {
-            bail!("tool result attachment_refs do not match the attachments of its image parts");
+        let mut expected = Self::image_attachment_hashes(&self.parts);
+        if let Some(spill) = &self.guard.spill {
+            if !self.guard.truncated
+                || self.guard.truncated_reason.as_deref() != Some(TOOL_RESULT_SPILLED)
+            {
+                bail!(
+                    "a spilled tool result must be truncated with reason `{TOOL_RESULT_SPILLED}`"
+                );
+            }
+            if self.guard.duplicate_of.is_some() {
+                bail!("a spilled tool result cannot be a duplicate");
+            }
+            if spill.stored_bytes > spill.total_bytes
+                || spill.preview_head_bytes + spill.preview_tail_bytes > spill.total_bytes
+            {
+                bail!("tool result spill byte counts contradict each other");
+            }
+            expected.push(spill.attachment.clone());
+        }
+        if self.attachment_refs != expected {
+            bail!(
+                "tool result attachment_refs do not match the attachments of its image parts and its spill"
+            );
         }
         self.message().validate()
     }
@@ -503,6 +697,296 @@ impl FrameRecord {
     }
 }
 
+/// The start of the `finish` of a final turn that records a provider refusal
+/// the compaction policy answers: the refusal's code follows it
+/// (`provider_refused_provider_context_length_exceeded`). Its text is the
+/// refusal, not a conversation turn.
+pub const FINISH_PROVIDER_REFUSED: &str = "provider_refused";
+
+/// The `finish` of the final turn that records a refusal with `code`.
+pub fn provider_refused_finish(code: &str) -> String {
+    format!("{FINISH_PROVIDER_REFUSED}_{code}")
+}
+
+/// The refusal code a final turn's `finish` names, when it records one.
+pub fn provider_refusal_code(finish: &str) -> Option<&str> {
+    finish
+        .strip_prefix(FINISH_PROVIDER_REFUSED)
+        .and_then(|rest| rest.strip_prefix('_'))
+}
+
+/// The start of the `finish` of a turn that is a compaction's summary call;
+/// the compaction's trigger follows it (`compaction_summary_pressure`). Its
+/// text is the summary, not a conversation turn: a fold never turns it into a
+/// message.
+pub const FINISH_COMPACTION_SUMMARY: &str = "compaction_summary";
+
+/// The `finish` of the summary call of a compaction started by `trigger`.
+pub fn compaction_summary_finish(trigger: &str) -> String {
+    format!("{FINISH_COMPACTION_SUMMARY}_{trigger}")
+}
+
+/// The trigger a summary call's `finish` names, when it is one.
+pub fn compaction_summary_trigger(finish: &str) -> Option<&str> {
+    finish
+        .strip_prefix(FINISH_COMPACTION_SUMMARY)
+        .and_then(|rest| rest.strip_prefix('_'))
+}
+
+/// Kind of the harness input a compaction's summary becomes in a rebuilt
+/// conversation.
+pub const KIND_COMPACTION_SUMMARY: &str = "compaction_summary";
+
+/// Largest serialized compaction record. A record holds the pinned inputs, so
+/// pinned inputs that do not fit leave a compaction impossible.
+pub const MAX_COMPACTION_RECORD_BYTES: usize = 192 * 1024;
+
+/// What the replay window of a compaction does not show: the progress of the
+/// run just before the window opens (the first kept turn's marker). Every
+/// recovery reader starts from it instead of from an empty record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSeed {
+    /// The last turn coordinate before the window.
+    pub last_coordinate: u32,
+    /// Completed turns before the window.
+    pub completed: u32,
+    /// Tool starts that took tool-call budget before the window.
+    pub tool_starts: u32,
+    /// Child spawns counted before the window.
+    pub spawns: u32,
+    /// Tool images admitted before the window, and the distinct bytes they hold.
+    pub images: u64,
+    pub image_bytes: u64,
+    /// The image attachments the node already stores for the run.
+    pub image_stored: Vec<String>,
+}
+
+/// How the tool results of the kept turns are read after a compaction: all but
+/// the newest `keep_recent` results that are longer than `over_bytes` are read
+/// as their first `head_bytes`, a marker naming how much was left out, and
+/// their last `tail_bytes`. The events are not edited; the fold applies the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipRule {
+    pub over_bytes: u64,
+    pub head_bytes: u64,
+    pub tail_bytes: u64,
+    pub keep_recent: u32,
+}
+
+/// Deserialize an `Option` that must be present: a missing key is an error
+/// instead of `None`.
+fn required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// The loop and stall findings the detectors look for. A closed set of
+/// mechanical detectors, serialised as its code string, so a record naming any
+/// other finding does not decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    Repetition,
+    PingPong,
+    NoProgress,
+    Idle,
+}
+
+impl FindingKind {
+    pub const ALL: [FindingKind; 4] = [
+        Self::Repetition,
+        Self::PingPong,
+        Self::NoProgress,
+        Self::Idle,
+    ];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Repetition => "repetition",
+            Self::PingPong => "ping_pong",
+            Self::NoProgress => "no_progress",
+            Self::Idle => "idle",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+}
+
+/// One tool call of a turn as the loop detectors see it: fingerprints of the
+/// call (tool name and arguments) and of its result (0 while unanswered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardCall {
+    pub signature: u64,
+    pub result: u64,
+}
+
+/// One finished turn reduced to fingerprints: no content, only what the
+/// detectors compare. A fingerprint is below [`GUARD_FINGERPRINT_BOUND`] so it
+/// survives any JSON reader that holds numbers as doubles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardTurn {
+    pub calls: Vec<GuardCall>,
+    /// The fingerprint of the assistant's text, when it wrote any.
+    pub text: Option<u64>,
+}
+
+/// Fingerprints are 48 bits.
+pub const GUARD_FINGERPRINT_BOUND: u64 = 1 << 48;
+
+/// Which wrap-up reasons had been given when a record was written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardWrapUp {
+    pub deadline: bool,
+    pub turn_limit: bool,
+}
+
+/// The loop-guard state a compaction carries, because the turns it replaces
+/// held it: the recent turns the detectors compare, which wrap-up notices the
+/// model was given, and how long ago each loop warning was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardCarry {
+    /// The history length this record was built to carry, from the loop-guard
+    /// settings in force. A resume whose settings want more than this reads a
+    /// history shorter than configured.
+    pub carry_len: u32,
+    /// The newest turns the compaction replaced, oldest first, at most
+    /// `carry_len`. The kept turns are not here; the conversation holds them.
+    pub recent_digests: Vec<GuardTurn>,
+    pub wrap_up: GuardWrapUp,
+    /// For each finding warned about: whole turns between the warning and the
+    /// record, counted over the recent digests followed by the kept turns.
+    pub loop_warned_turns_ago: std::collections::BTreeMap<FindingKind, u32>,
+}
+
+impl GuardCarry {
+    /// The most turns of history a record carries.
+    pub const MAX_DIGESTS: u32 = 256;
+
+    /// `kept_turns` is how many turns the record keeps whole.
+    pub fn validate(&self, kept_turns: u32) -> Result<()> {
+        if self.carry_len > Self::MAX_DIGESTS {
+            bail!(
+                "guard_carry carry_len {} exceeds {}",
+                self.carry_len,
+                Self::MAX_DIGESTS
+            );
+        }
+        let recent = self.recent_digests.len();
+        if recent > Self::MAX_DIGESTS as usize || recent > self.carry_len as usize {
+            bail!("guard_carry holds {recent} digests, over its carry_len or the bound");
+        }
+        for turn in &self.recent_digests {
+            let calls = turn.calls.iter().flat_map(|c| [c.signature, c.result]);
+            if calls
+                .chain(turn.text)
+                .any(|value| value >= GUARD_FINGERPRINT_BOUND)
+            {
+                bail!("guard_carry fingerprint is over {GUARD_FINGERPRINT_BOUND}");
+            }
+        }
+        // A warning's age is counted over the recent digests and the kept turns.
+        let reach = u64::try_from(recent).unwrap_or(u64::MAX) + u64::from(kept_turns);
+        if self
+            .loop_warned_turns_ago
+            .values()
+            .any(|age| u64::from(*age) > reach)
+        {
+            bail!("guard_carry warning age reaches back past the carried history");
+        }
+        Ok(())
+    }
+}
+
+/// A conversation compaction: the older part of the conversation replaced by
+/// a summary, the newest turns kept whole. Self-contained as a fold base: the
+/// pinned inputs and the summary are in it, and the window seed says where the
+/// replay of the kept turns begins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionPayload {
+    /// The turn coordinate the summary call took; 0 when no model was called.
+    pub turn: u32,
+    /// What started the compaction. An open token; the fold ignores it.
+    pub trigger: String,
+    /// The range of turns the summary replaces.
+    pub replaces_from_turn: u32,
+    pub replaces_to_turn: u32,
+    /// The first turn kept whole; its turn marker opens the replay window.
+    pub kept_from_turn: u32,
+    /// The summary, as the parts of one user message.
+    pub summary: Vec<Part>,
+    /// Whether a model wrote the summary or it is the policy's fixed note.
+    pub summary_model_call: bool,
+    /// Messages the summary call's bounded input left out.
+    pub omitted_from_input: u32,
+    /// The pinned inputs in force, with their acknowledgements, in order.
+    pub pinned: Vec<CognitionInput>,
+    pub seed: WindowSeed,
+    /// Completed turns when the record was written; the cooldown counts from it.
+    pub settled_turns: u32,
+    pub size_before: u64,
+    pub size_after: u64,
+    /// The reduction fell short of the policy's floor.
+    pub ineffective: bool,
+    /// Compactions and overflow recoveries up to and including this one.
+    pub compactions: u32,
+    pub overflow_recoveries: u32,
+    /// How the kept turns' tool results are clipped, when they are. Always
+    /// present on the record; `null` means not clipped.
+    #[serde(deserialize_with = "required_option")]
+    pub clip: Option<ClipRule>,
+    /// The loop-guard state the replaced turns held. Always present on the
+    /// record; `null` means the loop guards were off when it was written. A
+    /// record without the field is refused.
+    #[serde(deserialize_with = "required_option")]
+    pub guard_carry: Option<GuardCarry>,
+}
+
+impl CompactionPayload {
+    /// The summary as the user message the rebuilt conversation holds.
+    pub fn summary_message(&self) -> Message {
+        Message::new(Role::User, self.summary.clone())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_token("cognition_compaction trigger", &self.trigger)?;
+        if self.kept_from_turn == 0 || self.replaces_to_turn >= self.kept_from_turn {
+            bail!("cognition_compaction kept range must follow the replaced range");
+        }
+        if self.replaces_from_turn > self.replaces_to_turn {
+            bail!("cognition_compaction replaced range is inverted");
+        }
+        if self.summary_model_call && self.turn == 0 {
+            bail!("a model-written compaction summary names its turn coordinate");
+        }
+        if self.summary.is_empty() {
+            bail!("cognition_compaction carries no summary");
+        }
+        self.summary_message().validate()?;
+        for input in &self.pinned {
+            input.validate()?;
+        }
+        if let Some(carry) = &self.guard_carry {
+            // The turns kept whole are the turns completed since the window
+            // opened: `settled_turns` is the completed turns when the record
+            // was written and `seed.completed` those before the window.
+            carry.validate(self.settled_turns.saturating_sub(self.seed.completed))?;
+        }
+        Ok(())
+    }
+}
+
 /// Serialise a typed payload to the JSON an event carries.
 pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
     Ok(serde_json::to_value(payload)?)
@@ -512,6 +996,53 @@ pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_malformed_reply_kind_names_its_turn_and_position() {
+        let kind = malformed_reply_kind(7, 2);
+        assert_eq!(kind, "malformed_reply_turn_7_streak_2");
+        validate_token("kind", &kind).unwrap();
+        assert_eq!(malformed_reply_of_kind(&kind), Some((7, 2)));
+        for other in [
+            "output_limit",
+            "malformed_reply_turn_0_streak_1",
+            "malformed_reply_turn_3_streak_0",
+            "malformed_reply_turn_x_streak_1",
+            "malformed_reply_turn_3",
+        ] {
+            assert_eq!(malformed_reply_of_kind(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn an_empty_reply_kind_names_its_turn_and_position_and_is_not_malformed() {
+        let kind = empty_reply_kind(7, 2);
+        assert_eq!(kind, "empty_reply_turn_7_streak_2");
+        validate_token("kind", &kind).unwrap();
+        assert_eq!(empty_reply_of_kind(&kind), Some((7, 2)));
+        assert_eq!(
+            reply_correction_of_kind(&kind),
+            Some((ReplyCorrection::Empty, 7, 2))
+        );
+        assert_eq!(malformed_reply_of_kind(&kind), None);
+        let malformed = malformed_reply_kind(7, 2);
+        assert_eq!(empty_reply_of_kind(&malformed), None);
+        assert_eq!(
+            reply_correction_of_kind(&malformed),
+            Some((ReplyCorrection::Malformed, 7, 2))
+        );
+        for other in [
+            "empty_reply_turn_0_streak_1",
+            "empty_reply_turn_3_streak_0",
+            "empty_reply_turn_x_streak_1",
+            "empty_reply_turn_3",
+            "xempty_reply_turn_3_streak_1",
+            "output_limit",
+        ] {
+            assert_eq!(empty_reply_of_kind(other), None, "{other}");
+            assert_eq!(reply_correction_of_kind(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn input_serialises_without_empty_optionals() {
@@ -545,6 +1076,73 @@ mod tests {
             malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
+    }
+
+    fn spilled_result() -> ToolResultPayload {
+        let attachment = "ab".repeat(32);
+        ToolResultPayload {
+            operation_id: "cd".repeat(32),
+            call_id: "call-1".to_string(),
+            tool: "t".to_string(),
+            status: ToolResultStatus::Ok,
+            parts: vec![Part::text(format!(
+                "{TOOL_RESULT_PARTIAL_PREFIX}9000 bytes, full result stored as attachment {attachment}; the full result is not available to you]\nx"
+            ))],
+            guard: ToolResultGuard {
+                result_size_bytes: 9000,
+                truncated: true,
+                truncated_reason: Some(TOOL_RESULT_SPILLED.to_string()),
+                duplicate_of: None,
+                dropped_images: Vec::new(),
+                spill: Some(ToolResultSpill {
+                    attachment: attachment.clone(),
+                    stored_bytes: 9000,
+                    total_bytes: 9000,
+                    preview_head_bytes: 100,
+                    preview_tail_bytes: 50,
+                }),
+            },
+            attachment_refs: vec![attachment],
+        }
+    }
+
+    #[test]
+    fn a_spilled_result_names_its_stored_text_and_round_trips() {
+        let payload = spilled_result();
+        payload.validate().unwrap();
+        let value = to_payload(&payload).unwrap();
+        assert_eq!(value["guard"]["spill"]["total_bytes"], 9000);
+        let parsed: ToolResultPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, payload);
+        // A result without a spill carries no `spill` key at all.
+        let mut plain = spilled_result();
+        plain.guard.spill = None;
+        plain.guard.truncated = false;
+        plain.guard.truncated_reason = None;
+        plain.attachment_refs.clear();
+        plain.validate().unwrap();
+        assert!(to_payload(&plain).unwrap()["guard"].get("spill").is_none());
+    }
+
+    #[test]
+    fn a_spilled_result_that_contradicts_itself_is_refused() {
+        let mut unlisted = spilled_result();
+        unlisted.attachment_refs.clear();
+        assert!(unlisted.validate().is_err());
+        let mut wrong_reason = spilled_result();
+        wrong_reason.guard.truncated_reason = Some("result_guard".to_string());
+        assert!(wrong_reason.validate().is_err());
+        let mut impossible = spilled_result();
+        impossible.guard.spill.as_mut().unwrap().stored_bytes = 10_000;
+        assert!(impossible.validate().is_err());
+        let mut preview_too_big = spilled_result();
+        preview_too_big
+            .guard
+            .spill
+            .as_mut()
+            .unwrap()
+            .preview_head_bytes = 9000;
+        assert!(preview_too_big.validate().is_err());
     }
 
     fn frame(system: Option<&str>, model: &str) -> FrameRecord {
@@ -638,5 +1236,122 @@ mod tests {
             malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
+    }
+
+    fn guard_carry() -> GuardCarry {
+        GuardCarry {
+            carry_len: 18,
+            recent_digests: vec![
+                GuardTurn {
+                    calls: vec![GuardCall {
+                        signature: 5,
+                        result: 9,
+                    }],
+                    text: None,
+                },
+                GuardTurn {
+                    calls: vec![],
+                    text: Some(7),
+                },
+            ],
+            wrap_up: GuardWrapUp {
+                deadline: true,
+                turn_limit: false,
+            },
+            loop_warned_turns_ago: [(FindingKind::PingPong, 3)].into(),
+        }
+    }
+
+    fn compaction(guard_carry: Option<GuardCarry>) -> CompactionPayload {
+        CompactionPayload {
+            turn: 0,
+            trigger: "pressure".to_string(),
+            replaces_from_turn: 1,
+            replaces_to_turn: 2,
+            kept_from_turn: 3,
+            summary: vec![Part::text("S")],
+            summary_model_call: false,
+            omitted_from_input: 0,
+            pinned: vec![],
+            seed: WindowSeed {
+                completed: 2,
+                ..WindowSeed::default()
+            },
+            // Turns 3 to 5 completed since the window opened: 3 kept turns.
+            settled_turns: 5,
+            size_before: 10,
+            size_after: 5,
+            ineffective: false,
+            compactions: 1,
+            overflow_recoveries: 0,
+            clip: None,
+            guard_carry,
+        }
+    }
+
+    #[test]
+    fn a_guard_carry_survives_the_wire_and_an_absent_one_is_null() {
+        let record = compaction(Some(guard_carry()));
+        record.validate().unwrap();
+        let wire = serde_json::to_value(&record).unwrap();
+        // The finding is its code string on the wire.
+        assert_eq!(
+            wire["guard_carry"]["loop_warned_turns_ago"],
+            json!({"ping_pong": 3})
+        );
+        let back: CompactionPayload = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, record);
+        // Guards off: present as null, and it decodes as such.
+        let off = serde_json::to_value(compaction(None)).unwrap();
+        assert_eq!(off["guard_carry"], Value::Null);
+        assert_eq!(
+            serde_json::from_value::<CompactionPayload>(off)
+                .unwrap()
+                .guard_carry,
+            None
+        );
+    }
+
+    #[test]
+    fn a_record_without_guard_carry_or_with_an_unknown_finding_is_refused() {
+        let mut wire = serde_json::to_value(compaction(Some(guard_carry()))).unwrap();
+        let mut unknown = wire.clone();
+        unknown["guard_carry"]["loop_warned_turns_ago"] = json!({"daydreaming": 1});
+        assert!(serde_json::from_value::<CompactionPayload>(unknown).is_err());
+        wire.as_object_mut().unwrap().remove("guard_carry");
+        assert!(serde_json::from_value::<CompactionPayload>(wire).is_err());
+    }
+
+    #[test]
+    fn validate_refuses_a_guard_carry_that_cannot_be_true() {
+        // Over the digest bound.
+        let mut over = guard_carry();
+        over.carry_len = GuardCarry::MAX_DIGESTS;
+        over.recent_digests = vec![
+            GuardTurn {
+                calls: vec![],
+                text: None
+            };
+            GuardCarry::MAX_DIGESTS as usize + 1
+        ];
+        assert!(compaction(Some(over)).validate().is_err());
+        // More digests than the carry_len it says it was built under.
+        let mut longer = guard_carry();
+        longer.carry_len = 1;
+        assert!(compaction(Some(longer)).validate().is_err());
+        // A carry_len over the bound.
+        let mut wide = guard_carry();
+        wide.carry_len = GuardCarry::MAX_DIGESTS + 1;
+        assert!(compaction(Some(wide)).validate().is_err());
+        // A warning older than the carried turns and the 3 kept turns: 2 + 3 = 5.
+        let mut old = guard_carry();
+        old.loop_warned_turns_ago.insert(FindingKind::Idle, 5);
+        compaction(Some(old.clone())).validate().unwrap();
+        old.loop_warned_turns_ago.insert(FindingKind::Idle, 6);
+        assert!(compaction(Some(old)).validate().is_err());
+        // A fingerprint over 48 bits.
+        let mut big = guard_carry();
+        big.recent_digests[1].text = Some(GUARD_FINGERPRINT_BOUND);
+        assert!(compaction(Some(big)).validate().is_err());
     }
 }

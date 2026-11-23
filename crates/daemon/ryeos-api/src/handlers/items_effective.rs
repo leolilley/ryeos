@@ -98,13 +98,21 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
     })?;
 
     let project_root = req.project_path.map(std::path::PathBuf::from);
+    if let Some(root) = project_root.as_deref() {
+        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
+            &canonical,
+            &state.config.app_root,
+        )
+        .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
+    }
 
     let (effective, resolution) = state
         .engine
         .with_checked_bundle_generation(|generation| {
             let (mut effective, resolution) =
                 generation.effective_item_with_resolution(EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
                     item_ref,
                     expected_kind: req.expected_kind,
                     project_root: project_root.clone(),

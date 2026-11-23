@@ -43,6 +43,243 @@ pub struct ContinuationRuntimeConfig {
     /// alone; pinned inputs over the continuation threshold are refused.
     #[serde(default = "default_successor_start_tokens")]
     pub successor_start_tokens: u64,
+    /// When and how a conversation is compacted before it outgrows the window.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    /// Most continuation predecessors a chain may have; reaching it fails the
+    /// run with `continuation_chain_limit` instead of continuing. The daemon
+    /// keeps a higher backstop of its own.
+    #[serde(default = "default_chain_depth_limit")]
+    pub chain_depth_limit: u32,
+}
+
+fn default_chain_depth_limit() -> u32 {
+    12
+}
+
+/// What a compaction's summary is, as a mechanical switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryMode {
+    /// A bounded model call writes the summary.
+    Model,
+    /// The summary is a fixed note naming how much was removed.
+    None,
+}
+
+/// What a context-pressure crossing does when no hook says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOnPressure {
+    /// Compact at the trigger.
+    Compact,
+    /// Only a hook's `compact` action starts a compaction.
+    Observe,
+}
+
+/// The summary call of a compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryConfig {
+    #[serde(default = "default_summary_mode")]
+    pub mode: SummaryMode,
+    /// The system text the summary call is given.
+    #[serde(default = "default_summary_instruction")]
+    pub instruction: String,
+    /// Output cap of the summary call, in tokens.
+    #[serde(default = "default_summary_max_output_tokens")]
+    pub max_output_tokens: u64,
+    /// The share of the model window the summary call's input may fill. The
+    /// oldest part beyond it is left out of the call and the rendering says so.
+    #[serde(default = "default_summary_input_ratio")]
+    pub input_ratio: f64,
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_summary_mode(),
+            instruction: default_summary_instruction(),
+            max_output_tokens: default_summary_max_output_tokens(),
+            input_ratio: default_summary_input_ratio(),
+        }
+    }
+}
+
+fn default_summary_mode() -> SummaryMode {
+    SummaryMode::Model
+}
+fn default_summary_instruction() -> String {
+    "Summarize the conversation below so work can continue from the summary alone. Keep the \
+     decisions made, facts found, files and identifiers named, work done and work still open. \
+     Answer with the summary only."
+        .to_string()
+}
+fn default_summary_max_output_tokens() -> u64 {
+    2_000
+}
+fn default_summary_input_ratio() -> f64 {
+    0.6
+}
+
+/// The compaction policy: signed data, with the defaults below. A node turns
+/// it on by setting `enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Share of the model window at which live context starts a compaction.
+    #[serde(default = "default_compaction_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Newest assistant turns a compaction keeps whole.
+    #[serde(default = "default_compaction_keep_turns")]
+    pub keep_turns: u32,
+    /// Turns that must settle after a compaction before the next one.
+    #[serde(default = "default_compaction_min_turns_between")]
+    pub min_turns_between: u32,
+    /// A compaction that shrinks the conversation by less than this share is
+    /// recorded as ineffective.
+    #[serde(default = "default_compaction_min_reduction_ratio")]
+    pub min_reduction_ratio: f64,
+    #[serde(default = "default_compaction_on_pressure")]
+    pub on_pressure: CompactionOnPressure,
+    /// Rejection codes a compaction answers. The runtime does not know what
+    /// any code means; the provider entry's rejection rows name them.
+    #[serde(default = "default_compaction_overflow_codes")]
+    pub overflow_codes: Vec<String>,
+    /// Most overflow recoveries one chain may spend.
+    #[serde(default = "default_compaction_max_overflow_recoveries")]
+    pub max_overflow_recoveries_per_chain: u32,
+    #[serde(default)]
+    pub summary: SummaryConfig,
+    #[serde(default)]
+    pub clip: ClipConfig,
+}
+
+/// Whether a compaction clips the older tool results of the turns it keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipMode {
+    Clip,
+    Keep,
+}
+
+/// Clipping of the kept turns' older tool results (see `ClipRule`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipConfig {
+    #[serde(default = "default_clip_mode")]
+    pub tool_results: ClipMode,
+    #[serde(default = "default_clip_over_bytes")]
+    pub over_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub head_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub tail_bytes: u64,
+    /// Newest tool results left whole.
+    #[serde(default = "default_clip_keep_recent")]
+    pub keep_recent: u32,
+}
+
+impl Default for ClipConfig {
+    fn default() -> Self {
+        Self {
+            tool_results: default_clip_mode(),
+            over_bytes: default_clip_over_bytes(),
+            head_bytes: default_clip_part_bytes(),
+            tail_bytes: default_clip_part_bytes(),
+            keep_recent: default_clip_keep_recent(),
+        }
+    }
+}
+
+fn default_clip_mode() -> ClipMode {
+    ClipMode::Clip
+}
+fn default_clip_over_bytes() -> u64 {
+    8 * 1024
+}
+fn default_clip_part_bytes() -> u64 {
+    2 * 1024
+}
+fn default_clip_keep_recent() -> u32 {
+    4
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_ratio: default_compaction_trigger_ratio(),
+            keep_turns: default_compaction_keep_turns(),
+            min_turns_between: default_compaction_min_turns_between(),
+            min_reduction_ratio: default_compaction_min_reduction_ratio(),
+            on_pressure: default_compaction_on_pressure(),
+            overflow_codes: default_compaction_overflow_codes(),
+            max_overflow_recoveries_per_chain: default_compaction_max_overflow_recoveries(),
+            summary: SummaryConfig::default(),
+            clip: ClipConfig::default(),
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Refuse values that cannot work: ratios outside their range, no kept
+    /// turns, no overflow codes while the policy is on.
+    pub fn validate(&self) -> Result<(), String> {
+        let ratio = |name: &str, value: f64, low_open: bool| -> Result<(), String> {
+            let ok = value.is_finite()
+                && value <= 1.0
+                && if low_open { value > 0.0 } else { value >= 0.0 };
+            ok.then_some(())
+                .ok_or_else(|| format!("compaction.{name} {value} is outside its range"))
+        };
+        ratio("trigger_ratio", self.trigger_ratio, true)?;
+        ratio("summary.input_ratio", self.summary.input_ratio, true)?;
+        if !(self.min_reduction_ratio.is_finite() && (0.0..1.0).contains(&self.min_reduction_ratio))
+        {
+            return Err(format!(
+                "compaction.min_reduction_ratio {} is outside [0, 1)",
+                self.min_reduction_ratio
+            ));
+        }
+        if self.keep_turns == 0 {
+            return Err("compaction.keep_turns must be at least 1".to_string());
+        }
+        if self.summary.max_output_tokens == 0 {
+            return Err("compaction.summary.max_output_tokens must be at least 1".to_string());
+        }
+        if self.enabled && self.overflow_codes.is_empty() {
+            return Err(
+                "compaction.overflow_codes may not be empty while compaction is enabled"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn default_compaction_trigger_ratio() -> f64 {
+    0.70
+}
+fn default_compaction_keep_turns() -> u32 {
+    6
+}
+fn default_compaction_min_turns_between() -> u32 {
+    4
+}
+fn default_compaction_min_reduction_ratio() -> f64 {
+    0.25
+}
+fn default_compaction_on_pressure() -> CompactionOnPressure {
+    CompactionOnPressure::Compact
+}
+fn default_compaction_overflow_codes() -> Vec<String> {
+    vec!["provider_context_length_exceeded".to_string()]
+}
+fn default_compaction_max_overflow_recoveries() -> u32 {
+    2
 }
 
 fn default_context_threshold_ratio() -> f64 {
@@ -66,6 +303,8 @@ impl Default for ContinuationRuntimeConfig {
             carry_turns_default: default_carry_turns(),
             carry_turns_cap: default_carry_turns_cap(),
             successor_start_tokens: default_successor_start_tokens(),
+            compaction: CompactionConfig::default(),
+            chain_depth_limit: default_chain_depth_limit(),
         }
     }
 }
@@ -142,10 +381,24 @@ pub struct ExecutionConfig {
     /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
+    /// The most dispatches the observing hook events (`before_tool`,
+    /// `after_tool`, `turn_incomplete`, `idle`) may make in one provider turn.
+    /// Past it the turn's remaining observations are skipped and warned about
+    /// once; the run is not affected. Range 1..=1024. Each dispatch's cost
+    /// counts against the run's limits like any hook's.
+    #[serde(default = "default_observing_hooks_per_turn")]
+    pub observing_hooks_per_turn: u32,
     /// Upper bound, in milliseconds, on the delay before any provider retry.
     /// The delay is `backoff_base_ms * 2^attempt`, capped here.
     #[serde(default = "default_backoff_max_ms")]
     pub backoff_max_ms: u64,
+    /// Longest wait, in milliseconds, the runtime will honour when a retryable
+    /// provider response carries `Retry-After`. The delay is then the larger of
+    /// the backoff and the provider's ask; an ask above this value is not
+    /// waited out and the run fails with `provider_retry_after_exceeds_cap`.
+    /// `0` ignores the header. Must be `0` or at least `backoff_base_ms`.
+    #[serde(default = "default_retry_after_max_ms")]
+    pub retry_after_max_ms: u64,
     /// Retry policy for provider failures that leave it unknown whether the
     /// provider acted (timeout, send failure after the connection, a stream
     /// cut after content began). Absent means such outcomes are never retried.
@@ -170,6 +423,208 @@ pub struct ExecutionConfig {
     /// policy and the model's own limits.
     #[serde(default)]
     pub tool_images: ToolImagesConfig,
+    /// How an oversize tool result is shown to the model and stored.
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
+    /// Detection of a run that repeats itself or stops making progress.
+    #[serde(default)]
+    pub loop_guards: LoopGuardsConfig,
+}
+
+/// Signed thresholds for the loop and stall detectors. A finding first warns
+/// the model with a durable harness input; the same finding still present
+/// `grace_turns` turns later stops the run with the typed failure
+/// `loop_detected`. `enabled: false` turns every detector off explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LoopGuardsConfig {
+    #[serde(default = "default_loop_guards_enabled")]
+    pub enabled: bool,
+    /// Turns a repetition is counted over.
+    #[serde(default = "default_loop_window_turns")]
+    pub window_turns: u32,
+    /// The same call with the same result this many times in the window.
+    #[serde(default = "default_loop_repeat_threshold")]
+    pub repeat_threshold: u32,
+    /// An alternation of calls repeated this many full cycles with nothing new.
+    #[serde(default = "default_loop_pingpong_cycles")]
+    pub pingpong_cycles: u32,
+    /// Longest alternation period looked for, in turns.
+    #[serde(default = "default_loop_pingpong_max_period")]
+    pub pingpong_max_period: u32,
+    /// Consecutive turns whose results and text were all seen before.
+    #[serde(default = "default_loop_no_progress_turns")]
+    pub no_progress_turns: u32,
+    /// Consecutive turns with neither a tool call nor text.
+    #[serde(default = "default_loop_idle_turns")]
+    pub idle_turns: u32,
+    /// Turns between a warning and the stop for the same finding.
+    #[serde(default = "default_loop_grace_turns")]
+    pub grace_turns: u32,
+}
+
+fn default_loop_guards_enabled() -> bool {
+    true
+}
+
+fn default_loop_window_turns() -> u32 {
+    16
+}
+
+fn default_loop_repeat_threshold() -> u32 {
+    5
+}
+
+fn default_loop_pingpong_cycles() -> u32 {
+    4
+}
+
+fn default_loop_pingpong_max_period() -> u32 {
+    4
+}
+
+fn default_loop_no_progress_turns() -> u32 {
+    8
+}
+
+fn default_loop_idle_turns() -> u32 {
+    3
+}
+
+fn default_loop_grace_turns() -> u32 {
+    2
+}
+
+impl Default for LoopGuardsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_guards_enabled(),
+            window_turns: default_loop_window_turns(),
+            repeat_threshold: default_loop_repeat_threshold(),
+            pingpong_cycles: default_loop_pingpong_cycles(),
+            pingpong_max_period: default_loop_pingpong_max_period(),
+            no_progress_turns: default_loop_no_progress_turns(),
+            idle_turns: default_loop_idle_turns(),
+            grace_turns: default_loop_grace_turns(),
+        }
+    }
+}
+
+impl LoopGuardsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.window_turns == 0
+            || self.repeat_threshold < 2
+            || self.pingpong_cycles < 2
+            || self.pingpong_max_period < 2
+            || self.no_progress_turns == 0
+            || self.idle_turns == 0
+            || self.grace_turns == 0
+        {
+            anyhow::bail!(
+                "execution.loop_guards thresholds must be positive, repeat_threshold and pingpong_cycles at least 2, pingpong_max_period at least 2; set `enabled: false` to turn the detectors off"
+            );
+        }
+        if self.repeat_threshold > self.window_turns {
+            anyhow::bail!(
+                "execution.loop_guards repeat_threshold exceeds window_turns, so a repetition could never be seen"
+            );
+        }
+        let longest = u64::from(self.pingpong_cycles) * u64::from(self.pingpong_max_period);
+        if longest > u64::from(self.window_turns) {
+            anyhow::bail!(
+                "execution.loop_guards pingpong_cycles x pingpong_max_period exceeds window_turns, so the longest alternation could never be seen"
+            );
+        }
+        let carry = crate::loop_guards::carry_len(self);
+        if carry > ryeos_runtime::GuardCarry::MAX_DIGESTS {
+            anyhow::bail!(
+                "execution.loop_guards need {carry} turns of history (the longest of window_turns, no_progress_turns + 1, pingpong_cycles x pingpong_max_period, repeat_threshold and idle_turns, plus grace_turns), over the {} a compaction record can carry; lower window_turns or grace_turns",
+                ryeos_runtime::GuardCarry::MAX_DIGESTS
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Signed thresholds for oversize tool results. A result longer than
+/// `spill_threshold_bytes` is stored whole beside its event and the model sees
+/// a head-and-tail preview that says it is partial. When the node cannot store
+/// it, the result is cut at `hard_cut_bytes` instead and the record names why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputConfig {
+    #[serde(default = "default_tool_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    #[serde(default = "default_tool_preview_head_bytes")]
+    pub preview_head_bytes: u64,
+    #[serde(default = "default_tool_preview_tail_bytes")]
+    pub preview_tail_bytes: u64,
+    /// Most bytes of one result stored; keep it within the node's
+    /// `thread_attachments` per-attachment limit, which refuses a larger one.
+    #[serde(default = "default_tool_spill_stored_bytes")]
+    pub max_stored_bytes: u64,
+    /// The cut applied when a result is not stored.
+    #[serde(default = "default_tool_hard_cut_bytes")]
+    pub hard_cut_bytes: u64,
+}
+
+fn default_tool_spill_threshold_bytes() -> u64 {
+    64 * 1024
+}
+
+fn default_tool_preview_head_bytes() -> u64 {
+    24 * 1024
+}
+
+fn default_tool_preview_tail_bytes() -> u64 {
+    8 * 1024
+}
+
+fn default_tool_spill_stored_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+fn default_tool_hard_cut_bytes() -> u64 {
+    100 * 1024
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_tool_spill_threshold_bytes(),
+            preview_head_bytes: default_tool_preview_head_bytes(),
+            preview_tail_bytes: default_tool_preview_tail_bytes(),
+            max_stored_bytes: default_tool_spill_stored_bytes(),
+            hard_cut_bytes: default_tool_hard_cut_bytes(),
+        }
+    }
+}
+
+impl ToolOutputConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.spill_threshold_bytes == 0
+            || self.preview_head_bytes == 0
+            || self.preview_tail_bytes == 0
+            || self.max_stored_bytes == 0
+            || self.hard_cut_bytes == 0
+        {
+            anyhow::bail!("execution.tool_output limits must all be positive");
+        }
+        if self.preview_head_bytes + self.preview_tail_bytes >= self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output preview_head_bytes + preview_tail_bytes must be below spill_threshold_bytes, or the preview would not be smaller than the result it replaces"
+            );
+        }
+        if self.max_stored_bytes < self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output max_stored_bytes must be at least spill_threshold_bytes"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Signed ceilings on the images a run's tools may return. The per-run
@@ -308,6 +763,10 @@ fn default_tool_concurrency() -> u32 {
     4
 }
 
+fn default_observing_hooks_per_turn() -> u32 {
+    64
+}
+
 fn default_retries() -> u32 {
     2
 }
@@ -317,6 +776,10 @@ fn default_retry_status_codes() -> Vec<u16> {
 }
 
 fn default_backoff_max_ms() -> u64 {
+    60_000
+}
+
+fn default_retry_after_max_ms() -> u64 {
     60_000
 }
 
@@ -354,11 +817,15 @@ impl Default for ExecutionConfig {
             max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
             tool_concurrency: default_tool_concurrency(),
+            observing_hooks_per_turn: default_observing_hooks_per_turn(),
             backoff_max_ms: default_backoff_max_ms(),
+            retry_after_max_ms: default_retry_after_max_ms(),
             unknown_outcome_retry: None,
             on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
             tool_images: ToolImagesConfig::default(),
+            tool_output: ToolOutputConfig::default(),
+            loop_guards: LoopGuardsConfig::default(),
         }
     }
 }
@@ -371,10 +838,23 @@ impl ExecutionConfig {
                 self.tool_concurrency
             );
         }
+        if self.observing_hooks_per_turn == 0 || self.observing_hooks_per_turn > 1024 {
+            anyhow::bail!(
+                "execution.observing_hooks_per_turn must be between 1 and 1024, got {}",
+                self.observing_hooks_per_turn
+            );
+        }
         if self.backoff_max_ms < self.backoff_base_ms {
             anyhow::bail!(
                 "execution.backoff_max_ms ({}) must not be below execution.backoff_base_ms ({})",
                 self.backoff_max_ms,
+                self.backoff_base_ms
+            );
+        }
+        if self.retry_after_max_ms != 0 && self.retry_after_max_ms < self.backoff_base_ms {
+            anyhow::bail!(
+                "execution.retry_after_max_ms ({}) must be 0 (ignore Retry-After) or at least execution.backoff_base_ms ({})",
+                self.retry_after_max_ms,
                 self.backoff_base_ms
             );
         }
@@ -398,6 +878,8 @@ impl ExecutionConfig {
             }
         }
         self.tool_images.validate()?;
+        self.tool_output.validate()?;
+        self.loop_guards.validate()?;
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -757,6 +1239,12 @@ pub struct UsageUpdate {
     pub anomalies: Vec<String>,
 }
 
+/// Whether a reply has nothing to act on: no tool call and no text beyond
+/// whitespace. A reply holding only reasoning is empty.
+pub fn is_empty_reply(message: &ProviderMessage) -> bool {
+    !message.has_tool_calls() && message.text().is_none_or(|text| text.trim().is_empty())
+}
+
 /// Normalize a provider-specific finish reason string to a canonical enum.
 /// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
 /// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
@@ -776,6 +1264,74 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_reply_has_no_call_and_no_text_beyond_whitespace() {
+        use ryeos_provider_contract::ReasoningPart;
+        let reasoning = Part::Reasoning(ReasoningPart {
+            text: Some("thinking".to_string()),
+            artefact: None,
+        });
+        let assistant = |parts: Vec<Part>| ProviderMessage::new(Role::Assistant, parts);
+        assert!(is_empty_reply(&assistant(vec![])));
+        assert!(is_empty_reply(&assistant(vec![reasoning.clone()])));
+        assert!(is_empty_reply(&assistant(vec![Part::text(" \n\t ")])));
+        assert!(is_empty_reply(&assistant(vec![
+            reasoning.clone(),
+            Part::text("")
+        ])));
+        assert!(!is_empty_reply(&assistant(vec![Part::text("answer")])));
+        assert!(!is_empty_reply(&assistant(vec![
+            reasoning,
+            Part::tool_call("c1", "t", serde_json::json!({})),
+        ])));
+    }
+
+    #[test]
+    fn the_compaction_policy_refuses_values_that_cannot_work() {
+        assert!(CompactionConfig::default().validate().is_ok());
+        for bad in [
+            "trigger_ratio: 0\n",
+            "trigger_ratio: 1.5\n",
+            "min_reduction_ratio: 1\n",
+            "keep_turns: 0\n",
+            "summary:\n    input_ratio: 0\n",
+            "enabled: true\n  overflow_codes: []\n",
+        ] {
+            let config: CompactionConfig =
+                serde_yaml::from_str(&bad.replace("\n  ", "\n")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_compaction_policy_is_off_by_default_and_every_field_is_defaulted() {
+        let config: ContinuationRuntimeConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!config.compaction.enabled);
+        assert_eq!(config.compaction.trigger_ratio, 0.70);
+        assert_eq!(config.compaction.keep_turns, 6);
+        assert_eq!(config.compaction.min_turns_between, 4);
+        assert_eq!(config.compaction.max_overflow_recoveries_per_chain, 2);
+        assert_eq!(
+            config.compaction.overflow_codes,
+            ["provider_context_length_exceeded"]
+        );
+        assert_eq!(config.compaction.summary.mode, SummaryMode::Model);
+        assert_eq!(config.compaction.on_pressure, CompactionOnPressure::Compact);
+
+        let tuned: ContinuationRuntimeConfig = serde_yaml::from_str(
+            "compaction:\n  enabled: true\n  on_pressure: observe\n  summary:\n    mode: none\n",
+        )
+        .unwrap();
+        assert!(tuned.compaction.enabled);
+        assert_eq!(tuned.compaction.on_pressure, CompactionOnPressure::Observe);
+        assert_eq!(tuned.compaction.summary.mode, SummaryMode::None);
+        // The section refuses fields it does not know.
+        assert!(
+            serde_yaml::from_str::<ContinuationRuntimeConfig>("compaction:\n  trigger: 1\n")
+                .is_err()
+        );
+    }
 
     #[test]
     fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {
@@ -965,6 +1521,56 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_output, ToolOutputConfig::default());
+        defaults.validate().unwrap();
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 400\n  preview_tail_bytes: 100\n  max_stored_bytes: 5000\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        // A preview that is not smaller than the threshold would not bound
+        // anything.
+        let wide: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 900\n  preview_tail_bytes: 100\n",
+        )
+        .unwrap();
+        assert!(wide.validate().is_err());
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  hard_cut_bytes: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        let small_store: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  max_stored_bytes: 10\n").unwrap();
+        assert!(small_store.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_output:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn loop_guards_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.loop_guards, LoopGuardsConfig::default());
+        defaults.validate().unwrap();
+        let off: ExecutionConfig =
+            serde_yaml::from_str("loop_guards:\n  enabled: false\n  repeat_threshold: 0\n")
+                .unwrap();
+        off.validate().unwrap();
+        for bad in [
+            "loop_guards:\n  repeat_threshold: 1\n",
+            "loop_guards:\n  grace_turns: 0\n",
+            "loop_guards:\n  idle_turns: 0\n",
+            "loop_guards:\n  window_turns: 4\n  repeat_threshold: 5\n",
+            "loop_guards:\n  window_turns: 8\n  pingpong_cycles: 4\n  pingpong_max_period: 4\n",
+            // 250 + 10 turns of history is more than a record carries.
+            "loop_guards:\n  window_turns: 250\n  grace_turns: 10\n",
+        ] {
+            let cfg: ExecutionConfig = serde_yaml::from_str(bad).unwrap();
+            assert!(cfg.validate().is_err(), "{bad}");
+        }
+        assert!(serde_yaml::from_str::<ExecutionConfig>("loop_guards:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
     fn unknown_outcome_retry_block_parses_and_validates() {
         let cfg: ExecutionConfig = serde_yaml::from_str(
             "retries: 4\nunknown_outcome_retry:\n  max_retries: 2\n  on: [timeout, mid_stream]\n",
@@ -1013,6 +1619,35 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_cap_defaults_to_a_minute_and_zero_means_ignore() {
+        let cfg: ExecutionConfig = serde_yaml::from_str("retries: 1\n").unwrap();
+        assert_eq!(cfg.retry_after_max_ms, 60_000);
+        assert_eq!(
+            ExecutionConfig::default().retry_after_max_ms,
+            cfg.retry_after_max_ms
+        );
+        cfg.validate().unwrap();
+        let ignore: ExecutionConfig = serde_yaml::from_str("retry_after_max_ms: 0\n").unwrap();
+        ignore.validate().unwrap();
+        let at_base: ExecutionConfig = serde_yaml::from_str(
+            "backoff_base_ms: 2000\nbackoff_max_ms: 9000\nretry_after_max_ms: 2000\n",
+        )
+        .unwrap();
+        at_base.validate().unwrap();
+    }
+
+    #[test]
+    fn a_retry_after_cap_below_the_backoff_base_is_refused_naming_both() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "backoff_base_ms: 2000\nbackoff_max_ms: 9000\nretry_after_max_ms: 1999\n",
+        )
+        .unwrap();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("retry_after_max_ms (1999)"), "{error}");
+        assert!(error.contains("backoff_base_ms (2000)"), "{error}");
+    }
+
+    #[test]
     fn backoff_cap_below_base_is_rejected() {
         let cfg: ExecutionConfig =
             serde_yaml::from_str("backoff_base_ms: 2000\nbackoff_max_ms: 1000\n").unwrap();
@@ -1023,6 +1658,18 @@ mod tests {
 #[cfg(test)]
 mod tool_concurrency_tests {
     use super::ExecutionConfig;
+
+    #[test]
+    fn observing_hooks_per_turn_defaults_to_64_and_refuses_values_that_cannot_work() {
+        let config: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.observing_hooks_per_turn, 64);
+        assert!(config.validate().is_ok());
+        for bad in [0, 1025] {
+            let config: ExecutionConfig =
+                serde_yaml::from_str(&format!("observing_hooks_per_turn: {bad}")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn tool_concurrency_defaults_to_four_and_validates_range() {

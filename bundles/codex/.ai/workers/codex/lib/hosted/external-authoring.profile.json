@@ -246,30 +246,24 @@
         ]
       },
       {
-        "any_of": [
-          "recovery:enclosure",
-          "recovery:enclosure_trusted_init"
-        ],
-        "accept": [
-          "measured",
-          "trusted"
-        ]
-      },
-      {
-        "any_of": [
-          "termination:enclosure",
-          "termination:enclosure_trusted_init"
-        ],
-        "accept": [
-          "measured",
-          "trusted"
-        ]
-      },
-      {
         "name": "persistence:durable_state",
         "accept": [
           "measured",
           "provider_attested",
+          "trusted"
+        ]
+      },
+      {
+        "name": "recovery:enclosure_trusted_init",
+        "accept": [
+          "measured",
+          "trusted"
+        ]
+      },
+      {
+        "name": "termination:enclosure_trusted_init",
+        "accept": [
+          "measured",
           "trusted"
         ]
       },
@@ -336,6 +330,7 @@
         }
       },
       "response_schema": "schema/InitializeResponse.json",
+      "expected_server_version": "0.147.0",
       "notification": null
     },
     {

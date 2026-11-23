@@ -432,7 +432,9 @@ composed_value_contract:
             .insert("required_caps".to_owned(), serde_json::json!(caps));
         VerifiedItem {
             resolved: ResolvedItem {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
                 canonical_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                     "service:health/status",
                 )

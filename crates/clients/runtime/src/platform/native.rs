@@ -829,7 +829,9 @@ mod tests {
                 base_url: base_url.to_owned(),
                 audience: String::new(),
                 signer: None,
-                http: reqwest::Client::new(),
+                http: ryeos_http_egress::client_builder()
+                    .build()
+                    .expect("the HTTP client builds"),
                 session: RefCell::new(None),
             }),
             mint: None,

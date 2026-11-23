@@ -11,6 +11,7 @@ pub mod browser_session;
 pub mod compiled_binding;
 pub mod handlers;
 pub mod invokers;
+pub mod item_hints;
 mod phase_timing;
 pub mod seat_auth;
 pub mod seat_read_policy;
@@ -28,6 +29,7 @@ pub mod transfer_store;
 pub use browser_session::{
     BrowserSession, BrowserSessionStore, LaunchContext, SessionSummary, SessionTiming,
 };
+pub use item_hints::ItemHintFanout;
 pub use session_bus::SessionBus;
 pub use state::UiState;
 pub use thread_hints::ThreadHintFanout;

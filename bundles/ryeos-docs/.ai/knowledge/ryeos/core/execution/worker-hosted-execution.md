@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:27:04Z:3e4488f19d30e4300d2471ac6b636aff8504931d4b5a00e5efb41d69764523de:WOEjyyXjtDhUrVwoz3OiW+AweUP7x6Xo6nILGoQYh2PiksnKPkHV0hJzPg8Pxst0BjGOtzy+3LzWDgX3zzdwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:06:36Z:1f0bf5f8def2a62692284019d7767b1ab520f4d84505b3e3b20fa2d71b1908bc:i7C5iKO4yh9okhHS/bQ616D4CYtJXXt6n4DHgQlCOI9zHOldg+8Bk25zyKoNXY8HCuI9jFnXlHoYPn9hZcszAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -617,6 +617,14 @@ only the newest bounded suffix of terminal attempt diagnostics plus at most one
 running reservation. Ordinary terminal-job GC may later remove that operational
 row and its attempt diagnostics. Permanent target branch heads and signed
 terminal testimony—not the sync-job row—preserve settled handoff authority.
+
+Revoking the operator grant an adoption relied on fences runnable recovery and
+credential-private state on the target; it does not erase the signed terminal
+testimony. A restarted target whose operator grant was revoked while its
+adopted session was recovering settles that session cancelled at startup
+recovery: the node's recovery of the successor root is refused, and the root
+stop cancels the session. Replaying a retained adoption receipt returns the
+same signed terminal response and never changes session or credential state.
 Every error after reservation—including response decoding, closure fetch, and
 signature validation—settles that reservation before another exact redrive may
 begin. Each authenticated peer interaction has a finite total wall-clock bound;

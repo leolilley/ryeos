@@ -243,6 +243,7 @@ impl RuntimeHandler for RuntimeConfigHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -332,7 +333,7 @@ mod tests {
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: vec![],
         };

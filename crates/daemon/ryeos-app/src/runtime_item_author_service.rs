@@ -16,6 +16,7 @@ use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::item_revised::ItemRevised;
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -196,6 +197,7 @@ impl RuntimeItemAuthorService {
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
         heads: &RevisionHeads,
+        announce: &dyn Fn(ItemRevised),
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
         // Candidate integration and live publication are separate authorities.
@@ -203,7 +205,8 @@ impl RuntimeItemAuthorService {
         // capsule-sealed by the owner service; it never receives an ambient
         // live-tree path. Ordinary callbacks retain the existing independent
         // live-project write ceiling and durable publication-root check.
-        let project_root = match cap.provenance.candidate_item_authoring_root()? {
+        let candidate_root = cap.provenance.candidate_item_authoring_root()?;
+        let project_root = match candidate_root {
             Some(root) => root,
             None => {
                 authorizer
@@ -320,6 +323,7 @@ impl RuntimeItemAuthorService {
                 authoring,
                 engine,
                 heads,
+                (candidate_root.is_none()).then_some(announce),
                 RemovalTarget {
                     project_root,
                     canonical: &canonical,
@@ -480,6 +484,14 @@ impl RuntimeItemAuthorService {
             Some(signed.as_str()),
             revision_provenance(&provenance),
         )?;
+        if candidate_root.is_none() {
+            announce(revised_event(
+                project_root,
+                &canonical.to_string(),
+                Some(item_revision::file_digest(signed.as_bytes())),
+                recorded.seq,
+            ));
+        }
 
         Ok(RuntimeAuthorItemResponse {
             item_ref: canonical.to_string(),
@@ -502,6 +514,7 @@ impl RuntimeItemAuthorService {
         authoring: &NodeIdentity,
         engine: &ryeos_engine::engine::Engine,
         heads: &RevisionHeads,
+        announce: Option<&dyn Fn(ItemRevised)>,
         target: RemovalTarget<'_>,
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
@@ -588,6 +601,14 @@ impl RuntimeItemAuthorService {
             None,
             revision_provenance(&provenance),
         )?;
+        if let Some(announce) = announce {
+            announce(revised_event(
+                target.project_root,
+                &target.canonical.to_string(),
+                None,
+                recorded.seq,
+            ));
+        }
         Ok(RuntimeAuthorItemResponse {
             item_ref: target.canonical.to_string(),
             path: target.path.display().to_string(),
@@ -599,6 +620,26 @@ impl RuntimeItemAuthorService {
             revision_digest: recorded.digest,
             previous_digest: recorded.previous_digest,
         })
+    }
+}
+
+/// The announcement of a recorded change to the item at `item_ref` in
+/// `project_root`. The project is named by its canonical root path, as the
+/// node's revision heads name it.
+fn revised_event(
+    project_root: &Path,
+    item_ref: &str,
+    digest: Option<String>,
+    revision: u64,
+) -> ItemRevised {
+    let project = RevisionHeads::project_key(project_root)
+        .unwrap_or_else(|_| project_root.display().to_string());
+    ItemRevised {
+        project: Some(project),
+        item_ref: item_ref.to_owned(),
+        digest,
+        revision,
+        change_set: None,
     }
 }
 
@@ -882,7 +923,9 @@ fn enforce_authored_capability_ceiling(
             };
             let effective = engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                        None, &subject,
+                    ),
                     item_ref: parent_ref,
                     expected_kind: Some(target.kind.clone()),
                     project_root,

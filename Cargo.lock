@@ -901,9 +901,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2681,6 +2681,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-project-capture",
@@ -2739,6 +2740,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-isolation-protocol",
  "ryeos-node-runtime",
  "ryeos-project-capture",
@@ -2828,6 +2830,7 @@ name = "ryeos-claude-code-adapter"
 version = "0.1.0"
 dependencies = [
  "lillux",
+ "ryeos-accounting",
  "serde_json",
  "uuid",
 ]
@@ -2900,6 +2903,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-http-egress",
  "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
@@ -2943,9 +2947,11 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-http-egress",
  "ryeos-request-signing",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2962,6 +2968,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-http-egress",
  "ryeos-request-signing",
  "serde",
  "serde_json",
@@ -3076,6 +3083,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-directive-definition",
  "ryeos-engine",
+ "ryeos-http-egress",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-state",
@@ -3392,6 +3400,14 @@ dependencies = [
  "ryeos-effect-contract",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ryeos-http-egress"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
 ]
 
 [[package]]
@@ -3742,6 +3758,7 @@ dependencies = [
  "reqwest",
  "ryeos-engine",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-runtime",
  "ryeos-state",
  "serde",
@@ -3936,6 +3953,7 @@ dependencies = [
  "ryeos-executor",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution-contract",
+ "ryeos-http-egress",
  "ryeos-isolation-protocol",
  "ryeos-node",
  "ryeos-node-runtime",
@@ -4843,9 +4861,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

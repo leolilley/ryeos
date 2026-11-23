@@ -3656,7 +3656,12 @@ fn check_service_catalog_entry(
 fn installed_service_refs(
     engine: &ryeos_engine::engine::Engine,
 ) -> Result<Vec<ryeos_engine::canonical_ref::CanonicalRef>> {
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
         &roots,
         &engine.kinds,
@@ -4580,7 +4585,7 @@ async fn run(
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
-                        logical_project_root: None,
+                        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                             ryeos_engine::contracts::Principal {
                                 fingerprint: node_principal,
@@ -4602,7 +4607,7 @@ async fn run(
                     let effective_requests = installed_refs
                         .iter()
                         .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
-                            logical_project_root: None,
+                            logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                             item_ref: canonical.clone(),
                             expected_kind: Some(canonical.kind.clone()),
                             project_root: None,
@@ -6473,7 +6478,15 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
             }
             None => false,
         };
+        // A held dedicated-session root is owned by its session: the
+        // session policy table (not a process, claim or follow row) is the
+        // durable owner while the session is parked/frozen/publishing, so
+        // the root legitimately stays `running` with no resume.
+        let held_by_dedicated_session = !status.is_terminal()
+            && reconcile::dedicated_session_root_resume(state, thread_id)?
+                == ryeos_app::dedicated_session_service::SessionRootResume::Hold;
         if status.is_terminal()
+            || held_by_dedicated_session
             || live_owned_process
             // Reuse the owner checked by reconcile_in_process_handler. A
             // reservation alone is not liveness, and this volatile registry
@@ -7128,6 +7141,67 @@ async fn run_ui_hint_loop(
     }
 }
 
+/// Relay item revisions to the sessions whose attachments name them. When the
+/// hub drops announcements because this relay lagged, the revision chain heads
+/// are re-read and whatever is newer is passed on.
+async fn run_ui_item_hint_loop(
+    mut events: tokio::sync::broadcast::Receiver<ryeos_app::item_revised::ItemRevised>,
+    ui: Arc<ryeos_ui::UiState>,
+) -> Result<()> {
+    let fanout = Arc::new(ryeos_ui::ItemHintFanout::new());
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            recv = events.recv() => match recv {
+                Ok(event) => {
+                    fanout.publish(&ui, &event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let passed =
+                        ryeos_ui::item_hints::catch_up_blocking(fanout.clone(), ui.clone()).await;
+                    tracing::info!(skipped, passed, "item revision relay lagged and caught up");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("item revision hub closed before daemon shutdown")
+                }
+            }
+        }
+    }
+}
+
+/// Announce the revisions made since the last announcement the node recorded
+/// (changes made while the node was stopped, or whose announcement was lost).
+/// A failure is logged and never stops startup: the revision records are the
+/// durable form and the next start tries again.
+async fn reconcile_item_revisions(
+    state: &AppState,
+    hub: &Arc<ryeos_app::item_revised::ItemRevisedHub>,
+) {
+    let app_root = state.config.app_root.clone();
+    let node_key = *state.identity.verifying_key();
+    let hub = hub.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::item_revised::reconcile_published_heads(&app_root, node_key, &hub)
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) => tracing::info!(
+            projects = report.projects,
+            announced = report.announced,
+            failures = report.failures,
+            "reconciled item revision announcements"
+        ),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "could not reconcile item revision announcements")
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "item revision reconciliation task failed")
+        }
+    }
+}
+
 /// A daemon whose composition does not select the scheduler may perform
 /// terminal-history cleanup only while the pinned runtime and node namespaces
 /// continue to prove no scheduler DB, fire history, or signed schedule source
@@ -7275,12 +7349,24 @@ async fn supervise_background_tasks(
 
     let hint_hub = state.event_streams.clone();
     let hint_state = state.clone();
+    // Subscribe before the startup pass announces anything, so what it
+    // announces reaches the relay.
+    let item_revisions = state.event_streams.item_revisions().clone();
+    let item_revision_events = item_revisions.subscribe();
+    let item_ui = ui.clone();
     tasks.spawn(async move {
         (
             "UI hint fanout",
             run_ui_hint_loop(hint_hub, ui, hint_state).await,
         )
     });
+    tasks.spawn(async move {
+        (
+            "UI item hint fanout",
+            run_ui_item_hint_loop(item_revision_events, item_ui).await,
+        )
+    });
+    reconcile_item_revisions(&state, &item_revisions).await;
 
     let first_result = tokio::select! {
         _ = shutdown_signal() => Ok(()),
@@ -8897,7 +8983,9 @@ async fn run_service_standalone(
     let standalone_handler_context =
         standalone_operator_handler_context(standalone_principal.clone());
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: standalone_principal.clone(),

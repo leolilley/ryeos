@@ -25,6 +25,7 @@ serde_json.workspace = true
 jsonschema.workspace = true
 lillux.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
+ryeos-http-egress = { workspace = true, features = ["blocking"] }
 ryeos-engine.workspace = true
 ryeos-handler-protocol.workspace = true
 ryeos-runtime.workspace = true

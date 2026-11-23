@@ -306,6 +306,16 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["project", "register"],
+        summary: "Register a live checkout under its project name on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["project", "unregister"],
+        summary: "Remove a checkout from its project registration on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "bundle-set", "update"],
         summary: "Install an exact published bundle set while the node is stopped",
         category: "maintenance",
@@ -542,6 +552,10 @@ pub async fn try_dispatch(
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
             crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("project", Some(verb @ ("register" | "unregister"))) => {
+            crate::lifecycle_project::run(verb, &argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("operator")) if argv.get(2).map(String::as_str) == Some("rotate") => {
@@ -3073,6 +3087,21 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Live project registrations: node-signed records under
+    // `.ai/node/projects`. Inert until the owner+name trust cut; the rows
+    // report what the cut will trust.
+    if initialized {
+        checks.extend(project_registration_checks(&config.app_root));
+    } else {
+        for name in ["project_registrations", "project_registration_declarations"] {
+            checks.push(check(
+                name,
+                NA,
+                serde_json::json!({ "note": "not initialized" }),
+            ));
+        }
+    }
+
     // The wall clock the node issues external execution windows from. Always
     // reported; a node policy that requires a synchronized clock turns an
     // unsatisfied reading into a failure.
@@ -5067,6 +5096,101 @@ fn host_services_check(
 }
 
 /// The `remote_pins` doctor row.
+/// The two project registration rows. `project_registrations` verifies every
+/// record under the node key and warns when one name lists more than one
+/// checkout: names are free text, so two unrelated checkouts registered under
+/// one name would share its trust at the cut. `project_registration_declarations`
+/// warns for each registered checkout that is gone or no longer declares the
+/// registered name.
+fn project_registration_checks(
+    app_root: &Path,
+) -> Vec<ryeos_core_tools::actions::doctor::CheckResult> {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    let loaded = ryeos_engine::trust::load_node_verifying_key(app_root)
+        .map_err(anyhow::Error::new)
+        .and_then(|key| ryeos_node::project_registry::load_registrations(app_root, &key));
+    let registrations = match loaded {
+        Ok(registrations) => registrations,
+        Err(error) => {
+            return vec![
+                check(
+                    "project_registrations",
+                    FAIL,
+                    serde_json::json!({
+                        "error": format!("{error:#}"),
+                        "fix": "remove the unsigned, edited or stray entry under .ai/node/projects, then register the checkout again with `ryeos project register`",
+                    }),
+                ),
+                check(
+                    "project_registration_declarations",
+                    NA,
+                    serde_json::json!({ "note": "registrations did not verify" }),
+                ),
+            ];
+        }
+    };
+    let shared: Vec<serde_json::Value> = registrations
+        .iter()
+        .filter(|loaded| loaded.registration.paths.len() > 1)
+        .map(|loaded| {
+            serde_json::json!({
+                "identity": loaded.registration.identity,
+                "paths": loaded.registration.paths,
+                "fix": "unregister every checkout that is not this project with `ryeos project unregister <path>`",
+            })
+        })
+        .collect();
+    let registered = registrations.len();
+    let registrations_row = if shared.is_empty() {
+        check(
+            "project_registrations",
+            OK,
+            serde_json::json!({ "registrations": registered, "signature": "verified" }),
+        )
+    } else {
+        check(
+            "project_registrations",
+            WARN,
+            serde_json::json!({ "registrations": registered, "names_with_several_checkouts": shared }),
+        )
+    };
+    let mut stale = Vec::new();
+    for loaded in &registrations {
+        let identity = &loaded.registration.identity;
+        for path in &loaded.registration.paths {
+            let declared = ryeos_node::project_registry::inspect_checkout(app_root, path);
+            let problem = match declared {
+                Ok((_, Some(name))) if &name == identity.name() => None,
+                Ok((_, Some(name))) => Some(format!("declares `{name}`")),
+                Ok((_, None)) => Some("declares no name".to_owned()),
+                Err(error) => Some(format!("{error:#}")),
+            };
+            if let Some(problem) = problem {
+                stale.push(serde_json::json!({
+                    "identity": identity,
+                    "path": path,
+                    "problem": problem,
+                    "fix": format!("restore the checkout's .ai/project.yaml (name: {}) or `ryeos project unregister {} --name {}`", identity.name(), path.display(), identity.name()),
+                }));
+            }
+        }
+    }
+    let declarations_row = if stale.is_empty() {
+        check(
+            "project_registration_declarations",
+            OK,
+            serde_json::json!({ "registrations": registered }),
+        )
+    } else {
+        check(
+            "project_registration_declarations",
+            WARN,
+            serde_json::json!({ "stale_checkouts": stale }),
+        )
+    };
+    vec![registrations_row, declarations_row]
+}
+
 fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, OK};
     match ryeos_api::remote::config::load_remotes_report(app_root) {

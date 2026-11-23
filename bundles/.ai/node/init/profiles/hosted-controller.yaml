@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:22:30Z:1b1a160d05abb020ac6936b609638a2ae220156a19f532650001a0232d3b67bf:cYNXcBgVKdaZWUB3E2zWO9vMm7ZHLX/IUbwY6OgAYbAgxnNCtZrFjeCQBgv1BV9J8JAEiqcCrGVQcefnQV9nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T07:10:43Z:39e89fec401a4d5322ade04713d3513efefde28a0257eb4a27961bd9c9dbfe83:LcifaX3aq7WRzIo39BVu2YtrJP5A/JxCj9ATkeUQ0i3AV5N/uOElF41APS1HAx9/A1+a995vr04BJOb8YlOeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -193,6 +193,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
@@ -284,15 +285,14 @@ policies:
           # Docker). It has no qualified per-job process scopes and commonly no
           # swap and no CAP_IPC_LOCK, so the floor accepts a resident region
           # proven only by the absence of swap at startup (residency:swap_absent),
-          # which a later swapon ends. Jobs die with the node because the node is
-          # pid 1 of its container, or its parent is a pid 1 named in
-          # enclosure_inits; the trusted_init names carry that weaker grade and
-          # the report names which proof met each entry. Jobs run without a
-          # sandbox. Codex app servers run in the trusted direct process-group
-          # lane on this class as on `local`: a host with no qualified per-job
-          # scope cannot hold them in one, so the floor requires a trusted
-          # process-group termination proof instead, and the lane makes no
-          # hard-containment claim.
+          # which a later swapon ends. Jobs die with the node because its parent
+          # is a pid 1 named in enclosure_inits; the node itself cannot be pid 1,
+          # since process identity refuses pid 1. Jobs run without a sandbox.
+          # Codex app servers run in the trusted direct process-group lane on this
+          # class as on `local`: a host with no qualified per-job scope cannot
+          # hold them in one, so the floor requires a trusted process-group
+          # termination proof instead, and the lane makes no hard-containment
+          # claim.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
@@ -302,26 +302,25 @@ policies:
           proc_filesystem: empty
           host_direct: unavailable
         local:
-          # A host the operator runs the controller on directly.
-          # Vault secrets, the node identity, the credential home and the
-          # restart-inhibit record live under the app root, so every class
-          # requires storage:durable_root. Codex app servers run in the trusted
-          # direct process-group lane, which needs a trusted process-group
-          # termination proof. Remote Codex authoring also requires that the
-          # controller's jobs die with it and that a restart proves the old
-          # generation's jobs dead, so the floor requires the enclosure
-          # termination and recovery proofs: the node is pid 1 of a container
-          # enclosure, or its parent is a pid 1 named in enclosure_inits. An
-          # operator's host where the node runs under a service manager outside
-          # such an enclosure cannot prove them and refuses at boot; run the
-          # controller there in a container (Docker or Podman with one of the
-          # trusted inits, or the node as pid 1). The floor also requires
-          # strict `accounting`, a resident region proven by memory locking,
-          # so that container needs CAP_IPC_LOCK and a memlock limit large
-          # enough for the region. A container deployment that cannot lock
-          # memory declares `hosted` instead, whose floor accepts the absence
-          # of swap in place of the lock.
-          requires_capabilities: [accounting, {any_of: [recovery:enclosure, recovery:enclosure_trusted_init], accept: [measured, trusted]}, storage:durable_root, {any_of: [termination:enclosure, termination:enclosure_trusted_init], accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
+          # A host the operator runs the controller on directly. Vault secrets,
+          # the node identity, the credential home and the restart-inhibit
+          # record live under the app root, so every class requires
+          # storage:durable_root. Codex app servers run in the trusted direct
+          # process-group lane, which needs a trusted process-group termination
+          # proof. Remote Codex authoring also requires that the controller's
+          # jobs die with it and that a restart proves the old generation's jobs
+          # dead, so the floor requires the enclosure termination and recovery
+          # proofs: the node's parent is pid 1 of a container enclosure and is
+          # named in enclosure_inits. An operator's host where the node runs
+          # under a service manager outside such an enclosure cannot prove them
+          # and refuses at boot; run the controller there in a container (Docker
+          # or Podman with one of the trusted inits as pid 1). The floor also
+          # requires strict `accounting`, a resident region proven by memory
+          # locking, so that container needs CAP_IPC_LOCK and a memlock limit
+          # large enough for the region. A container deployment that cannot lock
+          # memory declares `hosted` instead, whose floor accepts the absence of
+          # swap in place of the lock.
+          requires_capabilities: [accounting, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
           # The same trusted direct process-group lane as `hosted`: it admits
@@ -509,7 +508,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 6
+    schema: 5
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -519,8 +518,6 @@ policies:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.events/chain_replay
-      - ryeos.execute.service.projects/add
-      - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input
       - ryeos.execute.service.commands/dispatch
       - ryeos.execute.service.commands/submit
@@ -528,7 +525,6 @@ policies:
       - ryeos.execute.service.revisions/list
       - ryeos.execute.service.revisions/get
       - ryeos.execute.service.worker-executions/resolve-approval
-      - ryeos.execute.directive.*
       - ryeos.execute.graph.*
       - ryeos.execute.tool.ryeos/core/fetch
       - ryeos.execute.tool.ryeos/core/verify
@@ -538,12 +534,10 @@ policies:
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log
-      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
-    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16
@@ -745,9 +739,12 @@ policies:
           - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints. Thread lifecycle hints keep
-      # the thread, its event name, status and time. Activity hints keep only
-      # their kind, so no thread list rides on them.
+      # The session stream carries thread hints and item hints. Thread
+      # lifecycle hints keep the thread, its event name, status and time.
+      # Activity hints keep only their kind, so no thread list rides on them.
+      # An item hint keeps the item ref, digest, revision and change set id;
+      # the daemon sends it only to a session whose own bindings name that
+      # item, and it carries no item content.
       - target: route:ui/events/session
         classes: [local_operator, hosted_principal]
         keep:
@@ -757,6 +754,10 @@ policies:
           - /payload/event_type
           - /payload/status
           - /payload/updated_at
+          - /payload/item_ref
+          - /payload/digest
+          - /payload/revision
+          - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
       # The pending approvals of a hosted work chain, as the Approvals view

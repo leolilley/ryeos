@@ -467,8 +467,8 @@ pub fn require_administrator() -> anyhow::Result<()> {
 /// container, that container's enclosure cgroup. The enclosure is recorded
 /// only when the node runs alone in a private cgroup namespace rooted at its
 /// own cgroup and a private pid namespace, and its exit is proven to end
-/// that namespace: the node is pid 1, or its parent is a pid 1 that node
-/// policy trusts to exit with its only child. Otherwise only the boot is
+/// that namespace: its parent is a pid 1 that node policy trusts to exit
+/// with its only child. Otherwise only the boot is
 /// recorded and the enclosure generation stays undecided. Callers decide
 /// lifetimes only while holding the node's state lock, which proves the
 /// recording node has exited; with both, a different enclosure on the same
@@ -1217,7 +1217,7 @@ impl ProcessScopeConfiguration {
         )
     }
 
-    fn exec_controller_inner(
+    fn prepare_controller_command(
         &self,
         account: &ControllerAccount,
         node_resources: ProcessScopeResourceLimits,
@@ -1227,7 +1227,7 @@ impl ProcessScopeConfiguration {
         environment: &[(String, String)],
         inherited_document: Option<(crate::InheritedReadonlyDocument, &str)>,
         oci_lifecycle: Option<&super::OciLifecycleGeneration>,
-    ) -> Result<std::convert::Infallible, String> {
+    ) -> Result<std::process::Command, String> {
         self.validate()?;
         account.validate()?;
         node_resources.validate()?;
@@ -1258,7 +1258,6 @@ impl ProcessScopeConfiguration {
         }
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::process::CommandExt as _;
             // Retain the exact selected directory across provisioning and
             // credential drop. Reopening cwd.path() here would discard the
             // caller's host association check if its parent were renamed.
@@ -1311,6 +1310,39 @@ impl ProcessScopeConfiguration {
             bootstrap.configure_command(&mut command)?;
             cwd.configure_command_cwd(&mut command)
                 .map_err(|error| error.to_string())?;
+            Ok(command)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (account, arguments, inherited_document, oci_lifecycle);
+            Err("scope controller provisioning is unavailable on this OS".to_owned())
+        }
+    }
+
+    fn exec_controller_inner(
+        &self,
+        account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
+        executable: &crate::PinnedRegularFile,
+        arguments: &[String],
+        cwd: &crate::PinnedDirectory,
+        environment: &[(String, String)],
+        inherited_document: Option<(crate::InheritedReadonlyDocument, &str)>,
+        oci_lifecycle: Option<&super::OciLifecycleGeneration>,
+    ) -> Result<std::convert::Infallible, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt as _;
+            let mut command = self.prepare_controller_command(
+                account,
+                node_resources,
+                executable,
+                arguments,
+                cwd,
+                environment,
+                inherited_document,
+                oci_lifecycle,
+            )?;
             // A host supervisor commonly runs this entry inside its own
             // administrator-owned session and process group. The controller
             // must lead its own: its exact identity names its group leader,
@@ -1324,9 +1356,50 @@ impl ProcessScopeConfiguration {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (account, arguments, inherited_document, oci_lifecycle);
+            let _ = (
+                account,
+                node_resources,
+                executable,
+                arguments,
+                cwd,
+                environment,
+                inherited_document,
+                oci_lifecycle,
+            );
             Err("scope controller provisioning is unavailable on this OS".to_owned())
         }
+    }
+
+    /// Test-only: the exact controller launch of
+    /// [`exec_controller_with_inherited_document`] (same placement in the
+    /// administrator-owned controller leaf, credential drop, resource limits
+    /// and inherited launch document), returned as a prepared command the
+    /// caller spawns as its own child instead of replacing itself. A test
+    /// harness uses it to keep the node's process as its child and to add the
+    /// arguments, environment and descriptors the protected entry never
+    /// carries. It exists only under the `test-support` feature, which no
+    /// shipped build enables.
+    #[cfg(feature = "test-support")]
+    pub fn spawn_controller_with_inherited_document(
+        &self,
+        account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
+        executable: &crate::PinnedRegularFile,
+        arguments: &[String],
+        cwd: &crate::PinnedDirectory,
+        document: crate::InheritedReadonlyDocument,
+        descriptor_env_name: &str,
+    ) -> Result<std::process::Command, String> {
+        self.prepare_controller_command(
+            account,
+            node_resources,
+            executable,
+            arguments,
+            cwd,
+            &[],
+            Some((document, descriptor_env_name)),
+            None,
+        )
     }
 
     /// Pure validation only. It does not inspect or mutate the current host.
@@ -2815,6 +2888,7 @@ mod tests {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args([
+                "--ignored",
                 "--exact",
                 "process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges",
                 "--nocapture",
@@ -3119,7 +3193,7 @@ mod tests {
             }
         };
         assert!(natural.success, "{}", natural.stderr);
-        natural_recovery.wait_empty(Duration::ZERO).unwrap();
+        natural_recovery.wait_empty(Duration::from_secs(5)).unwrap();
         provider
             .retire(&natural_recovery, Duration::from_secs(5))
             .unwrap();

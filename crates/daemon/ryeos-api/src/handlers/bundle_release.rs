@@ -2539,7 +2539,7 @@ async fn run_release_graph(
         let site_id = state.threads.site_id().to_owned();
         let origin_site_id = context.execution_origin(&site_id);
         let plan_ctx = ryeos_engine::contracts::PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: context.fingerprint.clone(),
@@ -4429,6 +4429,35 @@ pub const ALL: &[ServiceDescriptor] = &[
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn release_source_is_refused_without_the_principals_current_pushed_head() {
+        let (_node, _state_owner, state) = crate::test_support::build_test_state_with_bundles();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
+        let principal = operator.principal_id();
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let state = Arc::new(state);
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let snapshot = cas.store_object(&json!({"snapshot": "head"})).unwrap();
+        let context = HandlerContext::new(principal, Vec::new(), true);
+
+        // No pushed head at this path for the principal: the call is refused
+        // before any release source generation, and so any project identity,
+        // is produced.
+        let refused =
+            resolve_release_source_generation(&project, &snapshot, &context, &state).await;
+        assert!(
+            refused.is_err(),
+            "a principal with no pushed head must not obtain a release source generation"
+        );
+    }
 
     #[test]
     fn authority_measure_request_requires_both_qualification_lanes() {

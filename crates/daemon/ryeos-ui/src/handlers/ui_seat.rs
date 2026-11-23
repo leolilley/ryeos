@@ -760,6 +760,23 @@ fn reconcile_surface_closures(
         return Ok(true);
     }
     let replay = verified.replay;
+    // Settled in-place rebinds move Surface ownership to the successor
+    // attachment before anything compares coordinates against the replay.
+    let to_private = |coordinate: &ryeos_client_base::ui::UiBindingAttachmentCoordinate| {
+        BindingAttachmentCoordinate {
+            binding_attachment_id: coordinate.binding_attachment_id.clone(),
+            binding_generation: coordinate.binding_generation,
+            binding_digest: coordinate.binding_digest.clone(),
+        }
+    };
+    let rebinds = replay
+        .completed_rebinds()
+        .iter()
+        .map(|(_, from, to)| (to_private(from), to_private(to)))
+        .collect::<Vec<_>>();
+    ui.browser_sessions
+        .apply_settled_rebinds(&session.session_id, &membership.presentation_id, &rebinds)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     for surface in membership
         .surfaces
         .values()
@@ -768,6 +785,12 @@ fn reconcile_surface_closures(
         let Some(closure) = replay.closed_surfaces.get(&surface.surface_instance_id) else {
             continue;
         };
+        let mut expected = surface.coordinate.clone();
+        for (from, to) in &rebinds {
+            if *from == expected {
+                expected = to.clone();
+            }
+        }
         let coordinate = BindingAttachmentCoordinate {
             binding_attachment_id: closure.binding.binding_attachment_id.clone(),
             binding_generation: closure.binding.binding_generation,
@@ -775,7 +798,7 @@ fn reconcile_surface_closures(
         };
         if closure.presentation_id != membership.presentation_id
             || closure.surface_instance_id != surface.surface_instance_id
-            || coordinate != surface.coordinate
+            || coordinate != expected
         {
             return Err(HandlerError::Internal(
                 "retained Surface closure contradicts membership".into(),
@@ -3193,6 +3216,7 @@ mod digest_tests {
             particular_resume: None,
             saved_resume: None,
             tab_openings: std::collections::BTreeMap::new(),
+            pending_rebinds: Vec::new(),
             mount_manifest:
                 ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
                     ryeos_client_base::ids::PresentationId::try_new(presentation_id).unwrap(),

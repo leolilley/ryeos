@@ -10,6 +10,8 @@ use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 mod configuration_absence;
+#[cfg(test)]
+mod replay_tests;
 mod workload_client_broker;
 
 const WIRE_PROTOCOL: &str = "ryeos.structured-session";
@@ -389,6 +391,44 @@ struct InitializationStep {
     params: Value,
     response_schema: Option<String>,
     notification: Option<String>,
+    /// Version the workload's initialize response must report. Absent means
+    /// the response version is not checked.
+    #[serde(default)]
+    expected_server_version: Option<String>,
+}
+
+/// Refuse a workload whose initialize response reports a version other than
+/// the pinned one. The version reported by the workload is the first
+/// `<originator>/<version>` token of `userAgent`. It is a drift guard against
+/// a wrong or stale install, never evidence of binary identity; the
+/// activation sha256 pins are that evidence.
+fn check_server_version(pinned: &str, result: &Value) -> Result<()> {
+    let agent = result
+        .get("userAgent")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let found = agent
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.rsplit_once('/'))
+        .map(|(_, version)| version)
+        .filter(|version| !version.is_empty());
+    match found {
+        None => {
+            let raw: String = agent
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect();
+            bail!(
+                "structured-session workload did not report a version in its initialize userAgent (`{raw}`); the pinned version is `{pinned}`"
+            );
+        }
+        Some(found) if found != pinned => bail!(
+            "structured-session workload reported app-server version `{found}` but the pinned version is `{pinned}`; profiles and activations are signed data: update the profile pin and activation together, re-sign them, and re-derive bindings"
+        ),
+        Some(_) => Ok(()),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2770,12 +2810,12 @@ impl StructuredWorkload {
                     &http_contract.listener_stdout_prefix,
                     MonotonicDeadline::after(Duration::from_secs(30)),
                 )?;
-                let client = reqwest::blocking::Client::builder()
+                let client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(ROUTE_CALL_TIMEOUT)
                     .build()
                     .context("build structured workload HTTP client")?;
-                let server_request_client = reqwest::blocking::Client::builder()
+                let server_request_client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(SERVER_REQUEST_REPLY_TIMEOUT)
                     .build()
@@ -2791,7 +2831,7 @@ impl StructuredWorkload {
                 validate_schema_from_map(&schemas, &http_contract.readiness_schema, &readiness)?;
                 // The event stream is a long-lived read; it must never inherit
                 // the request client's call deadline.
-                let sse_client = reqwest::blocking::Client::builder()
+                let sse_client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .context("build structured workload event client")?;
@@ -2903,6 +2943,9 @@ impl StructuredWorkload {
             }
             if let Some(schema) = step.response_schema.as_deref() {
                 self.validate_schema(schema, result.get("result").unwrap_or(&Value::Null))?;
+            }
+            if let Some(pinned) = step.expected_server_version.as_deref() {
+                check_server_version(pinned, result.get("result").unwrap_or(&Value::Null))?;
             }
         }
         Ok(())
@@ -5118,6 +5161,36 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    fn initialize_result(agent: &str) -> Value {
+        json!({"userAgent":agent,"codexHome":"/h","platformFamily":"unix","platformOs":"linux"})
+    }
+
+    #[test]
+    fn a_workload_at_the_pinned_version_passes_the_version_check() {
+        let result = initialize_result("ryeos/0.147.0 (Debian 13.0.0; x86_64) unknown (ryeos; 1)");
+        check_server_version("0.147.0", &result).unwrap();
+    }
+
+    #[test]
+    fn a_workload_at_another_version_is_refused_naming_both_versions() {
+        let result = initialize_result("ryeos/0.156.1 (Debian 13.0.0; x86_64) unknown (ryeos; 1)");
+        let message = check_server_version("0.147.0", &result)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("0.156.1"), "{message}");
+        assert!(message.contains("0.147.0"), "{message}");
+        assert!(message.contains("re-sign"), "{message}");
+        let message = check_server_version("0.147.0", &initialize_result("odd"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("did not report a version")
+                && message.contains("`odd`")
+                && message.contains("0.147.0"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn only_the_result_notification_event_carries_the_result_marker() {

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T10:13:35Z:8bcc39ff59b9f7f7d3da169cee24fcb96b01b8169f18c91c721c506c346713be:AVHunrneQbJVdXTbPOTzYRo4/4sem6X+8c0yLJNz/w4i9jlaMupddsPZPPgh0pNwgTC6o/M+K7OCQ7P8whiXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T21:33:18Z:b1e039d4e4125f42e2224940d14c089276b3f22ff9537fa226bd8cdcac7de2cf:SGYEI2YFvr+29XJK+RUeKM6ejcTW1C3VF3DYc9itqi9810OjOWw/DdZpO61NVVWekHCSA+/Er2Lsv2NwPO+4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -378,7 +378,7 @@ A row matches a refused response when its status is listed and the response body
 first matching row wins. A match makes the thread fail with that `code`, and a
 refusal a row names is never retried, whatever `retry_status_codes` says. A
 refusal no row matches stays `directive_failed` and follows the ordinary retry
-rules. Only a response that carried a status can match, so an uncertain outcome
+rules (including the `Retry-After` handling described in `execution-config`). Only a response that carried a status can match, so an uncertain outcome
 (a timeout, a cut stream) is never reclassified.
 
 `code` is an opaque token chosen by the entry: lowercase letters, digits and
@@ -392,6 +392,84 @@ gives no code a meaning. A parent graph that follows the directive reads it as
 
 The runtime reads `request_rejections` with `deny_unknown_fields`, so a runtime
 payload older than a bundle config that declares it refuses the config. Refresh
+the runtime payload and the bundle's provider configs together.
+
+## Malformed replies
+
+Some models sometimes write a tool call as plain text in their own markup instead
+of making a structured call. The reply then has text and no tool calls, and
+without a policy the run would finish with that text as its result.
+`malformed_replies` sits at the top level of the provider entry, and a profile's
+value replaces the entry's whole; an entry without it finishes as before.
+
+```yaml
+malformed_replies:
+  markers: ["<|channel|>", "<|message|>"]
+  message: "Your last reply was not a valid tool call. Make the call again as a structured tool call."
+  max_consecutive: 3
+```
+
+A reply with no structured tool call whose text parts (not its reasoning) contain
+any marker, compared exactly and case-sensitively, is malformed. The runtime
+never parses or runs a call written as text. It drops the reply from the
+conversation sent next, records the entry's `message` as a harness input of kind
+`malformed_reply_turn_<turn>_streak_<n>` (so the record names the turn it
+corrects), and takes another turn. After `max_consecutive` corrections in a row,
+or when no turn is left, the run fails with `malformed_reply_retries_exhausted`
+and the failure names the marker it matched; the reply is never the result. A
+genuine answer that happens to contain a marker is retried the same way, so
+choose markers that only the malformed form contains. Every malformed reply is
+logged with its turn, streak position and marker.
+
+All three fields are required: 1 to 16 markers of 1 to 128 bytes (no control
+characters, none a substring of another), a message of 1 to 4096 bytes, and
+`max_consecutive` from 1 to 8. The runtime reads the strings as opaque data and
+gives none a meaning. It reads the field with `deny_unknown_fields`, so refresh
+the runtime payload and the bundle's provider configs together.
+
+## Empty replies
+
+Some reasoning models sometimes end a turn with no tool call and no text: a reply
+that holds only reasoning, or only whitespace. Without a policy the run retries
+silently with the same conversation, and the only bound is the idle loop guard or
+the turn and spend limits. `empty_replies` sits at the top level of the provider
+entry, next to `malformed_replies` but separate from it (an empty reply has no
+marker, so it is a different condition); a profile's value replaces the entry's
+whole. It is absent by default, and an entry without it behaves as before.
+
+```yaml
+empty_replies:
+  max_consecutive: 2
+  message: "Your last reply was empty. Call a tool or give your answer."
+```
+
+A reply is empty when it has no tool call and no text beyond whitespace, and it
+ended at a normal stop finish. Reasoning parts do not count as text. The policy
+never applies to a reply that ended at the output limit (that has its own
+`on_output_limit` path), to a content-filter or safety finish (a reply the
+provider withheld is left as it is today, never nudged past), to a cancelled,
+interrupted or cut stream, or to a finish reason the runtime does not recognise.
+
+The runtime drops the empty reply from the conversation sent next, records the
+entry's `message` as a harness input of kind
+`empty_reply_turn_<turn>_streak_<n>` (the record names the turn it corrects, and
+readers show it as runtime-authored, never as a user message), and takes another
+turn. The dropped reply stays in the durable record with its reasoning parts. A
+reply that is not empty resets the streak. After `max_consecutive` corrections in
+a row, or when no turn is left, the run fails with `empty_reply_retries_exhausted`.
+Each correction adds a run warning (`empty reply corrected: turn <turn>, <n> in a
+row`), so a run that succeeded after several nudges does not look clean. The
+streak resets, so the per-streak bound does not cap the empty replies in a whole
+run; the turn and spend limits do.
+
+Both fields are required: `max_consecutive` from 1 to 8, and a message of 1 to
+4096 bytes without control characters. A value of 0 or above 8 is refused when
+the config loads. The popped replies leave no digest, so with the policy active
+the idle loop guard does not see the corrected empty replies. The two settings
+are not coupled: a `max_consecutive` above 5 is looser than the idle guard's
+default (`idle_turns` 3 plus `grace_turns` 2 is five calls), and with the guard
+enabled the policy then hides empties from a guard that would have stopped the
+run sooner. The runtime reads the field with `deny_unknown_fields`, so refresh
 the runtime payload and the bundle's provider configs together.
 
 ## Provider cache usage

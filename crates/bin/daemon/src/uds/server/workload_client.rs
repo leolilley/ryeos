@@ -499,7 +499,10 @@ fn present_admitted_executions(
         engine: provenance.request_engine().clone(),
         requested_call: None,
         plan_ctx: PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                provenance.logical_project_root(current_site),
+                &subject,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.to_owned(),
                 scopes: scopes.to_vec(),

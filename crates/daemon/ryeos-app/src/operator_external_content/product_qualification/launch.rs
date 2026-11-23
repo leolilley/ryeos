@@ -52,6 +52,13 @@ pub struct ProductQualificationLaunchRequest {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationProjectContext {
     pub snapshot_hash: String,
+    /// The logical project this pinned qualification states, the thing
+    /// project-scoped signers are matched on. It is honoured only for the
+    /// node's operator and only when the caller's own pushed head for this
+    /// path is exactly `snapshot_hash`; otherwise the launch is refused.
+    /// Absent, the pinned lane states no logical project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -93,8 +100,31 @@ impl ProductQualificationLaunchRequest {
         {
             bail!("qualification project context requires an exact canonical snapshot");
         }
+        if let Some(path) = self
+            .project_context
+            .as_ref()
+            .and_then(|project| project.project_path.as_deref())
+        {
+            validate_logical_project_path(path)?;
+        }
         Ok(())
     }
+}
+
+fn validate_logical_project_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("qualification project_path must not be empty");
+    }
+    if path.len() > 4096 {
+        bail!("qualification project_path exceeds 4096 bytes");
+    }
+    if path.chars().any(|c| c.is_control()) {
+        bail!("qualification project_path must not contain NUL or control characters");
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        bail!("qualification project_path must be absolute");
+    }
+    Ok(())
 }
 
 /// Authenticated inputs to accepted-root preflight. This is not a grant: the

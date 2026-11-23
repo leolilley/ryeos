@@ -1243,6 +1243,67 @@ pub fn provision_installed_test_placement_credential(
     vault.provision_placement_credential(&access, value.as_str())
 }
 
+/// The artifact facts of an installed synthetic lifecycle bundle that a leased
+/// session binding pins.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct LeasedSessionRigArtifacts {
+    pub backend: String,
+    pub backend_artifact_hash: String,
+    pub backend_artifact_bytes: u64,
+    pub settings_schema_digest: String,
+    pub supervisor_artifact_hash: String,
+    pub supervisor_artifact_bytes: u64,
+    pub launcher_artifact_hash: String,
+    pub launcher_artifact_bytes: u64,
+    pub configuration_adapter_artifact_hash: String,
+    pub configuration_adapter_artifact_bytes: u64,
+    pub connector_artifact_hash: String,
+    pub connector_artifact_bytes: u64,
+    pub guest_runtime_manifest_hash: String,
+}
+
+/// The YAML body of a placement binding for the leased-session fixture
+/// program, composed exactly as an operator's binding is, for a test to sign
+/// as a node item before the node starts.
+#[cfg(any(test, feature = "test-support"))]
+pub fn leased_session_rig_binding_body(
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+    transport: ExternalControllerTransportContract,
+    tls_root_certificates_der_base64: Vec<String>,
+    artifacts: LeasedSessionRigArtifacts,
+    settings: Value,
+    timeout_seconds: u32,
+) -> Result<String> {
+    let qualification = PlacementQualificationSelection {
+        guest_runtime_manifest_hash: artifacts.guest_runtime_manifest_hash,
+        guest: None,
+        content: None,
+    };
+    let retained =
+        RetainedExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
+            program,
+            transport,
+            tls_root_certificates_der_base64,
+            artifacts.backend,
+            artifacts.backend_artifact_hash,
+            artifacts.backend_artifact_bytes,
+            artifacts.settings_schema_digest,
+            artifacts.supervisor_artifact_hash,
+            artifacts.supervisor_artifact_bytes,
+            artifacts.launcher_artifact_hash,
+            artifacts.launcher_artifact_bytes,
+            artifacts.configuration_adapter_artifact_hash,
+            artifacts.configuration_adapter_artifact_bytes,
+            artifacts.connector_artifact_hash,
+            artifacts.connector_artifact_bytes,
+            settings,
+            &qualification,
+            timeout_seconds,
+        )?;
+    Ok(serde_yaml::to_string(&retained.document)?)
+}
+
 impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]

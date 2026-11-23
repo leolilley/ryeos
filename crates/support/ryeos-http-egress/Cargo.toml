@@ -1,0 +1,18 @@
+[package]
+name = "ryeos-http-egress"
+version = "0.1.0"
+edition = "2024"
+description = "HTTP client proxy settings for RyeOS: environment proxies, with loopback never proxied"
+license.workspace = true
+
+[features]
+blocking = ["reqwest/blocking"]
+
+[dependencies]
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }
+
+[lints]
+workspace = true

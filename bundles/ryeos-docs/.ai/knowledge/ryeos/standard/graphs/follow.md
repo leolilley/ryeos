@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T05:28:29Z:f96f3c5176c68ed650056a01619e34330e20e41ea439c9870cffcc1fd6246aec:lSJAqmwG92yT2YnZEcGtZq40b5ZUnL6fSanwdhBZReExDadZWCCRoZMgCSWxUnDmkqsrsy2rTtWvlHLttDW+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:19:58Z:5f9a24fc7fd09f7b4d281beafba28a6899d7a3f46319855ee2c179e0da24466c:0fe2QwiE/Q87o0zg79Tm+65SU0ks5Q76/d3kYQQoIf8fogAv/hY0HjYuc4JWS9xul78mRLU8+VPgxjHvEmZQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -257,6 +257,13 @@ terminal error, never `continued` with no child behind it. See
   profile's result pointers: a profile's `cost_micro_usd` is converted into
   `total_usd` and is not a field of `cost`. A required path the value lacks
   fails the node's `assign`.
+- A worker whose reported cost is unknown (the Claude Code adapter reports
+  `usage.cost_micro_usd: null` with `usage.cost_status: "unknown"` when its
+  stream ended without a `result` event) produces a null `cost`, not a zero
+  one: a turn that may have spent is never shown as free. A rollup over several
+  followed workers adds only the members that reported a cost, so a total can
+  be lower than the true spend when a member's cost is null. Test
+  `${result.cost}` for null where that matters.
 - `on_error` also catches the node's own expression errors (an `assign` or
   `next` path that does not resolve), not only a failed child. Then no outcome
   record was written and `state._outcome` is absent, so a recovery node that may

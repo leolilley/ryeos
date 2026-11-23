@@ -32,6 +32,7 @@ fn add_cost(
             output_tokens: cost.output_tokens,
             total_usd: cost.total_usd,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         });
     }
     Ok(())
@@ -1537,6 +1538,7 @@ mod tests {
             output_tokens: 4,
             total_usd: usd("0.25"),
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         });
 
         let overflow = add_cost(
@@ -1546,6 +1548,7 @@ mod tests {
                 output_tokens: 1,
                 total_usd: usd("0.5"),
                 basis: None,
+                usage_status: Default::default(),
             }),
         )
         .unwrap_err();
@@ -1565,6 +1568,7 @@ mod tests {
                 output_tokens: 1,
                 total_usd: usd("0.5"),
                 basis: Some("estimated".to_string()),
+                usage_status: Default::default(),
             }),
         )
         .unwrap_err();

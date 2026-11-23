@@ -1,16 +1,16 @@
-<!-- ryeos:signed:2026-11-22T00:22:30Z:7cebd62bc98e3c46e1221e7b92ac7756134dff6fbcb7f4a3740cd6b33f9363a9:OOIw2QS1dvNenAt68ErYkY6mnUzUr7piDE2TODRzeJthbc2E8c6YMO3/VVN/AAMl0YEut6V7G1UZ6KAcDiwgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T21:24:58Z:56ae24d5b744241bb273072dac59cfcc06d215f98557591d875ca1f93ce5e057:AwnI80uH4GvZqCdxbaxr5IApBKYLfQQRd4PhUzOctgSyB0bHtGAARzJJ5RdIsn2FQBXV6beKnnRE7NDNnTAnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.4.0"
+version: "2.5.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.4.0`, implemented with UI binding contract
+Frame contract version `2.5.0`, implemented with UI binding contract
 `ryeos.ui.binding.v18` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
@@ -376,33 +376,6 @@ URL and no path.
   JPEG and WebP only; animated images, SVG and GIF are refused, as are bytes
   whose magic, hash, size or dimensions differ from the signed record.
 
-## Themes and the drawn ground
-
-A theme is a signed `theme` item (`theme:ryeos/night`): a six-colour palette,
-pictures by slot (`grounds`), and the picture behind a named Surface
-(`surface_grounds`, keyed by Surface ref). It replaces the constant palette
-list: the stored preference is `system` or an installed theme's ref, and
-`system` follows the platform through the pair named by the signed config
-`config:ryeos/ui/themes`. See the theme kind page in the docs bundle.
-
-- The theme source (`ui/ryeos-ui/config/get`, role `theme_preference`) returns
-  `theme_catalogue` beside `theme`: each installed theme's ref, id, title and
-  palette. For a browser session it also carries the Surface grounds of the
-  themes that session may draw now, each `{picture: {sha256, media_type}}` the
-  daemon resolved through the picture index and granted to the session, or
-  `{picture_state: unavailable}` when the binding failed.
-- `presentation.theme` carries `id` (the stored preference), `catalogue` (when
-  delivered) and `grounds`: the active Surface's ground in each theme that
-  names one, by theme ref, each with `origin: theme`. A renderer resolves `id`
-  against the catalogue (`system` follows the platform), draws the matching
-  ground and ignores a ground that is absent or `unavailable`.
-- Ground precedence: principal choice, node operator overlay, the Surface's
-  own binding, the theme's `surface_grounds`, then flat. Only the theme tier
-  exists today; the others are consulted ahead of it when they are built.
-- Rune draws the picture full-bleed behind the panels at opacity 0.70 and blur
-  10 under a vertical wash of the theme's ground colour (0.45 at the top to 0.90
-  at the bottom). The terminal draws no pictures.
-
 ## Attention (`ryeos.ui.attention.v3`)
 
 The `work/attention` service answers one response, which the shell reads whole;
@@ -483,6 +456,38 @@ destination — `center_is_empty` is a derived query.
 
 Backdrop removed 2026-11-08; an empty centre renders the empty state. The
 ambient-scene intent is kept in the project's future notes for the GPU renderer.
+
+## Live item pickup (`item.hint`)
+
+A session whose attachments name a revised item receives the session-bus event
+`item.hint` with `{ item_ref, digest, revision, change_set }`. The hint carries
+no content; it prompts a look. The seat reacts only to non-root attachments:
+
+1. The seat posts `ui/api/session/attachments/revise` for each held non-root
+   attachment (effect `revise_binding_attachment`). The daemon recompiles the
+   attachment from its own origin under the current engine generation. When
+   the digest is unchanged it answers `revised: false`. Otherwise it publishes
+   a successor attachment beside the source and answers with the successor's
+   public descriptor. Both stay owned by the Surface until the swap settles.
+2. The seat journals one composition mutation, `rebind_attachment`
+   (`from`, `to`, and the complete successor descriptor), for the owning
+   Surface. Every coordinate equal to `from` in the Surface binding, its tile
+   bindings, dialogs, saved-tab provenance, insertion defaults and lens frames
+   becomes `to`. Tile ids and instance keys do not change, so facets,
+   selection, scroll and composer drafts carry over. A tile whose view is
+   absent from the successor closes in the same step.
+3. After the completion settles, the daemon's authenticated reconciliation
+   moves the Surface's ownership from `from` to `to` and drops `from` from the
+   session. A detach of `from` before that point is refused (the Surface still
+   owns it); after it, the detach is the idempotent "already gone".
+
+Hints sharing a `change_set` produce one sweep, so a seat never renders half
+of a set. The root attachment is immutable: a hint naming only root items
+changes nothing, and a revise request for the root or for an attachment the
+presentation does not own is refused. A dispatch refused with
+`ui_binding_stale` revises the attachment once; a second stale for the same
+attachment is reported as before. An unsigned hand edit announces nothing and
+still surfaces through that dispatch-time refusal.
 
 ## Laws
 

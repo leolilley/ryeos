@@ -406,6 +406,7 @@ pub struct PreparedExternalProductConsumer {
     _semantic_config: Option<ryeos_engine::launch_config::LaunchConfigSnapshotSet>,
     _source_closure: Option<ryeos_app::source_closure_admission::AdmittedSourceClosure>,
     _project_context: Option<ResolvedProjectContext>,
+    logical_project: ryeos_engine::contracts::LogicalProject,
 }
 
 impl PreparedExternalProductConsumer {
@@ -433,6 +434,7 @@ impl PreparedExternalProductConsumer {
             self._project_context
                 .as_ref()
                 .map(|context| context.effective_path.clone()),
+            self.logical_project.clone(),
         );
         ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
             state,
@@ -479,6 +481,7 @@ impl PreparedExternalProductConsumer {
             self._project_context
                 .as_ref()
                 .map(|context| context.effective_path.clone()),
+            self.logical_project.clone(),
         );
         ryeos_app::operator_external_content::product_composition::select_and_import_products(
             Arc::clone(&state),
@@ -627,7 +630,12 @@ fn bind_logical_project_root(
     }
 }
 
-fn current_head_logical_project(
+/// The logical project a pinned qualification may state for `principal_id`:
+/// the canonical form of `project_path`, only when that principal's own pushed
+/// head for it is exactly `snapshot_hash`. A missing or different head is a
+/// typed `SnapshotNotCurrentHead`; an unresolvable path is `Other`. There is
+/// no fallback to a projectless or synthetic identity.
+pub fn current_head_logical_project(
     state: &AppState,
     principal_id: &str,
     project_path: &Path,
@@ -681,7 +689,10 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root,
+        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+            logical_project_root,
+            &subject_resolution_authority,
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -714,7 +725,7 @@ fn prepare_external_consumer_context(
     }
     let mut resolution =
         engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: verified.resolved.logical_project_root.clone(),
+            logical_project: verified.resolved.logical_project.clone(),
             item_ref: canonical,
             expected_kind: None,
             project_root: project_root.clone(),
@@ -732,11 +743,8 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let roots = engine
-        .resolution_roots(project_root.clone())
-        .with_logical_project_root(
-            plan_context.effective_logical_project_root(project_root.as_deref()),
-        );
+    let effective_logical_project = plan_context.effective_logical_project(project_root.as_deref());
+    let roots = engine.resolution_roots(project_root.clone(), effective_logical_project.clone());
     let project_authority = project_context
         .as_ref()
         .map(|context| {
@@ -804,6 +812,7 @@ fn prepare_external_consumer_context(
         _semantic_config: semantic_config,
         _source_closure: source_closure,
         _project_context: project_context,
+        logical_project: effective_logical_project,
     })
 }
 

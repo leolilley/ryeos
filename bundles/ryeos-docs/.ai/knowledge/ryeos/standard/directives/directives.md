@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T05:55:52Z:04affd2a7a5e2bc5ba7dc99256044357e20418d253398d9193888c454148fbd7:l/nkGq/eeRLsKc3xzL7VEvvJlNRbp96HCGp97xdNr7W7d3b4UPPxlkF7j4KVE88YUwer7n9lK1jqtNt2faSQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T02:38:30Z:25b110acd310cf91a93708845e68253b7b130484aeae92fb81fd0c5a75849118:QyGxtg3DaOkNqij7OLak+XdVlXL2XLYdaVblBMOvqDaANwoICrtiRHl6atHrMkESxzIv539jwai73vUzqEruCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -231,8 +231,9 @@ are appended after the parent's.
 
 ### Hooks
 
-Directive frontmatter may declare `hooks` for `after_step`, `continuation` and
-`provider_error`.
+Directive frontmatter may declare `hooks` for `after_step`, `continuation`,
+`provider_error`, `context_pressure`, `before_tool`, `after_tool`,
+`turn_incomplete` and `idle`.
 Each hook has `id`, `event`, required `result`, optional `condition`, and
 `action`. `discard` and `observation` are observers; `control` is accepted only
 where the signed event and layer permit directive control.
@@ -242,6 +243,48 @@ entry names the refusal with a code (see `request_rejections` in the model
 provider guide). Its context root is `event` with `code`, `status`, `turn` and
 `retryable`. It admits only `discard` and `observation` results: the failure is
 already typed and a hook cannot turn it into a retry or another outcome.
+
+`context_pressure` fires when live context reaches the compaction trigger
+(`trigger: pressure`) and when the provider refused a request with one of the
+compaction policy's overflow codes (`trigger: overflow`). Its context root is
+`event` with `trigger`, `turn`, `live_context_tokens`, `trigger_tokens`,
+`threshold_tokens`, `window_tokens`, `compactions_so_far`,
+`last_compaction_turn`, and for an overflow the rejection `code` and `status`.
+It carries no conversation text. A `control` result may name the action
+`compact` (compact now) or `skip_compaction` (not this time: on pressure the
+continuation boundary still applies, on an overflow the typed refusal stands);
+with no action the policy decides. Both actions are invalid on any other event,
+and `retry` is refused here. A hook that fails, or whose cost violates the
+accounting bounds, leaves the policy's default.
+
+`before_tool`, `after_tool`, `turn_incomplete` and `idle` only observe the
+run. They admit `discard` and `observation` results, which are validated and
+dropped: no result can block a call, retry a turn, end the run or reach the
+model. Each context root is `event` and carries names, counts and codes, never
+a call's arguments or result text:
+
+| Event | Fires | `event` fields |
+|-------|-------|----------------|
+| `before_tool` | once per tool call about to be dispatched (not `directive_return`) | `turn`, `tool`, `call_id`, `index`, `batch_size` |
+| `after_tool` | once per call after its result is recorded; every call that fired `before_tool` fires it | `turn`, `tool`, `call_id`, `status` (`ok`, `error`, `refused`), `raw_size`, `truncated`, `spilled`, `duplicate` |
+| `turn_incomplete` | a provider turn ended without a usable answer | `turn`, `reason` (`output_limit`, `empty_reply`, `malformed_reply`), `outcome` (`corrected`, `failed`, `retried`), `streak` |
+| `idle` | the loop guard's idle finding warns the model, and stops the run | `turn`, `phase` (`warned`, `stopped`), `idle_turns`, `grace_turns` |
+
+A call refused before it ran (a limit, the deadline, a failed preflight, or a
+sibling of a failed `directive_return`) has `status: refused`. `outcome:
+retried` is an empty reply no `empty_replies` policy counts, retried as before,
+with `streak` 0. With `empty_replies` declared, corrected empty replies leave no
+loop-guard digest, so `idle` does not fire for them and `turn_incomplete` does.
+
+A hook's own action runs as a child dispatch; it never fires the parent run's
+tool hooks. A hook that fails, or whose cost violates the accounting bounds, is
+warned about in the process log and the run goes on. Hook cost counts against
+the run's limits. The signed `execution.observing_hooks_per_turn` (default 64,
+range 1..=1024) caps how many dispatches these events make in one provider turn;
+past it the turn's remaining observations are skipped and warned about once.
+After a crash an event can fire again (at least once). These events ship with the
+directive kind-schema; a runtime older than the schema never fires them, so a
+hook on one is silently inert until the runtime is updated with it.
 
 Authored hook inheritance is atomic. Omitting `hooks` inherits the nearest
 ancestor's complete list. `hooks: []` clears it. A declared non-empty list
@@ -278,6 +321,72 @@ fails with `resume_start_not_user`, `resume_unanswered_tool_call` or
 request the provider would reject. The runtime descriptor's context-window
 rebind floor is the default budget; a node that raises `successor_start_tokens`
 should raise the floor with it.
+
+## Compaction
+
+A conversation that approaches the model window is compacted rather than cut:
+the older part is replaced by one summary, the newest turns stay whole, and the
+pinned inputs survive unchanged. The policy is signed runtime config, the
+`compaction` section of `ryeos-runtime/continuation`, off until a node sets
+`enabled: true`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `trigger_ratio` | 0.70 | Share of the window at which live context starts a compaction (the continuation boundary stays at `context_threshold_ratio`) |
+| `keep_turns` | 6 | Newest assistant turns kept whole |
+| `min_turns_between` | 4 | Turns that must settle between compactions |
+| `min_reduction_ratio` | 0.25 | A compaction that shrinks less is recorded `ineffective`; the next waits until live context has grown by the same share |
+| `on_pressure` | `compact` | `compact`, or `observe` to leave the trigger to a `context_pressure` hook |
+| `overflow_codes` | `[provider_context_length_exceeded]` | Refusal codes (named by the provider entry's `request_rejections`) that start an overflow recovery |
+| `max_overflow_recoveries_per_chain` | 2 | Overflow recoveries one chain may spend |
+| `summary.mode` | `model` | `model` (a bounded call writes the summary) or `none` (a fixed note) |
+| `summary.instruction` | neutral text | System text of the summary call |
+| `summary.max_output_tokens` | 2000 | Output cap of the summary call |
+| `summary.input_ratio` | 0.6 | Share of the window the summary call's input may fill; the oldest part beyond it is left out and the rendering says so |
+| `clip.tool_results` | `clip` | `clip` or `keep`: after a compaction, every kept tool result but the newest `clip.keep_recent` (4) that is longer than `clip.over_bytes` (8192) is read as its first `clip.head_bytes` (2048), a marker naming what was left out, and its last `clip.tail_bytes` (2048). The events are not edited; the rule is in the record and the fold applies it |
+
+The compaction is a `cognition_compaction` record written once the summary is
+settled. It carries the pinned inputs, the summary, the range it replaces, the
+first kept turn and a seed (turn coordinate, completed turns, tool starts,
+spawns and tool images before the kept turns), so every recovery reader starts
+from it: a rebuild replays from the first kept turn's marker on, not from the
+start of the chain, and the summary is never written twice. The summary call
+takes a turn coordinate and appears in the ledger and in usage like a turn,
+with `finish: compaction_summary_<trigger>`; it offers no tools, does not count
+against the directive's turn limit, and follows the directive's
+`provider_contact` rule on an unknown outcome. A crash after the summary
+settles finishes the record from the retained summary with no second call. A
+summary call that fails ends the run with `compaction_summary_failed`.
+A request refused with an overflow code is recorded as a final turn at the refused
+coordinate with `finish: provider_refused_<code>` (not a conversation turn and
+not a completed turn); the successor, and a recovery of it, start by compacting
+when the path's latest provider turn is such a refusal. A continuation
+predecessor with any other unfinished turn is refused, and a turn marker's
+`purpose` names a compaction summary call so a recovery re-enters it with its
+trigger.
+
+Live context reaching `trigger_ratio` compacts in place. A request the provider
+refuses with an overflow code settles the thread `continued` when the policy
+is on and the directive allows continuation; the successor's first act is the
+compaction, and its first request is the refused request, retried on the
+compacted conversation. A retried request refused again is the typed failure
+`provider_context_length_exceeded`; more recoveries than
+`max_overflow_recoveries_per_chain` is `compaction_recovery_exhausted`. With
+continuation off, a conversation over the continuation threshold fails with
+`context_window_exhausted` instead of finalising with its last message. A chain
+that reaches the signed `chain_depth_limit` of `ryeos-runtime/continuation`
+(default 12 continuation predecessors; the daemon keeps a higher backstop of its
+own) fails with `continuation_chain_limit`, and a recovery whose replay is over the ceiling with
+`replay_ceiling_exceeded`; a parent graph branches on them through
+`state._outcome.failure_code`.
+
+A successor of a path that holds a compaction starts from the compaction's fold
+without cutting it again; one that does not keeps the `carry_turns` and
+`successor_start_tokens` cut. A compacted start still over the window
+threshold fails with `resume_compacted_start_exceeds_window`. The request
+bytes after a compaction differ from the ones before it by design, so a
+provider-call effect record made before a compaction never matches the request
+after it.
 
 ## Inheritance (Extends)
 
@@ -319,3 +428,12 @@ This means:
    - Permission caps set
 5. **Run** — LLM loop with tool dispatch (up to `limits.turns`)
 6. **Complete** — result captured, thread finalized
+
+A reply that writes a tool call as text is not a result when the provider entry
+declares `malformed_replies` (see the model provider guide): the runtime takes a
+corrected turn, and fails with `malformed_reply_retries_exhausted` when the
+corrections run out.
+
+A reply with no tool call and no text is retried silently unless the provider entry
+declares `empty_replies`: the runtime then takes a corrected turn, and fails with
+`empty_reply_retries_exhausted` when the corrections run out.

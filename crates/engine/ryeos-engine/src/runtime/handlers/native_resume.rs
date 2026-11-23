@@ -96,6 +96,7 @@ impl RuntimeHandler for NativeResumeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use crate::item_resolution::ResolutionRoots;
     use crate::kind_registry::KindRegistry;
     use crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors;
@@ -125,7 +126,7 @@ mod tests {
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: vec![],
         };
@@ -231,7 +232,7 @@ mod tests {
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: vec![],
         };

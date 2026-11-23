@@ -9,6 +9,7 @@ pub mod diagnostic;
 pub mod effective_surface;
 pub mod ids;
 pub mod layout;
+pub mod layout_table;
 pub mod presentation;
 pub mod surface;
 pub mod text_surface;

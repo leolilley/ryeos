@@ -17,7 +17,7 @@ on:
         default: true
         type: boolean
       merge_gates:
-        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Full tests run on next after merge."
+        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Every gate also runs the tests of each crate the branch changed (touched-tests job). Full tests run on next after merge."
         required: true
         default: false
         type: boolean
@@ -36,6 +36,16 @@ on:
         required: true
         default: false
         type: boolean
+      process_scope_probe:
+        description: "Run the process-scope native job on its own (with run_tests=false and merge_gates=false no other job starts)"
+        required: true
+        default: false
+        type: boolean
+      process_scope_suite:
+        description: "Run only this process-scope e2e suite (empty: every suite)"
+        required: false
+        default: ""
+        type: string
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -71,6 +81,9 @@ env:
   # Incremental compilation is off because its artifacts cannot be shared.
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: sccache
+  # A compile whose sccache server dies mid-job runs rustc directly instead
+  # of failing; .github/actions/sccache-or-plain covers a server that never starts.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
   CARGO_INCREMENTAL: "0"
   # A hosted runner is dedicated to one job, so cargo and nextest use every core
   # (0 selects their own defaults). The gate's half-the-cores defaults are for
@@ -91,6 +104,9 @@ jobs:
     outputs:
       mode: ${{ steps.classify.outputs.mode || 'full' }}
       bundles_changed: ${{ steps.classify.outputs.bundles_changed || 'true' }}
+      # JSON list of the packages whose tests the touched-tests job runs. An unset or
+      # unreadable value is ERROR, which fails that job; it is never read as "none".
+      test_packages: ${{ steps.classify.outputs.test_packages || 'ERROR' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -113,11 +129,11 @@ jobs:
             exit 0
           fi
           # A classifier fault must leave the output unset (the job defaults it to full).
-          if ! python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --base-ref origin/next > "$RUNNER_TEMP/classification"; then
+          if ! python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --base-ref origin/next --rule wide > "$RUNNER_TEMP/classification"; then
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
           {
             echo "### Gate: $(sed -n 's/^mode=//p' "$RUNNER_TEMP/classification")"
             echo '```'
@@ -129,6 +145,7 @@ jobs:
     name: Static repository policy
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.process_scope_probe && !inputs.run_tests && !inputs.merge_gates) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -356,6 +373,7 @@ jobs:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.process_scope_probe && !inputs.run_tests && !inputs.merge_gates) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -375,8 +393,10 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -397,6 +417,12 @@ jobs:
 
       - name: Check test-support features stay out of shipped builds
         run: ./scripts/ci/check-test-support-feature-leak.sh
+
+      - name: A production build of lillux has no test-only controller spawn
+        # The `compile_fail` doctest under `cfg(not(feature = "test-support"))`
+        # runs only with default features; the all-features doctest runs below
+        # turn the feature on and skip it.
+        run: cargo test -p lillux --doc --locked
 
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -430,6 +456,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.process_scope_probe && !inputs.run_tests && !inputs.merge_gates) }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -482,7 +509,7 @@ jobs:
     name: Bundle refresh for tests
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || inputs.process_scope_probe }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -497,8 +524,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Prepare the runner
         run: ./scripts/ci/prepare-runner.sh
@@ -550,8 +579,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Prepare the runner
         # Places TMPDIR on a loop-mounted volume: a mount distinct from the
@@ -602,8 +633,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -809,8 +842,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -898,8 +933,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       # Read the crate cache the other jobs save; never save from here.
       - name: Restore cargo artifacts
@@ -938,8 +975,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       # Read the crate cache the other jobs save; never save from here.
       - name: Restore cargo artifacts
@@ -1039,6 +1078,188 @@ jobs:
           RUST_MIN_STACK: 8388608
         run: cargo test --locked -p ryeos-client-base -p ryeos-client-terminal -p ryeos-ui
 
+  # Every merge_gates dispatch runs the tests of each crate the branch changed: a branch that
+  # only adds tests, or changes a crate the skipped shards would have covered, otherwise merged
+  # with those tests never run. The classify job picks the packages (see
+  # classify-merge-gate.py: --rule wide = every crate with a changed file, minus the daemon's
+  # end-to-end test binaries, which the next-branch shards run; --rule narrow = crates with
+  # changed test code only). Tests run through gate.sh so they get the same composition
+  # features as the shards, on next's restored bundle state, because many crates' tests need
+  # populated bundle binaries.
+  touched-tests:
+    name: Changed crates' tests
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.test_packages != '[]' }}
+    steps:
+      - name: Require a readable package list
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+        run: |
+          if [[ "$PACKAGES" == ERROR ]]; then
+            echo "::error::The classifier could not decide which crates' tests to run; refusing to treat that as none."
+            exit 1
+          fi
+          printf '%s\n' "$PACKAGES" | jq -r '.[] | "\(.package) \(.manifest // "-") \(.args | join(" "))"'
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A branch that changes bundle sources tests against its own refresh. Otherwise next's
+      # bundle state is restored (it refuses when it would hide a branch change); if no usable
+      # state exists the branch refresh runs instead.
+      - name: Restore next's bundle state
+        id: restore
+        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Refresh the bundles from this branch
+        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      # The synthetic lifecycle adapter's remote-lease test runs real guests in an enclosure with
+      # no host libraries, so it needs the statically linked guest executables the workspace
+      # test archive job builds. Build them only when that crate is among the selected packages.
+      - name: Build the static guest executables
+        if: ${{ contains(needs.classify.outputs.test_packages, '"ryeos-synthetic-external-lifecycle-adapter"') }}
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+
+      - name: Run the changed crates' tests
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+          RUST_MIN_STACK: 8388608
+        run: |
+          set -uo pipefail
+          # The publish idempotency tests want the staged core binaries, not a cold build each.
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
+          failed=0
+          # Root-workspace packages with no special arguments share one run.
+          mapfile -t plain < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest == null and (.args | length) == 0) | "-p", .package')
+          if [[ ${#plain[@]} -gt 0 ]]; then
+            ./scripts/gate.sh "${plain[@]}" || failed=1
+          fi
+          # Packages with their own arguments (the daemon: lib and bin tests, or named test binaries).
+          while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            mapfile -t words < <(printf '%s\n' "$entry" | jq -r '"-p", .package, .args[]')
+            ./scripts/gate.sh "${words[@]}" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -c '.[] | select(.manifest == null and (.args | length) > 0)')
+          # Packages of a separate workspace (Rune) need their own manifest.
+          while IFS= read -r manifest; do
+            [[ -n "$manifest" ]] || continue
+            cargo test --locked --manifest-path "$manifest" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
+          exit "$failed"
+
   test:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
@@ -1078,8 +1299,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1211,6 +1434,510 @@ jobs:
           printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           printf '%s\n' "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
 
+  # The process-scope lane's native qualification tests are #[ignore] because
+  # they need a real host: sockets, user/pid namespaces, a delegated cgroup-v2
+  # subtree with memory and pids, and root. A hosted VM is disposable and has
+  # passwordless sudo, so this job provides each and FAILS (never skips) when a
+  # requirement is missing or a group runs fewer tests than it must.
+  process-scope-native:
+    name: Process-scope native qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    if: ${{ inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
+    env:
+      # The delegated cgroup parent is created by the probe step; the steps
+      # that follow read it from here.
+      RYEOS_SCOPE_PARENT: /sys/fs/cgroup/ryeos-scope-parent
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: process-scope-native-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Probe host facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== uname -r";            uname -r
+          echo "== lsb_release -a";      lsb_release -a
+          echo "== systemctl --version"; systemctl --version
+          echo "== mount info for /sys/fs/cgroup"
+          findmnt --target /sys/fs/cgroup
+          grep ' /sys/fs/cgroup ' /proc/self/mountinfo
+          echo "== filesystem type of /sys/fs/cgroup"
+          fstype="$(stat -fc %T /sys/fs/cgroup)"
+          echo "$fstype"
+          [[ "$fstype" == cgroup2fs ]] || { echo "FAIL: /sys/fs/cgroup is $fstype, not unified cgroup v2" >&2; exit 1; }
+          echo "== PID 1"
+          pid1="$(ps -p 1 -o comm=)"
+          echo "$pid1"
+          [[ "$pid1" == systemd ]] || { echo "FAIL: PID 1 is $pid1, not systemd" >&2; exit 1; }
+          echo "== passwordless sudo"
+          sudo -n id
+          echo "== /proc/self/cgroup";   cat /proc/self/cgroup
+          echo "== root cgroup.controllers"
+          controllers="$(cat /sys/fs/cgroup/cgroup.controllers)"
+          echo "$controllers"
+          echo "== root cgroup.subtree_control"
+          cat /sys/fs/cgroup/cgroup.subtree_control
+          for controller in memory pids; do
+            [[ " $controllers " == *" $controller "* ]] || { echo "FAIL: root cgroup has no $controller controller" >&2; exit 1; }
+          done
+          echo "== unprivileged user namespace"
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces || sysctl kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces
+          unshare -Ur true
+          echo "user namespace ok"
+          echo "== unprivileged pid + mount + cgroup namespaces"
+          unshare -Ur --pid --fork --mount-proc --cgroup true
+          echo "pid/mount/cgroup namespaces ok"
+
+      - name: Probe and build the delegated cgroup subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          parent="$RYEOS_SCOPE_PARENT"
+          echo "== create $parent as root and delegate it to uid $uid"
+          sudo -n mkdir "$parent"
+          echo "parent cgroup.controllers: $(cat "$parent/cgroup.controllers")"
+          for controller in memory pids; do
+            [[ " $(cat "$parent/cgroup.controllers") " == *" $controller "* ]] || { echo "FAIL: delegated parent has no $controller controller" >&2; exit 1; }
+          done
+          sudo -n mkdir "$parent/ctl"
+          echo '+memory +pids' | sudo -n tee "$parent/cgroup.subtree_control"
+          echo "parent cgroup.subtree_control: $(cat "$parent/cgroup.subtree_control")"
+          sudo -n chown -R "$uid:$gid" "$parent"
+          ls -ld "$parent" "$parent/ctl" "$parent/cgroup.procs" "$parent/cgroup.subtree_control"
+
+          # A process may only be moved between cgroups by a writer of their
+          # common ancestor. The hosted runner's own cgroup shares only the
+          # root with the delegated parent, so everything that touches the
+          # delegation runs from inside it: root places the process in the
+          # controller leaf beside the execution leaves, then drops to the
+          # runner user. This is the same shape the qualification itself
+          # builds when it is started under sudo.
+          cat > "$RUNNER_TEMP/in-delegation" <<'DELEGATION'
+          #!/bin/sh
+          set -eu
+          echo $$ > "$RYEOS_SCOPE_PARENT/ctl/cgroup.procs"
+          exec setpriv --reuid="$RYEOS_SCOPE_UID" --regid="$RYEOS_SCOPE_GID" --init-groups "$@"
+          DELEGATION
+          chmod 755 "$RUNNER_TEMP/in-delegation"
+          {
+            echo "RYEOS_SCOPE_UID=$uid"
+            echo "RYEOS_SCOPE_GID=$gid"
+            echo "LILLUX_TEST_CGROUP_PARENT=$parent"
+          } >> "$GITHUB_ENV"
+          export RYEOS_SCOPE_UID="$uid" RYEOS_SCOPE_GID="$gid"
+
+          cat > "$RUNNER_TEMP/probe-leaf" <<'PROBE'
+          #!/bin/bash
+          set -euo pipefail
+          parent="$RYEOS_SCOPE_PARENT"
+          echo "== as uid $(id -u): /proc/self/cgroup"; cat /proc/self/cgroup
+          echo "== ctl leaf holds this process"; cat "$parent/ctl/cgroup.procs"
+          leaf="$parent/probe-leaf"
+          mkdir "$leaf"
+          echo "leaf mkdir ok"
+          controllers="$(cat "$leaf/cgroup.controllers")"
+          echo "leaf cgroup.controllers: $controllers"
+          for controller in memory pids; do
+            [[ " $controllers " == *" $controller "* ]] || { echo "FAIL: leaf has no $controller controller" >&2; exit 1; }
+          done
+          echo 32 > "$leaf/pids.max";            echo "pids.max   = $(cat "$leaf/pids.max")"
+          echo 67108864 > "$leaf/memory.max";    echo "memory.max = $(cat "$leaf/memory.max")"
+          sleep 600 &
+          child=$!
+          echo "$child" > "$leaf/cgroup.procs"
+          echo "moved pid $child in; leaf cgroup.procs: $(cat "$leaf/cgroup.procs")"
+          grep -qx "$child" "$leaf/cgroup.procs"
+          echo 1 > "$leaf/cgroup.freeze"
+          sleep 1
+          echo "frozen events: $(tr '\n' ' ' < "$leaf/cgroup.events")"
+          grep -qx 'frozen 1' "$leaf/cgroup.events"
+          echo 0 > "$leaf/cgroup.freeze"
+          echo 1 > "$leaf/cgroup.kill"
+          wait "$child" || echo "child ended by kill, status $?"
+          sleep 1
+          echo "killed events: $(tr '\n' ' ' < "$leaf/cgroup.events")"
+          grep -qx 'populated 0' "$leaf/cgroup.events"
+          rmdir "$leaf"
+          echo "leaf rmdir ok"
+          echo "delegation probe passed"
+          PROBE
+          chmod 755 "$RUNNER_TEMP/probe-leaf"
+          sudo -n -E env "PATH=$PATH" "$RUNNER_TEMP/in-delegation" "$RUNNER_TEMP/probe-leaf"
+
+      - name: Build the lillux test binary
+        run: cargo test -p lillux --locked --lib --no-run
+
+      - name: Write the group runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/run-ignored" <<'RUN'
+          #!/bin/bash
+          # run-ignored EXPECTED FILTER...: run exactly the #[ignore] lillux
+          # tests matching the filters and fail unless exactly EXPECTED passed
+          # and none failed or were filtered to nothing.
+          set -euo pipefail
+          expected="$1"; shift
+          log="$(mktemp)"
+          # A test that drops privilege re-executes its own binary as another
+          # account, so that binary must sit where the account can reach it
+          # (LILLUX_TEST_BINARY); otherwise cargo runs it from the target dir.
+          if [[ -n "${LILLUX_TEST_BINARY:-}" ]]; then
+            "$LILLUX_TEST_BINARY" --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
+          else
+            cargo test -p lillux --locked --lib -- --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
+          fi
+          passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed; 0 failed.*/\1/p' "$log" | tail -n 1)"
+          # A child the tests re-execute that filters its own test out as
+          # ignored ran nothing, so its "pass" is empty.
+          if grep -q 'test result: ok\. 0 passed; 0 failed; [1-9][0-9]* ignored' "$log"; then
+            echo "FAIL: a re-executed child ran no test (reported ignored)" >&2; exit 1
+          fi
+          [[ "$passed" == "$expected" ]] || { echo "FAIL: expected $expected ignored tests to pass, saw '${passed:-none}'" >&2; exit 1; }
+          RUN
+          chmod 755 "$RUNNER_TEMP/run-ignored"
+
+      - name: Group 1 - plain sockets
+        run: |
+          "$RUNNER_TEMP/run-ignored" 10 \
+            loopback::tests:: \
+            exec::descriptor_transfer::tests:: \
+            local_ipc::peer_process_tests::
+
+      - name: Group 2 - unprivileged user and pid namespaces
+        run: |
+          "$RUNNER_TEMP/run-ignored" 4 \
+            process_control::pid_namespace::tests::pid_namespace_authority_covers_detached_and_nested_descendants \
+            process_control::scope::pid_namespace_containment::
+
+      - name: Group 3 - delegated cgroup
+        run: |
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" "$RUNNER_TEMP/in-delegation" "$RUNNER_TEMP/run-ignored" 3 \
+            process_control::cgroup::tests::native_scope_resource_limits_install_and_read_back \
+            process_control::cgroup::tests::cgroup_native_freeze_covers_detached_nested_writers_and_recovery \
+            process_control::scope::tests::scope_native_held_launch_cleanup_and_failed_launch_retain_exact_evidence
+
+      - name: Group 4 - root
+        run: |
+          # The credential-transition test re-executes the test binary as
+          # uid 65534, which cannot traverse the runner's home: install the
+          # exact binary where every account can execute it.
+          bin="$(cargo test -p lillux --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable')"
+          [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one lillux test executable, got: $bin" >&2; exit 1; }
+          sudo -n install -D -m 755 "$bin" /opt/ryeos-root-tests/lillux-tests
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_TEST_BINARY=/opt/ryeos-root-tests/lillux-tests "$RUNNER_TEMP/run-ignored" 2 \
+            process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges \
+            process_control::scope::readonly_delivery_grant_preserves_read_and_executable_modes
+
+  # The e2e suites that need an exclusive session skip on every other runner
+  # because a directly spawned daemon cannot qualify process scopes, and the
+  # fast fixture strips the per-scope contract on purpose. This job runs them
+  # as an administrator with RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1: the authored
+  # isolation policy is kept, each node starts under a protected host-runtime
+  # binding in a delegated cgroup subtree (see test_support/process_scopes.rs),
+  # an unqualified host fails the test, and every suite must pass an exact
+  # nonzero number of tests with none skipped.
+  process-scope-e2e:
+    name: Process-scope e2e (real isolation)
+    needs: [bundles]
+    runs-on: ubuntu-24.04
+    # The handoff acceptance matrix alone runs 55 to 90 minutes depending on
+    # the runner, and the claude follow suite runs after it.
+    timeout-minutes: 180
+    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    env:
+      RUST_MIN_STACK: 8388608
+      E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: process-scope-e2e-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A hosted-class node starts as pid 1 of its own user namespace with an
+      # identity map of uids and gids 0-65535, so the administrator that
+      # launches it needs that range in its subordinate id allowance.
+      - name: Allow the administrator an identity id map
+        run: |
+          echo 'root:0:65536' | sudo -n tee -a /etc/subuid /etc/subgid >/dev/null
+      # The enclosure's pid 1 is tini, the init the shipped image runs.
+      - name: Install the enclosure init
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends tini
+          test -x /usr/bin/tini
+
+      - name: Probe the cgroup host
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RYEOSD_TEST_STDERR_DIR=$RUNNER_TEMP/daemon-stderr" >> "$GITHUB_ENV"
+          fstype="$(stat -fc %T /sys/fs/cgroup)"
+          [[ "$fstype" == cgroup2fs ]] || { echo "FAIL: /sys/fs/cgroup is $fstype, not unified cgroup v2" >&2; exit 1; }
+          controllers="$(cat /sys/fs/cgroup/cgroup.controllers)"
+          echo "root cgroup.controllers: $controllers"
+          for controller in memory pids; do
+            [[ " $controllers " == *" $controller "* ]] || { echo "FAIL: root cgroup has no $controller controller" >&2; exit 1; }
+          done
+          sudo -n id
+          # Evidence that a subtree delegated from the root keeps both
+          # controllers: print what a child of the root would be offered.
+          sudo -n mkdir /sys/fs/cgroup/ryeos-controller-evidence
+          echo '+memory +pids' | sudo -n tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+          echo "root cgroup.subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
+          echo "delegated child cgroup.controllers: $(cat /sys/fs/cgroup/ryeos-controller-evidence/cgroup.controllers)"
+          sudo -n rmdir /sys/fs/cgroup/ryeos-controller-evidence
+
+      - name: Download the refreshed bundle state
+        if: ${{ needs.bundles.result == 'success' }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Restore the refreshed bundles
+        if: ${{ needs.bundles.result == 'success' }}
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Restore next's bundle state (no bundles job in this run)
+        if: ${{ needs.bundles.result != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: No shipped build resolves a test-support feature
+        # The same static check the rust-policy job runs: cargo tree only, no
+        # compile. Run here too so this job shows the production feature
+        # sets lack lillux's test-only controller spawn.
+        run: ./scripts/ci/check-test-support-feature-leak.sh
+
+      - name: Build the e2e test binaries
+        run: |
+          set -euo pipefail
+          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
+            exe="$(cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json \
+              | jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable')"
+            [[ "$(printf '%s\n' "$exe" | wc -l)" == 1 && -x "$exe" ]] || { echo "FAIL: expected exactly one $suite executable, got: $exe" >&2; exit 1; }
+            echo "$suite=$exe" >> "$RUNNER_TEMP/e2e-executables"
+          done
+          cat "$RUNNER_TEMP/e2e-executables"
+          ls -l target/debug/ryeosd
+
+      - name: Write the suite runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/run-suite" <<'RUN'
+          #!/bin/bash
+          # run-suite SUITE PASSED IGNORED: run one e2e test binary as an
+          # administrator under the real process-scope mode and fail unless
+          # exactly PASSED tests passed, none failed and exactly IGNORED are
+          # ignored. The mode turns every unqualified-host skip into a failure.
+          set -euo pipefail
+          suite="$1"; passed_expected="$2"; ignored_expected="$3"
+          exe="$(sed -n "s/^$suite=//p" "$RUNNER_TEMP/e2e-executables")"
+          log="$RUNNER_TEMP/$suite.log"
+          set +e
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" "TMPDIR=$TMPDIR" \
+            "RUST_MIN_STACK=$RUST_MIN_STACK" \
+            "RYEOSD_TEST_STDERR_DIR=$RYEOSD_TEST_STDERR_DIR" \
+            "RYEOSD_TEST_RUST_LOG=info,ryeos_app::worker_handoff=debug,ryeos_api::handlers::dedicated_sessions=debug,ryeosd::reconcile=debug" \
+            "RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1" \
+            "RYEOS_TEST_SCOPE_ACCOUNT=$(id -u):$(id -g)" \
+            ${RYEOS_TEST_HANDLER_BIN_DIR:+"RYEOS_TEST_HANDLER_BIN_DIR=$RYEOS_TEST_HANDLER_BIN_DIR"} \
+            "$exe" --test-threads=1 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          result="$(grep -E '^test result: ' "$log" | tail -n 1)"
+          echo "== $suite: exit $status; $result"
+          [[ "$status" == 0 ]] || { echo "FAIL: $suite exited $status" >&2; exit 1; }
+          [[ "$result" =~ ^test\ result:\ ok\.\ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored ]] || { echo "FAIL: no test result line for $suite" >&2; exit 1; }
+          passed="${BASH_REMATCH[1]}"; failed="${BASH_REMATCH[2]}"; ignored="${BASH_REMATCH[3]}"
+          [[ "$passed" == "$passed_expected" && "$failed" == 0 && "$ignored" == "$ignored_expected" ]] \
+            || { echo "FAIL: $suite expected $passed_expected passed / $ignored_expected ignored, saw $passed passed / $failed failed / $ignored ignored" >&2; exit 1; }
+          if grep -Eiq 'suite skipped|: skipped:' "$log"; then
+            echo "FAIL: $suite reported a skip" >&2; exit 1
+          fi
+          RUN
+          chmod 755 "$RUNNER_TEMP/run-suite"
+          staged="$GITHUB_WORKSPACE/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then echo "RYEOS_TEST_HANDLER_BIN_DIR=$staged" >> "$GITHUB_ENV"; fi
+
+      - name: Session secret delivery (real isolation)
+        if: ${{ !inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e' }}
+        run: |
+          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 7 0
+
+      - name: Handoff crash recovery (real isolation)
+        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
+        run: |
+          "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
+
+      - name: Claude Code worker follow (real isolation)
+        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
+        # The suite's development-hosted nodes start as the only child of tini,
+        # pid 1 of their own user, pid, mount and cgroup namespace (the
+        # enclosure placement, the shipped image's shape).
+        run: |
+          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0
+
+      - name: No suite skips on its own
+        run: |
+          # A skip must come only from the shared helper, which fails under
+          # the real process-scope mode; no test prints its own skip.
+          ! grep -rn "suite skipped" crates/bin/daemon/tests
+
+      - name: Show the node capability evidence
+        if: ${{ always() }}
+        run: |
+          shopt -s nullglob
+          for log in "$RYEOSD_TEST_STDERR_DIR"/*.stderr.log; do
+            echo "== $log"
+            grep -E 'node capability report recorded' "$log" | head -n 1 || true
+          done
+
+      - name: Collect the per-test daemon logs and suite output
+        if: ${{ always() }}
+        run: |
+          # The suites run as root, so their logs are root-owned; make the
+          # copy readable before the artifact upload.
+          mkdir -p "$RUNNER_TEMP/e2e-evidence"
+          sudo -n cp -a "$RYEOSD_TEST_STDERR_DIR" "$RUNNER_TEMP/e2e-evidence/daemon-stderr" || true
+          cp "$RUNNER_TEMP"/*_e2e.log "$RUNNER_TEMP/e2e-evidence/" || true
+          sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-evidence"
+
+      - name: Upload the per-test daemon logs and suite output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: process-scope-e2e-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-evidence
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Show daemon stderr of a failed run
+        if: ${{ failure() }}
+        run: |
+          shopt -s nullglob
+          for log in "$RYEOSD_TEST_STDERR_DIR"/*.stderr.log; do
+            echo "== $log ($(wc -l < "$log") lines)"
+            sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -v 'resolved project execution context\|cache metric\|admitted kind schemas\|CAS chain\|kind profiles' \
+              | cut -c1-600 | tail -n 30
+          done
+
   bundle-refresh:
     name: Bundle refresh
     runs-on: ubuntu-latest
@@ -1230,8 +1957,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1271,8 +2000,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1335,8 +2066,10 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

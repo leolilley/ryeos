@@ -1,10 +1,11 @@
-# ryeos:signed:2026-11-18T06:12:01Z:ed9d4985677022904ce3d2bb7f10a67cd3fe7338add4f7bc310af230b1956c36:m4dCIgaU5X7iKfImlOuonvk7i/GFN6HccOYLSaFTaRPiSauMV8uaflAEz2ANbAZzc+DRGIaa3SL+4QaexD0dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T09:46:53Z:325db80a4d08f87fc905392714200c6dec6f552ebbff383118e2faeb4e9e34e6:J9HyqlnRRPcRHaX3JSXjB6Do3UeFzhF/fnj4E6ikEEflEPBs7Hfi/eFJfiGeQCZK7R15Kbp89laDCuvLmePgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
 retry_status_codes: [429, 500, 502, 503, 504, 529]
 never_retry: ["401", "403", "404"]
 backoff_base_ms: 1000
 backoff_max_ms: 60000
+retry_after_max_ms: 60000
 timeout_seconds: 300
 max_provider_output_tokens_per_turn: 32768
 max_stream_output_bytes_per_turn: 131072
@@ -19,4 +20,19 @@ tool_images:
   max_images_per_run: 256
   max_bytes_per_run: 50331648
   max_image_dimension: 8000
+tool_output:
+  spill_threshold_bytes: 65536
+  preview_head_bytes: 24576
+  preview_tail_bytes: 8192
+  max_stored_bytes: 4194304
+  hard_cut_bytes: 102400
+loop_guards:
+  enabled: true
+  window_turns: 16
+  repeat_threshold: 5
+  pingpong_cycles: 4
+  pingpong_max_period: 4
+  no_progress_turns: 8
+  idle_turns: 3
+  grace_turns: 2
 tool_preload: false

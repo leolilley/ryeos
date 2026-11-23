@@ -458,7 +458,10 @@ async fn run_graph(
         if Instant::now() >= deadline {
             let stderr = daemon.drain_stderr_nonblocking().await;
             if stderr.contains("qualified node process-scope support") {
-                eprintln!("claude-code follow suite skipped: host cannot qualify process scopes");
+                // Fails the test when the real process-scope mode is selected.
+                common::process_scopes::skip_or_fail_unqualified(
+                    "claude-code follow suite: no qualified node process-scope support",
+                );
                 return Ok(Run::HostUnqualified);
             }
             anyhow::bail!(
@@ -648,7 +651,7 @@ fn stub_tokens(text: &str) -> (i64, i64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_completed_turn_flows_result_outcome_and_cost_into_the_graph() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     let stub = json!({
         "outcome": "completed",
         "text": ANSWER_TEXT,
@@ -716,7 +719,7 @@ async fn a_completed_turn_flows_result_outcome_and_cost_into_the_graph() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stub_crash_fails_the_node_as_a_worker_failure() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     // No text: the stub then reports its default crash sentence.
     let stub = json!({"outcome": "crash", "structured_output": null});
     plant_crash_graph(project.path(), &fixture.publisher, &stub)?;
@@ -762,7 +765,7 @@ async fn a_stub_crash_fails_the_node_as_a_worker_failure() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_that_outlives_the_duration_limit_fails_the_node_as_a_deadline() -> Result<()> {
     let (mut daemon, fixture) = start_node_with_short_turn().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     // The short turn's 8 second duration limit is the child's deadline; the
     // stub turn would run for two minutes.
     let stub = json!({
@@ -957,7 +960,7 @@ fn completed_stub() -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_turn_continues_the_first_turns_upstream_conversation() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     let publisher = &fixture.publisher;
     plant_turn_graph(
         project.path(),
@@ -1033,7 +1036,7 @@ async fn a_second_turn_continues_the_first_turns_upstream_conversation() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_predecessor_is_continued_at_most_once_and_must_exist() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     let publisher = &fixture.publisher;
     plant_turn_graph(
         project.path(),
@@ -1140,7 +1143,7 @@ async fn a_predecessor_is_continued_at_most_once_and_must_exist() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_conversation_settles_the_continuation_as_a_worker_failure() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     let publisher = &fixture.publisher;
     // The first turn completes normally, but its upstream session can never
     // be resumed by a later process.
