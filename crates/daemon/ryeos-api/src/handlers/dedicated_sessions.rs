@@ -9075,7 +9075,7 @@ fn verify_candidate_integration_terminal(
             ));
         }
     };
-    let expected_head = owner_base_head_key(state, &session.owner_principal, &base_snapshot_hash)?;
+    let expected_head = owner_base_head_key(state, &session.owner_principal, base_snapshot_hash)?;
     require_sealed_identity_matches(&source.project_authority.signer_project(), &expected_head)?;
     require_sealed_identity_matches(
         &integration.project_authority.signer_project(),
