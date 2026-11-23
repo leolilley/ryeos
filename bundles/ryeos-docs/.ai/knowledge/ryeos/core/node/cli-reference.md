@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T00:05:35Z:c73a463688e4afe8404fcff35e7c4277e42ab09bc75ff5d80463011776c6bb70:MoJZSraPLT5S0B7Ps9mICzEXInPikptim7JEJyBoDMgKES+XFTKlhgdj6l4q18oJWW4rtMH0kKrwFrMy7L3yAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:12:49Z:448c94f949b9da7ae732bf365a3b24e49d0982d3b9717e7fb1bf26c286c5c0c1:66ntr1dH/AM0m5oNi/HVSQ1B+9XKSLHzBkX9mcTkuYawkELeXOoiClDnhC3MSyEICovjbYo8HTe7ZnpKlrjHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -348,6 +348,66 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the owner+name project identity cut, epoch 144.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 143 --schema-cut-to 144 --include-project-heads --confirm-project-heads` on its next upgrade. Project heads are reset too, because their keys change shape.
+
+What a project is now:
+- **project**: `pid:v1:<owner>/<name>`.
+  - The owner is a principal: the sha256 of the key's inception record, for example `fp:000…0` → `pid:v1:62089d38725f465fca99bab850bf34953900e105670ca36f65f09e264d3dd6e5`.
+  - The name is the top-level `name:` of the project's `.ai/manifest.yaml`, the same name its items are namespaced under.
+  - The manifest's signature plays no part in identity.
+  - The name must match `[a-z0-9][a-z0-9._-]{0,63}`, written as a plain value. Values YAML reads as other types (`true`, `1.0`, `null`) are refused as `project_manifest_name_invalid`.
+- **checkout**: a registered live folder.
+- **snapshot** / **head**: a pushed copy, and the ref that points at it, now `projects/pid-v1-<hex>/<sha256(name)>/head`.
+
+Rotation and keys:
+- A key rotated with `ryeos node operator rotate` keeps its projects on the node where the rotation was recorded. Remotes see it only once they record it.
+- Retired and revoked keys own nothing. Revocation is per key.
+- Per-key state (principal space, schedules, the UI project list) does not move on rotation.
+- A second key is a second owner until key pairing exists.
+
+Before installing, on the old binary: run `ryeos trust list` and re-scope every signer record that lists project paths (a v1 record with paths is refused by name). On the release authority, take the public dev key out of project space with `--space bundle --any-project`.
+
+After the reset:
+1. Register each checkout that needs live trust: `ryeos project register <checkout>`. The name comes from the manifest.
+2. On every remote node, add `ryeos.execute.service.project/owner` to each principal grant that pushes or executes there. A remote on a pre-cut build refuses the new `expected_owner` field, so upgrade remotes first.
+3. Re-bind remote projects. Pre-cut binding records fail to load, and bind records the owner the remote reports (`remote_owner`).
+4. Re-push heads.
+5. Re-make standing endorsements, which now name `pid:v1:<owner>/<name>`.
+
+ryeos-next's identity becomes `pid:v1:<operator>/ryeos`, its manifest name. Its registration, bindings and endorsements are re-created under `ryeos`, and the old ones fail closed.
+
+Doctor rows to check:
+- `signer_records_refused`, `owner_chains_corrupt` and `succession_from_public_key` should each be 0.
+- `project_owners` lists each owner with its root and current keys.
+- `signer_records_v1` counts records still at v1. The v1 reader goes at the next signer-record schema change.
+- `project_registrations_pre_cut` lists registrations to re-make.
+- `project_manifest_name_drift` flags a checkout whose two manifests disagree.
+
+Known issue: older code and text outside this cut still says "live project root" for what is now a **checkout**. These are renamed as they are touched.
+
+Operator note for the runtime schema cut to epoch 143: every node must run
+`ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 143`
+on its next upgrade; no project heads are involved, so it is the heads-free form.
+The cut carries the stored external terminal observation's required `basis`
+field (how the lifecycle adapter settled a termination: it states the basis it
+relied on), which a store written at epoch 142 lacks. The same epoch also
+carries the turn marker's required `purpose` field (a stored-shape change: a
+marker without it is refused on resume with `resume_marker_without_purpose`) and the
+compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up
+flags and warned ages; null when loop guards are off; a record without the field is
+refused on resume). It also moves the provider retry policy digest to v3
+(`retry_after_max_ms`): the reset clears in-flight threads whose retry decisions
+sealed a v2 digest, and recovery refuses one it still meets. The cut ships together with
+lifecycle adapter protocol v4, so the order on a node is: drain (settle or
+terminate every lease, qualification occurrence and termination in flight),
+stop the daemon gracefully, install the re-signed bundles, run the reset above,
+start, run `ryeos node doctor`, recompose each binding it names as stranded
+(`ryeos node external-execution recompose`, plus `compose` for production and
+qualification bindings, provisioning credentials again where compose names a new
+generation), then run the rig preflight before any live spend.
 
 Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`

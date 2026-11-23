@@ -21,10 +21,11 @@ use ryeos_external_execution_contract::{
     GuestMountAccess, GuestMountInput, GuestMountKind, GuestMountRole, LIFECYCLE_ADAPTER_PROTOCOL,
     LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
     LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    LifecycleCapability, LifecycleOperationCommon, MAX_LIFECYCLE_RESPONSE_BYTES,
-    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
+    LatestLeaseEnd, LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
+    LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
+    LifecycleArtifactRole, LifecycleCapability, LifecycleOperationCommon,
+    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
+    from_json_slice_strict,
 };
 use ryeos_state::external_execution::admission::{
     AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
@@ -7211,6 +7212,7 @@ fn exercise_activation_fault(fault: &str) {
         ));
         let termination = TerminationIntent {
             termination_request_digest: "7".repeat(64),
+            latest_lease_end: LatestLeaseEnd::Unbounded {},
         };
         let terminate = LifecycleAdapterRequest::Terminate {
             common: common("terminate"),
@@ -7339,6 +7341,7 @@ fn exercise_activation_fault(fault: &str) {
 
     let termination = TerminationIntent {
         termination_request_digest: "7".repeat(64),
+        latest_lease_end: LatestLeaseEnd::Unbounded {},
     };
     let terminate = LifecycleAdapterRequest::Terminate {
         common: common("terminate"),
@@ -7487,4 +7490,308 @@ fn synthetic_adapter_lists_its_fixture_inventory() {
     response.validate_for(&request).unwrap();
     assert!(response.complete);
     assert_eq!(response.resources, fixture);
+}
+
+/// The adapter process answering termination from a scripted provider, over
+/// the real wire. These cases need no guest executables, only the adapter, the
+/// supervisor and the launcher it is handed, so they run wherever the crate's
+/// ordinary binaries build. The render and modal adapters' own rule (b)
+/// decisions stay proven by their unit tests; this proves the synthetic
+/// adapter speaks the same v4 rules, which is what the daemon-side rig drives.
+struct ScriptedProvider {
+    adapter: lillux::InheritedDescriptorAuthority,
+    supervisor: lillux::InheritedDescriptorAuthority,
+    launcher: lillux::InheritedDescriptorAuthority,
+    state: tempfile::TempDir,
+    settings: Vec<u8>,
+    credential: &'static [u8],
+    next_operation: std::cell::Cell<u32>,
+}
+
+impl ScriptedProvider {
+    fn new() -> Self {
+        let adapter = executable(env!(
+            "CARGO_BIN_EXE_ryeos-synthetic-external-lifecycle-adapter"
+        ));
+        let supervisor = executable(env!(
+            "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-supervisor"
+        ));
+        let launcher = executable(env!(
+            "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher"
+        ));
+        let state = tempfile::tempdir().unwrap();
+        lillux::PinnedDirectory::open(state.path())
+            .unwrap()
+            .unwrap()
+            .tighten_owner_private_directory()
+            .unwrap();
+        let credential: &'static [u8] = b"synthetic-secret";
+        let settings = lillux::canonical_json(&serde_json::json!({
+            "expected_credential_sha256": lillux::sha256_hex(credential),
+            "maximum_copy_depth": 8,
+            "maximum_copy_entries": 1000,
+            "schema": 1,
+            "startup_timeout_ms": 1000,
+            "state_root": state.path(),
+        }))
+        .unwrap()
+        .into_bytes();
+        Self {
+            adapter,
+            supervisor,
+            launcher,
+            state,
+            settings,
+            credential,
+            next_operation: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Script the provider; `None` removes the switch so the adapter derives
+    /// its answers from its own occurrence records again.
+    fn script(&self, switch: Option<serde_json::Value>) {
+        let path = self.state.path().join("provider-switch.json");
+        match switch {
+            Some(switch) => std::fs::write(&path, serde_json::to_vec(&switch).unwrap()).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    fn occurrence() -> BoundOccurrence {
+        BoundOccurrence {
+            request_digest: "a".repeat(64),
+            occurrence_id: format!("occ-{}", "a".repeat(48)),
+        }
+    }
+
+    fn contact(&self, terminate: bool, end: LatestLeaseEnd) -> LifecycleAdapterResponse {
+        let sequence = self.next_operation.get();
+        self.next_operation.set(sequence + 1);
+        let common = LifecycleOperationCommon {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            operation_id: format!("{sequence:064x}"),
+            binding_hash: "b".repeat(64),
+            settings_digest: lillux::sha256_hex(&self.settings),
+        };
+        let termination = TerminationIntent {
+            termination_request_digest: "d".repeat(64),
+            latest_lease_end: end,
+        };
+        let request = if terminate {
+            LifecycleAdapterRequest::Terminate {
+                common,
+                occurrence: Self::occurrence(),
+                termination,
+            }
+        } else {
+            LifecycleAdapterRequest::ReconcileTermination {
+                common,
+                occurrence: Self::occurrence(),
+                termination,
+            }
+        };
+        let response: LifecycleAdapterResponse = from_json_slice_strict(
+            &invoke_operation(
+                &self.adapter,
+                &self.supervisor,
+                &self.launcher,
+                &self.settings,
+                self.credential,
+                &request,
+                None,
+                Vec::new(),
+            ),
+            MAX_LIFECYCLE_RESPONSE_BYTES,
+        )
+        .unwrap();
+        response.validate_for(&request).unwrap();
+        response
+    }
+}
+
+/// `Some(basis)` for a terminal answer, `None` for a pending one.
+fn termination_basis(
+    response: &LifecycleAdapterResponse,
+) -> Option<ryeos_external_execution_contract::TerminalBasis> {
+    match response {
+        LifecycleAdapterResponse::OccurrenceTerminal { basis, .. } => Some(*basis),
+        LifecycleAdapterResponse::TerminationPending { .. } => None,
+        other => panic!("a termination contact answered {other:?}"),
+    }
+}
+
+fn bounded_in(offset_ms: i64) -> LatestLeaseEnd {
+    LatestLeaseEnd::Bounded {
+        unix_ms: lillux::time::timestamp_millis() + offset_ms,
+    }
+}
+
+const GRACE_MS: i64 = ryeos_remote_lease_core::LEASE_END_GRACE_MS;
+
+fn switch_json(answer: &str, accepted: bool, offset_ms: i64) -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "schema": 1,
+        "answer": answer,
+        "terminate_accepted": accepted,
+        "clock_offset_ms": offset_ms,
+    }))
+}
+
+#[test]
+fn scripted_provider_terminated_is_terminal_for_both_contacts() {
+    use ryeos_external_execution_contract::TerminalBasis;
+    // S1
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("terminated", false, 0));
+    for end in [bounded_in(3_600_000), LatestLeaseEnd::Unbounded {}] {
+        for terminate in [true, false] {
+            assert_eq!(
+                termination_basis(&provider.contact(terminate, end)),
+                Some(TerminalBasis::ObservedTerminated)
+            );
+        }
+    }
+}
+
+#[test]
+fn scripted_provider_pending_stays_pending_even_past_the_lease_end() {
+    // S2
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("pending", true, 10 * GRACE_MS));
+    for end in [bounded_in(-3_600_000), LatestLeaseEnd::Unbounded {}] {
+        for terminate in [true, false] {
+            assert_eq!(termination_basis(&provider.contact(terminate, end)), None);
+        }
+    }
+}
+
+#[test]
+fn scripted_not_found_after_an_accepted_terminate_is_terminal_by_rule_a() {
+    use ryeos_external_execution_contract::TerminalBasis;
+    // S3
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("not_found", true, 0));
+    assert_eq!(
+        termination_basis(&provider.contact(true, bounded_in(3_600_000))),
+        Some(TerminalBasis::AcceptedTerminateThenNotFound)
+    );
+    // The rule needs this contact's own terminate: a reconcile has none.
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(3_600_000))),
+        None
+    );
+}
+
+#[test]
+fn scripted_not_found_without_an_accepted_terminate_waits_for_the_lease_end() {
+    // S4
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("not_found", false, 0));
+    for terminate in [true, false] {
+        assert_eq!(
+            termination_basis(&provider.contact(terminate, bounded_in(3_600_000))),
+            None
+        );
+    }
+}
+
+#[test]
+fn scripted_not_found_past_the_lease_end_and_grace_is_terminal_by_rule_b() {
+    use ryeos_external_execution_contract::TerminalBasis;
+    // S5, driven by the lease end alone: it passed more than the grace ago.
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("not_found", false, 0));
+    for terminate in [true, false] {
+        assert_eq!(
+            termination_basis(&provider.contact(terminate, bounded_in(-GRACE_MS - 60_000))),
+            Some(TerminalBasis::PastLatestLeaseEndNotFound)
+        );
+    }
+    // S5, driven by the clock offset: the same future end, time moved on.
+    provider.script(switch_json(
+        "not_found",
+        false,
+        3_600_000 + GRACE_MS + 60_000,
+    ));
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(3_600_000))),
+        Some(TerminalBasis::PastLatestLeaseEndNotFound)
+    );
+}
+
+#[test]
+fn scripted_not_found_between_the_lease_end_and_the_grace_stays_pending() {
+    // S6: the end passed, the grace has not.
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("not_found", false, 0));
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(-60_000))),
+        None
+    );
+    provider.script(switch_json("not_found", false, 3_600_000 + 60_000));
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(3_600_000))),
+        None
+    );
+}
+
+#[test]
+fn scripted_not_found_for_an_unbounded_lease_stays_pending_however_late() {
+    // S7
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("not_found", false, i64::MAX / 4));
+    for terminate in [true, false] {
+        assert_eq!(
+            termination_basis(&provider.contact(terminate, LatestLeaseEnd::Unbounded {})),
+            None
+        );
+    }
+}
+
+#[test]
+fn scripted_provider_answers_change_between_contacts() {
+    use ryeos_external_execution_contract::TerminalBasis;
+    // S8: pending at the first contact, terminated at a later one.
+    let provider = ScriptedProvider::new();
+    provider.script(switch_json("pending", false, 0));
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(3_600_000))),
+        None
+    );
+    provider.script(switch_json("terminated", false, 0));
+    assert_eq!(
+        termination_basis(&provider.contact(false, bounded_in(3_600_000))),
+        Some(TerminalBasis::ObservedTerminated)
+    );
+}
+
+#[test]
+fn a_scripted_past_end_basis_is_refused_for_an_unbounded_request() {
+    use ryeos_external_execution_contract::TerminalBasis;
+    // The contract, not the adapter, refuses a past-end basis for a request
+    // that stated no lease end; the adapter never produces one.
+    let request = LifecycleAdapterRequest::ReconcileTermination {
+        common: LifecycleOperationCommon {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            operation_id: "e".repeat(64),
+            binding_hash: "b".repeat(64),
+            settings_digest: "c".repeat(64),
+        },
+        occurrence: ScriptedProvider::occurrence(),
+        termination: TerminationIntent {
+            termination_request_digest: "d".repeat(64),
+            latest_lease_end: LatestLeaseEnd::Unbounded {},
+        },
+    };
+    let response = LifecycleAdapterResponse::OccurrenceTerminal {
+        operation_id: "e".repeat(64),
+        termination_request_digest: "d".repeat(64),
+        provider_observation_digest: "f".repeat(64),
+        basis: TerminalBasis::PastLatestLeaseEndNotFound,
+    };
+    assert!(response.validate_for(&request).is_err());
 }

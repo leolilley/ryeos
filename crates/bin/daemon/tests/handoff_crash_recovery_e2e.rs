@@ -54,7 +54,7 @@ use ryeos_state::{
 };
 use tokio::net::TcpListener;
 
-use common::DaemonHarness;
+use common::{DaemonHarness, HandoffCrashGate};
 
 const DAEMON_SOURCE_SITE_ID: &str = "site:testhost";
 const REMOTE_TARGET_SITE_ID: &str = "site:handoff-target";
@@ -440,9 +440,17 @@ send('ready', None, {'boot_identity':boot})
 while True:
     frame = receive()
     if frame['kind'] == 'request':
+        observations = [{'kind':'remote_thread','id':session_id}]
+        if isinstance(frame['body'], dict) and frame['body'].get('route_id') == 'session.start':
+            # The start command runs one real turn to completion, so the
+            # node holds its exact completed-command fence.
+            observations += [
+                {'kind':'state','expected':'idle','next':'turn_running','turn_id':'turn-handoff-fixture-start'},
+                {'kind':'state','expected':'turn_running','next':'idle','completed_turn_id':'turn-handoff-fixture-start'},
+            ]
         send('final', frame['request_id'], {
             'response':{'result':{'session_id':session_id}},
-            'session_observations':[{'kind':'remote_thread','id':session_id}],
+            'session_observations':observations,
             'result_retention':'durable'
         })
     elif frame['kind'] == 'cancel':
@@ -1287,8 +1295,53 @@ struct HandoffRetryJobsEvidence {
     target_job: Option<HandoffRetryJobEvidence>,
 }
 
+/// The source ledger's durable allowance-export row for one handoff
+/// operation: the request digest and the financial-chain coordinate it
+/// anchored. Identical values before and after recovery prove the export was
+/// not repeated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceAllowanceExportEvidence {
+    request_digest: String,
+    financial_sequence: i64,
+    financial_chain_digest: String,
+}
+
+/// Read the exported-allowance row from the stopped source node's accounting
+/// ledger through the native test gate; `None` when no export was recorded.
+fn read_source_allowance_export(
+    state_path: &Path,
+    operation_id: &str,
+) -> Option<SourceAllowanceExportEvidence> {
+    use rusqlite::OptionalExtension as _;
+
+    let path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
+    if !path.exists() {
+        return None;
+    }
+    ryeos_app::test_support::read_existing_accounting(&path, |connection| {
+        Ok(connection
+            .query_row(
+                "SELECT request_digest, financial_sequence, financial_chain_digest
+                   FROM accounting_handoff_transfer WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| {
+                    Ok(SourceAllowanceExportEvidence {
+                        request_digest: row.get(0)?,
+                        financial_sequence: row.get(1)?,
+                        financial_chain_digest: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HandoffRetryEvidence {
+    source_allowance_export: Option<SourceAllowanceExportEvidence>,
     source_job: Option<HandoffRetryJobEvidence>,
     target_job: Option<HandoffRetryJobEvidence>,
     writer_grant_hash: Option<String>,
@@ -1830,6 +1883,8 @@ async fn observe_handoff_retry_evidence(
     };
     // A test thread holds one Store at a time: read everything the source
     // node retains and close its Store before the target's opens.
+    let source_allowance_export =
+        read_source_allowance_export(&handoff.source.state_path, operation_id);
     let (source_job, source_chain_head, source_remote_continuation) = {
         let source = open_daemon_state_with_trusted_nodes(&handoff.source.state_path, &trusted)?;
         let source_job = match live_source_job {
@@ -1942,6 +1997,7 @@ async fn observe_handoff_retry_evidence(
     }
     drop(target);
     Ok(HandoffRetryEvidence {
+        source_allowance_export,
         source_job,
         target_job,
         writer_grant_hash,
@@ -2450,7 +2506,11 @@ fn assert_retry_disposition(
     let final_source = after_retry
         .source_job
         .as_ref()
-        .context("handoff retry retained no source operation")?;
+        .with_context(|| {
+            format!(
+                "handoff retry retained no source operation (retry returned {status}: {response}; at cut: {at_cut:#?}; after retry: {after_retry:#?})"
+            )
+        })?;
     let final_target = after_retry
         .target_job
         .as_ref()
@@ -2659,6 +2719,18 @@ fn assert_retry_disposition(
                 "resume case `{}` did not start from an incomplete durable operation",
                 case.case_id
             );
+            if case.boundary == HandoffCrashBoundary::SourceAllowanceExported {
+                // The irreversible export precedes the cut, so recovery rolls
+                // the writer cut forward and must reuse that exact export.
+                let exported = at_cut
+                    .source_allowance_export
+                    .as_ref()
+                    .context("crash after the allowance export retained no export row")?;
+                anyhow::ensure!(
+                    after_retry.source_allowance_export.as_ref() == Some(exported),
+                    "recovery repeated or changed the accounting allowance export"
+                );
+            }
             let receipt = after_retry
                 .adoption_receipt
                 .as_ref()
@@ -2968,7 +3040,7 @@ fn export_exact_chain_head(
 }
 
 fn create_source_abort_authority() -> Result<SourceAbortAuthority> {
-    let state_root = tempfile::tempdir()?;
+    let state_root = common::process_scopes::tempdir()?;
     let identity_path = state_root
         .path()
         .join(ryeos_engine::AI_DIR)
@@ -3660,11 +3732,57 @@ fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
                 .downcast_ref::<HostCannotQualifyProcessScopes>()
                 .is_some() =>
         {
-            eprintln!("handoff crash suite skipped: {error}");
+            // Fails the test when the real process-scope mode is selected.
+            common::process_scopes::skip_or_fail_unqualified(&format!(
+                "handoff crash suite: {error}"
+            ));
             Ok(())
         }
         other => other,
     }
+}
+
+/// The terminate request that ends a session whose first command completed a
+/// turn. A completed termination must carry that command's exact completion
+/// fence, which the command observation reports once the turn has completed.
+async fn completed_termination_request(
+    daemon: &DaemonHarness,
+    chain_root_id: &str,
+    command_response: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let command = command_response.get("result").unwrap_or(command_response);
+    let placement_thread_id = command
+        .get("placement_thread_id")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("command response names no placement: {command_response}"))?;
+    let command_sequence = command
+        .get("command_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .with_context(|| format!("command response names no sequence: {command_response}"))?;
+    let mut last = None;
+    for _ in 0..120 {
+        let (status, observed) = daemon
+            .post_execute(
+                "service:worker-executions/command-observation",
+                ".",
+                serde_json::json!({
+                    "chain_root_id":chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "command_sequence":command_sequence,
+                }),
+            )
+            .await?;
+        if let Some(fence) = observed.pointer("/result/completion_fence") {
+            return Ok(serde_json::json!({
+                "chain_root_id":chain_root_id,
+                "reason":"completed",
+                "completion":fence,
+            }));
+        }
+        last = Some((status, observed));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("the first command never reported a completed turn: {last:?}")
 }
 
 async fn launch_and_checkpoint_portable_worker(
@@ -3725,14 +3843,14 @@ async fn launch_and_checkpoint_portable_worker(
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({"chain_root_id":chain_root_id,"reason":"completed"}),
+            completed_termination_request(daemon, &chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
@@ -4140,7 +4258,22 @@ impl RealPortableHandoff {
 }
 
 async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
-    let project = tempfile::tempdir()?;
+    Ok(start_real_portable_handoff_with(None, &[]).await?.0)
+}
+
+/// Start the real portable-worker pair. The source is restarted exactly once
+/// here (its remote routes are installed while it is down), and that is the
+/// only restart a source can take before its handoff: a dedicated-session root
+/// is native-resumed once per node run budget, so a second restart settles it
+/// failed and a restart after the preflight moves the chain head the
+/// preflight is bound to. A test that needs the source to carry a crash gate
+/// or an environment variable therefore asks for it here, not by restarting
+/// the source later.
+async fn start_real_portable_handoff_with(
+    gate: Option<HandoffCrashBoundary>,
+    source_environment: &[(&str, &str)],
+) -> Result<(RealPortableHandoff, Option<HandoffCrashGate>)> {
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join(".ai/manifest.yaml"),
@@ -4251,11 +4384,29 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         &format!("fp:{}", source_fixture.user_fp()),
         &candidate_snapshot_hash,
     )?;
-    source
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-source");
-        })
-        .await?;
+    let source_gate = match gate {
+        Some(boundary) => Some(
+            source
+                .respawn_with_handoff_crash_gate(boundary, |command| {
+                    command.env("HOSTNAME", "handoff-source");
+                    for (name, value) in source_environment {
+                        command.env(name, value);
+                    }
+                })
+                .await?,
+        ),
+        None => {
+            source
+                .respawn_with(|command| {
+                    command.env("HOSTNAME", "handoff-source");
+                    for (name, value) in source_environment {
+                        command.env(name, value);
+                    }
+                })
+                .await?;
+            None
+        }
+    };
     install_single_remote(
         &target.state_path,
         remote_config(
@@ -4282,7 +4433,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         )?,
     )?;
 
-    Ok(RealPortableHandoff {
+    let mut handoff = RealPortableHandoff {
         _project: project,
         source,
         source_fixture,
@@ -4291,7 +4442,34 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         source_site_id,
         target_site_id,
         checkpoint,
-    })
+    };
+    // The restart's native resume appends to the session chain; a preflight
+    // taken before it settles would be bound to a head that has already moved.
+    wait_for_source_chain_quiescence(&mut handoff).await?;
+    Ok((handoff, source_gate))
+}
+
+/// Wait until the source node's view of the session thread stops changing
+/// (the same response on consecutive polls) after a restart's resume.
+async fn wait_for_source_chain_quiescence(handoff: &mut RealPortableHandoff) -> Result<()> {
+    let chain_root_id = handoff.checkpoint.chain_root_id.clone();
+    let mut previous: Option<serde_json::Value> = None;
+    let mut stable = 0;
+    for _ in 0..60 {
+        let current = handoff.source.get_thread(&chain_root_id).await?;
+        let current = serde_json::to_value(&current)?;
+        if previous.as_ref() == Some(&current) {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+            previous = Some(current);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("the restarted source session thread never settled: {previous:?}")
 }
 
 async fn assert_real_handoff_completed(
@@ -4585,6 +4763,32 @@ async fn await_declared_startup_recovery(
 fn stderr_tail(stderr: &str, max_lines: usize) -> String {
     let lines = stderr.lines().collect::<Vec<_>>();
     lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
+/// A crash gate that was never reached says nothing about why. Name what the
+/// driving request returned (a refusal there means the boundary could not be
+/// reached, not that the daemon was slow) and the gated daemon's log tail.
+async fn gate_miss_evidence(
+    error: anyhow::Error,
+    request: Option<tokio::task::JoinHandle<Result<(reqwest::StatusCode, serde_json::Value)>>>,
+    gated: &mut DaemonHarness,
+) -> anyhow::Error {
+    let request = match request {
+        Some(task) => match tokio::time::timeout(Duration::from_secs(2), task).await {
+            Ok(Ok(Ok((status, body)))) => format!("driving request returned {status}: {body}"),
+            Ok(Ok(Err(error))) => format!("driving request failed: {error:#}"),
+            Ok(Err(error)) => format!("driving request task failed: {error}"),
+            Err(_) => "driving request still pending".to_owned(),
+        },
+        None => "no driving request".to_owned(),
+    };
+    let stderr = gated.drain_stderr_nonblocking().await;
+    let tail: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.contains("cache metric") && !line.contains("resolved project"))
+        .collect();
+    let tail = tail[tail.len().saturating_sub(40)..].join("\n");
+    error.context(format!("{request}\ngated daemon log tail:\n{tail}"))
 }
 
 async fn post_handoff_request(
@@ -4909,7 +5113,8 @@ async fn crash_real_source_handoff_at(
     CasEntrySnapshot,
     HandoffPhaseCutEvidence,
 )> {
-    let mut handoff = start_real_portable_handoff().await?;
+    let (mut handoff, gate) = start_real_portable_handoff_with(Some(boundary), &[]).await?;
+    let mut gate = gate.context("the gated source start returned no crash gate")?;
     let (preflight_id, successor_id) = handoff.preflight().await?;
     handoff.target.kill_daemon().await?;
     let target_before_transfer = snapshot_cas_entries(&handoff.target.state_path)?;
@@ -4917,14 +5122,6 @@ async fn crash_real_source_handoff_at(
         .target
         .respawn_with(|command| {
             command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff.refresh_routes()?;
-    handoff.source.kill_daemon().await?;
-    let mut gate = handoff
-        .source
-        .respawn_with_handoff_crash_gate(boundary, |command| {
-            command.env("HOSTNAME", "handoff-source");
         })
         .await?;
     handoff.refresh_routes()?;
@@ -4951,7 +5148,12 @@ async fn crash_real_source_handoff_at(
     let request_task = tokio::spawn(async move {
         post_handoff_request(source_bind, &source_user_key, &source_node_key, request).await
     });
-    let cut_evidence = gate.wait_reached().await?;
+    let cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(gate_miss_evidence(error, Some(request_task), &mut handoff.source).await);
+        }
+    };
     handoff.source.kill_daemon().await?;
     let _ = tokio::time::timeout(Duration::from_secs(5), request_task).await;
     Ok((
@@ -4979,12 +5181,6 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         .target
         .respawn_with(|command| {
             command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff
-        .source
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-source");
         })
         .await?;
     handoff.refresh_routes()?;
@@ -5175,16 +5371,44 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;
-    handoff
-        .target
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff.target.kill_daemon().await?;
-    wait_for_state_lock_release(&handoff.target.state_path).await?;
-    let private_projection_before_replay =
-        revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
+    // With the operator grant revoked, a restarted target keeps its recovering
+    // successor session only until the node's own recovery of that session's
+    // root runs and is refused: that cancels the session. It is the startup
+    // recovery, not the replay, so let the target run idle long enough for it
+    // to finish before the "before" projection is read. If the session is
+    // still recovering after that, anything that then changes it is the
+    // replay and the comparison below reports it.
+    let mut private_projection_before_replay = serde_json::Value::Null;
+    for _ in 0..3 {
+        handoff
+            .target
+            .respawn_with(|command| {
+                command.env("HOSTNAME", "handoff-target");
+            })
+            .await?;
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        handoff.target.kill_daemon().await?;
+        wait_for_state_lock_release(&handoff.target.state_path).await?;
+        private_projection_before_replay =
+            revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
+        if private_projection_before_replay.pointer("/session/state")
+            == Some(&serde_json::json!("terminal"))
+        {
+            break;
+        }
+    }
+    // The recovering session of the revoked-grant target settles before any
+    // replay, and as a cancellation: the node's startup recovery of the
+    // successor root is refused and its root-stop path
+    // (`abort_session_for_root_stop`) cancels the session. Assert that, so the
+    // replay comparison below can only be about the replay.
+    anyhow::ensure!(
+        private_projection_before_replay.pointer("/session/state")
+            == Some(&serde_json::json!("terminal"))
+            && private_projection_before_replay.pointer("/session/terminal_reason")
+                == Some(&serde_json::json!("cancelled")),
+        "with the operator grant revoked the target's startup recovery must settle the recovering successor session as cancelled before the replay: {private_projection_before_replay}"
+    );
     handoff
         .target
         .respawn_with(|command| {
@@ -5479,17 +5703,12 @@ async fn failed_terminal_fetch_retries_in_the_same_source_process() -> Result<()
 
 async fn failed_terminal_fetch_retries_in_the_same_source_process_on_qualified_host() -> Result<()>
 {
-    let mut handoff = start_real_portable_handoff().await?;
+    let (mut handoff, _) = start_real_portable_handoff_with(
+        None,
+        &[("RYEOS_TEST_HANDOFF_FAIL_TERMINAL_FETCH_ONCE", "1")],
+    )
+    .await?;
     let (preflight_id, successor_id) = handoff.preflight().await?;
-    handoff.source.kill_daemon().await?;
-    handoff
-        .source
-        .respawn_with(|command| {
-            command
-                .env("HOSTNAME", "handoff-source")
-                .env("RYEOS_TEST_HANDOFF_FAIL_TERMINAL_FETCH_ONCE", "1");
-        })
-        .await?;
     handoff.refresh_routes()?;
     let source_pid = handoff.source.child.id();
 
@@ -5548,7 +5767,10 @@ async fn explicit_handoff_acceptance_matrix_emits_retained_report() -> Result<()
                 .downcast_ref::<HostCannotQualifyProcessScopes>()
                 .is_some() =>
         {
-            eprintln!("handoff crash suite skipped: {error}");
+            // Fails the test when the real process-scope mode is selected; on
+            // any other host it names the reason, and the report below keeps
+            // what this host proved.
+            common::process_scopes::skip_or_fail_unqualified(&error.to_string());
             retain_unqualified_host_report(error.to_string())
         }
         other => other,
@@ -5740,7 +5962,12 @@ async fn crash_real_target_adoption_at(
     let request_task = tokio::spawn(async move {
         post_handoff_request(source_bind, &source_user_key, &source_node_key, request).await
     });
-    let cut_evidence = gate.wait_reached().await?;
+    let cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(gate_miss_evidence(error, Some(request_task), &mut handoff.target).await);
+        }
+    };
     // The source is synchronously waiting on this exact target request. Start
     // both kills in the same poll turn so waiting for target process/UDS
     // cleanup cannot let the broken connection settle the source attempt.
@@ -6078,7 +6305,10 @@ async fn qualify_target_recovery_case(
         })
         .await?;
     handoff.refresh_routes()?;
-    let recovery_cut_evidence = gate.wait_reached().await?;
+    let recovery_cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => return Err(gate_miss_evidence(error, None, &mut handoff.target).await),
+    };
     anyhow::ensure!(
         recovery_cut_evidence.operation_id == cut_evidence.operation_id,
         "target recovery crash gate changed the live operation identity"
@@ -6250,11 +6480,29 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
         &worker.process_identity,
         ryeos_app::process::ShutdownAction::Hard,
     );
-    anyhow::ensure!(
-        killed.success,
-        "could not prove worker terminalization at attachment cut: {}",
-        killed.method
-    );
+    if !killed.success {
+        // A scope settles only for the account that owns its delegation, which
+        // is the node account; in the real process-scope mode this test
+        // process is the administrator and is refused. The worker is what
+        // must be gone before recovery, so end its process group and wait for
+        // its exact process to exit; the node's own recovery settles the
+        // scope as its owner.
+        let identity = &worker.process_identity;
+        lillux::child_group::signal_group(
+            u32::try_from(identity.group_leader_pid)?,
+            lillux::child_group::GroupSignal::Kill,
+        );
+        let target = u32::try_from(identity.target_pid)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while lillux::is_alive(target) {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "worker did not exit at attachment cut after its group was killed (first attempt: {})",
+                killed.method
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     target_store.fence_abandoned_worker_process(
         &worker.worker_instance_id,
         &successor_id,
@@ -7080,7 +7328,7 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session() -> R
 
 async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qualified_host()
 -> Result<()> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -7141,17 +7389,14 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _command = command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({
-                "chain_root_id":chain_root_id,
-                "reason":"completed",
-            }),
+            completed_termination_request(&daemon, chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
@@ -7254,7 +7499,7 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
     const LAUNCH_ID: &str = "L-22222222222222222222222222222222";
     const COMMAND_KEY: &str = "portable-lost-ack-session-start";
 
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(project.path().join("fixture.txt"), b"lost-ack fixture\n")?;
     let (mut cut_gate, mut cut_child) = DedicatedCommandCutGate::pair(COMMAND_KEY)?;

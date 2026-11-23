@@ -865,7 +865,14 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
                 };
             }
         }
-        let success = scope.terminate_and_wait(scope.control_timeout()).is_ok();
+        let terminated = scope.terminate_and_wait(scope.control_timeout());
+        if let Err(error) = &terminated {
+            tracing::warn!(
+                %error,
+                "process scope termination was not proved; the scope's cleanup stays unproved"
+            );
+        }
+        let success = terminated.is_ok();
         if success
             && let Some(group) = wrapper_group_wait(Duration::ZERO)
             && !group.success

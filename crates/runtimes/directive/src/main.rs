@@ -6,6 +6,7 @@ use serde_json::json;
 mod adapter;
 mod bootstrap;
 mod budget;
+mod compaction;
 mod continuation;
 mod directive;
 mod dispatcher;
@@ -506,6 +507,29 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     )?;
     drop(launch_inventory);
     let launch_key = format!("launch:{}", envelope.thread_id);
+    let chain_depth_limit = bootstrap_output
+        .config
+        .continuation_runtime
+        .chain_depth_limit;
+    if let Err(refusal) = bootstrap_output
+        .config
+        .continuation_runtime
+        .compaction
+        .validate()
+    {
+        return runner::refuse_launch(
+            &callback,
+            &envelope.thread_id,
+            &format!("compaction_policy_invalid: {refusal}"),
+            budget.cost(),
+        )
+        .await;
+    }
+    let compaction_policy = bootstrap_output
+        .config
+        .continuation_runtime
+        .compaction
+        .clone();
 
     // What a recovery rebuilds. A thread that lost its process before it
     // wrote any launch record has nothing to rebuild and launches fresh.
@@ -549,6 +573,17 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 // settled on the thread, not a process error the daemon can
                 // only report as an exit without finalization.
                 Err(error) => {
+                    if let Some(ceiling) = error
+                        .downcast_ref::<ryeos_runtime::callback_client::ReplayCeilingExceeded>(
+                    ) {
+                        return runner::refuse_launch(
+                            &callback,
+                            &envelope.thread_id,
+                            &ceiling.to_string(),
+                            budget.cost(),
+                        )
+                        .await;
+                    }
                     if let Some(refusal) = error.downcast_ref::<resume::ResumeFoldError>() {
                         return runner::refuse_launch(
                             &callback,
@@ -561,6 +596,26 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     return Err(error);
                 }
             };
+            // A compacted start still over the window is only workable when the
+            // policy can compact it again.
+            if loaded.start_over_ceiling
+                && !bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .compaction
+                    .enabled
+            {
+                return runner::refuse_launch(
+                    &callback,
+                    &envelope.thread_id,
+                    &resume::ResumeFoldError::CompactedStartExceedsWindow {
+                        ceiling: carry.ceiling_tokens,
+                    }
+                    .to_string(),
+                    budget.cost(),
+                )
+                .await;
+            }
             (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
         }
         None => None,
@@ -570,6 +625,15 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let resume_id = resume_id
             .as_deref()
             .expect("a resume has a thread to resume");
+        // The edge into this thread: a machine continuation extends the
+        // chain's machine depth, an operator follow-up starts it again.
+        if !same_thread_resume {
+            resume_state.chain_depth = if envelope.request.suppress_stimulus {
+                resume_state.chain_depth.saturating_add(1)
+            } else {
+                0
+            };
+        }
         // A provider entry may refuse a mid-conversation change of the system
         // text, the tool inventory or the reasoning policy. That is decided
         // before the thread is continued or anything is recorded, so a refused
@@ -741,6 +805,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             reasoning,
         })
     };
+    runner_inst.set_compaction(compaction_policy);
+    runner_inst.set_chain_depth_limit(chain_depth_limit);
     runner_inst.run().await
 }
 

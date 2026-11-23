@@ -3575,37 +3575,109 @@ async fn handoff(
             &preflight_response.preflight_attestation,
         )
         .map_err(internal)?;
-    if preflight_operation.role != ryeos_app::worker_handoff::WorkerHandoffJobRole::Source
-        || preflight_operation.preflight_id != req.preflight_id
-        || preflight_operation.owner_principal != source.owner_principal
-        || preflight_operation.chain_root_id != source.chain_root_id
-        || preflight_operation.source_site_id != state.threads.site_id()
-        || preflight_operation.target_site_id != target_site_id
-        || preflight_operation.source_placement_thread_id != source_thread_id
-        || preflight_operation.source_chain_head_hash != source_head.target_hash
-        || preflight_operation.source_last_event_hash != source_event_hash
-        || preflight_operation.target_project_path != binding.remote_project_path
-        || preflight_operation.project_route_digest != route_digest
-        || preflight_operation.target_credential_profile_id != req.target_credential_profile_id
-        || preflight_operation.follow_delivery_reservation_attestation_hash
-            != preflight_evidence.follow_delivery_reservation_attestation_hash
-        || preflight_operation.peer_remote_name != req.remote
-        || preflight_response.preflight_attestation_hash
-            != ryeos_state::objects::canonical_value_digest(
-                &preflight_response.preflight_attestation.to_value(),
-            )
-            .map_err(internal)?
-        || preflight_evidence.preflight_id != req.preflight_id
-        || preflight_evidence.source_chain_head_hash != source_head.target_hash
-        || preflight_evidence.source_last_event_hash != source_event_hash
-        || preflight_evidence.source_launch_capsule_hash != launch_capsule_hash
-        || preflight_evidence.target_project_path != binding.remote_project_path
-        || preflight_evidence.project_route_digest != route_digest
-        || preflight_evidence.target_credential_profile_id != req.target_credential_profile_id
-    {
-        return Err(HandlerError::BadRequest(
-            "handoff request differs from its completed target preflight".into(),
-        ));
+    let preflight_digest = ryeos_state::objects::canonical_value_digest(
+        &preflight_response.preflight_attestation.to_value(),
+    )
+    .map_err(internal)?;
+    let differing: Vec<&str> = [
+        (
+            "preflight_operation.role",
+            preflight_operation.role != ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
+        ),
+        (
+            "preflight_operation.preflight_id",
+            preflight_operation.preflight_id != req.preflight_id,
+        ),
+        (
+            "preflight_operation.owner_principal",
+            preflight_operation.owner_principal != source.owner_principal,
+        ),
+        (
+            "preflight_operation.chain_root_id",
+            preflight_operation.chain_root_id != source.chain_root_id,
+        ),
+        (
+            "preflight_operation.source_site_id",
+            preflight_operation.source_site_id != state.threads.site_id(),
+        ),
+        (
+            "preflight_operation.target_site_id",
+            preflight_operation.target_site_id != target_site_id,
+        ),
+        (
+            "preflight_operation.source_placement_thread_id",
+            preflight_operation.source_placement_thread_id != source_thread_id,
+        ),
+        (
+            "preflight_operation.source_chain_head_hash",
+            preflight_operation.source_chain_head_hash != source_head.target_hash,
+        ),
+        (
+            "preflight_operation.source_last_event_hash",
+            preflight_operation.source_last_event_hash != source_event_hash,
+        ),
+        (
+            "preflight_operation.target_project_path",
+            preflight_operation.target_project_path != binding.remote_project_path,
+        ),
+        (
+            "preflight_operation.project_route_digest",
+            preflight_operation.project_route_digest != route_digest,
+        ),
+        (
+            "preflight_operation.target_credential_profile_id",
+            preflight_operation.target_credential_profile_id != req.target_credential_profile_id,
+        ),
+        (
+            "preflight_operation.follow_delivery_reservation_attestation_hash",
+            preflight_operation.follow_delivery_reservation_attestation_hash
+                != preflight_evidence.follow_delivery_reservation_attestation_hash,
+        ),
+        (
+            "preflight_operation.peer_remote_name",
+            preflight_operation.peer_remote_name != req.remote,
+        ),
+        (
+            "preflight_response.preflight_attestation_hash",
+            preflight_response.preflight_attestation_hash != preflight_digest,
+        ),
+        (
+            "preflight_evidence.preflight_id",
+            preflight_evidence.preflight_id != req.preflight_id,
+        ),
+        (
+            "preflight_evidence.source_chain_head_hash",
+            preflight_evidence.source_chain_head_hash != source_head.target_hash,
+        ),
+        (
+            "preflight_evidence.source_last_event_hash",
+            preflight_evidence.source_last_event_hash != source_event_hash,
+        ),
+        (
+            "preflight_evidence.source_launch_capsule_hash",
+            preflight_evidence.source_launch_capsule_hash != launch_capsule_hash,
+        ),
+        (
+            "preflight_evidence.target_project_path",
+            preflight_evidence.target_project_path != binding.remote_project_path,
+        ),
+        (
+            "preflight_evidence.project_route_digest",
+            preflight_evidence.project_route_digest != route_digest,
+        ),
+        (
+            "preflight_evidence.target_credential_profile_id",
+            preflight_evidence.target_credential_profile_id != req.target_credential_profile_id,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, differs)| differs.then_some(name))
+    .collect();
+    if !differing.is_empty() {
+        return Err(HandlerError::BadRequest(format!(
+            "handoff request differs from its completed target preflight in: {}",
+            differing.join(", ")
+        )));
     }
     let authority = state
         .state_store
@@ -4004,6 +4076,16 @@ async fn handoff(
     let successor_project_snapshot_hash = target_authority
         .operational_snapshot_projection()
         .map(ToOwned::to_owned);
+    // The pre-cut crash boundary sits before the accounting allowance export:
+    // once exported, recovery must roll the writer cut forward, so a crash
+    // here is the last point where the handoff still aborts cleanly.
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeWriterCut,
+        &operation,
+    )
+    .map_err(internal)?;
     let source_accounting_transfer = match (
         state.accounting.as_ref(),
         source_metadata.accounting_scope.as_ref(),
@@ -4032,6 +4114,14 @@ async fn handoff(
         (_, None) => None,
         (None, Some(_)) => return Err(internal("source accounting ledger disappeared")),
     };
+    // A crash here must roll the writer cut forward: the allowance export is irreversible.
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceAllowanceExported,
+        &operation,
+    )
+    .map_err(internal)?;
     let successor = ryeos_app::state_store::NewThreadRecord {
         thread_id: successor_thread_id.clone(),
         chain_root_id: source.chain_root_id.clone(),
@@ -4050,13 +4140,6 @@ async fn handoff(
         usage_subject_asserted_by: None,
         captured_history_policy: None,
     };
-    #[cfg(any(test, feature = "handoff-test-support"))]
-    reach_source_handoff_phase_cut(
-        &state,
-        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeWriterCut,
-        &operation,
-    )
-    .map_err(internal)?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     let source_publication_started = lillux::time::MonotonicTimer::start();
     let publication = state
@@ -5350,6 +5433,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                     .transpose()?
                     .unwrap_or(false);
                 if allowance_was_exported {
+                    // Finish the exact writer cut, then fall through and
+                    // redrive target adoption in this same pass.
                     recover_exported_source_writer_cut(
                         state,
                         &latest_job,
@@ -5357,15 +5442,19 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         &mut progress,
                     )
                     .await?;
-                    recovered += 1;
+                } else {
+                    if recover_pre_cut_source_handoff_abort(
+                        state,
+                        &latest_job,
+                        &operation,
+                        &progress,
+                    )
+                    .await?
+                    {
+                        recovered += 1;
+                    }
                     continue;
                 }
-                if recover_pre_cut_source_handoff_abort(state, &latest_job, &operation, &progress)
-                    .await?
-                {
-                    recovered += 1;
-                }
-                continue;
             }
             let (Some(placement_hash), Some(writer_hash), Some(target_head_hash)) = (
                 progress.placement_attestation_hash.clone(),
