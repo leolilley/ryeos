@@ -290,6 +290,12 @@ pub(crate) fn record_head_advance(
     trust_store: &TrustStore,
 ) -> Result<()> {
     advancer.validate()?;
+    if previous_hash == Some(target_hash) {
+        bail!(
+            "head_advance_target_unchanged: an advance to the head's current target {target_hash} \
+             moves nothing and is never recorded"
+        );
+    }
     let existing = entries(head_directory)?;
     if let Some(latest) = existing.last() {
         let record = read_entry(head_directory, latest, trust_store)?;

@@ -1594,6 +1594,9 @@ pub(crate) fn advance_verified_project_head_ref(
         .into());
     }
 
+    if new_snapshot_hash == expected_current_hash {
+        return Ok(());
+    }
     project_lock
         .ensure_protects(refs_root, principal_key, project_hash)
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
@@ -1657,6 +1660,13 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
             observed: Some(current.target_hash),
         }
         .into());
+    }
+    // The head already names the target: nothing moves, so nothing is
+    // recorded or rewritten. A rewrite to the same target inside one second
+    // would be byte-identical to the head it replaces, and the advance
+    // records rely on every swap changing the target.
+    if new_snapshot_hash == expected_current_hash {
+        return Ok(());
     }
     ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
@@ -3266,6 +3276,42 @@ mod tests {
         assert!(records[1].applied && records[2].applied);
         let sequences: Vec<u64> = records.iter().map(|read| read.record.sequence).collect();
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // An advance to the head's current target moves nothing: no record,
+        // and the head file is left byte for byte.
+        let record_count = || {
+            head_directory
+                .entry_names()
+                .unwrap()
+                .iter()
+                .filter(|name| {
+                    name.to_str().is_some_and(|name| {
+                        name.starts_with(crate::head_advance::HEAD_ADVANCE_PREFIX)
+                    })
+                })
+                .count()
+        };
+        let head_file = head_directory.path().join("head");
+        let (records_before, head_before) = (record_count(), fs::read(&head_file).unwrap());
+        advance(&c, &c, &one).unwrap();
+        assert_eq!(record_count(), records_before);
+        assert_eq!(fs::read(&head_file).unwrap(), head_before);
+        // The recorder itself refuses an unchanged target.
+        let unchanged = crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&c),
+            &c,
+            None,
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{unchanged:#}").starts_with("head_advance_target_unchanged"),
+            "{unchanged:#}"
+        );
     }
 
     #[cfg(target_os = "linux")]

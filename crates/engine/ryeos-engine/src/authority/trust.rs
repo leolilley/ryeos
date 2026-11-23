@@ -1940,6 +1940,18 @@ mod tests {
         );
     }
 
+    /// The verdict for a signer outside its scope: untrusted, or refused as
+    /// out of scope. Any other refusal is a broken fixture.
+    fn assert_untrusted_or_out_of_scope<E: std::fmt::Debug>(verdict: Result<TrustClass, E>) {
+        match verdict {
+            Ok(class) => assert_eq!(class, TrustClass::Untrusted),
+            Err(error) => {
+                let text = format!("{error:?}");
+                assert!(text.contains("SignerOutOfScope"), "{text}");
+            }
+        }
+    }
+
     #[test]
     fn a_project_named_core_and_the_installed_core_bundle_are_judged_apart() {
         // A project whose manifest says `name: core` is pid:v1:<owner>/core.
@@ -1980,10 +1992,7 @@ mod tests {
         // Outside its scope the signer is refused, never trusted.
         let refused = verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx())
             .map(|(class, _)| class);
-        assert!(
-            !matches!(refused, Ok(TrustClass::Trusted)),
-            "a project author was trusted for the bundle: {refused:?}"
-        );
+        assert_untrusted_or_out_of_scope(refused);
 
         // The core bundle's publisher is trusted in bundle space, never as
         // the project named core.
@@ -1993,10 +2002,7 @@ mod tests {
         assert_eq!(class, TrustClass::Trusted);
         let refused = verify_item_signature(&content, &header, &envelope, &store, &in_project)
             .map(|(class, _)| class);
-        assert!(
-            !matches!(refused, Ok(TrustClass::Trusted)),
-            "the bundle publisher was trusted as the project: {refused:?}"
-        );
+        assert_untrusted_or_out_of_scope(refused);
 
         // `core` alone is not a project identity, so a bundle name can never
         // be read as one.
