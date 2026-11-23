@@ -6051,7 +6051,7 @@ mod tests {
             source
                 .collection
                 .as_ref()
-                .and_then(super::content::CollectionBinding::as_plain),
+                .and_then(crate::ui::content::CollectionBinding::as_plain),
             Some("threads")
         );
         let columns = table_columns(&binding);
