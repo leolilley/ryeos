@@ -6007,11 +6007,10 @@ impl Runner {
                     } else {
                         error
                     };
-                    record_callback_warning(
-                        &mut warnings,
-                        "thread_failed(emit_error)",
-                        self.callback.emit_error(&error).await,
-                    );
+                    // The failure is recorded once, by the daemon's finalization,
+                    // which carries the typed error. The runtime appends no
+                    // `thread_failed` of its own: a stream consumer treats the
+                    // first one it sees as the end.
                     let failure = runtime_failure_payload(
                         &error,
                         &self.thread_id,
@@ -7546,7 +7545,6 @@ pub(crate) async fn refuse_launch(
     cost: ryeos_runtime::envelope::RuntimeCost,
 ) -> anyhow::Result<RuntimeResult> {
     let failure = runtime_failure_payload(error, thread_id, 0, None);
-    callback.emit_error(error).await?;
     callback
         .finalize_thread(TerminalCompletion {
             status: ThreadTerminalStatus::Failed,
@@ -11739,18 +11737,17 @@ mod frame_refusal_tests {
             failure.summary
         );
 
+        // The runtime appends no `thread_failed` of its own; the failure is
+        // recorded once, by finalization, which carries the typed error.
         let events = recorder.events.lock().unwrap();
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(events[0].0, "thread_failed");
-        assert!(
-            events[0].1["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("frame_change_refused")
-        );
+        assert!(events.is_empty(), "{events:?}");
         let finalized = recorder.finalized.lock().unwrap();
         assert_eq!(finalized.len(), 1);
         assert_eq!(finalized[0].status, ThreadTerminalStatus::Failed);
+        assert_eq!(
+            finalized[0].error.as_ref().expect("a typed error")["code"],
+            "frame_change_refused"
+        );
     }
 
     #[tokio::test]
