@@ -106,7 +106,7 @@ pub async fn handle(
         state.identity.fingerprint(),
     )?;
     let coverage = if page.truncations.is_empty() {
-        Coverage::observed()
+        Coverage::complete()
     } else {
         Coverage::with_reason(CoverageState::Partial, "history_rotated")
     }
