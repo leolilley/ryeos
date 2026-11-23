@@ -107,6 +107,8 @@ async fn the_capability_report_is_listed_read_and_summarised() -> Result<()> {
         "the signer is the node the report names: {got}"
     );
     assert!(got["verify"]["fresh"].is_boolean(), "{got}");
+    assert_eq!(got["verify"]["signer_status"], "node", "{got}");
+    assert!(got["verify"].get("signing_principal").is_none(), "{got}");
     assert!(got["body"].is_object(), "{got}");
     assert_eq!(got["truncated"], false);
     let hash = got["hash"].as_str().expect("a hash").to_owned();
