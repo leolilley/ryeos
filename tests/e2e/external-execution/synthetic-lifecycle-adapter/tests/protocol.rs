@@ -268,7 +268,10 @@ fn live_bundle_engine(
             verifying_key: *identity.verifying_key(),
             label: Some("external candidate E2E authoring bundle".into()),
         },
-    ]);
+    ])
+    // The node registry with no recorded succession: every key owns its own
+    // solo principal, as on a node that never rotated a key.
+    .with_succession_chain(&[]);
     let core = ryeos_engine::test_support::core_bundle_root();
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
@@ -4659,6 +4662,15 @@ async fn run_production_tls_candidate(
     for (path, (bytes, mode)) in signed_candidate_operation_sources(&state.identity) {
         store_project_file(&cas, &mut base_files, &path, &bytes, mode);
     }
+    // The candidate's integration and publication key the owner's head by the
+    // name the source checkout declares, so base B carries that declaration.
+    store_project_file(
+        &cas,
+        &mut base_files,
+        ".ai/manifest.yaml",
+        b"name: composed-controller\n",
+        ryeos_state::objects::ProjectFile::REGULAR_MODE,
+    );
     let tree_hash = cas
         .store_object(
             &ProjectTree {
@@ -5331,14 +5343,6 @@ async fn run_production_tls_candidate(
             "W-external-composed-controller",
         )
         .unwrap();
-    // The candidate's integration and publication key the owner's head by the
-    // name the source checkout declares.
-    std::fs::create_dir_all(workspace_project.join(".ai")).unwrap();
-    std::fs::write(
-        workspace_project.join(".ai/manifest.yaml"),
-        "name: composed-controller\n",
-    )
-    .unwrap();
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: admitted guest, preparing candidate session");
     }
