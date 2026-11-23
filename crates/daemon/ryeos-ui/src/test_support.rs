@@ -41,7 +41,7 @@ async fn live_presentation_seeded(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let root = fixture_project_root(state);
-    live_presentation_in_project(state, &root, &root, initial_surface).await
+    live_presentation_in_project(state, &root, initial_surface).await
 }
 
 /// A project directory for the default presentation fixtures, beside the
@@ -59,12 +59,11 @@ pub fn fixture_project_root(state: &AppState) -> std::path::PathBuf {
     project
 }
 
-/// The presentation fixture bound to `project_root`. Its signed shared
-/// Config is an item of the state's fixture bundle. `spelling` is the path the launch names that project by; it
-/// may be any equivalent path of the canonical root.
+/// The presentation fixture bound to the project `spelling` names, launched
+/// by the node operator. Its signed shared Config is an item of the state's
+/// fixture bundle. `spelling` may be any equivalent path of the canonical root.
 async fn live_presentation_in_project(
     state: &AppState,
-    project_root: &std::path::Path,
     spelling: &std::path::Path,
     initial_surface: Option<&str>,
 ) -> (
@@ -127,7 +126,9 @@ pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Pat
     let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
         .await
         .unwrap();
-    let mut projects = store.load_projects().unwrap();
+    let mut projects: crate::handlers::ui_projects::ProjectsFile = store
+        .load_yaml(&store.paths().projects_config())
+        .unwrap();
     let local_id = format!("prj_{}", uuid::Uuid::new_v4().simple());
     projects
         .projects
@@ -138,7 +139,9 @@ pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Pat
             added_at: lillux::time::iso8601_now(),
             tags: vec![],
         });
-    store.write_projects(&projects).unwrap();
+    store
+        .write_yaml(&store.paths().projects_config(), &projects)
+        .unwrap();
     local_id
 }
 
@@ -325,7 +328,7 @@ pub async fn live_presentation_with_surface(
 /// coordinate of its one authored initial Surface rather than the root.
 pub async fn live_presentation_with_surface_in_project(
     state: &AppState,
-    project_root: &std::path::Path,
+    _project_root: &std::path::Path,
     spelling: &std::path::Path,
     surface_ref: &str,
 ) -> (
@@ -335,7 +338,7 @@ pub async fn live_presentation_with_surface_in_project(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let (id, ctx, producer, _) =
-        live_presentation_in_project(state, project_root, spelling, Some(surface_ref)).await;
+        live_presentation_in_project(state, spelling, Some(surface_ref)).await;
     let session = crate::state::get_ui_state(state)
         .unwrap()
         .browser_sessions
