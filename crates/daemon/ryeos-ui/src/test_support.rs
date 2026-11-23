@@ -126,9 +126,8 @@ pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Pat
     let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
         .await
         .unwrap();
-    let mut projects: crate::handlers::ui_projects::ProjectsFile = store
-        .load_yaml(&store.paths().projects_config())
-        .unwrap();
+    let mut projects: crate::handlers::ui_projects::ProjectsFile =
+        store.load_yaml(&store.paths().projects_config()).unwrap();
     let local_id = format!("prj_{}", uuid::Uuid::new_v4().simple());
     projects
         .projects
