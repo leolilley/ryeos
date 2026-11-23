@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T05:13:27Z:164a2f7e2d4af76e5b7923d7b539ad4d5032eefa9fa7af74ab2a186e5198e23c:MZerAjU3ZLOJOI71GbZrpkSlSTt9QDJ4pul97AbEQCuGQGKi678b/lNzNbs0+OtbNp1s88dGCATrJuCE1xzWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T07:10:43Z:ee4aa3da120fcf8282404baf1d6baf51165cccba0d78296db8d56b2f5e3e986b:6D1z/esTexhP1Ph81CRFfVY703iJvfNof8zy5Arw356vsjSTT8kF0JLhYHKRWtY6yt7xsZKmYowKmHN+tmk7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -246,11 +246,9 @@ policies:
           # Docker). It has no qualified per-job process scopes and commonly no
           # swap and no CAP_IPC_LOCK, so the floor accepts a resident region
           # proven only by the absence of swap at startup (residency:swap_absent),
-          # which a later swapon ends. Jobs die with the node because the node is
-          # pid 1 of its container, or its parent is a pid 1 named in
-          # enclosure_inits; the trusted_init names carry that weaker grade and
-          # the report names which proof met each entry. Jobs run without a
-          # sandbox.
+          # which a later swapon ends. Jobs die with the node because its parent
+          # is a pid 1 named in enclosure_inits; the node itself cannot be pid 1,
+          # since process identity refuses pid 1. Jobs run without a sandbox.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
           process_scopes:
             mode: unconfigured
