@@ -94,7 +94,7 @@ fn record_authored_note(project: &Path, signer: &SigningKey) {
 }
 
 /// The newest revision of each item the node has announced for `project`.
-fn announced(h: &DaemonHarness, project: &str) -> std::collections::BTreeMap<String, u64> {
+fn cursor_items(h: &DaemonHarness, project: &str) -> std::collections::BTreeMap<String, u64> {
     let cursor =
         ryeos_engine::roots::RuntimeRoot::new(h.state_path.clone()).item_revised_cursor_dir();
     let path = cursor.join(format!("{}.json", lillux::sha256_hex(project.as_bytes())));
@@ -375,7 +375,7 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     let digest = plant_note(project.path(), "one", &fixture.authoring);
     record_authored_note(project.path(), &fixture.authoring);
     let project_path = canonical(project.path());
-    assert!(announced(&h, &project_path).is_empty());
+    assert!(cursor_items(&h, &project_path).is_empty());
 
     let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
     assert_eq!(status, 200, "{recorded:#}");
@@ -399,7 +399,7 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     // The node published it: its announcement cursor, written beside the hub
     // publish that feeds the seat fanout, now holds the item's revision.
     assert_eq!(
-        announced(&h, &project_path),
+        cursor_items(&h, &project_path),
         [(KNOWLEDGE_REF.to_owned(), 1)].into()
     );
 

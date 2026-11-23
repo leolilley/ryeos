@@ -294,6 +294,12 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .ok_or_else(|| local("endorse requires a project (--project <dir>)"))?;
     let project = std::fs::canonicalize(project_path)
         .map_err(|error| local(format!("project `{project_path}` is not readable: {error}")))?;
+    // Read before anything is signed: the announcement after the record names
+    // the checkout by this text, and must not fail a change already made.
+    let project_text = project
+        .to_str()
+        .ok_or_else(|| local("the project path is not UTF-8"))?
+        .to_owned();
     let items = text_list(parameters.get("item"), "item")?;
     let kinds = text_list(parameters.get("kind"), "kind")?;
     let standing = parameters
@@ -431,9 +437,6 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .and_then(Value::as_str)
         .map(str::to_owned)
     {
-        let project_text = project
-            .to_str()
-            .ok_or_else(|| local("the project path is not UTF-8"))?;
         let announcement = announce_revised(
             app_root,
             json!({ "project_path": project_text, "endorsement": digest }),
