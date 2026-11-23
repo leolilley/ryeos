@@ -22,7 +22,10 @@
 //!
 //! The cursor is held by the client and is not a capability: it carries only
 //! a position, bound to the read, the filter and the order key, and a cursor
-//! that does not match all three is refused as `<read>_cursor_invalid`.
+//! that does not match all three is refused as `<read>_cursor_invalid`. It is
+//! unauthenticated by design. Decoding one grants nothing, and the read
+//! re-authorizes every page, so a forged position can only skip or repeat
+//! rows the caller may already see.
 
 use std::collections::BTreeMap;
 
@@ -97,11 +100,22 @@ impl Coverage {
         }
     }
 
+    /// Add a typed completeness fact. `state` and `reason` are the
+    /// coverage's own fields and are never overwritten: such a key is
+    /// dropped.
     pub fn with_extra(mut self, key: &'static str, value: Value) -> Self {
-        self.extra.insert(key, value);
+        debug_assert!(
+            !COVERAGE_OWN_KEYS.contains(&key),
+            "coverage extra may not be named {key:?}"
+        );
+        if !COVERAGE_OWN_KEYS.contains(&key) {
+            self.extra.insert(key, value);
+        }
         self
     }
 }
+
+const COVERAGE_OWN_KEYS: &[&str] = &["state", "reason"];
 
 fn is_code(value: &str) -> bool {
     !value.is_empty()
@@ -228,8 +242,11 @@ fn digest_hex(bytes: &[u8]) -> String {
     lillux::sha256_hex(bytes)
 }
 
-/// Digest of a filter: the canonical JSON of the read's parsed filter
-/// (cursor, limit and `if_revision` excluded by the caller).
+/// Digest of a filter: the JSON of the read's parsed filter (cursor, limit
+/// and `if_revision` excluded by the caller). It is canonical only when the
+/// filter type serializes in a fixed order: a struct with fixed fields, and
+/// `BTreeMap`/`BTreeSet` or sorted vectors for collections, never a
+/// `HashMap` or `HashSet`.
 pub fn filter_digest(filter: &impl Serialize) -> Result<String, HandlerError> {
     let bytes = serde_json::to_vec(filter)
         .map_err(|error| HandlerError::Internal(format!("filter does not serialize: {error}")))?;
@@ -239,6 +256,10 @@ pub fn filter_digest(filter: &impl Serialize) -> Result<String, HandlerError> {
 /// The revision of the state a caller's filter reads: a digest over every
 /// source tip the read draws on, named, and the filter. A change in any
 /// source changes it; another filter has another revision.
+///
+/// Every read MUST include the node policy generation digest among `tips`,
+/// and for a seat the seat's pins, so a change of grant or disclosure never
+/// leaves a stale `not_modified` standing.
 pub fn revision_of(read: &str, tips: &[(&str, &str)], filter_digest: &str) -> String {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(read.as_bytes());

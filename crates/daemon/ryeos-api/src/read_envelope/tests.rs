@@ -90,6 +90,16 @@ fn the_revision_changes_with_any_source_tip_and_with_the_filter() {
         ),
         revision_of("node_journal", &tips, "g"),
         revision_of("threads", &tips, "f"),
+        revision_of(
+            "node_journal",
+            &[
+                ("journal", "a"),
+                ("ledger", "b"),
+                ("trust", "c"),
+                ("policy", "p2"),
+            ],
+            "f",
+        ),
     ] {
         assert_ne!(base, changed);
     }
@@ -232,4 +242,39 @@ fn the_signers_table_names_exactly_the_given_keys_with_fresh_standing() {
     assert_eq!(table["fp:nn"].status, SignerStatus::Node);
     assert_eq!(table["fp:zz"].status, SignerStatus::Unknown);
     assert!(!table.contains_key("fp:aa"));
+}
+
+#[test]
+fn coverage_extras_never_overwrite_state_or_reason() {
+    let coverage = Coverage::observed().with_extra("truncations", json!([]));
+    assert!(coverage.extra.contains_key("truncations"));
+    let result = std::panic::catch_unwind(|| {
+        Coverage::with_reason(CoverageState::Partial, "history_rotated")
+            .with_extra("state", json!("observed"))
+    });
+    if cfg!(debug_assertions) {
+        assert!(result.is_err(), "debug builds refuse the key loudly");
+    } else {
+        let coverage = result.unwrap();
+        assert!(coverage.extra.is_empty());
+        assert_eq!(coverage.state, CoverageState::Partial);
+    }
+}
+
+#[test]
+fn a_filter_digest_is_stable_for_a_fixed_field_struct() {
+    #[derive(serde::Serialize)]
+    struct Filter {
+        types: std::collections::BTreeSet<&'static str>,
+        since: Option<&'static str>,
+    }
+    let one = Filter {
+        types: ["b", "a"].into_iter().collect(),
+        since: None,
+    };
+    let two = Filter {
+        types: ["a", "b"].into_iter().collect(),
+        since: None,
+    };
+    assert_eq!(filter_digest(&one).unwrap(), filter_digest(&two).unwrap());
 }
