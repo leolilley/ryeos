@@ -72,11 +72,11 @@ async fn every_dispatched_call_fires_before_and_after() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn calls_sharing_one_provider_id_each_fire_their_hooks() {
-    // The occurrence is told apart by the call's ordinal, never by the model's
-    // id text, which providers repeat. Both calls carry the same id, one that
-    // looks like a positional fallback.
-    let script = "steps:\n  - tool_calls:\n      - id: index-1\n        name: noop\n        arguments: {}\n      - id: index-1\n        name: noop\n        arguments: {}\n  - text: done\n";
+async fn a_provider_id_repeated_across_turns_still_fires_every_call_s_hooks() {
+    // A provider may reuse an id from one turn to the next (within one answer
+    // the runtime refuses it). The occurrence is told apart by turn and the
+    // call's ordinal, never by the model's id text.
+    let script = "steps:\n  - tool_calls:\n      - id: index-0\n        name: noop\n        arguments: {}\n  - tool_calls:\n      - id: index-0\n        name: noop\n        arguments: {}\n  - text: done\n";
     let (rig, status) = run(script, options(BEFORE_AND_AFTER)).await;
     assert_eq!(status, "completed");
     assert_eq!(
@@ -91,8 +91,7 @@ async fn a_hooks_own_tool_call_does_not_fire_the_runs_tool_hooks() {
     // The model calls the marker tool once; each of its two hooks runs the
     // marker tool too. Were a hook's call to re-enter the run's hooks the
     // count would grow past three.
-    let script =
-        "steps:\n  - tool_calls:\n      - name: marker\n        arguments: {}\n  - text: done\n";
+    let script = "steps:\n  - tool_calls:\n      - name: marker_marker\n        arguments: {}\n  - text: done\n";
     let (rig, status) = run(script, options(BEFORE_AND_AFTER)).await;
     assert_eq!(status, "completed");
     assert_eq!(rig.marker_count(), 3);
