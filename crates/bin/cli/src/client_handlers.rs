@@ -431,6 +431,9 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .and_then(Value::as_str)
         .map(str::to_owned)
     {
+        let project_text = project
+            .to_str()
+            .ok_or_else(|| local("the project path is not UTF-8"))?;
         let announcement = announce_revised(
             app_root,
             json!({ "project_path": project_text, "endorsement": digest }),
