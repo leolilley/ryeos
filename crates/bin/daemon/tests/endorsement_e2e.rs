@@ -69,6 +69,43 @@ fn declare_name(project: &Path, name: &str) {
     std::fs::write(ai.join("manifest.yaml"), format!("name: {name}\n")).expect("project manifest");
 }
 
+/// The authoring record `ryeos sign` leaves for the planted note: revision 1
+/// of its chain, signed by `signer`.
+fn record_authored_note(project: &Path, signer: &SigningKey) {
+    use ryeos_node_runtime::item_revision::{ActorRole, ChainItem, Change, append};
+    let signed = std::fs::read_to_string(project.join(".ai/knowledge/acme/note.md")).unwrap();
+    let recorded = append(
+        project,
+        signer,
+        ActorRole::Authoring,
+        Change {
+            item: &ChainItem::parse(KNOWLEDGE_REF).unwrap(),
+            file_ext: ".md",
+            before: None,
+            after: Some(&signed),
+            provenance: std::collections::BTreeMap::from([(
+                "action".to_owned(),
+                "sign".to_owned(),
+            )]),
+        },
+    )
+    .expect("authoring record");
+    assert_eq!(recorded.seq, 1);
+}
+
+/// The newest revision of each item the node has announced for `project`.
+fn announced(h: &DaemonHarness, project: &str) -> std::collections::BTreeMap<String, u64> {
+    let cursor =
+        ryeos_engine::roots::RuntimeRoot::new(h.state_path.clone()).item_revised_cursor_dir();
+    let path = cursor.join(format!("{}.json", lillux::sha256_hex(project.as_bytes())));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Default::default();
+    };
+    let document: Value = serde_json::from_slice(&bytes).expect("cursor document");
+    assert_eq!(document["project"], json!(project), "{document:#}");
+    serde_json::from_value(document["items"].clone()).expect("cursor items")
+}
+
 fn canonical(path: &Path) -> String {
     path.canonicalize().unwrap().to_str().unwrap().to_owned()
 }
@@ -336,7 +373,9 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     let project = tempfile::tempdir().expect("project");
     declare_name(project.path(), PROJECT_NAME);
     let digest = plant_note(project.path(), "one", &fixture.authoring);
+    record_authored_note(project.path(), &fixture.authoring);
     let project_path = canonical(project.path());
+    assert!(announced(&h, &project_path).is_empty());
 
     let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
     assert_eq!(status, 200, "{recorded:#}");
@@ -356,6 +395,13 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     assert_eq!(items.len(), 1, "{announced:#}");
     assert_eq!(items[0]["item_ref"], KNOWLEDGE_REF, "{announced:#}");
     assert_eq!(items[0]["digest"], json!(digest), "{announced:#}");
+    assert_eq!(items[0]["revision"], json!(1), "{announced:#}");
+    // The node published it: its announcement cursor, written beside the hub
+    // publish that feeds the seat fanout, now holds the item's revision.
+    assert_eq!(
+        announced(&h, &project_path),
+        [(KNOWLEDGE_REF.to_owned(), 1)].into()
+    );
 
     // The endorsement is found under the identity the checkout states, never
     // by the path the caller names: a checkout that declares no name, or

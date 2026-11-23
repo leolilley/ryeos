@@ -57,15 +57,16 @@ fn refusal(code: &str, status: u16, detail: impl Into<String>) -> HandlerError {
 }
 
 /// A refusal carrying the code the first cause of `error` leads with (the
-/// `code: detail` shape identity and owner refusals take), or `fallback`
-/// when no cause names one.
+/// `code: detail` shape identity and owner refusals take; a code is snake
+/// case with at least one underscore, so a bare `path:` prefix is not one),
+/// or `fallback` when no cause names one.
 fn coded_refusal(error: anyhow::Error, fallback: &str, status: u16) -> HandlerError {
     let code = error
         .chain()
         .find_map(|cause| {
             let text = cause.to_string();
             let (code, _) = text.split_once(':')?;
-            (!code.is_empty()
+            (code.contains('_')
                 && code
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
