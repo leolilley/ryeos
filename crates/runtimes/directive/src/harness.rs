@@ -609,7 +609,7 @@ mod tests {
             harness
                 .check_retry_limits()
                 .unwrap_err()
-                .contains("token limit")
+                .contains("token_limit_exceeded: before retry")
         );
     }
 
