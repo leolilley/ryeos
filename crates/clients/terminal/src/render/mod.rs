@@ -827,6 +827,7 @@ mod tests {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             root_attachment_id: "shared-attachment".into(),
             binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "centre-attachment".into(),
                 binding_generation: 1,
                 binding_digest: "surface-binding".into(),
@@ -858,7 +859,7 @@ max_seat_append_bytes:64*1024,
             "binding_attachment_id":"shared-attachment", "binding_generation":2,
             "binding_digest":"shared-binding", "root_ref":"config:test/presentation",
             "root_generation":"shared-generation", "project_path":null, "subject":{"kind":"projectless"},
-            "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
+            "posture":"observation_only", "named_items": [], "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
             "presentation":{"definition":{"kind":"shared_presentation","config":{
                 "category":"ui","shared_presentation":{"schema":2,"title":"Fixture","launcher":"launch",
                     "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launch"}],

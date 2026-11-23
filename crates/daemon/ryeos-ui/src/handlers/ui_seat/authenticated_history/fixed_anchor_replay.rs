@@ -922,7 +922,7 @@ mod tests {
                 "binding_attachment_id":"root","binding_generation":1,"binding_digest":"ab".repeat(32),
                 "root_ref":"config:ryeos/test/presentation","root_generation":"cd".repeat(32),
                 "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
-                "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
+                "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
                 "presentation":{"definition":{"kind":"shared_presentation","config":{
                     "category":"ui","shared_presentation":{"schema":2,"title":"Replay fixture","launcher":"launcher",
                         "dialogs":[{"id":"launcher","title":"Launcher","view":"view:test/launcher"}],

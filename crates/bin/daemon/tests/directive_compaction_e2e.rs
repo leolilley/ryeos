@@ -46,7 +46,7 @@ async fn chain_threads(rig: &Rig, root: &str) -> Vec<(String, String)> {
 /// Wait until every thread of the chain is terminal and the thread count has
 /// stayed the same across several polls.
 async fn wait_chain_settled(rig: &Rig, root: &str) -> Vec<(String, String)> {
-    wait_chain_settled_for(rig, root, 300).await
+    wait_chain_settled_for(rig, root, 600).await
 }
 
 async fn wait_chain_settled_for(rig: &Rig, root: &str, seconds: u64) -> Vec<(String, String)> {
@@ -63,9 +63,15 @@ async fn wait_chain_settled_for(rig: &Rig, root: &str, seconds: u64) -> Vec<(Str
             stable = 0;
         }
         last_count = chain.len();
-        if stable >= 6 || std::time::Instant::now() >= deadline {
+        if stable >= 6 {
             return chain;
         }
+        // A chain that has not settled is a timeout, said as one. Returning it
+        // as it stands made a slow runner look like a missing failure.
+        assert!(
+            std::time::Instant::now() < deadline,
+            "chain did not settle within {seconds} s: {chain:?}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }

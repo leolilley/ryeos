@@ -105,6 +105,12 @@ impl RuntimeRoot {
         self.state().join("revision-heads")
     }
 
+    /// The node's record of the newest revision it has announced for each
+    /// project item, one document per project.
+    pub fn item_revised_cursor_dir(&self) -> PathBuf {
+        self.state().join("item-revised-cursor")
+    }
+
     /// Node-private implementation root for declarative external-content
     /// activation. Callers must still open and mutate it through Lillux
     /// descriptor-relative primitives; this method owns only canonical layout.
