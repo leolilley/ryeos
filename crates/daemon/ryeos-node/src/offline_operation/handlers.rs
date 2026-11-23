@@ -1009,11 +1009,15 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         ctx.sealing_signer(),
     )
     .context("commit updated node policy generation into initialized state")?;
+    // The generation replaced is the one the request was checked against;
+    // the reader of the ledger shows the pair without re-deriving either.
     Ok(json!({
         "section": arguments.section,
         "signer_fingerprint": ctx.node.fingerprint(),
         "policy_generation": expected,
         "capacity_amendment": capacity_amendment,
+        "before_ref": ctx.request.precondition.get(super::facts::FACT_POLICY_GENERATION),
+        "after_ref": expected,
     }))
 }
 
@@ -1702,14 +1706,36 @@ pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
 pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: BundleReplaceArguments = ctx.arguments()?;
     arguments.validate()?;
-    ctx.host.replace_bundle(super::host::BundleReplace {
+    let registration = ctx
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/bundles")
+        .join(format!("{}.yaml", arguments.name));
+    let registration_digest = || -> Result<Option<String>> {
+        match std::fs::read(&registration) {
+            Ok(bytes) => Ok(Some(format!("sha256:{}", lillux::sha256_hex(&bytes)))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("read bundle registration {}", registration.display())),
+        }
+    };
+    let before = registration_digest()?;
+    let mut result = ctx.host.replace_bundle(super::host::BundleReplace {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
         node: ctx.node,
         name: &arguments.name,
         archive: ctx.inputs.require("archive")?,
         preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
-    })
+    })?;
+    // The registration digests before and after, so the ledger's reader shows
+    // what was replaced without re-deriving it.
+    let after = registration_digest()?;
+    if let Value::Object(map) = &mut result {
+        map.insert("before_ref".to_owned(), json!(before));
+        map.insert("after_ref".to_owned(), json!(after));
+    }
+    Ok(result)
 }
 
 // ── Bundle state homes ───────────────────────────────────────────────────
