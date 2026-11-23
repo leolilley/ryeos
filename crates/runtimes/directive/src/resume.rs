@@ -56,6 +56,12 @@ pub struct ResumeState {
     /// Malformed replies in a row, ending at the newest recorded one that the
     /// run has not yet moved past: the position its correction names.
     pub trailing_malformed_replies: u32,
+    /// Empty replies in a row, ending at the newest recorded one that the run
+    /// has not yet moved past: the position its correction names.
+    pub trailing_empty_replies: u32,
+    /// Whether the newest final turn of this exact native thread ended at a
+    /// normal stop finish.
+    pub last_final_stopped: bool,
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
@@ -63,10 +69,60 @@ pub struct ResumeState {
     /// recovered or continued segment does not tell the model twice.
     pub wrap_up_delivered: WrapUpDelivered,
     /// The loop findings the model was already warned about, each with the
-    /// number of turns the conversation held when the warning was given.
-    pub loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
+    /// number of turns the history held when the warning was given. The
+    /// history is `guard_prefix` followed by the conversation.
+    pub loop_warned: crate::loop_guards::WarnedAt,
+    /// The turns before the conversation that the loop detectors still read:
+    /// a compaction's carried digests, or the turns of the predecessors a
+    /// successor's start did not carry. Oldest first, at most
+    /// `GuardCarry::MAX_DIGESTS`.
+    pub guard_prefix: Vec<crate::loop_guards::TurnDigest>,
+    /// How complete `guard_prefix` is, for the run's current settings to judge.
+    pub guard_history: GuardHistory,
     /// What the path has stored of tool images, against the run's limits.
     pub images: ImageRunState,
+    /// Tool starts and child spawns counted before the replay window of the
+    /// latest compaction; zero when the path holds no compaction.
+    pub tool_starts_before_window: u32,
+    pub spawns_before_window: u32,
+    /// The latest compaction on the path, as far as the live run needs it.
+    pub compaction: Option<CompactionMemo>,
+    /// The trigger of the compaction summary call this thread had in flight
+    /// when its process was lost (a same-thread recovery re-enters it).
+    pub active_summary_trigger: Option<String>,
+    /// The code of the refusal the path's latest provider turn recorded, when
+    /// no completed turn or compaction follows it: the request that was
+    /// refused is still to be retried.
+    pub refused_code: Option<String>,
+    /// Continuation predecessors this thread has on its path.
+    pub chain_depth: u32,
+    /// A compacted start that is still over the continuation threshold: the
+    /// run compacts again before its first request when its policy allows.
+    pub start_over_ceiling: bool,
+}
+
+/// What a run keeps in memory of the latest compaction on its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionMemo {
+    pub settled_turns: u32,
+    pub ineffective: bool,
+    pub size_after: u64,
+    pub compactions: u32,
+    pub overflow_recoveries: u32,
+    pub trigger: String,
+}
+
+impl CompactionMemo {
+    pub fn of(record: &ryeos_runtime::CompactionPayload) -> Self {
+        Self {
+            settled_turns: record.settled_turns,
+            ineffective: record.ineffective,
+            size_after: record.size_after,
+            compactions: record.compactions,
+            overflow_recoveries: record.overflow_recoveries,
+            trigger: record.trigger.clone(),
+        }
+    }
 }
 
 impl ResumeState {
@@ -101,6 +157,15 @@ pub enum ResumeDisposition {
     FinalizeDirectiveReturn {
         outputs: Value,
     },
+    /// A compaction's summary call settled but its record was not written:
+    /// write it from the retained summary. No second model call is made.
+    FinishCompaction {
+        trigger: String,
+        summary: Vec<ryeos_provider_contract::Part>,
+    },
+    /// The thread recorded the refusal of a request the compaction policy
+    /// answers by continuing; only the handoff to the successor is left.
+    ForkAfterRefusal,
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +226,8 @@ const MAX_CONTINUATION_PATH: usize = 10_000;
 /// The event types a recovery reads. Everything else a thread records, such
 /// as launch audit and accounting transitions, is neither fetched nor counted
 /// against the replay budget.
-const RECOVERY_EVENT_TYPES: [&str; 7] = [
+const RECOVERY_EVENT_TYPES: [&str; 8] = [
+    "cognition_compaction",
     "cognition_frame",
     "cognition_in",
     "cognition_out",
@@ -189,17 +255,20 @@ pub async fn load_resume_state(
     // its continuation predecessor, never a child), and replaying each turn
     // thread-scoped structurally excludes those children.
     let path = continuation_path(callback, previous_thread_id).await?;
+    let chain_depth = count_machine_edges(callback, &path).await?;
 
-    let mut events: Vec<ReplayedEventRecord> = Vec::new();
-    let mut source_thread_ids = Vec::new();
-    let mut replay_budget = RuntimeReplayBudget::default();
-    for thread_id in &path {
-        let page = callback
-            .replay_thread_with_budget(thread_id, Some(&RECOVERY_EVENT_TYPES), &mut replay_budget)
-            .await?;
-        source_thread_ids.extend(std::iter::repeat_n(thread_id.clone(), page.events.len()));
-        events.extend(page.events);
-    }
+    // A path that holds a compaction replays from the compaction's kept turns
+    // on, not from its start: the compaction carries what came before.
+    let ReplayWindow {
+        events,
+        source_thread_ids,
+        anchor,
+    } = replay_window(callback, &path).await?;
+    refuse_markers_without_purpose(&events)?;
+    let seed = anchor
+        .as_ref()
+        .map(|anchor| anchor.payload.seed.clone())
+        .unwrap_or_default();
 
     let own_start = match mode {
         // The current thread's events are the suffix of its own path.
@@ -260,9 +329,23 @@ pub async fn load_resume_state(
     } else {
         ResultGuard::new()
     };
-    let turn_progress = recover_turn_progress(&events)?;
-    let active_provider_turn =
-        recover_active_provider_turn(&events, &source_thread_ids, previous_thread_id, mode)?;
+    let turn_progress = recover_turn_progress_from(&events, &seed)?;
+    let unfinished = recover_unfinished_provider_turn(
+        &events,
+        &source_thread_ids,
+        previous_thread_id,
+        seed.last_coordinate,
+    )?;
+    // A settled predecessor with a turn that never completed is a record
+    // defect: a refusal the policy answers is recorded as a final turn.
+    if mode == ResumeMode::Continuation && unfinished.is_some() {
+        anyhow::bail!("resume: continuation predecessor contains an unfinished provider turn");
+    }
+    let active_provider_turn = unfinished.map(|turn| turn.turn);
+    let active_summary_trigger = unfinished
+        .and_then(|turn| turn.purpose.summary_trigger())
+        .map(str::to_string);
+    let refused_code = recover_refused_code(&events);
     let provider_retry_testimony_digests =
         recover_provider_retry_testimonies(&events, &source_thread_ids, previous_thread_id, mode)?;
     let thread_usage = recover_thread_usage(&events, turn_progress)?;
@@ -278,39 +361,94 @@ pub async fn load_resume_state(
     // pinned inputs, then the most recent turns.
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let trailing_malformed_replies = trailing_malformed_replies(&events[own_start..])?;
+    let trailing_empty_replies = trailing_empty_replies(&events[own_start..])?;
+    let last_final_stopped = last_final_stopped(&events[own_start..])?;
     let frame = latest_frame(&events)?;
-    let predecessor = fold_messages(&events[..own_start])?;
-    let own = fold_messages(&events[own_start..])?;
-    let predecessor_notices: Vec<(ProviderMessage, WrapUpDelivered)> = predecessor
-        .iter()
-        .filter_map(|folded| wrap_up_notice_reasons(folded).map(|r| (folded.message.clone(), r)))
-        .collect();
-    let mut wrap_up_delivered = own
-        .iter()
-        .filter_map(wrap_up_notice_reasons)
-        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
-    let mut messages = carry_into_successor(predecessor, &carry, images)?;
-    // A notice counts as delivered only if the conversation the model is
-    // given still holds it: a successor whose carried start trimmed it away is
-    // told again, with the time left now.
-    for (notice, reasons) in &predecessor_notices {
-        if messages.contains(notice) {
-            wrap_up_delivered = wrap_up_delivered.union(*reasons);
-        }
-    }
-    // A loop warning is positioned among the turns of the whole rebuilt
-    // conversation: the carried part first, then this thread's own messages.
-    let mut loop_warned = std::collections::BTreeMap::new();
-    let mut turns_so_far = crate::loop_guards::digests_from_messages(&messages).len() as u32;
-    for folded in &own {
-        if folded.message.role == ryeos_provider_contract::Role::Assistant {
-            turns_so_far += 1;
-        }
-        if let Some(kind) = loop_warning_kind(folded) {
-            loop_warned.insert(kind, turns_so_far);
-        }
-    }
-    messages.extend(own.into_iter().map(|folded| folded.message));
+    let (messages, wrap_up_delivered, loop_warned, start_over_ceiling, guard_prefix, guard_history) =
+        match anchor.as_ref() {
+            // A compacted conversation is the compaction's own fold; it is not cut
+            // again. A successor's start must still fit the window.
+            Some(anchor) => {
+                let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
+                let kept_at_record = turns_before_event(&events, anchor.chain_seq)?;
+                let signals = anchored_signals(
+                    mode,
+                    anchor.payload.guard_carry.as_ref(),
+                    kept_at_record,
+                    &folded,
+                );
+                let messages: Vec<ProviderMessage> =
+                    folded.into_iter().map(|folded| folded.message).collect();
+                let over = mode == ResumeMode::Continuation
+                    && crate::estimate::estimate_tokens(&messages, images) > carry.ceiling_tokens;
+                (
+                    messages,
+                    signals.delivered,
+                    signals.warned,
+                    over,
+                    signals.prefix,
+                    signals.history,
+                )
+            }
+            None => {
+                let predecessor = fold_messages(&events[..own_start])?;
+                let own = fold_messages(&events[own_start..])?;
+                let predecessor_digests = crate::loop_guards::digests_from_messages(
+                    &predecessor
+                        .iter()
+                        .map(|folded| folded.message.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let predecessor_notices: Vec<(ProviderMessage, WrapUpDelivered)> = predecessor
+                    .iter()
+                    .filter_map(|folded| {
+                        wrap_up_notice_reasons(folded).map(|r| (folded.message.clone(), r))
+                    })
+                    .collect();
+                let mut wrap_up_delivered = own
+                    .iter()
+                    .filter_map(wrap_up_notice_reasons)
+                    .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
+                let mut messages = carry_into_successor(predecessor, &carry, images)?;
+                // A notice counts as delivered only if the conversation the model
+                // is given still holds it: a successor whose carried start trimmed
+                // it away is told again, with the time left now.
+                for (notice, reasons) in &predecessor_notices {
+                    if messages.contains(notice) {
+                        wrap_up_delivered = wrap_up_delivered.union(*reasons);
+                    }
+                }
+                // The predecessor turns the carried start left out are still
+                // history the loop detectors read. A successor is made by the
+                // runtime (context window, a refused request) or by an operator,
+                // never by a model action, but a looping run fills its context
+                // and is continued, so detection must not start over there.
+                let carried = crate::loop_guards::digests_from_messages(&messages).len();
+                let prefix = successor_prefix(&predecessor_digests, carried);
+                // A loop warning is positioned among the turns of the whole
+                // history: the prefix, the carried part, then this thread's own
+                // messages.
+                let mut loop_warned = crate::loop_guards::WarnedAt::new();
+                let mut turns_so_far = (prefix.len() + carried) as u32;
+                for folded in &own {
+                    if folded.message.role == ryeos_provider_contract::Role::Assistant {
+                        turns_so_far += 1;
+                    }
+                    if let Some(kind) = loop_warning_kind(folded) {
+                        loop_warned.insert(kind, turns_so_far);
+                    }
+                }
+                messages.extend(own.into_iter().map(|folded| folded.message));
+                (
+                    messages,
+                    wrap_up_delivered,
+                    loop_warned,
+                    false,
+                    prefix,
+                    GuardHistory::Complete,
+                )
+            }
+        };
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
     // request that would be sent and rejected.
@@ -342,19 +480,345 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         trailing_malformed_replies,
+        trailing_empty_replies,
+        last_final_stopped,
         frame,
         wrap_up_delivered,
         loop_warned,
-        images: recover_image_run(&events)?,
+        guard_prefix,
+        guard_history,
+        images: recover_image_run_from(&events, &seed)?,
+        tool_starts_before_window: seed.tool_starts,
+        spawns_before_window: seed.spawns,
+        compaction: anchor
+            .as_ref()
+            .map(|anchor| CompactionMemo::of(&anchor.payload)),
+        active_summary_trigger,
+        refused_code,
+        chain_depth,
+        start_over_ceiling,
     })
+}
+
+/// The events a recovery reads, in path order, each with the thread that
+/// recorded it, and the compaction the replay started from, if the path holds
+/// one.
+struct ReplayWindow {
+    events: Vec<ReplayedEventRecord>,
+    source_thread_ids: Vec<String>,
+    anchor: Option<AnchorRecord>,
+}
+
+/// The latest compaction of a path.
+#[derive(Debug, Clone)]
+pub(crate) struct AnchorRecord {
+    pub chain_seq: i64,
+    pub payload: ryeos_runtime::CompactionPayload,
+}
+
+/// Read the path's events. Without a compaction that is every recovery event
+/// of every thread. With one it is the frames recorded before the window, then
+/// every recovery event from the first kept turn's marker on: what came
+/// before is in the compaction.
+async fn replay_window(callback: &CallbackClient, path: &[String]) -> Result<ReplayWindow> {
+    let located = locate_window(callback, path).await?;
+    let (first_thread, after_seq, anchor) = match located {
+        Some((first_thread, marker_seq, anchor)) => {
+            (first_thread, Some(marker_seq - 1), Some(anchor))
+        }
+        None => (0, None, None),
+    };
+    let mut events: Vec<ReplayedEventRecord> = Vec::new();
+    let mut source_thread_ids = Vec::new();
+    let mut replay_budget = RuntimeReplayBudget::default();
+    if let Some(after_seq) = after_seq {
+        // The frame in force may have been recorded before the window opens.
+        for (index, thread_id) in path.iter().enumerate().take(first_thread + 1) {
+            let page = callback
+                .replay_thread_with_budget(
+                    thread_id,
+                    Some(&["cognition_frame"]),
+                    &mut replay_budget,
+                )
+                .await?;
+            for event in page.events.into_iter().filter(|event| {
+                event.event_type == "cognition_frame"
+                    && (index < first_thread || event.chain_seq <= after_seq)
+            }) {
+                source_thread_ids.push(thread_id.clone());
+                events.push(event);
+            }
+        }
+    }
+    for (index, thread_id) in path.iter().enumerate().skip(first_thread) {
+        let page = match after_seq.filter(|_| index == first_thread) {
+            Some(after_seq) => {
+                callback
+                    .replay_thread_after(
+                        thread_id,
+                        Some(&RECOVERY_EVENT_TYPES),
+                        after_seq,
+                        &mut replay_budget,
+                    )
+                    .await?
+            }
+            None => {
+                callback
+                    .replay_thread_with_budget(
+                        thread_id,
+                        Some(&RECOVERY_EVENT_TYPES),
+                        &mut replay_budget,
+                    )
+                    .await?
+            }
+        };
+        source_thread_ids.extend(std::iter::repeat_n(thread_id.clone(), page.events.len()));
+        events.extend(page.events);
+    }
+    Ok(ReplayWindow {
+        events,
+        source_thread_ids,
+        anchor,
+    })
+}
+
+/// Find the path's latest compaction and where its replay window opens: the
+/// thread index and chain sequence of the turn marker of its first kept turn.
+async fn locate_window(
+    callback: &CallbackClient,
+    path: &[String],
+) -> Result<Option<(usize, i64, AnchorRecord)>> {
+    let mut found = None;
+    for (index, thread_id) in path.iter().enumerate().rev() {
+        let page = callback
+            .replay_thread_with_budget(
+                thread_id,
+                Some(&["cognition_compaction"]),
+                &mut RuntimeReplayBudget::default(),
+            )
+            .await?;
+        if let Some(event) = page
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "cognition_compaction")
+        {
+            let payload: ryeos_runtime::CompactionPayload =
+                serde_json::from_value(event.payload.clone())
+                    .context("resume: cognition_compaction is not a recorded compaction")?;
+            payload
+                .validate()
+                .context("resume: invalid cognition_compaction")?;
+            found = Some((
+                index,
+                AnchorRecord {
+                    chain_seq: event.chain_seq,
+                    payload,
+                },
+            ));
+            break;
+        }
+    }
+    let Some((anchor_thread, anchor)) = found else {
+        return Ok(None);
+    };
+    let kept = anchor.payload.kept_from_turn;
+    // Every `cognition_in` of a thread (turn markers and inputs) is read to
+    // find the first kept turn's marker; the first kept turn is recent, so the
+    // search stops in the anchor's thread or the one before it. A thread with
+    // more of them than the replay ceiling allows fails typed
+    // (`replay_ceiling_exceeded`) before its window is read.
+    for index in (0..=anchor_thread).rev() {
+        let page = callback
+            .replay_thread_with_budget(
+                &path[index],
+                Some(&["cognition_in"]),
+                &mut RuntimeReplayBudget::default(),
+            )
+            .await?;
+        if let Some(marker) = page.events.iter().rev().find(|event| {
+            event.event_type == "cognition_in"
+                && event.chain_seq < anchor.chain_seq
+                && turn_start_coordinate(event).ok().flatten() == Some(kept)
+        }) {
+            return Ok(Some((index, marker.chain_seq, anchor)));
+        }
+    }
+    anyhow::bail!(
+        "resume: the latest compaction keeps turn {kept} but no turn marker for it is on the path"
+    )
+}
+
+/// The whole conversation of a running thread as its record holds it, for
+/// choosing a compaction's cut. The predecessors are not trimmed here: the
+/// compaction summarises what the record has, not what a successor carried.
+pub(crate) struct CompactionBasis {
+    pub folded: Vec<FoldedMessage>,
+    events: Vec<ReplayedEventRecord>,
+    source_thread_ids: Vec<String>,
+    seed: ryeos_runtime::WindowSeed,
+    anchor: Option<AnchorRecord>,
+    /// Completed model turns on the path.
+    pub completed_turns: u32,
+}
+
+impl CompactionBasis {
+    /// The latest compaction already on the path.
+    pub fn anchor(&self) -> Option<&ryeos_runtime::CompactionPayload> {
+        self.anchor.as_ref().map(|anchor| &anchor.payload)
+    }
+
+    /// What a compaction keeping turn `kept_turn` first must remember of the run
+    /// before that turn's marker: the replay window will open there.
+    pub fn seed_before_turn(&self, kept_turn: u32) -> Result<ryeos_runtime::WindowSeed> {
+        let marker = self
+            .events
+            .iter()
+            .rposition(|event| turn_start_coordinate(event).ok().flatten() == Some(kept_turn))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "compaction: no turn marker for kept turn {kept_turn} in the window"
+                )
+            })?;
+        let prefix = &self.events[..marker];
+        let sources = &self.source_thread_ids[..marker];
+        let progress = recover_turn_progress_from(prefix, &self.seed)?;
+        let tools = recover_tool_state(prefix, sources)?;
+        let tool_starts = u32::try_from(tools.started.len())
+            .ok()
+            .and_then(|starts| starts.checked_add(self.seed.tool_starts))
+            .ok_or_else(|| anyhow::anyhow!("compaction: tool-start count exceeds u32"))?;
+        let mut spawns = self.seed.spawns;
+        for event in prefix
+            .iter()
+            .filter(|event| event.event_type == "thread_usage")
+        {
+            if let Some(used) = event
+                .payload
+                .get("spawns_used")
+                .and_then(Value::as_u64)
+                .and_then(|used| u32::try_from(used).ok())
+            {
+                spawns = used;
+            }
+        }
+        let images = recover_image_run_from(prefix, &self.seed)?;
+        Ok(ryeos_runtime::WindowSeed {
+            last_coordinate: progress.last_coordinate,
+            completed: progress.completed,
+            tool_starts,
+            spawns,
+            images: images.images,
+            image_bytes: images.bytes,
+            image_stored: images.stored.into_iter().collect(),
+        })
+    }
+}
+
+pub(crate) async fn load_compaction_basis(
+    callback: &CallbackClient,
+    thread_id: &str,
+) -> Result<CompactionBasis> {
+    let path = continuation_path(callback, thread_id).await?;
+    let ReplayWindow {
+        events,
+        source_thread_ids,
+        anchor,
+    } = replay_window(callback, &path).await?;
+    CompactionBasis::from_window(events, source_thread_ids, anchor)
+}
+
+impl CompactionBasis {
+    fn from_window(
+        events: Vec<ReplayedEventRecord>,
+        source_thread_ids: Vec<String>,
+        anchor: Option<AnchorRecord>,
+    ) -> Result<Self> {
+        refuse_markers_without_purpose(&events)?;
+        let seed = anchor
+            .as_ref()
+            .map(|anchor| anchor.payload.seed.clone())
+            .unwrap_or_default();
+        let progress = recover_turn_progress_from(&events, &seed)?;
+        let folded =
+            fold_messages_anchored(&events, anchor.as_ref().map(|anchor| anchor.chain_seq))?;
+        Ok(Self {
+            folded,
+            events,
+            source_thread_ids,
+            seed,
+            anchor,
+            completed_turns: progress.completed,
+        })
+    }
+
+    /// The messages the rebuild after a compaction keeping `kept_turn` first
+    /// reads for the kept turns, before any clipping: the raw events from that
+    /// turn's marker on. A compaction's size estimate is taken over these, so it
+    /// agrees with the bytes the fold produces.
+    pub fn raw_kept_messages(&self, kept_turn: u32) -> Result<Vec<ProviderMessage>> {
+        let marker = self
+            .events
+            .iter()
+            .rposition(|event| turn_start_coordinate(event).ok().flatten() == Some(kept_turn))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "compaction: no turn marker for kept turn {kept_turn} in the window"
+                )
+            })?;
+        Ok(fold_messages_anchored(&self.events[marker..], None)?
+            .into_iter()
+            .map(|folded| folded.message)
+            .collect())
+    }
+}
+
+/// Consecutive machine continuation edges that end at the path's last thread,
+/// newest first. An edge into a thread that began with an operator input (a
+/// follow-up) is not one, and ends the count: the daemon exempts those edges
+/// from the chain depth limit, and so does this. A live steer inside a thread
+/// also carries the operator origin, so it can only make the count shorter.
+async fn count_machine_edges(callback: &CallbackClient, path: &[String]) -> Result<u32> {
+    let mut count = 0u32;
+    for thread_id in path.iter().skip(1).rev() {
+        let page = callback
+            .replay_thread_with_budget(
+                thread_id,
+                Some(&["cognition_in"]),
+                &mut RuntimeReplayBudget::default(),
+            )
+            .await?;
+        let operator_input = page.events.iter().any(|event| {
+            event.event_type == "cognition_in"
+                && event.payload.get("origin").and_then(Value::as_str) == Some("operator")
+        });
+        if !machine_edge(operator_input) {
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+/// Whether the edge into a thread is a machine continuation, given whether the
+/// thread opened with an operator input.
+fn machine_edge(operator_input: bool) -> bool {
+    !operator_input
 }
 
 /// What the whole path has stored of tool images: how many were admitted and
 /// how many distinct bytes they hold, and which attachments the node therefore
 /// already stores. Seeds the run's limits and keeps a repeated image from
 /// being uploaded again.
-fn recover_image_run(events: &[ReplayedEventRecord]) -> Result<ImageRunState> {
-    let mut run = ImageRunState::default();
+fn recover_image_run_from(
+    events: &[ReplayedEventRecord],
+    seed: &ryeos_runtime::WindowSeed,
+) -> Result<ImageRunState> {
+    let mut run = ImageRunState {
+        images: seed.images,
+        bytes: seed.image_bytes,
+        stored: seed.image_stored.iter().cloned().collect(),
+    };
     for event in events
         .iter()
         .filter(|event| event.event_type == "tool_call_result")
@@ -376,12 +840,165 @@ pub struct WrapUpDelivered {
 }
 
 impl WrapUpDelivered {
-    fn union(self, other: Self) -> Self {
+    pub(crate) fn union(self, other: Self) -> Self {
         Self {
             deadline: self.deadline || other.deadline,
             turn_limit: self.turn_limit || other.turn_limit,
         }
     }
+}
+
+/// The wrap-up reasons already given and the loop findings already warned
+/// about in a compacted conversation, each warning positioned by the assistant
+/// turns before it in the conversation the model is given.
+fn compacted_signals(folded: &[FoldedMessage]) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
+    let delivered = folded
+        .iter()
+        .filter_map(wrap_up_notice_reasons)
+        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
+    let mut warned = std::collections::BTreeMap::new();
+    let mut turns_so_far = 0u32;
+    for message in folded {
+        if message.message.role == ryeos_provider_contract::Role::Assistant {
+            turns_so_far += 1;
+        }
+        if let Some(kind) = loop_warning_kind(message) {
+            warned.insert(kind, turns_so_far);
+        }
+    }
+    (delivered, warned)
+}
+
+/// How much of the history the loop guards are configured to read the path
+/// still holds, as the record it was rebuilt from says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardHistory {
+    /// No compaction on the path: every turn is in the conversation or the
+    /// carried predecessor digests.
+    Complete,
+    /// A compaction record carried this much history (`carry_len` turns).
+    Carried { carry_len: u32 },
+    /// A compaction record written with the loop guards off: no history was
+    /// carried, so the turns it replaced were not measured.
+    NotRecorded,
+}
+
+impl GuardHistory {
+    /// When the loop-guard settings now in force want more history than the
+    /// record carried (or any when it carried none), the history the detectors
+    /// read is shorter than configured: a quiet detector does not mean a clean
+    /// run. Returns the turns the record carried.
+    pub fn shortfall(self, config: &crate::directive::LoopGuardsConfig) -> Option<u32> {
+        if !config.enabled {
+            return None;
+        }
+        let wanted = crate::loop_guards::carry_len(config);
+        match self {
+            Self::Complete => None,
+            Self::Carried { carry_len } => (carry_len < wanted).then_some(carry_len),
+            Self::NotRecorded => Some(0),
+        }
+    }
+}
+
+/// What a rebuilt compacted conversation tells the guards.
+struct AnchoredSignals {
+    delivered: WrapUpDelivered,
+    warned: crate::loop_guards::WarnedAt,
+    prefix: Vec<crate::loop_guards::TurnDigest>,
+    history: GuardHistory,
+}
+
+/// The guard state of a conversation rebuilt from a compaction.
+///
+/// A compaction record carries the guard state the replaced turns held: the
+/// recent digests (the prefix the detectors read before the conversation), the
+/// wrap-up flags and each warning's age. A same-thread recovery takes the
+/// union of that with what the compacted conversation itself still holds
+/// (inputs recorded since, and notices a predecessor gave that the
+/// conversation carries). A successor is a new conversation: it keeps the
+/// prefix, but counts a notice or warning only if the conversation it was
+/// given still holds it. `kept_at_record` is the turns the record kept whole.
+fn anchored_signals(
+    mode: ResumeMode,
+    carry: Option<&ryeos_runtime::GuardCarry>,
+    kept_at_record: u32,
+    folded: &[FoldedMessage],
+) -> AnchoredSignals {
+    let prefix = carry
+        .map(|carry| carry.recent_digests.clone())
+        .unwrap_or_default();
+    let (mut delivered, mut warned) = compacted_signals(folded);
+    // Positions in the conversation count after the prefix.
+    let offset = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+    for position in warned.values_mut() {
+        *position = position.saturating_add(offset);
+    }
+    if mode == ResumeMode::NativeSameThread
+        && let Some(carry) = carry
+    {
+        delivered = delivered.union(WrapUpDelivered {
+            deadline: carry.wrap_up.deadline,
+            turn_limit: carry.wrap_up.turn_limit,
+        });
+        for (kind, position) in crate::loop_guards::warned_from_carry(carry, kept_at_record) {
+            // A finding in both keeps the earlier position: the earlier stop.
+            warned
+                .entry(kind)
+                .and_modify(|existing| *existing = (*existing).min(position))
+                .or_insert(position);
+        }
+    }
+    let history = match carry {
+        Some(carry) => GuardHistory::Carried {
+            carry_len: carry.carry_len,
+        },
+        None => GuardHistory::NotRecorded,
+    };
+    AnchoredSignals {
+        delivered,
+        warned,
+        prefix,
+        history,
+    }
+}
+
+/// The turns the window holds before the compaction event at `anchor_seq`: the
+/// kept turns the record kept whole. Counts the same finals the fold turns into
+/// assistant messages, so a reply a correction removed is not a turn: the live
+/// run popped it before it measured how long ago a warning was given.
+fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> Result<u32> {
+    let corrected = corrected_replies(events)?;
+    let end = events
+        .iter()
+        .position(|event| {
+            event.event_type == "cognition_compaction" && event.chain_seq == anchor_seq
+        })
+        .unwrap_or(events.len());
+    let turns = events[..end]
+        .iter()
+        .enumerate()
+        .filter(|(index, event)| {
+            event.event_type == "cognition_out"
+                && !is_stream_fragment(event)
+                && !is_compaction_summary_turn(event)
+                && !is_refusal_final(event)
+                && !corrected.contains(index)
+        })
+        .count();
+    Ok(u32::try_from(turns).unwrap_or(u32::MAX))
+}
+
+/// The history before a successor's conversation: the predecessors' turns its
+/// carried start left out, newest `GuardCarry::MAX_DIGESTS` at most.
+/// `carried_turns` is how many of the predecessors' last turns the start holds.
+fn successor_prefix(
+    predecessor: &[crate::loop_guards::TurnDigest],
+    carried_turns: usize,
+) -> Vec<crate::loop_guards::TurnDigest> {
+    let left_out = predecessor.len().saturating_sub(carried_turns);
+    let start = left_out.saturating_sub(ryeos_runtime::GuardCarry::MAX_DIGESTS as usize);
+    predecessor[start..left_out].to_vec()
 }
 
 /// The reasons a folded message gave, when it is a wrap-up notice.
@@ -408,7 +1025,11 @@ fn loop_warning_kind(folded: &FoldedMessage) -> Option<crate::loop_guards::Findi
 fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
     let mut count = 0u32;
     for event in events.iter().rev() {
-        if final_cognition_turn(event)?.is_none() {
+        // A compaction's summary call is not a turn of the conversation.
+        if final_cognition_turn(event)?.is_none()
+            || is_compaction_summary_turn(event)
+            || is_refusal_final(event)
+        {
             continue;
         }
         if event.payload.get("finish").and_then(Value::as_str) != Some("length") {
@@ -419,55 +1040,113 @@ fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
     Ok(count)
 }
 
-/// The turn and run position a `cognition_in` event's kind names, when the
-/// event is the correction of a malformed reply.
-fn malformed_reply_input(event: &ReplayedEventRecord) -> Option<(u32, u32)> {
+/// The correction, turn and run position a `cognition_in` event's kind names,
+/// when the event is the correction of a reply.
+fn reply_correction_input(
+    event: &ReplayedEventRecord,
+) -> Option<(ryeos_runtime::cognition::ReplyCorrection, u32, u32)> {
     if event.event_type != "cognition_in" {
         return None;
     }
-    ryeos_runtime::cognition::malformed_reply_of_kind(
+    ryeos_runtime::cognition::reply_correction_of_kind(
         event.payload.get("kind").and_then(Value::as_str)?,
     )
 }
 
-/// The run position of the newest malformed-reply correction, while the run
-/// has not moved past it. At most one final turn may follow it, and only one
-/// that proposed no tool call: that turn is the reply the run was about to
-/// judge, so the correction still counts. Any later turn means the run went on
-/// and the run starts over. Derived from the record so resume needs no
-/// separate counter.
-fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+/// Whether a final turn is an empty reply the empty-reply correction applies
+/// to: a normal stop finish with nothing to act on.
+fn final_is_correctable_empty(event: &ReplayedEventRecord) -> Result<bool> {
+    if event.payload.get("finish").and_then(Value::as_str) != Some("stop") {
+        return Ok(false);
+    }
+    Ok(crate::directive::is_empty_reply(
+        &replayed_cognition_out(event)?.message(),
+    ))
+}
+
+/// The run position of the newest correction of `which`, while the run has not
+/// moved past it. At most one final turn may follow it, and only one that
+/// proposed no tool call and is the kind of reply `which` corrects: that turn
+/// is the reply the run was about to judge, so the correction still counts.
+/// Any later turn means the run went on and the run starts over. Derived from
+/// the record so resume needs no separate counter.
+fn trailing_corrections(
+    events: &[ReplayedEventRecord],
+    which: ryeos_runtime::cognition::ReplyCorrection,
+) -> Result<u32> {
+    use ryeos_runtime::cognition::ReplyCorrection;
     let mut finals_after = 0u32;
     let mut calls_after = false;
+    let mut shape_ok = true;
     for event in events.iter().rev() {
-        if let Some((_, position)) = malformed_reply_input(event) {
-            let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after);
+        if let Some((kind, _, position)) = reply_correction_input(event)
+            && kind == which
+        {
+            let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after && shape_ok);
             return Ok(if still_counts { position } else { 0 });
         }
-        if final_cognition_turn(event)?.is_some() {
+        // A compaction's summary call and a recorded refusal are not replies
+        // the run judged: a compaction landing after a correction leaves the
+        // run where it was.
+        if final_cognition_turn(event)?.is_some()
+            && !is_compaction_summary_turn(event)
+            && !is_refusal_final(event)
+        {
             finals_after = finals_after.saturating_add(1);
             calls_after |= replayed_cognition_out(event)?
                 .message()
                 .tool_calls()
                 .next()
                 .is_some();
+            let empty = final_is_correctable_empty(event)?;
+            // An empty reply is never malformed, and a malformed reply is
+            // never empty, so the reply after a correction must be of the
+            // corrected shape for its run to continue.
+            shape_ok = match which {
+                ReplyCorrection::Empty => empty,
+                ReplyCorrection::Malformed => !empty,
+            };
         }
     }
     Ok(0)
 }
 
-/// The positions of the final `cognition_out` events that a later
-/// malformed-reply correction names. The live run removed such a reply from
-/// the conversation, so a fold must not include it.
+/// Whether the newest final turn ended at a normal stop finish.
+fn last_final_stopped(events: &[ReplayedEventRecord]) -> Result<bool> {
+    for event in events.iter().rev() {
+        if final_cognition_turn(event)?.is_some() {
+            return Ok(event.payload.get("finish").and_then(Value::as_str) == Some("stop"));
+        }
+    }
+    Ok(false)
+}
+
+fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+    trailing_corrections(events, ryeos_runtime::cognition::ReplyCorrection::Malformed)
+}
+
+fn trailing_empty_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+    trailing_corrections(events, ryeos_runtime::cognition::ReplyCorrection::Empty)
+}
+
+/// The positions of the final `cognition_out` events that a later reply
+/// correction names. The live run removed such a reply from the conversation,
+/// so a fold must not include it. A correction names its turn, and only the
+/// latest final turn before it can be that turn; an empty-reply correction
+/// also removes only a reply that is an empty normal stop, so a record that
+/// names any other reply leaves it in.
 fn corrected_replies(events: &[ReplayedEventRecord]) -> Result<std::collections::HashSet<usize>> {
+    use ryeos_runtime::cognition::ReplyCorrection;
     let mut corrected = std::collections::HashSet::new();
     let mut latest_final: Option<(usize, u32)> = None;
     for (index, event) in events.iter().enumerate() {
         if let Some(turn) = final_cognition_turn(event)? {
             latest_final = Some((index, turn));
-        } else if let Some((named, _)) = malformed_reply_input(event)
+        } else if let Some((kind, named, _)) = reply_correction_input(event)
             && let Some((final_index, turn)) = latest_final
             && turn == named
+            && (kind == ReplyCorrection::Malformed
+                || final_is_correctable_empty(&events[final_index])?)
         {
             corrected.insert(final_index);
         }
@@ -498,6 +1177,63 @@ fn replayed_cognition_out(event: &ReplayedEventRecord) -> Result<CognitionOutPay
         .validate()
         .context("resume: invalid cognition_out")?;
     Ok(payload)
+}
+
+/// Whether a final `cognition_out` is a compaction's summary call.
+/// Whether a final `cognition_out` records the refusal of a request the
+/// compaction policy answers by continuing.
+fn is_refusal_final(event: &ReplayedEventRecord) -> bool {
+    refusal_code_of(event).is_some()
+}
+
+fn refusal_code_of(event: &ReplayedEventRecord) -> Option<&str> {
+    if event.event_type != "cognition_out" {
+        return None;
+    }
+    event
+        .payload
+        .get("finish")
+        .and_then(Value::as_str)
+        .and_then(ryeos_runtime::cognition::provider_refusal_code)
+}
+
+/// The refusal the path's latest provider turn or compaction recorded, when
+/// the latest is a refusal: nothing has completed or compacted since.
+fn recover_refused_code(events: &[ReplayedEventRecord]) -> Option<String> {
+    for event in events.iter().rev() {
+        if event.event_type == "cognition_compaction" {
+            return None;
+        }
+        if final_cognition_turn(event).ok().flatten().is_none() {
+            continue;
+        }
+        return refusal_code_of(event).map(str::to_string);
+    }
+    None
+}
+
+/// A turn marker recorded before markers carried their purpose is refused: no
+/// reader parses the old shape.
+fn refuse_markers_without_purpose(events: &[ReplayedEventRecord]) -> Result<()> {
+    for event in events {
+        if event.event_type == "cognition_in"
+            && event.payload.get("turn").is_some()
+            && event.payload.get("purpose").is_none()
+        {
+            return Err(ResumeFoldError::MarkerWithoutPurpose.into());
+        }
+    }
+    Ok(())
+}
+
+fn is_compaction_summary_turn(event: &ReplayedEventRecord) -> bool {
+    event
+        .payload
+        .get("finish")
+        .and_then(Value::as_str)
+        .is_some_and(|finish| {
+            ryeos_runtime::cognition::compaction_summary_trigger(finish).is_some()
+        })
 }
 
 /// Whether a final `cognition_out` records a turn cut short by an interrupt.
@@ -1042,10 +1778,21 @@ struct RecoveredTurnProgress {
 /// Recover the independent provider-turn coordinate and completed-turn budget.
 /// Every final cognition consumes a monotonic coordinate; an interrupted
 /// cognition refunds only the completed-turn budget, never its identity.
+#[cfg(test)]
 fn recover_turn_progress(events: &[ReplayedEventRecord]) -> Result<RecoveredTurnProgress> {
+    recover_turn_progress_from(events, &ryeos_runtime::WindowSeed::default())
+}
+
+/// [`recover_turn_progress`] for a replay window that opens after the seed's
+/// progress. A compaction's summary call takes a coordinate but is not a
+/// completed model turn.
+fn recover_turn_progress_from(
+    events: &[ReplayedEventRecord],
+    seed: &ryeos_runtime::WindowSeed,
+) -> Result<RecoveredTurnProgress> {
     let mut progress = RecoveredTurnProgress {
-        last_coordinate: 0,
-        completed: 0,
+        last_coordinate: seed.last_coordinate,
+        completed: seed.completed,
     };
     for event in events {
         let Some(turn) = final_cognition_turn(event)? else {
@@ -1062,7 +1809,10 @@ fn recover_turn_progress(events: &[ReplayedEventRecord]) -> Result<RecoveredTurn
             );
         }
         progress.last_coordinate = turn;
-        if is_interrupted_turn(event) {
+        if is_interrupted_turn(event)
+            || is_compaction_summary_turn(event)
+            || is_refusal_final(event)
+        {
             continue;
         }
         progress.completed = progress
@@ -1087,21 +1837,42 @@ fn turn_start_coordinate(event: &ReplayedEventRecord) -> Result<Option<u32>> {
     Ok(Some(turn))
 }
 
+#[cfg(test)]
 fn recover_active_provider_turn(
     events: &[ReplayedEventRecord],
     source_thread_ids: &[String],
     current_thread_id: &str,
     mode: ResumeMode,
 ) -> Result<Option<u32>> {
+    let unfinished =
+        recover_unfinished_provider_turn(events, source_thread_ids, current_thread_id, 0)?;
+    Ok((mode == ResumeMode::NativeSameThread)
+        .then_some(unfinished)
+        .flatten()
+        .map(|turn| turn.turn))
+}
+
+/// The turn coordinate the path's last thread started and never completed.
+/// `last_final_seed` is the last completed coordinate before the replay window.
+/// For the thread of this process generation it is a turn in flight; for a
+/// settled predecessor it is a turn whose request was refused.
+fn recover_unfinished_provider_turn(
+    events: &[ReplayedEventRecord],
+    source_thread_ids: &[String],
+    current_thread_id: &str,
+    last_final_seed: u32,
+) -> Result<Option<UnfinishedTurn>> {
     if events.len() != source_thread_ids.len() {
         anyhow::bail!("resume: replay source/event cardinality mismatch");
     }
-    let mut last_final = 0u32;
-    let mut current_active = None;
+    let mut last_final = last_final_seed;
+    let mut current_active: Option<u32> = None;
+    let mut current_purpose = ryeos_runtime::cognition::TurnPurpose::Turn;
     for (event, source_thread_id) in events.iter().zip(source_thread_ids) {
         if source_thread_id == current_thread_id
             && let Some(turn) = turn_start_coordinate(event)?
         {
+            current_purpose = turn_marker_purpose(event)?;
             let expected = last_final
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("resume: provider-turn coordinate overflow"))?;
@@ -1131,12 +1902,35 @@ fn recover_active_provider_turn(
             last_final = turn;
         }
     }
-    if mode == ResumeMode::Continuation && current_active.is_some() {
-        anyhow::bail!("resume: continuation predecessor contains an unfinished provider turn");
-    }
-    Ok((mode == ResumeMode::NativeSameThread)
-        .then_some(current_active)
-        .flatten())
+    Ok(current_active.map(|turn| UnfinishedTurn {
+        turn,
+        purpose: current_purpose,
+    }))
+}
+
+/// A turn that started and has no final yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnfinishedTurn {
+    turn: u32,
+    purpose: ryeos_runtime::cognition::TurnPurpose,
+}
+
+/// The purpose a turn marker records; a marker without it is refused.
+fn turn_marker_purpose(
+    event: &ReplayedEventRecord,
+) -> Result<ryeos_runtime::cognition::TurnPurpose> {
+    let marker: ryeos_runtime::TurnMarker = match serde_json::from_value(event.payload.clone()) {
+        Ok(marker) => marker,
+        Err(_) if event.payload.get("purpose").is_none() => {
+            return Err(ResumeFoldError::MarkerWithoutPurpose.into());
+        }
+        Err(error) => {
+            return Err(
+                anyhow::Error::new(error).context("resume: invalid cognition_in turn marker")
+            );
+        }
+    };
+    Ok(marker.purpose)
 }
 
 fn recover_provider_retry_testimonies(
@@ -1274,6 +2068,24 @@ fn recover_resume_disposition(
         return Ok(ResumeDisposition::ContinueProvider);
     };
 
+    if is_refusal_final(last_cognition) {
+        return Ok(ResumeDisposition::ForkAfterRefusal);
+    }
+    if is_compaction_summary_turn(last_cognition)
+        && !events[last_cognition_index + 1..]
+            .iter()
+            .any(|event| event.event_type == "cognition_compaction")
+    {
+        let out = replayed_cognition_out(last_cognition)?;
+        let trigger = ryeos_runtime::cognition::compaction_summary_trigger(&out.finish)
+            .unwrap_or_default()
+            .to_string();
+        return Ok(ResumeDisposition::FinishCompaction {
+            trigger,
+            summary: out.parts,
+        });
+    }
+
     let later_cognition_input = events[last_cognition_index + 1..]
         .iter()
         .any(|event| event.event_type == "cognition_in");
@@ -1395,7 +2207,7 @@ fn recover_thread_usage(
         let Some(turn) = final_cognition_turn(event)? else {
             continue;
         };
-        if is_interrupted_turn(event) {
+        if is_interrupted_turn(event) || is_refusal_final(event) {
             if unconsumed_settlement_turn == Some(u64::from(turn)) {
                 unconsumed_settlement_turn = None;
             }
@@ -1470,15 +2282,31 @@ fn latest_frame(events: &[ReplayedEventRecord]) -> Result<Option<CognitionFrameP
 
 /// One message of a fold, with whether the input that produced it is pinned.
 #[derive(Debug, Clone)]
-struct FoldedMessage {
-    message: ProviderMessage,
-    pinned: bool,
+pub(crate) struct FoldedMessage {
+    pub(crate) message: ProviderMessage,
+    pub(crate) pinned: bool,
     /// The kind of the harness input that produced this message, when it is an
     /// input's own user message.
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
+    /// The turn coordinate of an assistant turn's message.
+    pub(crate) turn: Option<u32>,
+    /// The recorded input whose own user message this is.
+    pub(crate) input: Option<ryeos_runtime::CognitionInput>,
 }
 
 fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
+    fold_messages_anchored(events, None)
+}
+
+/// [`fold_messages`] over a replay window that holds a compaction: at the
+/// compaction with chain sequence `anchor_seq` the conversation so far (the
+/// kept turns) gets the pinned inputs and the summary in front of it. Other
+/// compactions in the window are older and add nothing. A compaction's summary
+/// call is not a conversation turn.
+pub(crate) fn fold_messages_anchored(
+    events: &[ReplayedEventRecord],
+    anchor_seq: Option<i64>,
+) -> Result<Vec<FoldedMessage>> {
     let mut messages = Vec::new();
     let mut cognition_in = ryeos_runtime::CognitionInAssembler::default();
     let corrected = corrected_replies(events)?;
@@ -1486,6 +2314,8 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
         message,
         pinned: false,
         kind: None,
+        turn: None,
+        input: None,
     };
 
     for (index, event) in events.iter().enumerate() {
@@ -1513,6 +2343,8 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
                                 // The input's own message comes first; its
                                 // acknowledgement follows and has no kind.
                                 kind: if index == 0 { input.kind.clone() } else { None },
+                                turn: None,
+                                input: (index == 0).then(|| input.clone()),
                             }),
                     );
                 }
@@ -1521,11 +2353,56 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
             // provider history. The final transcript-bearing cognition_out
             // emitted at turn completion is folded below.
             "cognition_out" if is_stream_fragment(event) => {}
+            "cognition_out" if is_compaction_summary_turn(event) || is_refusal_final(event) => {}
             // A reply the run corrected as malformed was removed from the
             // conversation when it was corrected.
             "cognition_out" if corrected.contains(&index) => {}
             "cognition_out" => {
-                messages.push(unpinned(replayed_cognition_out(event)?.message()));
+                let out = replayed_cognition_out(event)?;
+                messages.push(FoldedMessage {
+                    turn: Some(out.turn),
+                    ..unpinned(out.message())
+                });
+            }
+            "cognition_compaction" if anchor_seq == Some(event.chain_seq) => {
+                let record: ryeos_runtime::CompactionPayload =
+                    serde_json::from_value(event.payload.clone())
+                        .context("resume: cognition_compaction is not a recorded compaction")?;
+                record
+                    .validate()
+                    .context("resume: invalid cognition_compaction")?;
+                let mut prefix = Vec::new();
+                for input in &record.pinned {
+                    prefix.extend(
+                        crate::launch_records::input_messages(input)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, message)| FoldedMessage {
+                                message,
+                                pinned: true,
+                                kind: if index == 0 { input.kind.clone() } else { None },
+                                turn: None,
+                                input: (index == 0).then(|| input.clone()),
+                            }),
+                    );
+                }
+                prefix.push(FoldedMessage {
+                    kind: Some(ryeos_runtime::cognition::KIND_COMPACTION_SUMMARY.to_string()),
+                    ..unpinned(record.summary_message())
+                });
+                // The kept turns read as the record says: older large tool
+                // results clipped, the events themselves untouched.
+                if let Some(rule) = &record.clip {
+                    let mut kept: Vec<ProviderMessage> = messages
+                        .iter()
+                        .map(|folded| folded.message.clone())
+                        .collect();
+                    crate::compaction::clip_tool_results(&mut kept, rule);
+                    for (folded, clipped) in messages.iter_mut().zip(kept) {
+                        folded.message = clipped;
+                    }
+                }
+                messages.splice(0..0, prefix);
             }
             "tool_call_result" => {
                 // The retained text is exactly what the live runner put in the
@@ -1595,6 +2472,11 @@ pub enum ResumeFoldError {
     OrphanToolResult { call_id: String },
     /// The pinned inputs alone are larger than the ceiling.
     PinnedInputsExceedWindow { ceiling: u64 },
+    /// A compacted conversation is still larger than the ceiling.
+    CompactedStartExceedsWindow { ceiling: u64 },
+    /// A provider turn marker without its `purpose`: the record was written
+    /// before markers carried it, and there is no reader for that shape.
+    MarkerWithoutPurpose,
     /// The record moves on while calls of a tool batch have no result.
     /// Records written before a failed `directive_return` answered the calls
     /// after it (they were left with no start and no result) read this way
@@ -1612,6 +2494,8 @@ impl ResumeFoldError {
             Self::UnansweredToolCall { .. } => "resume_unanswered_tool_call",
             Self::OrphanToolResult { .. } => "resume_orphan_tool_result",
             Self::PinnedInputsExceedWindow { .. } => "resume_pinned_exceeds_window",
+            Self::CompactedStartExceedsWindow { .. } => "resume_compacted_start_exceeds_window",
+            Self::MarkerWithoutPurpose => "resume_marker_without_purpose",
             Self::UnsettledToolBatch { .. } => "resume_unsettled_tool_batch",
         }
     }
@@ -1636,6 +2520,14 @@ impl std::fmt::Display for ResumeFoldError {
             Self::PinnedInputsExceedWindow { ceiling } => write!(
                 f,
                 "{code}: pinned inputs alone exceed the {ceiling}-token ceiling of the model window"
+            ),
+            Self::MarkerWithoutPurpose => write!(
+                f,
+                "{code}: a provider turn marker has no purpose; the record predates the marker's purpose and is not read"
+            ),
+            Self::CompactedStartExceedsWindow { ceiling } => write!(
+                f,
+                "{code}: the compacted conversation still exceeds the {ceiling}-token ceiling of the model window"
             ),
             Self::UnsettledToolBatch { detail } => write!(f, "{code}: {detail}"),
         }
@@ -2033,6 +2925,7 @@ mod tests {
 
     fn usage_event(completed_turns: u32, last_settled_turn_seq: u64) -> ReplayedEventRecord {
         ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "thread_usage".to_string(),
             payload: json!({
                 "completed_turns": completed_turns,
@@ -2070,6 +2963,7 @@ mod tests {
     #[tokio::test]
     async fn continuation_refuses_an_unresolved_predecessor_tool_batch() {
         let callback = make_callback(vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out_calls(
                 1,
@@ -2099,6 +2993,7 @@ mod tests {
         let first = directive_tool_operation_id(&source, 3, 0);
         let second = directive_tool_operation_id(&source, 3, 1);
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out_calls(
                 3,
@@ -2132,6 +3027,7 @@ mod tests {
         assert!(proposed.started.is_empty());
 
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({
                 "operation_id": second,
@@ -2153,6 +3049,7 @@ mod tests {
             (second.clone(), "call-b", "tool:b"),
         ] {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({
                     "operation_id": operation_id,
@@ -2180,6 +3077,7 @@ mod tests {
             (second.clone(), "call-b", "tool:b", 1),
         ] {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({
                     "operation_id": operation_id,
@@ -2219,6 +3117,7 @@ mod tests {
             ),
         ] {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: event_type.to_string(),
                 payload,
             });
@@ -2247,6 +3146,7 @@ mod tests {
             calls
         };
         let mut events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out_calls(1, json!(selected)),
         }];
@@ -2255,10 +3155,12 @@ mod tests {
             let first = directive_tool_operation_id(&source, 1, 0);
             events.extend([
                 ReplayedEventRecord {
+                    chain_seq: 0,
                     event_type: "tool_call_start".to_string(),
                     payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
                 },
                 ReplayedEventRecord {
+                    chain_seq: 0,
                     event_type: "tool_call_result".to_string(),
                     payload: result(&first, "call-a", "tool:a", "{}"),
                 },
@@ -2267,10 +3169,12 @@ mod tests {
         }
         let return_operation = directive_tool_operation_id(&source, 1, return_index);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL}),
         });
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: if succeeded {
                 result(
@@ -2324,6 +3228,7 @@ mod tests {
         let sibling = directive_tool_operation_id("T-lifecycle", 1, 1);
         if sibling_start {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":sibling,"call_id":"call-b","tool":"tool:b"}),
             });
@@ -2331,6 +3236,7 @@ mod tests {
         }
         if let Some(text) = sibling_result {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: error_result(&sibling, "call-b", "tool:b", &text),
             });
@@ -2396,6 +3302,7 @@ mod tests {
         // The next proposal cannot begin while a refusal is still owed.
         let (mut events, mut sources) = failed_return_batch(true, None);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out(2, "next"),
         });
@@ -2433,10 +3340,12 @@ mod tests {
         );
         let mut events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: {
                     let mut out = out_calls(1, json!(calls));
@@ -2447,10 +3356,12 @@ mod tests {
         ];
         let first = directive_tool_operation_id(&source, 1, 0);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":first,"call_id":"call-r1","tool":DIRECTIVE_RETURN_TOOL}),
         });
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: error_result(
                 &first,
@@ -2464,10 +3375,12 @@ mod tests {
             let id = call["id"].as_str().unwrap();
             let tool = call["name"].as_str().unwrap();
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":operation,"call_id":id,"tool":tool}),
             });
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: error_result(&operation, id, tool, &refusal_text()),
             });
@@ -2539,6 +3452,7 @@ mod tests {
         // start and no result and the run went on.
         let mut events = failed_return_events_before_refusal();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: input("later"),
         });
@@ -2560,6 +3474,7 @@ mod tests {
         assert!(recovered.owed.is_empty());
         let sibling = directive_tool_operation_id("T-lifecycle", 1, 1);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":sibling,"call_id":"call-b","tool":"tool:b"}),
         });
@@ -2574,6 +3489,7 @@ mod tests {
         let (mut batch, _) = failed_return_batch(true, Some(refusal_text()));
         batch[0].payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
         let mut events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: input("task"),
         }];
@@ -2667,10 +3583,12 @@ mod tests {
         interrupted["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
         let callback = make_callback(vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: interrupted,
             },
@@ -2693,6 +3611,7 @@ mod tests {
         let (mut events, mut sources) = lifecycle_batch_events(0, true);
         let later = directive_tool_operation_id("T-lifecycle", 1, 1);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":later,"call_id":"call-b","tool":"tool:b"}),
         });
@@ -2709,6 +3628,7 @@ mod tests {
     fn successful_lifecycle_return_rejects_later_cognition_evidence() {
         let (mut events, mut sources) = lifecycle_batch_events(0, true);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out_interrupted(2, "a later process must not reopen a terminal directive"),
         });
@@ -2728,6 +3648,7 @@ mod tests {
         let calls = [(first, "call-a", "tool:a"), (second, "call-b", "tool:b")];
         for (operation_id, call_id, tool) in &calls {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":operation_id,"call_id":call_id,"tool":tool}),
             });
@@ -2735,6 +3656,7 @@ mod tests {
         }
         for (operation_id, call_id, tool) in calls {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: result(&operation_id, call_id, tool, "{}"),
             });
@@ -2752,10 +3674,12 @@ mod tests {
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         events.extend([
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("cannot interleave"),
             },
@@ -2773,6 +3697,7 @@ mod tests {
     fn replay_rejects_orphan_mismatched_and_duplicate_tool_evidence() {
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
         });
@@ -2786,6 +3711,7 @@ mod tests {
 
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":first,"call_id":"wrong","tool":"tool:a"}),
         });
@@ -2800,6 +3726,7 @@ mod tests {
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         for _ in 0..2 {
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
             });
@@ -2813,6 +3740,7 @@ mod tests {
         );
 
         let orphan = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({
                 "operation_id":"9".repeat(64),
@@ -2829,6 +3757,7 @@ mod tests {
 
         let (mut events, mut sources, _, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out(4, "skipped unresolved tools"),
         });
@@ -2845,6 +3774,7 @@ mod tests {
     fn replay_rejects_successor_thread_settlement_of_predecessor_proposal() {
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
         });
@@ -2859,10 +3789,12 @@ mod tests {
         let (mut events, mut sources, first, _) = proposed_tool_batch();
         events.extend([
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a"}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: result(&first, "call-a", "tool:a", "{}"),
             },
@@ -2879,6 +3811,7 @@ mod tests {
     #[test]
     fn replay_only_turn_needs_no_fabricated_usage_settlement() {
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: {
                 let mut payload = out(1, "replayed");
@@ -2894,6 +3827,7 @@ mod tests {
     #[test]
     fn live_turn_without_exact_usage_settlement_fails_closed() {
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out(1, "live"),
         }];
@@ -2911,10 +3845,12 @@ mod tests {
         let events = vec![
             usage_event(0, 1),
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out(2, "retry"),
             },
@@ -2944,10 +3880,12 @@ mod tests {
     fn interrupted_cognition_advances_coordinate_but_not_completed_budget() {
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: {
                     let mut payload = out(2, "completed replay");
@@ -2968,6 +3906,7 @@ mod tests {
     #[test]
     fn interrupted_or_mixed_stream_cognition_cannot_authorize_tool_calls() {
         let interrupted = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: {
                 let mut payload = out_calls(1, json!([{"id":"c1","name":"tool:a","arguments":{}}]));
@@ -2984,6 +3923,7 @@ mod tests {
         );
 
         let mixed = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: json!({
                 "turn": 1,
@@ -3002,6 +3942,7 @@ mod tests {
     #[test]
     fn malformed_retained_tool_calls_cannot_disappear_during_replay() {
         let event = ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: json!({
                 "turn": 1,
@@ -3016,6 +3957,7 @@ mod tests {
     #[test]
     fn a_tool_call_part_without_a_string_id_is_refused() {
         let event = ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: json!({
                 "turn": 1,
@@ -3030,6 +3972,7 @@ mod tests {
     #[test]
     fn retained_terminal_cognition_is_parsed_without_another_provider_call() {
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out(1, "done"),
         }];
@@ -3041,6 +3984,7 @@ mod tests {
 
         let mut redirected = events.clone();
         redirected.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: input("steer"),
         });
@@ -3059,10 +4003,12 @@ mod tests {
     async fn a_large_pending_proposal_is_kept_whole_by_same_thread_recovery() {
         let callback = make_callback(vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Do task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: {
                     let mut payload = out_calls(
@@ -3100,22 +4046,27 @@ mod tests {
         let events = vec![
             // turn-boundary marker (no content) — skipped
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Hello"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out(1, "Hi there!"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Do something"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out_calls(
                     2,
@@ -3123,6 +4074,7 @@ mod tests {
                 ),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: result(&"1".repeat(64), "c1", "read_file", "file contents"),
             },
@@ -3142,6 +4094,7 @@ mod tests {
     fn replay_preserves_json_looking_tool_content_as_the_exact_provider_string() {
         let exact = r#"{"ok":true,"nested":{"value":7}}"#;
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: result(&"2".repeat(64), "call-exact", "tool:exact", exact),
         }];
@@ -3174,6 +4127,7 @@ mod tests {
             no_call_id,
         ] {
             let error = reconstruct_messages(&[ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload,
             }])
@@ -3189,10 +4143,12 @@ mod tests {
         let marker = format!("[duplicate result omitted — hash {}]", &hash[..16]);
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: result(&"4".repeat(64), "c1", "tool:t", &content),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: result_with(
                     &"5".repeat(64),
@@ -3226,6 +4182,7 @@ mod tests {
             let mut payload = result_with(operation, call, "tool:t", &text, "ok", duplicate);
             payload["guard"]["dropped_images"] = json!([{"position": 1, "code": "image_oversize"}]);
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload,
             }
@@ -3261,6 +4218,7 @@ mod tests {
     fn error_results_never_enter_the_result_guard() {
         let content = "x".repeat(1024);
         let events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: error_result(&"6".repeat(64), "c1", "tool:t", &content),
         }];
@@ -3293,11 +4251,12 @@ mod tests {
     /// carry no message), folded.
     fn wrap_up_events() -> Vec<ReplayedEventRecord> {
         let record = |payload: Value| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload,
         };
         let mut events = vec![
-            record(json!({"turn": 1})),
+            record(json!({"turn": 1, "purpose": "turn"})),
             record(input("Deadline notice: about 5 seconds remain")),
         ];
         events.extend(
@@ -3321,6 +4280,7 @@ mod tests {
         .map(|payload| ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
             payload,
+            chain_seq: 0,
         })
         .collect()
     }
@@ -3390,6 +4350,7 @@ mod tests {
         // is gone and it is not delivered; a successor carrying everything
         // still holds it; a same-thread resume keeps its own events whole.
         let mut events = vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: serde_json::to_value(
                 ryeos_runtime::CognitionInput::text("launch", "task").pinned(),
@@ -3397,11 +4358,13 @@ mod tests {
             .unwrap(),
         }];
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: accounted_out(1, "a1"),
         });
         events.extend(wrap_up_events().into_iter().skip(2));
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: accounted_out(2, "a2"),
         });
@@ -3430,6 +4393,7 @@ mod tests {
         .unwrap()
         .into_iter()
         .map(|payload| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload,
         })
@@ -3445,22 +4409,27 @@ mod tests {
     fn reconstruct_messages_skips_streaming_cognition_out_fragments() {
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Hello"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: json!({"delta": "H"}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: json!({"tool_use_partial": {"id": "partial"}}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: json!({"tool_use": {"id": "call-1", "name": "read_file"}}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out(1, "Hi there!"),
             },
@@ -3487,20 +4456,24 @@ mod tests {
         // ignored by the fold (only content/tool_calls/reasoning are read).
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("start the long task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out_interrupted(1, "working on it, step on"),
             },
             // The operator's redirect, folded as a durable cognition_in by the
             // daemon's poll-and-persist.
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("stop — do X instead"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out(2, "doing X"),
             },
@@ -3529,22 +4502,27 @@ mod tests {
         // folding skips them rather than failing.
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "thread_created".to_string(),
                 payload: json!({}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Hello"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "thread_usage".to_string(),
                 payload: json!({"completed_turns": 1}),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"tool": "read_file"}),
             },
@@ -3571,6 +4549,7 @@ mod tests {
         let operation_id = directive_tool_operation_id(&source, 1, 0);
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: out_calls(
                     1,
@@ -3582,6 +4561,7 @@ mod tests {
                 ),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({
                     "operation_id": operation_id,
@@ -3634,6 +4614,7 @@ mod tests {
                     b"retry-policy",
                 ))
                 .unwrap(),
+                retry_after_ms: None,
             },
             1_000,
         )
@@ -3642,6 +4623,7 @@ mod tests {
 
     fn retry_event(advance: &ryeos_accounting::ProviderRetryAdvance) -> ReplayedEventRecord {
         ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "provider_retry".to_string(),
             payload: json!({
                 "turn": advance.decision.turn,
@@ -3660,8 +4642,9 @@ mod tests {
         let advance = retry_advance(1, 1, "one");
         let mut events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             retry_event(&advance),
         ];
@@ -3688,6 +4671,7 @@ mod tests {
         );
 
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload: out(1, "settled"),
         });
@@ -3712,8 +4696,9 @@ mod tests {
 
         let skipped = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             retry_event(&retry_advance(1, 2, "skipped")),
         ];
@@ -3748,6 +4733,7 @@ mod tests {
     #[test]
     fn trailing_length_turns_are_derived_from_the_newest_finals() {
         let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: event_type.to_string(),
             payload,
         };
@@ -3793,10 +4779,12 @@ mod tests {
         impl Fn(u32, u32) -> ReplayedEventRecord,
     ) {
         let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: event_type.to_string(),
             payload,
         };
         let correction = |turn: u32, position: u32| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: json!({
                 "origin": "harness",
@@ -3869,6 +4857,230 @@ mod tests {
             trailing_malformed_replies(&[leak(1), correction(1, 1), leak(2), leak(3)]).unwrap(),
             0
         );
+        // A compaction's summary call, or a recorded refusal, between the
+        // correction and the next reply does not move the run on.
+        let summary_final = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({
+                    "turn": turn,
+                    "parts": [{"type": "text", "text": "SUMMARY"}],
+                    "finish": "compaction_summary_pressure",
+                }),
+            )
+        };
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), summary_final(2), leak(3)])
+                .unwrap(),
+            1
+        );
+        let refusal_final = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({
+                    "turn": turn,
+                    "parts": [],
+                    "finish": ryeos_runtime::cognition::provider_refused_finish("context_length"),
+                }),
+            )
+        };
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), refusal_final(2), leak(3)])
+                .unwrap(),
+            1
+        );
+    }
+
+    fn empty_correction(turn: u32, position: u32) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({
+                "origin": "harness",
+                "kind": ryeos_runtime::cognition::empty_reply_kind(turn, position),
+                "parts": text_parts("answer or call"),
+            }),
+            chain_seq: 0,
+        }
+    }
+
+    /// A reply holding only reasoning, ending as `finish`.
+    fn reasoning_only(turn: u32, finish: &str) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: json!({
+                "turn": turn,
+                "parts": [{"type": "reasoning", "text": "thinking"}],
+                "finish": finish,
+            }),
+            chain_seq: 0,
+        }
+    }
+
+    fn texts_of(events: &[ReplayedEventRecord]) -> Vec<String> {
+        reconstruct_messages(events)
+            .unwrap()
+            .iter()
+            .map(|message| message.joined_text())
+            .collect()
+    }
+
+    #[test]
+    fn the_fold_drops_an_empty_reply_a_later_correction_names() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+            chain_seq: 0,
+        };
+        let events = vec![
+            event("cognition_in", input("Do task")),
+            reasoning_only(1, "stop"),
+            empty_correction(1, 1),
+            event("cognition_out", out(2, "the answer")),
+        ];
+        assert_eq!(
+            texts_of(&events),
+            vec!["Do task", "answer or call", "the answer"]
+        );
+
+        // A whitespace-only text reply is empty too.
+        let mut spaced = events.clone();
+        spaced[1] = event("cognition_out", out(1, "  \n "));
+        assert_eq!(texts_of(&spaced).len(), 3);
+
+        // A correction naming another turn removes nothing.
+        let other = vec![
+            event("cognition_in", input("Do task")),
+            reasoning_only(1, "stop"),
+            empty_correction(5, 1),
+        ];
+        assert_eq!(texts_of(&other).len(), 3);
+
+        // An empty-reply correction never removes a reply that is not an empty
+        // normal stop: a text reply, or an empty one with another finish.
+        let text_reply = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "kept")),
+            empty_correction(1, 1),
+        ];
+        assert!(texts_of(&text_reply).contains(&"kept".to_string()));
+        for finish in ["content_filter", "other", "length"] {
+            let filtered = vec![
+                event("cognition_in", input("Do task")),
+                reasoning_only(1, finish),
+                empty_correction(1, 1),
+            ];
+            // The reply stays in the fold: it carries no text, so the visible
+            // difference is the message count (task, reply, correction).
+            assert_eq!(
+                reconstruct_messages(&filtered).unwrap().len(),
+                3,
+                "{finish}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_run_position_is_derived_from_the_record() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+            chain_seq: 0,
+        };
+        let empty = |turn: u32| reasoning_only(turn, "stop");
+        assert_eq!(trailing_empty_replies(&[]).unwrap(), 0);
+        assert_eq!(trailing_empty_replies(&[empty(1)]).unwrap(), 0);
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1)]).unwrap(),
+            1
+        );
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                empty(2),
+                empty_correction(2, 2)
+            ])
+            .unwrap(),
+            2
+        );
+        // The next reply, not yet judged, still counts the correction before it.
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1), empty(2)]).unwrap(),
+            1
+        );
+        // A later reply that is not an empty stop (text, or another finish)
+        // ends the run, as does a second later turn.
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                event("cognition_out", out(2, "text"))
+            ])
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            trailing_empty_replies(&[
+                empty(1),
+                empty_correction(1, 1),
+                reasoning_only(2, "content_filter")
+            ])
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            trailing_empty_replies(&[empty(1), empty_correction(1, 1), empty(2), empty(3)])
+                .unwrap(),
+            0
+        );
+        // The last final's finish is read for the retained-response path.
+        assert!(!last_final_stopped(&[]).unwrap());
+        assert!(last_final_stopped(&[empty(1)]).unwrap());
+        assert!(!last_final_stopped(&[empty(1), reasoning_only(2, "content_filter")]).unwrap());
+        assert!(!last_final_stopped(&[empty(1), reasoning_only(2, "other")]).unwrap());
+    }
+
+    #[test]
+    fn both_correction_kinds_in_one_run_fold_and_count_independently() {
+        let (event, malformed_correction) = malformed_fixture();
+        let events = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "<|channel|>leak")),
+            malformed_correction(1, 1),
+            reasoning_only(2, "stop"),
+            empty_correction(2, 1),
+            event("cognition_out", out(3, "the answer")),
+        ];
+        // Each named reply is dropped; the other kind's reply is not touched.
+        assert_eq!(
+            texts_of(&events),
+            vec!["Do task", "fix it", "answer or call", "the answer"]
+        );
+        // Streaks are derived per kind: the empty correction ends the
+        // malformed run, and the malformed reply never counted for the empty.
+        assert_eq!(trailing_malformed_replies(&events[..3]).unwrap(), 1);
+        assert_eq!(trailing_malformed_replies(&events[..5]).unwrap(), 0);
+        assert_eq!(trailing_empty_replies(&events[..5]).unwrap(), 1);
+        assert_eq!(trailing_empty_replies(&events[..3]).unwrap(), 0);
+        // The reply after an empty correction is malformed: the empty run
+        // is over, and the malformed correction after it starts its own.
+        let mixed = vec![
+            reasoning_only(1, "stop"),
+            empty_correction(1, 1),
+            event("cognition_out", out(2, "<|channel|>leak")),
+            malformed_correction(2, 1),
+        ];
+        assert_eq!(trailing_malformed_replies(&mixed).unwrap(), 1);
+        assert_eq!(trailing_empty_replies(&mixed).unwrap(), 0);
+        // A malformed correction naming the empty reply's turn removes the
+        // latest final only when the turn matches, and an empty correction
+        // naming a malformed reply's turn leaves the reply in.
+        let crossed = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "<|channel|>leak")),
+            empty_correction(1, 1),
+        ];
+        assert_eq!(texts_of(&crossed).len(), 3);
     }
 
     #[test]
@@ -3888,8 +5100,9 @@ mod tests {
         );
 
         let prelude = ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
-            payload: json!({"turn": 1}),
+            payload: json!({"turn": 1, "purpose": "turn"}),
         };
         let sources = vec!["T-current".to_string(); 2];
         let mut event = retry_event(&status);
@@ -3932,10 +5145,12 @@ mod tests {
     async fn full_roundtrip_via_callback() {
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("Do task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: {
                     let mut payload = out(1, "Done!");
@@ -4013,6 +5228,7 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let ev = |t: &str, p: Value| ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: t.to_string(),
                 payload: p,
             };
@@ -4173,6 +5389,8 @@ mod tests {
             message,
             pinned,
             kind: None,
+            turn: None,
+            input: None,
         }
     }
 
@@ -4310,10 +5528,12 @@ mod tests {
         let call_envelope = json!({"capture": "sig", "group": "g", "value": {"s": "x"}});
         let events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("go"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: json!({
                     "turn": 1,
@@ -4555,6 +5775,7 @@ mod tests {
         let mut payload = out(1, "orphan answer");
         payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
         let callback = make_callback(vec![ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_out".to_string(),
             payload,
         }]);
@@ -4589,6 +5810,7 @@ mod tests {
         .unwrap();
         frame.payload.frame_seq = frame_seq;
         ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_frame".to_string(),
             payload: ryeos_runtime::cognition::to_payload(&frame.payload).unwrap(),
         }
@@ -4599,6 +5821,7 @@ mod tests {
             .iter()
             .flat_map(|input| ryeos_runtime::encode_cognition_in_payloads(input).unwrap())
             .map(|payload| ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload,
             })
@@ -4717,5 +5940,742 @@ mod tests {
             .filter_map(|m| m.text())
             .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2"]);
+    }
+
+    fn event_at(event_type: &str, chain_seq: i64, payload: Value) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            chain_seq,
+            event_type: event_type.to_string(),
+            payload,
+        }
+    }
+
+    /// A compaction record keeping turns 3 and on, with one pinned task.
+    fn compaction_record(trigger: &str) -> ryeos_runtime::CompactionPayload {
+        ryeos_runtime::CompactionPayload {
+            turn: 0,
+            trigger: trigger.to_string(),
+            replaces_from_turn: 1,
+            replaces_to_turn: 2,
+            kept_from_turn: 3,
+            summary: vec![ryeos_provider_contract::Part::text("THE SUMMARY")],
+            summary_model_call: false,
+            omitted_from_input: 0,
+            pinned: vec![ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned()],
+            seed: ryeos_runtime::WindowSeed {
+                last_coordinate: 2,
+                completed: 2,
+                tool_starts: 5,
+                spawns: 1,
+                images: 2,
+                image_bytes: 300,
+                image_stored: vec!["att-1".to_string()],
+            },
+            settled_turns: 4,
+            size_before: 1000,
+            size_after: 400,
+            ineffective: false,
+            compactions: 1,
+            overflow_recoveries: 0,
+            clip: None,
+            guard_carry: None,
+        }
+    }
+
+    /// The window of a compaction: the kept turns 3 and 4, a summary call at
+    /// turn 5, the record, then turn 6.
+    fn windowed_events() -> Vec<ReplayedEventRecord> {
+        vec![
+            event_at("cognition_in", 20, json!({"turn": 3, "purpose": "turn"})),
+            event_at("cognition_out", 21, out(3, "kept three")),
+            event_at("cognition_in", 22, json!({"turn": 4, "purpose": "turn"})),
+            event_at("cognition_out", 23, out(4, "kept four")),
+            event_at(
+                "cognition_in",
+                24,
+                json!({"turn": 5, "purpose": "compaction_summary_pressure"}),
+            ),
+            event_at(
+                "cognition_out",
+                25,
+                json!({
+                    "turn": 5,
+                    "parts": text_parts("THE SUMMARY"),
+                    "finish": "compaction_summary_pressure",
+                }),
+            ),
+            event_at(
+                "cognition_compaction",
+                26,
+                serde_json::to_value(compaction_record("pressure")).unwrap(),
+            ),
+            event_at("cognition_in", 27, json!({"turn": 6, "purpose": "turn"})),
+            event_at("cognition_out", 28, out(6, "after")),
+        ]
+    }
+
+    #[test]
+    fn a_compaction_keeps_the_wrap_up_and_loop_warnings_its_kept_turns_carry() {
+        let mut events = windowed_events();
+        let notices: Vec<ReplayedEventRecord> = kinded_input("loop_warning_ping_pong")
+            .into_iter()
+            .chain(kinded_input(ryeos_runtime::cognition::KIND_LIMIT_WRAP_UP))
+            .enumerate()
+            .map(|(i, mut event)| {
+                event.chain_seq = 100 + i as i64;
+                event
+            })
+            .collect();
+        // The notices sit between kept turn 4 and the summary call.
+        events.splice(4..4, notices);
+        let folded = fold_messages_anchored(&events, Some(26)).unwrap();
+        let (delivered, warned) = compacted_signals(&folded);
+        assert_eq!(
+            delivered,
+            WrapUpDelivered {
+                deadline: false,
+                turn_limit: true
+            }
+        );
+        // Two assistant turns (the kept turns 3 and 4) precede the warning.
+        assert_eq!(
+            warned.get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&2)
+        );
+        // Without the notices nothing is carried.
+        let plain = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let (none, empty) = compacted_signals(&plain);
+        assert_eq!(none, WrapUpDelivered::default());
+        assert!(empty.is_empty());
+    }
+
+    fn digest(n: u64) -> crate::loop_guards::TurnDigest {
+        ryeos_runtime::GuardTurn {
+            calls: vec![],
+            text: Some(n),
+        }
+    }
+
+    /// A record's carry: a deadline wrap-up given, two replaced turns, and a
+    /// ping-pong warning three turns before the record.
+    fn carry_record() -> ryeos_runtime::GuardCarry {
+        ryeos_runtime::GuardCarry {
+            carry_len: 18,
+            recent_digests: vec![digest(1), digest(2)],
+            wrap_up: ryeos_runtime::GuardWrapUp {
+                deadline: true,
+                turn_limit: false,
+            },
+            loop_warned_turns_ago: [(crate::loop_guards::FindingKind::PingPong, 3)].into(),
+        }
+    }
+
+    #[test]
+    fn corrected_replies_are_not_kept_turns_of_a_compaction_window() {
+        // Turn 3 was a malformed reply and turn 4 an empty one; each was popped
+        // by the live run. Only turn 5 is a kept turn.
+        fn push(events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value) {
+            let seq = 20 + events.len() as i64;
+            events.push(event_at(kind, seq, payload));
+        }
+        fn correct(events: &mut Vec<ReplayedEventRecord>, kind: &str) {
+            for mut input in kinded_input(kind) {
+                input.chain_seq = 20 + events.len() as i64;
+                events.push(input);
+            }
+        }
+        let mut events = Vec::new();
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 3, "purpose": "turn"}),
+        );
+        push(
+            &mut events,
+            "cognition_out",
+            out(3, "a call written as text"),
+        );
+        correct(&mut events, "malformed_reply_turn_3_streak_1");
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 4, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(4, "  "));
+        correct(&mut events, "empty_reply_turn_4_streak_1");
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 5, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(5, "kept"));
+        let anchor = 20 + events.len() as i64;
+        push(
+            &mut events,
+            "cognition_compaction",
+            serde_json::to_value(compaction_record("pressure")).unwrap(),
+        );
+        assert_eq!(turns_before_event(&events, anchor).unwrap(), 1);
+        // Without the empty reply's correction, that reply is a kept turn again.
+        let mut only_malformed = events.clone();
+        only_malformed.remove(5);
+        assert_eq!(turns_before_event(&only_malformed, anchor).unwrap(), 2);
+    }
+
+    #[test]
+    fn the_record_tells_a_same_thread_recovery_what_a_compaction_dropped() {
+        // The compacted conversation holds no notice and no warning (both were
+        // summarised away), the record carries them.
+        let window = windowed_events();
+        let folded = fold_messages_anchored(&window, Some(26)).unwrap();
+        assert_eq!(turns_before_event(&window, 26).unwrap(), 2);
+        let signals = anchored_signals(
+            ResumeMode::NativeSameThread,
+            Some(&carry_record()),
+            2,
+            &folded,
+        );
+        assert_eq!(
+            signals.delivered,
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: false
+            }
+        );
+        assert_eq!(signals.prefix, vec![digest(1), digest(2)]);
+        // 2 carried + 2 kept turns, warned 3 turns before the record: position 1.
+        assert_eq!(
+            signals
+                .warned
+                .get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&1)
+        );
+        assert_eq!(signals.history, GuardHistory::Carried { carry_len: 18 });
+    }
+
+    #[test]
+    fn a_successor_keeps_the_prefix_but_not_a_notice_its_conversation_lacks() {
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let signals = anchored_signals(ResumeMode::Continuation, Some(&carry_record()), 2, &folded);
+        // The notice and the warning are in the record only, not in the
+        // conversation the successor was given: the existing rule applies.
+        assert_eq!(signals.delivered, WrapUpDelivered::default());
+        assert!(signals.warned.is_empty());
+        // The detectors still read the history the compaction carried.
+        assert_eq!(signals.prefix.len(), 2);
+    }
+
+    #[test]
+    fn a_same_thread_recovery_unions_the_record_with_what_the_conversation_holds() {
+        let mut window = windowed_events();
+        let carried: Vec<ReplayedEventRecord> =
+            kinded_input(ryeos_runtime::cognition::KIND_LIMIT_WRAP_UP)
+                .into_iter()
+                .chain(kinded_input("loop_warning_ping_pong"))
+                .enumerate()
+                .map(|(i, mut event)| {
+                    event.chain_seq = 100 + i as i64;
+                    event
+                })
+                .collect();
+        window.splice(4..4, carried);
+        let folded = fold_messages_anchored(&window, Some(26)).unwrap();
+        let signals = anchored_signals(
+            ResumeMode::NativeSameThread,
+            Some(&carry_record()),
+            2,
+            &folded,
+        );
+        // The limit notice is in the conversation, the deadline one in the record.
+        assert_eq!(
+            signals.delivered,
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: true
+            }
+        );
+        // The conversation's own warning sits after the 2 carried and 2 kept
+        // turns (position 4); the record says 1: the earlier stop wins.
+        assert_eq!(
+            signals
+                .warned
+                .get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn history_shorter_than_configured_is_reported() {
+        let config = crate::directive::LoopGuardsConfig::default();
+        let off = crate::directive::LoopGuardsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        // Written with guards on and enough history: complete.
+        assert_eq!(
+            GuardHistory::Carried { carry_len: 18 }.shortfall(&config),
+            None
+        );
+        assert_eq!(GuardHistory::Complete.shortfall(&config), None);
+        // Written under a shorter setting: the record's length is reported.
+        assert_eq!(
+            GuardHistory::Carried { carry_len: 10 }.shortfall(&config),
+            Some(10)
+        );
+        // Written with the guards off, resumed with them on: nothing was
+        // measured, which must not read as a clean history.
+        assert_eq!(GuardHistory::NotRecorded.shortfall(&config), Some(0));
+        // With the guards off there is nothing to claim.
+        assert_eq!(GuardHistory::NotRecorded.shortfall(&off), None);
+        // A record with no carry is read as not recorded.
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let signals = anchored_signals(ResumeMode::NativeSameThread, None, 2, &folded);
+        assert_eq!(signals.history, GuardHistory::NotRecorded);
+        assert!(signals.prefix.is_empty());
+    }
+
+    #[test]
+    fn a_successors_prefix_is_the_predecessor_turns_its_start_left_out() {
+        let digests: Vec<_> = (0..10).map(digest).collect();
+        // (carried turns, expected prefix length)
+        for (carried, expected) in [(3, 7), (0, 10), (10, 0), (25, 0)] {
+            assert_eq!(
+                successor_prefix(&digests, carried).len(),
+                expected,
+                "{carried}"
+            );
+        }
+        assert_eq!(successor_prefix(&digests, 3), digests[..7]);
+        // Never more than a record could carry, newest first kept.
+        let many: Vec<_> = (0..300).map(digest).collect();
+        let prefix = successor_prefix(&many, 0);
+        assert_eq!(prefix.len(), 256);
+        assert_eq!(prefix[255], digest(299));
+    }
+
+    #[tokio::test]
+    async fn a_successor_start_keeps_the_history_it_did_not_carry() {
+        // The predecessor ran six turns and warned about a loop after the
+        // second. A successor carrying two turns holds neither the warning nor
+        // the first four turns, but detection still reads those four.
+        let mut events = vec![ReplayedEventRecord {
+            chain_seq: 0,
+            event_type: "cognition_in".to_string(),
+            payload: serde_json::to_value(
+                ryeos_runtime::CognitionInput::text("launch", "task").pinned(),
+            )
+            .unwrap(),
+        }];
+        for turn in 1..=6 {
+            events.push(ReplayedEventRecord {
+                chain_seq: 0,
+                event_type: "cognition_out".to_string(),
+                payload: accounted_out(turn, &format!("a{turn}")),
+            });
+            if turn == 2 {
+                events.extend(kinded_input("loop_warning_idle"));
+            }
+        }
+        let callback = make_callback(events);
+        let state = load_resume_state(
+            &callback,
+            "T1",
+            CarryPolicy::turns(2),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.guard_prefix.len(), 4);
+        assert_eq!(state.guard_history, GuardHistory::Complete);
+        // The warning was in the turns the start left out: told again if found.
+        assert!(state.loop_warned.is_empty());
+        // Carrying everything leaves no prefix. A predecessor's warning is not
+        // a successor's own: as before, only this thread's own inputs count.
+        let whole = load_resume_state(
+            &callback,
+            "T1",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(whole.guard_prefix.is_empty());
+        assert_eq!(
+            whole
+                .loop_warned
+                .get(&crate::loop_guards::FindingKind::Idle),
+            None
+        );
+    }
+
+    #[test]
+    fn a_wrap_up_flag_a_live_process_set_cannot_turn_off() {
+        let given = WrapUpDelivered {
+            deadline: true,
+            turn_limit: false,
+        };
+        let rebuilt = WrapUpDelivered {
+            deadline: false,
+            turn_limit: true,
+        };
+        assert_eq!(
+            given.union(rebuilt),
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: true
+            }
+        );
+        assert_eq!(given.union(WrapUpDelivered::default()), given);
+    }
+
+    #[test]
+    fn a_compaction_folds_to_pinned_inputs_the_summary_and_the_kept_turns() {
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let texts: Vec<String> = folded
+            .iter()
+            .map(|f| f.message.text().unwrap_or_default())
+            .collect();
+        // The summary call's own turn is not a conversation turn.
+        assert_eq!(
+            texts,
+            [
+                "THE TASK",
+                "THE SUMMARY",
+                "kept three",
+                "kept four",
+                "after"
+            ]
+        );
+        assert!(folded[0].pinned);
+        assert!(folded[0].input.is_some());
+        assert_eq!(
+            folded[1].kind.as_deref(),
+            Some(ryeos_runtime::cognition::KIND_COMPACTION_SUMMARY)
+        );
+        assert_eq!(
+            folded.iter().map(|f| f.turn).collect::<Vec<_>>(),
+            [None, None, Some(3), Some(4), Some(6)]
+        );
+        // A different anchor leaves the record out: older compactions add nothing.
+        let unanchored = fold_messages_anchored(&windowed_events(), Some(99)).unwrap();
+        assert_eq!(unanchored.len(), 3);
+    }
+
+    #[test]
+    fn recovery_readers_start_from_the_window_seed() {
+        let events = windowed_events();
+        let seed = compaction_record("pressure").seed;
+        let progress = recover_turn_progress_from(&events, &seed).unwrap();
+        // Turns 3, 4 and 6 complete; the summary call at 5 takes a coordinate
+        // and is not a completed turn.
+        assert_eq!(progress.last_coordinate, 6);
+        assert_eq!(progress.completed, 2 + 3);
+        // Without the seed the window's first turn does not follow turn 0.
+        assert!(recover_turn_progress(&events).is_err());
+        let images = recover_image_run_from(&events, &seed).unwrap();
+        assert_eq!(images.images, 2);
+        assert_eq!(images.bytes, 300);
+        assert!(images.stored.contains("att-1"));
+        let sources = vec!["T".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T", seed.last_coordinate).unwrap(),
+            None
+        );
+        assert!(recover_unfinished_provider_turn(&events, &sources, "T", 0).is_err());
+    }
+
+    #[test]
+    fn a_summary_turn_without_its_record_is_finished_from_the_retained_summary() {
+        let mut events = windowed_events();
+        events.truncate(6);
+        let sources = vec!["T".to_string(); events.len()];
+        let tools = recover_tool_state(&events, &sources).unwrap();
+        match recover_resume_disposition(&events, &tools).unwrap() {
+            ResumeDisposition::FinishCompaction { trigger, summary } => {
+                assert_eq!(trigger, "pressure");
+                assert_eq!(
+                    summary,
+                    vec![ryeos_provider_contract::Part::text("THE SUMMARY")]
+                );
+            }
+            other => panic!("expected FinishCompaction, got {other:?}"),
+        }
+        // With the record written, the run goes on from its last turn.
+        let events = windowed_events();
+        let tools = recover_tool_state(&events, &vec!["T".to_string(); events.len()]).unwrap();
+        assert!(!matches!(
+            recover_resume_disposition(&events, &tools).unwrap(),
+            ResumeDisposition::FinishCompaction { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unfinished_marker_is_reported_with_its_purpose() {
+        use ryeos_runtime::cognition::TurnPurpose;
+        let events = vec![
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 2, out(1, "one")),
+            event_at(
+                "cognition_in",
+                3,
+                json!({"turn": 2, "purpose": "compaction_summary_overflow"}),
+            ),
+        ];
+        let sources = vec!["T".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T", 0).unwrap(),
+            Some(UnfinishedTurn {
+                turn: 2,
+                purpose: TurnPurpose::CompactionSummaryOverflow
+            })
+        );
+    }
+
+    #[test]
+    fn a_marker_without_a_purpose_is_refused_with_its_stable_code() {
+        let events = vec![event_at("cognition_in", 1, json!({"turn": 1}))];
+        let error = refuse_markers_without_purpose(&events).unwrap_err();
+        let typed = error.downcast_ref::<ResumeFoldError>().unwrap();
+        assert_eq!(typed.code(), "resume_marker_without_purpose");
+        let sources = vec!["T".to_string()];
+        assert!(
+            recover_unfinished_provider_turn(&events, &sources, "T", 0)
+                .unwrap_err()
+                .downcast_ref::<ResumeFoldError>()
+                .is_some()
+        );
+    }
+
+    fn refusal_events() -> Vec<ReplayedEventRecord> {
+        vec![
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 2, out(1, "one")),
+            event_at("cognition_in", 3, json!({"turn": 2, "purpose": "turn"})),
+            event_at(
+                "cognition_out",
+                4,
+                json!({
+                    "turn": 2,
+                    "parts": text_parts("refused"),
+                    "finish": "provider_refused_provider_context_length_exceeded",
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_refusal_final_is_data_not_a_conversation_turn() {
+        let events = refusal_events();
+        // Not a message, and no completed turn, but the coordinate is used.
+        let folded = fold_messages(&events).unwrap();
+        assert_eq!(folded.len(), 1);
+        let progress = recover_turn_progress(&events).unwrap();
+        assert_eq!(progress.last_coordinate, 2);
+        assert_eq!(progress.completed, 1);
+        // The marker has its final, so nothing is unfinished.
+        let sources = vec!["T".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T", 0).unwrap(),
+            None
+        );
+        assert_eq!(
+            recover_refused_code(&events).as_deref(),
+            Some("provider_context_length_exceeded")
+        );
+        // A completed turn or a compaction after it ends the pending retry.
+        let mut later = events.clone();
+        later.push(event_at(
+            "cognition_in",
+            5,
+            json!({"turn": 3, "purpose": "turn"}),
+        ));
+        later.push(event_at("cognition_out", 6, out(3, "three")));
+        assert_eq!(recover_refused_code(&later), None);
+        let tools = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(
+            recover_resume_disposition(&events, &tools).unwrap(),
+            ResumeDisposition::ForkAfterRefusal
+        );
+    }
+
+    /// Turns 3 to 8 each call a tool with a large result; a first compaction
+    /// (kept turns 3 on) sits after turn 5.
+    fn two_compaction_events() -> Vec<ReplayedEventRecord> {
+        let big = "z".repeat(600);
+        let mut events = Vec::new();
+        let mut seq = 10;
+        let mut push = |events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value| {
+            seq += 1;
+            events.push(event_at(kind, seq, payload));
+        };
+        let turn = |events: &mut Vec<ReplayedEventRecord>,
+                    push: &mut dyn FnMut(&mut Vec<ReplayedEventRecord>, &str, Value),
+                    n: u32| {
+            let call = format!("c{n}");
+            let operation = directive_tool_operation_id("T", n, 0);
+            push(
+                events,
+                "cognition_in",
+                json!({"turn": n, "purpose": "turn"}),
+            );
+            push(
+                events,
+                "cognition_out",
+                out_calls(n, json!([{"id": call, "name": "big", "arguments": {}}])),
+            );
+            push(
+                events,
+                "tool_call_start",
+                json!({"operation_id": operation, "call_id": call, "tool": "big", "turn": n, "call_index": 0}),
+            );
+            push(
+                events,
+                "tool_call_result",
+                result(&operation, &call, "big", &format!("{n}{big}")),
+            );
+        };
+        for n in 3..=5 {
+            turn(&mut events, &mut push, n);
+        }
+        let first = serde_json::to_value(compaction_record("pressure")).unwrap();
+        push(&mut events, "cognition_compaction", first);
+        for n in 6..=8 {
+            turn(&mut events, &mut push, n);
+        }
+        events
+    }
+
+    #[test]
+    fn a_second_compactions_size_estimate_is_the_size_of_what_the_fold_rebuilds() {
+        let events = two_compaction_events();
+        let sources = vec!["T".to_string(); events.len()];
+        let first_seq = events
+            .iter()
+            .find(|event| event.event_type == "cognition_compaction")
+            .unwrap()
+            .chain_seq;
+        let mut first = compaction_record("pressure");
+        first.clip = Some(ryeos_runtime::ClipRule {
+            over_bytes: 100,
+            head_bytes: 10,
+            tail_bytes: 10,
+            keep_recent: 1,
+        });
+        let mut events = events;
+        for event in &mut events {
+            if event.event_type == "cognition_compaction" {
+                event.payload = serde_json::to_value(&first).unwrap();
+            }
+        }
+        let basis = CompactionBasis::from_window(
+            events.clone(),
+            sources,
+            Some(AnchorRecord {
+                chain_seq: first_seq,
+                payload: first,
+            }),
+        )
+        .unwrap();
+        let policy = crate::directive::CompactionConfig {
+            keep_turns: 2,
+            summary: crate::directive::SummaryConfig {
+                mode: crate::directive::SummaryMode::None,
+                ..Default::default()
+            },
+            clip: crate::directive::ClipConfig {
+                tool_results: crate::directive::ClipMode::Clip,
+                over_bytes: 100,
+                head_bytes: 10,
+                tail_bytes: 10,
+                keep_recent: 1,
+            },
+            ..Default::default()
+        };
+        let plan = crate::compaction::plan(&basis.folded, policy.keep_turns).expect("a cut");
+        assert_eq!(plan.kept_from_turn, 7);
+        let summary = crate::compaction::fixed_note(&plan);
+        let record = crate::compaction::build_record(
+            &basis, &plan, summary, "pressure", &policy, None, None,
+        )
+        .unwrap();
+        // The rebuild reads the window from the kept turn's marker, with the
+        // new record in it.
+        let marker = events
+            .iter()
+            .rposition(|event| turn_start_coordinate(event).ok().flatten() == Some(7))
+            .unwrap();
+        let mut window = events[marker..].to_vec();
+        window.push(event_at(
+            "cognition_compaction",
+            9_999,
+            serde_json::to_value(&record).unwrap(),
+        ));
+        let rebuilt = fold_messages_anchored(&window, Some(9_999)).unwrap();
+        let rebuilt: Vec<ProviderMessage> = rebuilt.into_iter().map(|f| f.message).collect();
+        assert_eq!(
+            record.size_after,
+            crate::estimate::estimate_tokens(&rebuilt, None)
+        );
+        assert!(
+            rebuilt
+                .iter()
+                .any(|m| m.text().is_some_and(|t| t.contains("were clipped")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_continuation_predecessor_with_an_unfinished_turn_is_refused() {
+        // A marker with no final and no recorded refusal: a lost process, a
+        // budget stop, an auth failure. Not a refusal the policy answers.
+        let callback = make_callback(vec![
+            event_at("cognition_in", 1, input_with_origin("task")),
+            event_at("cognition_in", 2, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 3, out(1, "one")),
+            event_at("cognition_in", 4, json!({"turn": 2, "purpose": "turn"})),
+        ]);
+        let error = load_resume_state(
+            &callback,
+            "T-test",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unfinished provider turn"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_predecessor_that_recorded_a_refusal_reports_its_code_to_the_successor() {
+        let mut events = vec![event_at("cognition_in", 1, input_with_origin("task"))];
+        let mut refusal = refusal_events();
+        // The completed turn 1 has its usage settlement before its final.
+        refusal.insert(1, usage_event(1, 1));
+        events.extend(refusal);
+        let callback = make_callback(events);
+        let loaded = load_resume_state(
+            &callback,
+            "T-test",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            loaded.refused_code.as_deref(),
+            Some("provider_context_length_exceeded")
+        );
+        assert_eq!(loaded.last_turn_coordinate, 2);
+        assert_eq!(loaded.turns_completed, 1);
+    }
+
+    fn input_with_origin(text: &str) -> Value {
+        json!({"origin": "launch", "parts": text_parts(text), "pinned": true})
     }
 }

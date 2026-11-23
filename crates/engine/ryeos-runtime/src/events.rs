@@ -1102,9 +1102,12 @@ mod tests {
     fn inline_input_marker_and_malformed_payloads_are_told_apart() {
         let mut assembler = CognitionInAssembler::default();
         assert_eq!(
-            assembler.push(&json!({"turn": 3})).unwrap(),
+            assembler
+                .push(&json!({"turn": 3, "purpose": "turn"}))
+                .unwrap(),
             CognitionInAssembly::Marker(TurnMarker {
                 turn: 3,
+                purpose: crate::cognition::TurnPurpose::Turn,
                 tools_offered: None
             })
         );

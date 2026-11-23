@@ -12,9 +12,9 @@ use lillux::time::Duration;
 
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LifecycleAdapterResponse, LifecycleOperationCommon,
-    TerminationIntent, canonical_json,
+    TerminalBasis, TerminationIntent, canonical_json,
 };
-use ryeos_remote_lease_core::{EgressPolicy, NetworkPolicyType};
+use ryeos_remote_lease_core::{EgressPolicy, NetworkPolicyType, lease_end_passed};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -119,18 +119,6 @@ struct TerminalEvidence<'a> {
     returncode: Option<i64>,
     facade_sha256: &'a str,
     response_sha256: &'a str,
-}
-
-/// The proof a terminal verdict rests on.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalBasis {
-    /// The facade reported this exact sandbox terminated with an exit status.
-    ObservedTerminated,
-    /// This same operation's terminate request was accepted by the facade for
-    /// this exact sandbox, and the facade then definitively reported it
-    /// absent. A not-found without that accepted request is never a proof.
-    AcceptedTerminateThenNotFound,
 }
 
 /// What a terminate acknowledgement says: the facade found and tagged this
@@ -477,7 +465,8 @@ pub fn observe_termination<T: FacadeTransport>(
 
 /// `accepted_terminate` is true only when this very operation's terminate
 /// request was acknowledged for this exact sandbox. A separate reconciliation
-/// holds no such proof, so a not-found there stays pending.
+/// holds no such proof, so a not-found there settles only once the lease is
+/// past its stated latest end plus grace.
 fn observe_termination_with_proof<T: FacadeTransport>(
     client: &FacadeClient<'_, T>,
     common: &LifecycleOperationCommon,
@@ -494,12 +483,24 @@ fn observe_termination_with_proof<T: FacadeTransport>(
     let Some(observation) = reply.observation::<GetObservation>() else {
         return termination_pending(common, termination);
     };
-    if !observation.found && accepted_terminate && observation.sandbox_id.is_none() {
+    if !observation.found && observation.sandbox_id.is_none() {
+        // A definitive facade not-found settles on one of two proofs: this
+        // operation's own accepted terminate, or the lease having run past
+        // its stated latest end plus the adapter's grace. Neither holds
+        // otherwise, and a clock that cannot be read never satisfies the
+        // second.
+        let basis = if accepted_terminate {
+            TerminalBasis::AcceptedTerminateThenNotFound
+        } else if lease_end_passed(&termination.latest_lease_end) {
+            TerminalBasis::PastLatestLeaseEndNotFound
+        } else {
+            return termination_pending(common, termination);
+        };
         let evidence = TerminalEvidence {
             schema: 1,
             provider: SPEC_EVIDENCE_PROVIDER,
             terminal_state: "terminated",
-            basis: TerminalBasis::AcceptedTerminateThenNotFound,
+            basis,
             operation_id: &common.operation_id,
             binding_hash: &common.binding_hash,
             request_digest: &occurrence.request_digest,
@@ -509,14 +510,7 @@ fn observe_termination_with_proof<T: FacadeTransport>(
             facade_sha256: &client.pin().sha256,
             response_sha256: &reply.body_sha256,
         };
-        return match digest_of(&evidence) {
-            Some(digest) => LifecycleAdapterResponse::OccurrenceTerminal {
-                operation_id: common.operation_id.clone(),
-                termination_request_digest: termination.termination_request_digest.clone(),
-                provider_observation_digest: digest,
-            },
-            None => termination_pending(common, termination),
-        };
+        return terminal_response(common, termination, &evidence, basis);
     }
     let (true, Some(id), Some("terminated"), Some(returncode), Some(true)) = (
         observation.found,
@@ -544,11 +538,26 @@ fn observe_termination_with_proof<T: FacadeTransport>(
         facade_sha256: &client.pin().sha256,
         response_sha256: &reply.body_sha256,
     };
-    match digest_of(&evidence) {
+    terminal_response(
+        common,
+        termination,
+        &evidence,
+        TerminalBasis::ObservedTerminated,
+    )
+}
+
+fn terminal_response(
+    common: &LifecycleOperationCommon,
+    termination: &TerminationIntent,
+    evidence: &TerminalEvidence<'_>,
+    basis: TerminalBasis,
+) -> LifecycleAdapterResponse {
+    match digest_of(evidence) {
         Some(digest) => LifecycleAdapterResponse::OccurrenceTerminal {
             operation_id: common.operation_id.clone(),
             termination_request_digest: termination.termination_request_digest.clone(),
             provider_observation_digest: digest,
+            basis,
         },
         None => termination_pending(common, termination),
     }
@@ -558,6 +567,7 @@ fn observe_termination_with_proof<T: FacadeTransport>(
 mod tests {
     use std::collections::BTreeSet;
 
+    use ryeos_external_execution_contract::LatestLeaseEnd;
     use ryeos_remote_lease_core::NetworkPolicyCapability;
 
     use super::*;
@@ -571,7 +581,7 @@ mod tests {
     fn common() -> LifecycleOperationCommon {
         LifecycleOperationCommon {
             schema: 1,
-            protocol: "ryeos.external-execution.lifecycle-adapter.v3".into(),
+            protocol: "ryeos.external-execution.lifecycle-adapter.v4".into(),
             operation_id: "op-1".into(),
             binding_hash: "b".repeat(64),
             settings_digest: "c".repeat(64),
@@ -1148,8 +1158,13 @@ mod tests {
     }
 
     fn intent() -> TerminationIntent {
+        intent_ending(LatestLeaseEnd::Unbounded {})
+    }
+
+    fn intent_ending(latest_lease_end: LatestLeaseEnd) -> TerminationIntent {
         TerminationIntent {
             termination_request_digest: "a".repeat(64),
+            latest_lease_end,
         }
     }
 
@@ -1266,6 +1281,118 @@ mod tests {
             ),
             LifecycleAdapterResponse::TerminationPending { .. }
         ));
+    }
+
+    const LONG_PAST_END: LatestLeaseEnd = LatestLeaseEnd::Bounded { unix_ms: 1_000 };
+    const FAR_FUTURE_END: LatestLeaseEnd = LatestLeaseEnd::Bounded {
+        unix_ms: ryeos_external_execution_contract::MAX_LATEST_LEASE_END_UNIX_MS,
+    };
+
+    fn run_reconcile_termination(
+        latest_lease_end: LatestLeaseEnd,
+        get: Step,
+    ) -> LifecycleAdapterResponse {
+        let fake = Scripted::new(vec![get]);
+        let pin = pin();
+        observe_termination(
+            &FacadeClient::new(&fake, &pin),
+            &common(),
+            &occurrence(),
+            &intent_ending(latest_lease_end),
+        )
+    }
+
+    fn basis_of(response: &LifecycleAdapterResponse) -> Option<TerminalBasis> {
+        match response {
+            LifecycleAdapterResponse::OccurrenceTerminal { basis, .. } => Some(*basis),
+            _ => None,
+        }
+    }
+
+    fn not_found() -> Step {
+        envelope("get", 200, json!({"ok": true, "found": false}))
+    }
+
+    #[test]
+    fn the_response_names_the_basis_of_each_terminal_verdict() {
+        let accepted = run_terminate(vec![accepted_ack(), not_found()]);
+        assert_eq!(
+            basis_of(&accepted),
+            Some(TerminalBasis::AcceptedTerminateThenNotFound)
+        );
+        let observed = run_terminate(vec![
+            accepted_ack(),
+            envelope("get", 200, get_fields(true, "terminated", Some(137))),
+        ]);
+        assert_eq!(basis_of(&observed), Some(TerminalBasis::ObservedTerminated));
+    }
+
+    #[test]
+    fn a_not_found_past_the_latest_lease_end_is_terminal_without_a_terminate() {
+        let response = run_reconcile_termination(LONG_PAST_END, not_found());
+        assert_eq!(
+            basis_of(&response),
+            Some(TerminalBasis::PastLatestLeaseEndNotFound)
+        );
+        // A different basis hashes to a different observation digest.
+        let accepted = digest_of_terminal(run_terminate(vec![accepted_ack(), not_found()]));
+        assert_ne!(digest_of_terminal(response), accepted);
+    }
+
+    #[test]
+    fn an_accepted_terminate_outranks_the_lease_end_basis() {
+        let fake = Scripted::new(vec![accepted_ack(), not_found()]);
+        let pin = pin();
+        let response = terminate(
+            &FacadeClient::new(&fake, &pin),
+            &common(),
+            &occurrence(),
+            &intent_ending(LONG_PAST_END),
+        );
+        assert_eq!(
+            basis_of(&response),
+            Some(TerminalBasis::AcceptedTerminateThenNotFound)
+        );
+    }
+
+    #[test]
+    fn a_not_found_before_the_latest_lease_end_or_for_an_unbounded_lease_stays_pending() {
+        for end in [FAR_FUTURE_END, LatestLeaseEnd::Unbounded {}] {
+            assert!(matches!(
+                run_reconcile_termination(end, not_found()),
+                LifecycleAdapterResponse::TerminationPending { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn failures_and_provider_errors_stay_pending_even_past_the_lease_end() {
+        for get in [
+            Step::Fail(TransportFailure::NoRequestSent),
+            Step::Fail(TransportFailure::MayHaveBeenSent),
+            provider_error("get", "InternalError"),
+            provider_error("get", "NotFoundError"),
+            refusal("get", "not_facade_sandbox"),
+            envelope(
+                "get",
+                200,
+                json!({"ok": true, "found": false, "sandbox_id": "sb-other"}),
+            ),
+        ] {
+            assert!(matches!(
+                run_reconcile_termination(LONG_PAST_END, get),
+                LifecycleAdapterResponse::TerminationPending { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn an_observed_termination_reports_its_basis_whatever_the_lease_end() {
+        let response = run_reconcile_termination(
+            LatestLeaseEnd::Unbounded {},
+            envelope("get", 200, get_fields(true, "terminated", Some(1))),
+        );
+        assert_eq!(basis_of(&response), Some(TerminalBasis::ObservedTerminated));
     }
 
     #[test]

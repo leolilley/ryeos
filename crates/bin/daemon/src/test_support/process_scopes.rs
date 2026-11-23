@@ -1,0 +1,443 @@
+//! Real process-scope qualification mode for the end-to-end harness.
+//!
+//! By default a harness daemon is a direct child of the test process: it has
+//! no protected host-runtime association, so the fast fixture signs a node
+//! isolation member without the per-scope contract and the suites that need
+//! an exclusive session skip when the host cannot provide one. That leaves
+//! the exclusive-session lane unexercised.
+//!
+//! Setting [`REQUIRE_PROCESS_SCOPES_ENV`] to `1` changes three things:
+//!
+//! * the fast fixture keeps the authored isolation member and capability
+//!   floor, including `process_scopes` and the per-scope capability names;
+//! * the daemon is started the way an external supervisor starts one: the
+//!   test process, running as an administrator on a disposable host, provisions
+//!   a delegated cgroup subtree, writes the protected host-runtime binding
+//!   and starts the node through the same controller launch as
+//!   `ryeosd host-runtime --binding <path>` (test-only spawn variant, so the
+//!   test keeps the node as its child and can pass crash gates), which places the node
+//!   in its controller leaf and drops to the node account;
+//! * a host that cannot qualify the scopes is a failure ([`skip_or_fail_unqualified`]
+//!   panics) and the node's own capability report must show the per-scope
+//!   floor entries provided ([`assert_scope_capabilities_provided`]).
+//!
+//! The mode never weakens an authored profile. It needs an administrator
+//! test process, the node account named by [`SCOPE_ACCOUNT_ENV`] as
+//! `uid:gid`, and a host with a writable cgroup-v2 hierarchy; without them the
+//! start fails with the cause.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use anyhow::{Context as _, Result};
+
+/// Selects the real process-scope mode when set to `1`.
+pub const REQUIRE_PROCESS_SCOPES_ENV: &str = "RYEOS_TEST_REQUIRE_PROCESS_SCOPES";
+/// `uid:gid` of the node account the daemon runs as in the real mode.
+pub const SCOPE_ACCOUNT_ENV: &str = "RYEOS_TEST_SCOPE_ACCOUNT";
+
+const NODE_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const NODE_PROCESSES: u32 = 8192;
+/// Administrator-owned directory holding the daemon image and bindings. The
+/// external controller refuses an image or binding whose directories are not
+/// owned by the administrator, so neither can sit in the test's temp tree.
+const ADMIN_ROOT: &str = "/var/lib/ryeos-e2e-scopes";
+
+/// Whether this run requires real process scopes.
+pub fn required() -> bool {
+    match std::env::var(REQUIRE_PROCESS_SCOPES_ENV).as_deref() {
+        Ok("1") => true,
+        Ok("") | Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        Ok(other) => panic!("{REQUIRE_PROCESS_SCOPES_ENV} must be `1` or unset, not `{other}`"),
+        Err(error) => panic!("{REQUIRE_PROCESS_SCOPES_ENV} is unreadable: {error}"),
+    }
+}
+
+/// The one place a suite reports that its host cannot qualify process scopes.
+/// Without the real mode this prints the reason so the caller can skip; with
+/// it, an unqualified host is a failure, never a skip.
+pub fn skip_or_fail_unqualified(reason: &str) {
+    if required() {
+        panic!(
+            "{REQUIRE_PROCESS_SCOPES_ENV}=1 but this host cannot qualify process scopes: {reason}"
+        );
+    }
+    eprintln!("skipped: this host cannot qualify process scopes: {reason}");
+}
+
+/// How a prepared node is started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// In a delegated cgroup subtree under a protected host-runtime binding,
+    /// for node classes whose floor asks for per-execution process scopes.
+    Controller,
+    /// As the only child of `tini`, pid 1 of a private pid, user, mount and
+    /// cgroup namespace, for node classes whose floor asks for the enclosure
+    /// instead (a hosted node: its jobs die with it because its parent is a
+    /// trusted init that exits with it, and it configures no per-execution
+    /// scopes). This is the shape of the shipped image.
+    Enclosure,
+}
+
+struct Registration {
+    placement: Placement,
+    binding: PathBuf,
+    daemon: PathBuf,
+    owned: Vec<PathBuf>,
+}
+
+fn registry() -> &'static Mutex<HashMap<PathBuf, Registration>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Registration>>> = OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+
+fn account() -> Result<(u32, u32)> {
+    let raw = std::env::var(SCOPE_ACCOUNT_ENV).with_context(|| {
+        format!("{SCOPE_ACCOUNT_ENV} (uid:gid of the node account) is required")
+    })?;
+    let (uid, gid) = raw
+        .split_once(':')
+        .with_context(|| format!("{SCOPE_ACCOUNT_ENV} must be `uid:gid`"))?;
+    Ok((uid.parse()?, gid.parse()?))
+}
+
+fn chown_tree(paths: &[PathBuf], uid: u32, gid: u32) -> Result<()> {
+    for path in paths {
+        let output = std::process::Command::new("chown")
+            .arg("-R")
+            .arg(format!("{uid}:{gid}"))
+            .arg(path)
+            .output()
+            .context("run chown")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "chown -R {uid}:{gid} {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Copy the daemon image under the administrator-owned directory, once per
+/// source image, and return its path.
+fn installed_daemon() -> Result<PathBuf> {
+    let source = super::ryeosd_binary();
+    let metadata =
+        std::fs::metadata(&source).with_context(|| format!("stat {}", source.display()))?;
+    let modified = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    // One directory per source image, the file keeping the daemon's own name:
+    // the harness authenticates a running node by its executable's file name.
+    let directory = Path::new(ADMIN_ROOT)
+        .join("bin")
+        .join(format!("ryeosd-{}-{modified}", metadata.len()));
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create {}", directory.display()))?;
+    let installed = directory.join("ryeosd");
+    if !installed.exists() {
+        let staging = directory.join(format!(".ryeosd-{}", std::process::id()));
+        std::fs::copy(&source, &staging)
+            .with_context(|| format!("copy {} to {}", source.display(), staging.display()))?;
+        std::fs::rename(&staging, &installed)
+            .with_context(|| format!("publish {}", installed.display()))?;
+    }
+    Ok(installed)
+}
+
+/// A temporary directory the node can use. A directory the test creates is
+/// owned by the test process, which in the real mode is an administrator, and
+/// the node account could not enter it; here it belongs to the node account.
+/// Without the real mode this is an ordinary temporary directory.
+pub fn tempdir() -> Result<tempfile::TempDir> {
+    let directory = tempfile::tempdir()?;
+    if required() {
+        let (uid, gid) = account()?;
+        chown_tree(&[directory.path().to_path_buf()], uid, gid)?;
+    }
+    Ok(directory)
+}
+
+/// Provision the delegation and protected binding for the node at
+/// `state_path` and make `owned` (every tree the node reads or writes) belong
+/// to the node account. Called once, before the first start.
+pub fn prepare(state_path: &Path, owned: &[&Path], placement: Placement) -> Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    lillux::require_administrator().with_context(|| {
+        format!("{REQUIRE_PROCESS_SCOPES_ENV}=1 needs the test process to run as an administrator")
+    })?;
+    if placement == Placement::Enclosure {
+        // The node is the administrator inside an identity-mapped namespace,
+        // so every tree it uses keeps its owner and needs no hand-over.
+        registry().lock().unwrap().insert(
+            state_path.to_path_buf(),
+            Registration {
+                placement,
+                binding: PathBuf::new(),
+                daemon: super::ryeosd_binary(),
+                owned: Vec::new(),
+            },
+        );
+        return Ok(());
+    }
+    let (uid, gid) = account()?;
+    let mut owned: Vec<PathBuf> = owned.iter().map(|path| path.to_path_buf()).collect();
+    owned.push(state_path.to_path_buf());
+    chown_tree(&owned, uid, gid)?;
+
+    let account = lillux::ControllerAccount::unix(uid, gid);
+    let node_resources = lillux::ProcessScopeResourceLimits {
+        maximum_memory_bytes: NODE_MEMORY_BYTES,
+        maximum_processes: NODE_PROCESSES,
+    };
+    let label = format!(
+        "ryeos-e2e-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    );
+    let process_scopes = lillux::ProcessScopeConfiguration::provision_host_delegation(&label)
+        .map_err(anyhow::Error::msg)
+        .context("provision the delegated cgroup subtree")?;
+    let app_root =
+        lillux::PinnedDirectory::open(state_path)?.context("the node app root is absent")?;
+    let identity_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/public-identity.json");
+    let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
+        &std::fs::read(&identity_path)
+            .with_context(|| format!("read {}", identity_path.display()))?,
+    )?;
+    let binding = ryeos_node::host_runtime::HostRuntimeBinding::capture(
+        &app_root,
+        identity.verified_fingerprint()?,
+        account,
+        node_resources,
+        process_scopes,
+    )
+    .context("capture the host-runtime binding")?;
+    let bindings = Path::new(ADMIN_ROOT).join("bindings");
+    std::fs::create_dir_all(&bindings).with_context(|| format!("create {}", bindings.display()))?;
+    let binding_path = bindings.join(format!("{label}.json"));
+    std::fs::write(&binding_path, serde_json::to_vec(&binding)?)
+        .with_context(|| format!("write {}", binding_path.display()))?;
+    registry().lock().unwrap().insert(
+        state_path.to_path_buf(),
+        Registration {
+            placement,
+            binding: binding_path,
+            daemon: installed_daemon()?,
+            owned,
+        },
+    );
+    Ok(())
+}
+
+/// The command that starts the node at `state_path` under its protected
+/// binding, or `None` when the node is not in the real mode. Files the test
+/// process wrote since the last start are handed back to the node account
+/// first.
+pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Command>> {
+    let registry = registry().lock().unwrap();
+    let Some(registration) = registry.get(state_path) else {
+        return Ok(None);
+    };
+    if registration.placement == Placement::Enclosure {
+        return Ok(Some(enclosure_command(&registration.daemon, state_path)));
+    }
+    let (uid, gid) = account()?;
+    chown_tree(&registration.owned, uid, gid)?;
+    // The same placement, credential drop and inherited binding as the
+    // protected `host-runtime` entry, returned as a command this process
+    // spawns as its own child, so the node's arguments, environment and
+    // inherited descriptors (a crash gate) can be added.
+    let command = ryeos_node::host_runtime::spawn_external_controller_command(
+        &registration.binding,
+        &registration.daemon,
+    )
+    .map_err(|error| {
+        let occupants = controller_leaf_occupants(&registration.binding);
+        error.context(format!("controller leaf occupants: {occupants}"))
+    })?;
+    let mut command = tokio::process::Command::from(command);
+    // The controller launch clears the environment; a diagnostic log filter
+    // the test run asks for reaches the node explicitly.
+    if let Some(filter) = std::env::var_os("RYEOSD_TEST_RUST_LOG") {
+        command.env("RUST_LOG", filter);
+    }
+    Ok(Some(command))
+}
+
+/// The command that starts a node in a private enclosure whose pid 1 is
+/// `tini`, as in the shipped image. The node is not pid 1 itself: process
+/// identity refuses pid 1 and process group 1, so a node that is the init of
+/// its namespace cannot start. With `tini` as pid 1 the node grades the
+/// enclosure as trusted (`tini` is in the profile's `enclosure_inits`). The
+/// identity maps cover every account the harness uses, so the node, running
+/// as the administrator of its own user namespace, reads and writes the same
+/// trees under the same ownership. `--kill-child` ends the enclosure when the
+/// wrapper dies, which is how the harness stops it.
+fn enclosure_command(daemon: &Path, state_path: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("unshare");
+    command
+        .args([
+            "--user",
+            "--map-users=0:0:65536",
+            "--map-groups=0:0:65536",
+            "--pid",
+            "--fork",
+            "--kill-child",
+            "--cgroup",
+            "--mount-proc",
+            "tini",
+            "--",
+        ])
+        .arg(daemon)
+        .arg("--app-root")
+        .arg(state_path);
+    if let Some(filter) = std::env::var_os("RYEOSD_TEST_RUST_LOG") {
+        command.env("RUST_LOG", filter);
+    }
+    command
+}
+
+/// The processes still in the node's controller leaf, for a start refused
+/// because that leaf is occupied: which process outlived the node that
+/// occupied it decides whether the harness or the product leaves it behind.
+fn controller_leaf_occupants(binding: &Path) -> String {
+    let parent = std::fs::read(binding)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .pointer("/process_scopes/backend/parent")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        });
+    let Some(parent) = parent else {
+        return "the binding names no delegation parent".to_owned();
+    };
+    let leaf = parent.join("controller");
+    let procs = std::fs::read_to_string(leaf.join("cgroup.procs")).unwrap_or_default();
+    let events = std::fs::read_to_string(leaf.join("cgroup.events")).unwrap_or_default();
+    let mut text = format!("{} events [{}]", leaf.display(), events.replace('\n', " "));
+    for pid in procs.lines() {
+        let command = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+            .unwrap_or_default();
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let state = state.rsplit(')').next().unwrap_or("").trim();
+        text.push_str(&format!(
+            "; pid {pid} state {} cmd {command}",
+            state.chars().next().unwrap_or('?')
+        ));
+    }
+    text
+}
+
+/// Take the node's trees back for the test process, which in the real mode is
+/// an administrator. Offline operations that must be owned by the effective
+/// user (re-sealing the initialization transaction) need this between stopping
+/// the node and starting it again; [`launch_command`] hands the trees back to
+/// the node account. A node not in the real mode is untouched.
+pub fn reclaim_for_test(state_path: &Path) -> Result<()> {
+    let owned = match registry().lock().unwrap().get(state_path) {
+        Some(registration) => registration.owned.clone(),
+        None => return Ok(()),
+    };
+    chown_tree(&owned, 0, 0)
+}
+
+/// Fail with the cause when the node's own capability report does not show
+/// every per-scope floor entry provided. The report is the node's record of
+/// what its host proved at start, so this judges the real qualification, not
+/// the harness's setup.
+pub fn assert_scope_capabilities_provided(state_path: &Path) -> Result<()> {
+    let report =
+        ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(state_path)?
+            .context("the node recorded no capability report")?
+            .report;
+    let mut scope_names: Vec<&str> = report
+        .floor
+        .requires
+        .iter()
+        .flat_map(|entry| entry.names())
+        .map(String::as_str)
+        .filter(|name| lillux::process_control::is_scope_capability(name))
+        .collect();
+    scope_names.sort_unstable();
+    scope_names.dedup();
+    for needed in ["recovery:scope", "termination:scope"] {
+        anyhow::ensure!(
+            scope_names.contains(&needed),
+            "the node floor does not require {needed}: the authored process-scope contract was not kept (it requires {scope_names:?})"
+        );
+    }
+    let missing: Vec<String> = scope_names
+        .iter()
+        .copied()
+        .filter(|name| !report.provided.contains_key(*name))
+        .map(|name| {
+            format!(
+                "{name}: {}",
+                report
+                    .missing
+                    .get(name)
+                    .map(String::as_str)
+                    .unwrap_or("not provided")
+            )
+        })
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty() && report.floor.admitted,
+        "the node did not qualify its per-scope capabilities; missing: [{}]; unmet floor: {:?}",
+        missing.join("; "),
+        report.floor.unmet
+    );
+    Ok(())
+}
+
+/// Fail with the cause when an enclosure node's own capability report does
+/// not show both enclosure names provided. The harness only started the
+/// namespace; the report is what the node proved about it.
+pub fn assert_enclosure_capabilities_provided(state_path: &Path) -> Result<()> {
+    let report =
+        ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(state_path)?
+            .context("the node recorded no capability report")?
+            .report;
+    for needed in [
+        lillux::process_control::RECOVERY_ENCLOSURE_TRUSTED_INIT,
+        lillux::process_control::TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    ] {
+        anyhow::ensure!(
+            report.provided.contains_key(needed),
+            "the enclosure node did not provide {needed}: {}",
+            report
+                .missing
+                .get(needed)
+                .map(String::as_str)
+                .unwrap_or("not provided")
+        );
+    }
+    anyhow::ensure!(
+        report.floor.admitted,
+        "the enclosure node's floor is unmet: {:?}",
+        report.floor.unmet
+    );
+    Ok(())
+}
+
+/// What the node's report says is missing, for a start that failed.
+pub fn describe_missing(state_path: &Path) -> String {
+    match ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(state_path) {
+        Ok(Some(signed)) => format!(
+            "node capability report: missing {:?}; unmet floor {:?}",
+            signed.report.missing, signed.report.floor.unmet
+        ),
+        Ok(None) => "the node recorded no capability report".to_owned(),
+        Err(error) => format!("the node capability report is unreadable: {error:#}"),
+    }
+}

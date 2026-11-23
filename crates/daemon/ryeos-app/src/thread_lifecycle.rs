@@ -761,7 +761,11 @@ pub const MAX_CONTINUATION_AUTO_ATTEMPTS: u32 = 3;
 /// An operator follow-up resets the count, so this never caps an operator
 /// conversation, only a runaway autonomous one. This bound is what makes
 /// autonomous machine continuation safe to be always-on (no env gate).
-pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
+///
+/// This is the daemon's backstop. The working limit is the directive runtime's
+/// signed continuation config (`chain_depth_limit`, default 12), which fails a
+/// chain with `continuation_chain_limit` before it reaches this.
+pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 64;
 
 /// Stable fingerprint of an OPERATOR follow-up request over its launch-significant
 /// boundary inputs. Two `threads/input` calls with the same fingerprint are the
@@ -9601,6 +9605,7 @@ mod tests {
             output_tokens: 9,
             total_usd: UsdNanos::from_nanos(1_000).unwrap(),
             basis: None,
+            usage_status: Default::default(),
         };
         let envelope = settled_envelope(
             RuntimeResultStatus::Completed,

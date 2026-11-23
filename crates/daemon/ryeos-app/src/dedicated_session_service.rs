@@ -6818,40 +6818,214 @@ pub struct SessionStatePolicy {
     /// retirement; `terminal` has no worker left to retire.
     pub retires_before_capture: bool,
     pub root_resume: SessionRootResume,
-}
-
-const fn session_policy(
-    state: &'static str,
-    retires_before_capture: bool,
-    root_resume: SessionRootResume,
-) -> SessionStatePolicy {
-    SessionStatePolicy {
-        state,
-        retires_before_capture,
-        root_resume,
-    }
+    /// A session in this state whose worker is gone (or never attached) may be
+    /// settled terminal from local rows alone once its ground is proved. The
+    /// candidate-holding states are excluded: their settlement is the
+    /// candidate path's.
+    pub settles_without_worker: bool,
+    /// The abandoned-worker fence moves a session of this state to
+    /// `recovering` (or `outcome_unknown`). `false` states are left to their
+    /// own path and the fence refuses them: the candidate-holding states and
+    /// `terminal`. A candidate state never meets a live worker today (its
+    /// worker is dead and reaped before the session leaves `recovering` for
+    /// the candidate path), so the refusal is a guard, not a behaviour.
+    pub worker_fence_moves_session: bool,
+    /// A session of this state that names no worker identity may be settled
+    /// terminal by the unattached settlement. It is `settles_without_worker`
+    /// less `binding`: a binding session has already recorded the worker it is
+    /// binding, so it is never unattached.
+    pub settles_unattached: bool,
+    /// A session of this state keeps its credential profile's lock against the
+    /// boot orphan release even when no worker row, session worker identity or
+    /// reservation names the lock: its start may have contacted a worker it
+    /// has not recorded yet (`admitted`, `binding`) or never settled whether it
+    /// did (`outcome_unknown`). A `recovering` session recorded its worker, so
+    /// its claim on the lock is through that worker identity.
+    pub start_claims_profile_lock: bool,
 }
 
 /// One row per dedicated-session state, pinned to the runtime schema's state
 /// set by a test. Every state-keyed decision reads this table.
 pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
-    session_policy("admitted", true, SessionRootResume::Resume),
-    session_policy("binding", true, SessionRootResume::Resume),
-    session_policy("idle", true, SessionRootResume::Resume),
-    session_policy("turn_running", true, SessionRootResume::Resume),
-    session_policy("awaiting_approval", true, SessionRootResume::Resume),
-    session_policy("recovering", true, SessionRootResume::Resume),
-    session_policy("outcome_unknown", true, SessionRootResume::Resume),
-    session_policy("draining", true, SessionRootResume::Resume),
-    session_policy("freezing", false, SessionRootResume::Hold),
-    session_policy("frozen", false, SessionRootResume::Hold),
-    session_policy("verifying", false, SessionRootResume::Hold),
-    session_policy("qualifying", false, SessionRootResume::Hold),
-    session_policy("publish_ready", false, SessionRootResume::Hold),
-    session_policy("publishing", false, SessionRootResume::Hold),
-    session_policy("discarding", false, SessionRootResume::Hold),
-    session_policy("terminal", false, SessionRootResume::Finalise),
+    SessionStatePolicy {
+        state: "admitted",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "binding",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "idle",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "turn_running",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "awaiting_approval",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "recovering",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "outcome_unknown",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: true,
+        settles_unattached: true,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: true,
+    },
+    SessionStatePolicy {
+        state: "draining",
+        retires_before_capture: true,
+        root_resume: SessionRootResume::Resume,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: true,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "freezing",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "frozen",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "verifying",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "qualifying",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "publish_ready",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "publishing",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "discarding",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Hold,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
+    SessionStatePolicy {
+        state: "terminal",
+        retires_before_capture: false,
+        root_resume: SessionRootResume::Finalise,
+        settles_without_worker: false,
+        settles_unattached: false,
+        worker_fence_moves_session: false,
+        start_claims_profile_lock: false,
+    },
 ];
+
+/// The states a policy column selects, as an SQL list. Every element is a
+/// static state name from [`SESSION_STATE_POLICY`], so the list needs no
+/// escaping.
+fn states_sql(selected: impl Fn(&SessionStatePolicy) -> bool) -> String {
+    SESSION_STATE_POLICY
+        .iter()
+        .filter(|policy| selected(policy))
+        .map(|policy| format!("'{}'", policy.state))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The SQL list of states the abandoned-worker fence moves.
+pub fn worker_fence_moved_states_sql() -> String {
+    states_sql(|policy| policy.worker_fence_moves_session)
+}
+
+/// The SQL list of states a failed start may settle: a session with no live
+/// worker settles from local rows.
+pub fn failed_start_settled_states_sql() -> String {
+    states_sql(|policy| policy.settles_without_worker)
+}
+
+/// The SQL list of states the unattached settlement may settle.
+pub fn unattached_settled_states_sql() -> String {
+    states_sql(|policy| policy.settles_unattached)
+}
+
+/// The SQL list of states whose start keeps the profile lock against the boot
+/// orphan release.
+pub fn start_claimed_lock_states_sql() -> String {
+    states_sql(|policy| policy.start_claims_profile_lock)
+}
 
 fn session_state_policy(session_state: &str) -> Option<&'static SessionStatePolicy> {
     SESSION_STATE_POLICY
@@ -6874,6 +7048,195 @@ pub fn session_root_resume(session_state: Option<&str>) -> SessionRootResume {
             session_state_policy(state).map_or(SessionRootResume::Hold, |policy| policy.root_resume)
         }
     }
+}
+
+/// Typed terminal reason of a session settled because its external
+/// allocation reached a settled phase while no local holding was ever
+/// recorded.
+pub const SESSION_SETTLED_ALLOCATION_REASON: &str = "external_allocation_settled";
+/// Typed terminal reason of a session settled because reconcile finalised its
+/// root thread.
+pub const SESSION_SETTLED_ROOT_FINALIZED_REASON: &str = "root_finalized";
+
+/// What proves that a session with no live worker may be settled from local
+/// rows alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSettleGround {
+    /// The session's external allocation is settled (provider terminal
+    /// observed, or never contacted). Required: an allocation row exists.
+    AllocationSettled,
+    /// Reconcile finalised the session's root thread, so nothing will run the
+    /// session again. An allocation, if any, must be settled.
+    RootFinalized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLocalSettle {
+    /// The session is terminal and its credential lock released.
+    Settled,
+    /// The root was finalised while the session's worker was not proved gone,
+    /// and the worker's retirement was not proved either: the worker row is
+    /// fenced as unproved and the session and its credential lock stay held
+    /// for the paths that own an unproved worker.
+    WorkerFenced,
+    /// Nothing was changed; the reason names the unmet precondition.
+    Skipped(&'static str),
+}
+
+/// Settle a dedicated session whose worker is gone, from local rows only (no
+/// provider I/O): the session goes terminal with a typed reason and its
+/// credential lock is released in the same runtime-database transaction as the
+/// transition, through the writer that already carries the CAS guards. A
+/// session that recorded a worker scope or trusted holding is left to the
+/// holding-proof paths. A session whose worker is not proved dead and reaped is
+/// left to the worker fence, except on the `RootFinalized` ground: nothing
+/// will drive that session's worker again, so a running or recoverable session
+/// has its worker retired by its recorded process identity (no provider I/O)
+/// and, on a proved reap, is settled; an unproved reap fences the worker and
+/// keeps the credential lock. Candidate-holding states are never touched.
+pub fn settle_session_without_worker(
+    state: &AppState,
+    placement_thread_id: &str,
+    ground: SessionSettleGround,
+) -> Result<SessionLocalSettle> {
+    let Some(session) = state.state_store.dedicated_session(placement_thread_id)? else {
+        return Ok(SessionLocalSettle::Skipped("no_session"));
+    };
+    let allocation = state.state_store.external_allocation(placement_thread_id)?;
+    match (&allocation, ground) {
+        (Some(record), _) if !record.phase.is_settled() => {
+            return Ok(SessionLocalSettle::Skipped("allocation_unsettled"));
+        }
+        (None, SessionSettleGround::AllocationSettled) => {
+            return Ok(SessionLocalSettle::Skipped("no_allocation"));
+        }
+        _ => {}
+    }
+    let reason = match ground {
+        SessionSettleGround::AllocationSettled => SESSION_SETTLED_ALLOCATION_REASON,
+        SessionSettleGround::RootFinalized => SESSION_SETTLED_ROOT_FINALIZED_REASON,
+    };
+    let _credential_operation =
+        acquire_credential_profile_operation_sync(&session.credential_profile_id);
+    if session.state == "terminal" {
+        // Settled earlier; only the idempotent lock cleanup can remain.
+        if let Some(worker_id) = session.worker_instance_id.as_deref() {
+            let reaped = state
+                .state_store
+                .worker_process(worker_id)?
+                .is_none_or(|worker| {
+                    worker.state == WorkerProcessState::Dead && worker.cleanup_state == "reaped"
+                });
+            if !reaped {
+                return Ok(SessionLocalSettle::Skipped("worker_not_reaped"));
+            }
+            finish_terminal_credential_cleanup(state, &session)?;
+        }
+        return Ok(SessionLocalSettle::Settled);
+    }
+    if ground == SessionSettleGround::RootFinalized
+        && session_state_policy(&session.state)
+            .is_some_and(|policy| policy.worker_fence_moves_session)
+        && let (Some(worker_id), Some(epoch)) = (
+            session.worker_instance_id.as_deref(),
+            session.worker_boot_epoch,
+        )
+        && let Some(worker) = state.state_store.worker_process(worker_id)?
+        && !(worker.state == WorkerProcessState::Dead && worker.cleanup_state == "reaped")
+    {
+        return retire_worker_of_finalized_root(state, &session, &worker, epoch, reason);
+    }
+    if !session_state_policy(&session.state).is_some_and(|policy| policy.settles_without_worker) {
+        return Ok(SessionLocalSettle::Skipped("state_not_settleable"));
+    }
+    match (
+        session.worker_instance_id.as_deref(),
+        session.worker_boot_epoch,
+    ) {
+        (Some(worker_id), Some(epoch)) => match state.state_store.worker_process(worker_id)? {
+            None => {
+                if state
+                    .state_store
+                    .dedicated_worker_scope(placement_thread_id, worker_id, epoch)?
+                    .is_some()
+                    || state
+                        .state_store
+                        .dedicated_worker_trusted_holding(placement_thread_id, worker_id, epoch)?
+                        .is_some()
+                {
+                    return Ok(SessionLocalSettle::Skipped("holding_recorded"));
+                }
+                state.state_store.fail_dedicated_session_start(
+                    placement_thread_id,
+                    worker_id,
+                    epoch,
+                    reason,
+                    true,
+                )?;
+            }
+            Some(worker)
+                if worker.state == WorkerProcessState::Dead
+                    && worker.cleanup_state == "reaped"
+                    && session.state == "recovering" =>
+            {
+                state.state_store.terminalize_dedicated_session(
+                    placement_thread_id,
+                    worker_id,
+                    epoch,
+                    reason,
+                )?;
+                finish_terminal_credential_cleanup(state, &session)?;
+            }
+            Some(_) => return Ok(SessionLocalSettle::Skipped("worker_not_proved_gone")),
+        },
+        (None, None) => {
+            state
+                .state_store
+                .terminalize_unattached_dedicated_session(placement_thread_id, reason)?;
+        }
+        _ => return Ok(SessionLocalSettle::Skipped("partial_worker_identity")),
+    }
+    Ok(SessionLocalSettle::Settled)
+}
+
+/// Retire the live worker of a session whose root reconcile finalised, then
+/// settle the session. The caller holds the credential-profile operation lock.
+/// Reuses [`retire_worker_process`]; an unproved reap fences the worker row
+/// (unless an earlier fence already did) and keeps the credential lock.
+fn retire_worker_of_finalized_root(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker: &WorkerProcessRecord,
+    epoch: u64,
+    reason: &str,
+) -> Result<SessionLocalSettle> {
+    let cleanup_state = retire_worker_process(state, &session.placement_thread_id, worker)?;
+    if cleanup_state != "reaped" {
+        if worker.state != WorkerProcessState::Dead {
+            state.state_store.fence_abandoned_worker_process(
+                &worker.worker_instance_id,
+                &session.placement_thread_id,
+                epoch,
+                cleanup_state,
+            )?;
+        }
+        return Ok(SessionLocalSettle::WorkerFenced);
+    }
+    state.state_store.settle_worker_process(
+        &worker.worker_instance_id,
+        &session.placement_thread_id,
+        epoch,
+        "reaped",
+        reason,
+    )?;
+    state.state_store.terminalize_dedicated_session(
+        &session.placement_thread_id,
+        &worker.worker_instance_id,
+        epoch,
+        reason,
+    )?;
+    finish_terminal_credential_cleanup(state, session)?;
+    Ok(SessionLocalSettle::Settled)
 }
 
 /// Node-owned owner-drop cancellation path used by the root execution guard.
@@ -6975,6 +7338,88 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_worker_fence_moves_only_running_or_recoverable_sessions() {
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(
+                policy.worker_fence_moves_session,
+                matches!(
+                    policy.state,
+                    "admitted"
+                        | "binding"
+                        | "idle"
+                        | "turn_running"
+                        | "awaiting_approval"
+                        | "recovering"
+                        | "outcome_unknown"
+                        | "draining"
+                ),
+                "{}",
+                policy.state
+            );
+        }
+        let list = worker_fence_moved_states_sql();
+        assert_eq!(list.split(',').count(), 8);
+        for excluded in [
+            "terminal",
+            "frozen",
+            "publish_ready",
+            "freezing",
+            "verifying",
+            "qualifying",
+            "publishing",
+            "discarding",
+        ] {
+            assert!(!list.contains(excluded), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn only_running_or_recoverable_states_settle_without_a_worker() {
+        let settleable: Vec<&str> = SESSION_STATE_POLICY
+            .iter()
+            .filter(|policy| policy.settles_without_worker)
+            .map(|policy| policy.state)
+            .collect();
+        assert_eq!(
+            settleable,
+            ["admitted", "binding", "recovering", "outcome_unknown"]
+        );
+    }
+
+    #[test]
+    fn every_generated_settle_list_is_exactly_the_states_it_names() {
+        // Each list was a literal in its SQL before the table generated it;
+        // these are those literals, in table order.
+        assert_eq!(
+            worker_fence_moved_states_sql(),
+            "'admitted','binding','idle','turn_running','awaiting_approval','recovering',\
+             'outcome_unknown','draining'"
+        );
+        assert_eq!(
+            failed_start_settled_states_sql(),
+            "'admitted','binding','recovering','outcome_unknown'"
+        );
+        assert_eq!(
+            unattached_settled_states_sql(),
+            "'admitted','recovering','outcome_unknown'"
+        );
+        assert_eq!(
+            start_claimed_lock_states_sql(),
+            "'admitted','binding','outcome_unknown'"
+        );
+        // The unattached settlement is the worker-less settlement less the one
+        // state that has always recorded its worker.
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(
+                policy.settles_unattached,
+                policy.settles_without_worker && policy.state != "binding",
+                "{}",
+                policy.state
+            );
+        }
+    }
 
     fn bounded(
         kind: DedicatedSessionBoundedOutcomeKind,

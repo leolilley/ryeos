@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T02:48:16Z:0b206516cd944a612d66b629ac39d844049ee364b5e9a7c808bfc01633694ea4:yybHMMcbTbCf7qDbgBr+zpcu7H3jV8a7XyRJIAkqzzQbOLvDwnTzlPrYNCWtd2ODGFYm42qaFJsFTs8Zl26YBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T02:35:38Z:dabd3483b3bdde128ea438d9683422d626bfc8824638e2d7eb03b7f6239d816f:4jw1G2gPd62oMgheymZOO674hJmNF+RBMtRLnL3ZAvuwQS/M3/2nTuXxd8qjqKcwlVD/5B6WP8iOHPjl9VtsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -204,7 +204,9 @@ events:
           tone: [{default: accent}]
           project: {headline: {join: [{path: item.name, prefix: "binding changed: "}]}}
 
-  # A failed thread writes two terminal events; both address one outcome entry.
+  # A failed thread writes one terminal event, the daemon's finalization; its
+  # `error` carries the typed failure, so the reason reads `payload.error.summary`.
+  # `payload.message` is kept as the first choice for older recorded chains.
   thread_failed:
     - when: {on_spine: true}
       emit:

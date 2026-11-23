@@ -1684,6 +1684,7 @@ mod tests {
             reason,
             failure_digest: digest.clone(),
             retry_policy_digest: digest,
+            retry_after_ms: None,
         }
     }
 

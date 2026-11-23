@@ -6,6 +6,7 @@ pub mod parts_builder;
 pub mod prepared;
 pub mod reasoning_capture;
 pub mod reasoning_replay;
+pub mod retry_after;
 pub mod streaming;
 pub mod tools;
 
