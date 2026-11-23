@@ -46,6 +46,9 @@ pub struct ThreadEventHub {
     /// keep using the keyed lanes.
     all: broadcast::Sender<PersistedEventRecord>,
     capacity: usize,
+    /// The `item_revised` hub, beside the thread lanes with the same
+    /// capacity and lag rule.
+    item_revised: Arc<crate::item_revised::ItemRevisedHub>,
 }
 
 impl ThreadEventHub {
@@ -55,7 +58,13 @@ impl ThreadEventHub {
             inner: Mutex::new(HashMap::new()),
             all,
             capacity,
+            item_revised: Arc::new(crate::item_revised::ItemRevisedHub::new(capacity)),
         }
+    }
+
+    /// The hub that announces new revisions of project items.
+    pub fn item_revisions(&self) -> &Arc<crate::item_revised::ItemRevisedHub> {
+        &self.item_revised
     }
 
     /// Subscribe to every published event (the firehose lane).

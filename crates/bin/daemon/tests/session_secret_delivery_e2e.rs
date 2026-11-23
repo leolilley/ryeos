@@ -98,7 +98,10 @@ if slot is not None:
 report['worker_fds_after_close'] = descriptor_targets()
 if NAME in values:
     report['worker_sha256'] = hashlib.sha256(values[NAME].encode()).hexdigest()
-    script = 'printf %s "$' + NAME + '" | sha256sum | cut -d" " -f1; for f in /proc/self/fd/*; do readlink "$f"; done'
+    # The shell's own glob-expansion directory descriptor is listed but is
+    # already closed when its entry is read, so that readlink fails; the probe
+    # reports descriptors, not the listing's exit status.
+    script = 'printf %s "$' + NAME + '" | sha256sum | cut -d" " -f1; for f in /proc/self/fd/*; do readlink "$f" || true; done'
     child = subprocess.run(
         ['/bin/sh', '-c', script],
         env={'PATH': '/usr/bin:/bin', NAME: values[NAME]},
@@ -585,7 +588,10 @@ async fn launch_session(
                 .to_string()
                 .contains("persistent-session dependency `session_worker`")
         {
-            eprintln!("session secret suite skipped: host cannot qualify process scopes");
+            // Fails the test when the real process-scope mode is selected.
+            common::process_scopes::skip_or_fail_unqualified(&format!(
+                "session secret suite: {launch}\n{stderr}"
+            ));
             return Ok(Launch::HostUnqualified);
         }
         return Ok(Launch::Rejected(format!("{status}: {launch}\n{stderr}")));
@@ -602,7 +608,7 @@ async fn launch_session(
 }
 
 fn fixture_project() -> Result<tempfile::TempDir> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -665,6 +671,42 @@ async fn refusal_evidence(
     {
         text.push_str(&status.to_string());
     }
+    text
+}
+
+/// What the node shows about a session that never accepted its first command:
+/// the retained thread, the session status, and the daemon log without its
+/// polling noise.
+async fn session_start_evidence(daemon: &mut DaemonHarness, chain_root_id: &str) -> String {
+    let mut text = String::new();
+    if let Ok(Some(thread)) = daemon.get_thread(chain_root_id).await {
+        text.push_str(&format!("thread: {thread}\n"));
+    }
+    if let Ok((_, status)) = daemon
+        .post_execute(
+            "service:worker-executions/status",
+            ".",
+            json!({"chain_root_id": chain_root_id}),
+        )
+        .await
+    {
+        text.push_str(&format!("status: {status}\n"));
+    }
+    let stderr = daemon.drain_stderr_nonblocking().await;
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| {
+            !line.contains("resolved project execution context") && !line.contains("cache metric")
+        })
+        .collect();
+    for line in lines
+        .iter()
+        .filter(|line| line.contains("session_secret_") || line.contains("native resume failed"))
+    {
+        text.push_str(&format!("refusal in daemon log: {line}\n"));
+    }
+    text.push_str("daemon log tail:\n");
+    text.push_str(&lines[lines.len().saturating_sub(40)..].join("\n"));
     text
 }
 
@@ -798,7 +840,7 @@ async fn read_report(path: &Path) -> Result<Value> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let (mut daemon, _operator) =
@@ -814,7 +856,13 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
         Launch::HostUnqualified => return Ok(()),
         Launch::Rejected(text) => anyhow::bail!("session launch was rejected: {text}"),
     };
-    first_session_command(&daemon, &chain_root_id, "session-secret-start").await?;
+    if let Err(error) = first_session_command(&daemon, &chain_root_id, "session-secret-start").await
+    {
+        anyhow::bail!(
+            "{error:#}\n{}",
+            session_start_evidence(&mut daemon, &chain_root_id).await
+        );
+    }
     let report = read_report(&report_path).await?;
 
     // 1. The workload received the value: its digest matches, both as the
@@ -834,7 +882,14 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
     assert_eq!(report["secret_fd_sealed"], json!(true), "{report:#}");
 
     // 7. Neither the worker after adopting the descriptor nor the workload
-    // child holds a sealed descriptor.
+    // child holds the sealed secret descriptor. The worker may hold other
+    // memfds (on a real host its own program is a descriptor-bound memfd), so
+    // the check names the sealed secret's own memfd, taken from the report.
+    let sealed = report["secret_fd_target"]
+        .as_str()
+        .map(|target| target.trim_end_matches(" (deleted)").to_owned())
+        .context("the report names no sealed secret descriptor")?;
+    assert!(sealed.starts_with("/memfd:"), "{report:#}");
     for holder in ["worker_fds_after_close", "child_fds"] {
         let targets = report[holder]
             .as_array()
@@ -844,8 +899,27 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
             targets
                 .iter()
                 .filter_map(Value::as_str)
-                .all(|target| !target.contains("memfd:")),
-            "{holder} holds a sealed descriptor: {report:#}"
+                .all(|target| target.trim_end_matches(" (deleted)") != sealed),
+            "{holder} holds the sealed secret descriptor: {report:#}"
+        );
+    }
+    // The node's own executable image never reaches a worker or its child.
+    for holder in ["worker_fds_after_close", "child_fds"] {
+        let image_descriptors: Vec<&str> = report[holder]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|target| {
+                Path::new(target.trim_end_matches(" (deleted)"))
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ryeosd"))
+            })
+            .collect();
+        assert!(
+            image_descriptors.is_empty(),
+            "{holder} holds the node's executable image: {image_descriptors:?}"
         );
     }
     assert!(
@@ -858,7 +932,7 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            json!({"chain_root_id": chain_root_id, "reason": "completed"}),
+            json!({"chain_root_id": chain_root_id, "reason": "cancelled"}),
         )
         .await?;
     anyhow::ensure!(
@@ -872,7 +946,7 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_name_the_vault_lacks_refuses_as_missing() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let case = Case {
@@ -898,7 +972,7 @@ async fn a_name_the_vault_lacks_refuses_as_missing() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_recipient_the_ceiling_does_not_admit_is_refused() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let mut case = Case::holding(SECRET_VALUE);
@@ -923,7 +997,7 @@ async fn a_recipient_the_ceiling_does_not_admit_is_refused() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_oversize_value_is_refused_as_unbounded() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     // One byte over the 16 KiB bound, built from the distinctive value so the
@@ -951,7 +1025,7 @@ async fn an_oversize_value_is_refused_as_unbounded() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_value_with_control_characters_is_refused_as_unbounded() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let with_control = format!("{SECRET_VALUE}\u{7}-after-the-bell");
@@ -978,7 +1052,7 @@ async fn a_value_with_control_characters_is_refused_as_unbounded() -> Result<()>
 /// `session_secret_revoked` instead of replaying the earlier value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() -> Result<()> {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let (mut daemon, operator) =
@@ -998,6 +1072,7 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
     read_report(&report_path).await?;
 
     daemon.kill_daemon().await?;
+    common::process_scopes::reclaim_for_test(&daemon.state_path)?;
     // The first worker's report must not be rewritten: a respawn would
     // write it again.
     std::fs::remove_file(&report_path).context("clear the first worker's report")?;
@@ -1007,29 +1082,55 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
     common::fast_fixture::seal_initialized_state(&daemon.state_path)?;
     daemon.respawn_with(|_| {}).await?;
 
+    // A restarted session is `recovering`; the node accepts no caller command
+    // for it except an exact settled replay, because the re-attach is the
+    // runtime's own. A caller command is refused for that stated reason.
+    let (status, response) = daemon
+        .post_execute(
+            "service:worker-executions/command",
+            ".",
+            json!({
+                "chain_root_id": chain_root_id,
+                "idempotency_key": "session-secret-after-revoke",
+                "route_id": "session.inspect",
+                "payload": {},
+            }),
+        )
+        .await?;
+    anyhow::ensure!(
+        !status.is_success()
+            && response.to_string().contains(
+                "accept only an exact settled replay or the runtime-owned reattach route"
+            ),
+        "a caller command on the recovering session was not refused as runtime-owned: {status} {response}"
+    );
+    // The node drives the recovery itself: after the restart the reconciler
+    // resumes the retained session, the resume re-delivers its secrets, and the
+    // withdrawn recipient rule refuses that delivery as `session_secret_revoked`
+    // (the worker runtime's `request_failed` names it in the root thread's
+    // result). The refused resume settles the session as `terminal`, cancelled.
     let mut evidence = String::new();
-    for attempt in 0..240 {
-        let (_, response) = daemon
-            .post_execute(
-                "service:worker-executions/command",
-                ".",
-                json!({
-                    "chain_root_id": chain_root_id,
-                    "idempotency_key": format!("session-secret-after-revoke-{attempt}"),
-                    "route_id": "session.inspect",
-                    "payload": {},
-                }),
-            )
-            .await?;
-        evidence = refusal_evidence(&mut daemon, &chain_root_id, &response.to_string()).await;
+    for _ in 0..240 {
+        evidence = session_start_evidence(&mut daemon, &chain_root_id).await;
         if evidence.contains(REVOKED_CODE) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    for expected in [
+        REVOKED_CODE,
+        "vault_name_not_delivered",
+        "\"state\":\"terminal\"",
+        "\"terminal_reason\":\"cancelled\"",
+    ] {
+        anyhow::ensure!(
+            evidence.contains(expected),
+            "recovery did not report `{expected}`: {evidence}"
+        );
+    }
     anyhow::ensure!(
-        evidence.contains(REVOKED_CODE),
-        "recovery never reported `{REVOKED_CODE}`: {evidence}"
+        !evidence.contains(SECRET_VALUE),
+        "the recovery evidence carries the secret value"
     );
     anyhow::ensure!(
         !report_path.exists(),
@@ -1055,7 +1156,7 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_terminal() -> Result<()>
 {
-    let reports = tempfile::tempdir()?;
+    let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
     let (mut daemon, _operator) =
@@ -1075,6 +1176,7 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
     read_report(&report_path).await?;
 
     daemon.kill_daemon().await?;
+    common::process_scopes::reclaim_for_test(&daemon.state_path)?;
     std::fs::remove_file(&report_path).context("clear the first worker's report")?;
     {
         let store = common::open_stopped_node_store(&daemon.state_path)?;
@@ -1121,6 +1223,7 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
         "the ended session was resumed:\n{log}"
     );
     daemon.stop_gracefully().await?;
+    common::process_scopes::reclaim_for_test(&daemon.state_path)?;
     let store = common::open_stopped_node_store(&daemon.state_path)?;
     let result = store
         .get_thread_result(&chain_root_id)?
@@ -1135,9 +1238,19 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
     let session = store
         .dedicated_session(&chain_root_id)?
         .context("the session was lost")?;
+    // A settled session keeps the id of a worker whose process row the node
+    // retains as evidence (the store clears it only when no row remains); what
+    // must hold is that the retained worker is settled dead and reaped.
+    let retained_worker_settled = match session.worker_instance_id.as_deref() {
+        None => true,
+        Some(worker) => store.worker_process(worker)?.is_none_or(|row| {
+            row.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+                && row.cleanup_state == "reaped"
+        }),
+    };
     anyhow::ensure!(
-        session.state == "terminal" && session.worker_instance_id.is_none(),
-        "the ended session did not stay terminal: {session:?}"
+        session.state == "terminal" && retained_worker_settled,
+        "the ended session did not stay terminal with its worker settled: {session:?}"
     );
     Ok(())
 }

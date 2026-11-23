@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T11:43:18Z:4dca5ee5ae794fe2cb61b430082a6bd1ba62c3276032539065b4eb598959b472:JTSQVO/wY9ul13lPcqkE/0RG4XHtLz/8YdkM40YD/rTb4jpvsJBD4A49vKXAlePtFIQq8VRuL0dOtIdO6+hLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T01:03:46Z:d2782fac5c33f73012612a3e0eca70eaccbbafbda8b84a36fa7c88a0a85a9075:yM2+3l3uY0rb/2124v40gLTgu+RtG1y10Rr4V44l8vJctRooJ52gcwgWAKKWxesKxY0237T4qvaIgz5Bz89vAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -180,6 +180,17 @@ An image that fails a check is dropped and the result names a stable code:
 `image_limit` or `image_input_unsupported`. A malformed envelope is an error result,
 `tool_result_parts_invalid`.
 
+What the model is shown. A tool's own result is shown as the tool returned it;
+the runtime's completion record is not shown. A tool that fails (a non-zero
+exit, a soft failure, a timeout) is shown as
+`{"error": {"code": ..., "message": ...}}`, the same shape every other failed
+call has, and its result is recorded with status `error`. A successful tool
+must not return a top-level `error` key: it reads like a failure to the model
+and, on providers with no tool-error flag, is indistinguishable from one. A
+tool that wants plain-text output returns
+`{"result_parts": [{"type": "text", "text": "..."}]}`, which the model receives
+as that text; no other key may sit beside `result_parts`.
+
 ```yaml
 tool_images:
   max_bytes_per_image: 2097152     # keep within the node's thread_attachments limit
@@ -308,7 +319,9 @@ over `window_turns`), is refused at load.
 When the run has a turn limit, the last turn it allows is a wrap-up turn: before
 that turn the model is told, once, as a durable harness input (kind
 `limit_wrap_up`), that it is the last and to finish. The limit stays a hard cap:
-a run that does not finish on that turn still ends with `turn limit exceeded`.
+a run that does not finish on that turn still ends with the typed failure `turn_limit_exceeded`. The other limits fail the
+same way, each with its own code: `token_limit_exceeded`, `spend_limit_exceeded`,
+`spawn_limit_exceeded`, `duration_limit_exceeded` and `depth_limit_exceeded`.
 With a limit of one turn the first turn carries the notice. When the run
 deadline's wrap-up phase falls on the same turn, one input (kind
 `deadline_limit_wrap_up`) names both reasons.

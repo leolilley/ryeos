@@ -78,7 +78,7 @@ pub enum Envelope {
 
 /// Whether a completion record reports a tool that ran to success: a success
 /// outcome and no error.
-fn completion_succeeded(record: &serde_json::Map<String, Value>) -> bool {
+pub(crate) fn completion_succeeded(record: &serde_json::Map<String, Value>) -> bool {
     matches!(
         record.get("outcome_code").and_then(Value::as_str),
         Some("success" | "exit:0")

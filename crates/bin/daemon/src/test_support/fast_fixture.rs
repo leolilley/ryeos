@@ -1316,6 +1316,12 @@ pub fn node_isolation_mode(state_path: &Path) -> Result<String> {
 /// authored profiles keep their floors; tests of per-scope containment need
 /// an administrator-prepared host-backed node, not this harness.
 fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
+    // The real process-scope mode starts the node under a protected
+    // host-runtime binding that can qualify the per-scope contract, so the
+    // authored member is kept as it is.
+    if super::process_scopes::required() {
+        return Ok(());
+    }
     let class = fixture_host_class_of_policy(isolation)?;
     let policy = isolation
         .pointer_mut(&format!("/policy/host_classes/{class}"))

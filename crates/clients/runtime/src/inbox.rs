@@ -400,7 +400,8 @@ pub fn result_kind_for(effect: &RyeOsEffect) -> RyeOsEffectResultKind {
         | RyeOsEffectKind::CopyToClipboard { .. }
         | RyeOsEffectKind::OpenUrl { .. }
         | RyeOsEffectKind::ReplaceSession { .. }
-        | RyeOsEffectKind::ReleaseBindingAttachment { .. } => RyeOsEffectResultKind::BrowserOnly,
+        | RyeOsEffectKind::ReleaseBindingAttachment { .. }
+        | RyeOsEffectKind::ReviseBindingAttachment { .. } => RyeOsEffectResultKind::BrowserOnly,
     }
 }
 

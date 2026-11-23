@@ -1,4 +1,5 @@
-# ryeos:signed:2026-11-22T21:38:02Z:11132a252c3c04fd116924569bfc289399e7ce938723a911c7930d0160c0537b:kWWxOPqtZRYxmTQQn9I1v5HWpTxQRcrNmoPD87HjSQkSOgguoDegm2UqDKNWWG+ZT22SD4WU1n3M8I8ITx78BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-23T04:38:05Z:ff989c3240aa2d10e9185c9a1a426e9e106abd3fe205dc69c357949005783f1a:zJmgZ/+w+aUDHhv3nM1GyLTUHVqJkq4Plw7cQ77EdTLs66hVdFojNWg0krI1IY+iG5S5XmKEGK83m++ZvusVCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+||||||| 36cbee82c
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -654,9 +655,12 @@ policies:
           - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints. Thread lifecycle hints keep
-      # the thread, its event name, status and time. Activity hints keep only
-      # their kind, so no thread list rides on them.
+      # The session stream carries thread hints and item hints. Thread
+      # lifecycle hints keep the thread, its event name, status and time.
+      # Activity hints keep only their kind, so no thread list rides on them.
+      # An item hint keeps the item ref, digest, revision and change set id;
+      # the daemon sends it only to a session whose own bindings name that
+      # item, and it carries no item content.
       - target: route:ui/events/session
         classes: [local_operator, hosted_principal]
         keep:
@@ -666,6 +670,10 @@ policies:
           - /payload/event_type
           - /payload/status
           - /payload/updated_at
+          - /payload/item_ref
+          - /payload/digest
+          - /payload/revision
+          - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
       # The pending approvals of a hosted work chain, as the Approvals view
