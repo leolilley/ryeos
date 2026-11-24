@@ -1,6 +1,7 @@
-# ryeos:signed:2026-11-13T10:01:36Z:034ef553bb83d8e89a6ee6445c07f67b8bfa8f20a54fe379a25b9487381c5df8:TGkEXt7twVKhsUBHsFRyHyz0yl19H+5WasyyupAiZJ+i5Sa43Eqw0cRsTryA0ElEfWcojn5Jk5WuMNg7n6bICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:01928a6786035c018959d466b797c90d7f0f6e31d959a183a35cb3d906e4c69c:AQ6rDEX9vh1BdkzdcVzvINOCFEMOIODRUkhybNwjYDWEZ+HMAfpIbvUADJPixmhw3aDREVNH/irbMnR5OmLEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [admission, submit]
 description: Admit a local CAS root, such as a captured product witness, under a node admission policy
+human_terminal_only: true
 defaults:
   policy: local-node-v2
   claim: accepted

@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:06Z:420d259ecd1230947bbe94eac307f8c86da51c5202bea17dbca5f000374c7646:Wq9osqX9hhmL8j2uxCKOwoRKRZ9ol0qH4jQCuhAnWG3OGe/99JLOt/0JNIWUpwUO/ych+wlcJ6j7EIQB9ajxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:8912a80218dd6dc0847edb32684c007251bb4d622bc5c04fcf534d33a49fd87b:xsZ810E/be2SeizpYKMdiCFz63yNd4ns/Cdr+DqjB0ekFRQdfcSwcufK1l8nzIcE/+oUfDUECcY8OPISUkidBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - authorize-key
 description: Authorize a key with scoped capabilities
+human_terminal_only: true
 dispatch:
   kind: execute_ref
   execute: service:identity/authorize-key

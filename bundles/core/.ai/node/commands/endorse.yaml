@@ -1,7 +1,8 @@
-# ryeos:signed:2026-11-20T23:16:10Z:2a95715fdf7c4a9d5ebfcbaf12af032c0e6ca9cd3c87c5feafd7b9797e051a22:gydsNIC6jE0rbOkEwC0BrhsW34tJZFNfl124rS63CpQ+eqyqPDkcT2EWEGPX2vwvImTEJn3IlFBsGidXdV46Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:fabef5e61a2f817606f89e43ca1fa7648d1ed4e86315d318cb5901e3b4cb1723:Ef5hC59E53cMG1i5/OhdnaUJHwjm4DrdelGSxm4i+8YKdUsSqH6de2uOUxACcPdnGH8TErjCdZSQhk0PknD2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - endorse
 description: Endorse items the node's authoring key signed so the node trusts them, signing with your operator key in this CLI
+human_terminal_only: true
 help:
   usage: "ryeos --project <path> endorse --item <ref|path>... | --standing --kind <kind>... [--lifetime-secs <seconds>]"
   examples:

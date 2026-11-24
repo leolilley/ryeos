@@ -42,6 +42,13 @@ pub struct CommandDef {
     pub control_flags: Vec<CommandControlFlag>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<CommandProjectPolicy>,
+    /// The verb changes who or what the node trusts (a signature, an
+    /// endorsement, a key, a grant, a secret, installed code) or approves
+    /// something on a human's behalf, so it runs only from a human's terminal.
+    /// A caller that declares itself an agent (`RYEOS_CALLER=agent`, set by
+    /// the MCP server) is refused with `verb_needs_human_terminal`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human_terminal_only: bool,
     pub dispatch: CommandDispatch,
     #[serde(skip)]
     pub source_file: PathBuf,
@@ -825,6 +832,7 @@ mod tests {
                 execute: format!("tool:test/{name}"),
                 availability: CommandAvailability::Auto,
             },
+            human_terminal_only: false,
             source_file: PathBuf::new(),
             provenance: CommandProvenance::default(),
         }

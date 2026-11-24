@@ -25,6 +25,18 @@ This means:
   * DO use it from a single-operator IDE harness (Claude Code,
     Cursor, etc.) on the operator's own machine.
 
+VERBS THAT NEED A HUMAN
+
+Every `ryeos` this server starts carries `RYEOS_CALLER=agent` (set over any
+inherited value; the tool passes only argv, so a call cannot unset it). The CLI
+refuses, with `verb_needs_human_terminal`, the verbs whose signed command items
+say `human_terminal_only` (endorse, sign, key and grant changes, secrets,
+bundle install, remote trust, approvals, credentials) and its hardcoded
+lifecycle trust commands, and any other verb that dispatches to the same
+service. That stops an honest agent steered by injected text into a trust
+change through this tool. It does not contain a hostile process on a node that
+does not enclose its runs: such a process can read the keys directly.
+
 The proper auth design (signed-request from delegated principal,
 audience binding, replay protection) is tracked in
 `.ai/knowledge/ryeos/future/mcp-server-auth.md` at the repository root.
@@ -49,6 +61,10 @@ from ryeosd_mcp import __version__
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 60.0
+# Tells the CLI its caller is an agent, so it refuses verbs that need a human's
+# terminal. See the module docstring.
+CALLER_ENV = "RYEOS_CALLER"
+CALLER_AGENT = "agent"
 TOOL_NAME = "cli"
 TOOL_DESCRIPTION = (
     "Run any Rye CLI verb. Verbs are loaded data-driven from signed "
@@ -141,6 +157,7 @@ async def _run_rye(
         bin_path,
         *args,
         cwd=project_path if project_path is not None else None,
+        env={**os.environ, CALLER_ENV: CALLER_AGENT},
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

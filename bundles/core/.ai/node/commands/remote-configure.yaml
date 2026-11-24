@@ -1,9 +1,10 @@
-# ryeos:signed:2026-11-13T09:57:23Z:e5cfd446dc53f67425c219d31d9564cfba25eb03d357b55dd360b2290dd32f34:fdvyawMH1U/7doyXBwEl5O7h/7SvY0gsD/LZr3ViQ9mFGyNN1ndFU5ec3Jeow34qO+JWSFdZx4dNNCEh3+eWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:5f74d6594c04d3258408cf2a9188157bba05174fcb0e44eb7437da5636688015:rQw9bPdZAacBmY2VhQ7hYFUma2kvPJrvl+RiloKYPx0Fo9eT7qcdGv5yTnBttIJtq8x2KqnnOrYRmEeNT1L3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - configure
 description: Add or update a remote node configuration; pin the remote key with
   --descriptor or --expect-fingerprint
+human_terminal_only: true
 forms:
 - slots:
   - field: remote

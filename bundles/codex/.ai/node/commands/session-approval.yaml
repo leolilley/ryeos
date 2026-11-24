@@ -1,6 +1,7 @@
-# ryeos:signed:2026-08-26T10:09:18Z:665f2135d822554c8e33ff88c1b264e399dcef5bf87bf55afe788f2c72667c80:tUk+om0JoPL8defL5C8UIVZh17KPAH/gTee6E7VrSd0Q0vJYzDpDZUfo98EbNBDHHhzqzcESJ65m866Urna4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:ea87ced779f8697074903a66b644b8916665b21a47206f2f342b4bd3927ecc07:rKivHQMyOWabE9LHM2cMaNYVmrdqNbsG2QwLHj+a+IL2IJxHCkecl7YQxz/tteCO6tBO4qgRf15R3xuPn4r9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, approval]
 description: "Resolve one digest-fenced Codex approval with an explicit boolean decision"
+human_terminal_only: true
 forms:
   - slots:
       - field: chain_root_id

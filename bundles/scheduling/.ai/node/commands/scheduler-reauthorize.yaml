@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-13T01:19:55Z:e93dd3891a0de655cdf457917a3c18b5a6c100982baaca75c6cf37d6d922b51b:eFkOWSDnwZPS/WCcCQ/l4XJ1YcinHFAOi/DDv9x5RSVHRwQmu8cXEj31xm9e88jwusbowmTiTePwhWpJXTQ5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:995709c7ec8ad1c5b4473bfff2ed3df6aea3a7228b302dee519fcc620d1b5a77:+CpeFwevAyk4jtCEV0iuVrFJoB2fhvBzRYwngAYQDKGBoEZp12Szix8PMu1tfW71H/C2i80zJKN3Gyia5nmwDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - reauthorize
 description: Re-pin a schedule to its owner's current grant generation
+human_terminal_only: true
 forms:
 - slots:
   - field: schedule_id

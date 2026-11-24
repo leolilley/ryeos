@@ -1361,6 +1361,7 @@ mod tests {
             control_flags: Vec::new(),
             project: None,
             dispatch: crate::CommandDispatch::Group,
+            human_terminal_only: false,
             source_file: std::path::PathBuf::new(),
             provenance: crate::CommandProvenance::default(),
         }

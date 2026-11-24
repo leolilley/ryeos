@@ -1,7 +1,8 @@
-# ryeos:signed:2026-11-14T11:51:10Z:db3629432aa2bd59216a71d99a881ffd9a19d33e3044ffbd4b0997b01f3fbe6c:iUT6ZCCBTHiBDTVJBOGFrdqi3TPADBiqDdQb5LWcx6eSPDOR9Dmkkm6ciKXZbQOW+XqcZvZKGZIqPAn1l8n8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:35f71448a91944ccde264d68eb399ab0f001238b12b89ea7ab37915afe3c33b7:rU5Vvul3kE48cdc1a2QQtgCaDki1/+TmHrl5eEqJy3X5FXjgovm9Ak0R3WPZPGmjR1ntUd37EsSQ4ME9r9PFBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - s
 description: Cryptographically sign one or more items or item globs by canonical ref or .ai path with your operator key, in this CLI
+human_terminal_only: true
 aliases:
 - tokens:
   - sign

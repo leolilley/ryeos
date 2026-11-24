@@ -161,6 +161,7 @@ mod tests {
                     execute: "tool:bundle/sign".into(),
                     availability: ryeos_runtime::CommandAvailability::Auto,
                 },
+                human_terminal_only: false,
                 source_file: PathBuf::from("/tmp/command.yaml"),
                 provenance: ryeos_runtime::CommandProvenance::default(),
             }],

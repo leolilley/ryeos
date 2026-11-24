@@ -1,9 +1,10 @@
-# ryeos:signed:2026-11-13T14:29:21Z:d69a4672b158b2e48940e6f0483fc74f69759fb5da9b551be70f24df62441d4f:Fi0MoMStXOrtvgAddpP3vqISWV25XqCWZUPaYAilAUSfJ30ypEv0IiGh5rk4iElVGiCHUpOBieFf8Zmh3nRsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:f6bffcd76bbe3d71013c473404dfa276c982faa5a29daac0058960500c6beca9:nh5nPRtPKPmQ3rE4jeIytk1zvWhDj3VhSGTF2MvXt75RTwvchx7HuRLAPhw+pzUVZm2oTOeLYirD68f95YddCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - delegation
 - revoke
 description: Revoke your delegation for a remote, on the remote and on this node
+human_terminal_only: true
 help:
   usage: "ryeos remote delegation revoke --remote <name> [--local-only]"
 parameter_binding:

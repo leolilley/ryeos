@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:06Z:c1500d75005e7a3beea643ffa602db64bc2d4ee52cb2024b5c76aaaafdc71d2a:vGpWppCYudmqSGxeBN7kRIMysanhKpJ82bsAljI39XDb3vCKlYq7IDoEdZAlj7Dq6zwwXIUo5AMjvU1Z2H00Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:ef8a238ce31abda825bfd3d97af144dd5ed615cbb1a2578027ffa3e9e6f2dd5b:X0zs+WcceDk/FRHA7828y1em+FZulPLt2IDDlP+95r++pF8wGr121jZWGA98hLL8qjZbBkw844+xWkp3NdrYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - install
 description: Install a bundle into the daemon's state
+human_terminal_only: true
 forms:
 - slots:
   - field: name

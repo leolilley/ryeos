@@ -1,9 +1,10 @@
-# ryeos:signed:2026-11-19T05:15:46Z:c58fd9014895f92717b6b71bd2be110ed498f9848b7f65520fa590e7fb24a840:M6uPhGILu9y3yP6y2+gEtbVWK98oJtAxwEid3REufL2Sjx2EESGpEli/VTUVSMzIyic9uAjekKkkVScVJldzDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:6cceb97d07e303ee2ab18a7f46d0f6808600f0b1ea5f86a09c3d9a46449e1053:qxViKaZxddIAgKFOIjR1dib8xKcj6CvGjSq4T0/+XP4xKydD/HvhBrZ24DJqR0O3QgFyhXmK4Zt34NJn3JbEDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - node
 - machine
 - remove
 description: Remove a machine declaration
+human_terminal_only: true
 forms:
 - slots:
   - field: label

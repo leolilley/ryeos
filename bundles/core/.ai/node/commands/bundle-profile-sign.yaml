@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-16T23:14:24Z:b82065901ea9e51fdc36159ca88d76abb98c14ccc43f1e156e7a9781a949863a:K2kRZhmKlJ18AwUnI+z8/ErhR+C+PdQPQBGKrtX4+zsccLf2vaiUCzrwnueJZULzPq0ZI+nhkCiPphSxp3NjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:98b819c078fe050691c60353ee77eb0e62f765fc6ec8c6b9e66dec84121791e6:Bf2bha6DMHLMRkxQl57DwD+eeyx70dWew2ltlxUCGiOA4i95OyyPobEMjdcObxBe1n49zGxmoMoF9VabsxwZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - profile-sign
 description: Sign an init profile with a publisher key
+human_terminal_only: true
 forms:
 - slots:
   - field: profile

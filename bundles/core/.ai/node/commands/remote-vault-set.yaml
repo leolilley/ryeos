@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:10Z:c2e91116cd2b70a5b51f0926da47f3e5f6248b06b1e2e1dfabf4dd35effd5f8d:EUOv2/IQk+MsaY9oKDxihCAx5YpNQFzSoG8VARnq0aiCufqnMLH35Ja3iH2xXpp8AziMefsGNr4+8YvF96/SBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:1f5d4bc869b6a362323ba083790fb3196ff25a2bf4c10e2592e3456a0b53fbdc:hTFTBEW944yfYNqxIgl26mMJMQ1piJiDMUCVmqAoHmkeUTgNnJnsjhh6G37/3zx0XAuPJoXoM0h48bXdnEMfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - vault-set
 description: Set a secret on a remote node's vault
+human_terminal_only: true
 forms:
 - slots:
   - field: remote

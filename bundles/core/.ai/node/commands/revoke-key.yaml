@@ -1,7 +1,8 @@
-# ryeos:signed:2026-11-14T05:54:19Z:1568011250ea43bd8d108b7cefeca659603b225f428b9a74bb37be5c64959ddb:xM6xMo8fyNt+fdtEa5ojJwEY0XbYVi1q9IY1sDphIx+3mpByc9S62Jn0z8uq1LQysjakSxo0MGY4f4Xb1Uy4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:0bd3a4bf083c71e74e801c8c394b2f57f3bebd160b1b521f09e5e290cf986950:MmTWctMsvuOBSBSrSEgTqGJAKFuP/Fl+oRhkAQ0OwKgz/XidZmNzd8zexTS0oIclts7AliY+Zs2BQVRQlQB9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - revoke-key
 description: Revoke an authorized-key grant and stop work running under it
+human_terminal_only: true
 help:
   usage: "ryeos revoke-key --fingerprint <grant-fingerprint> --reason <text> [--leave-running] [--keep-delegates]"
 parameter_binding:

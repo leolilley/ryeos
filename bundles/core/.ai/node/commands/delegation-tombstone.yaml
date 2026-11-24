@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-13T14:29:21Z:770e350a1bb12e0344d3cef23ccf567a963566f4b6ff265da9611001333d3f02:7lO6zVftd0lVkeiDZqcbHYtjdjwA+JXQTAR7QODcXXiYkPrqTPEXFxQr+ATTYsxUABq2Esx3tQMguv6Oxjy/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:e656ea079a7b6be8cc4f6825dcc38cd53cf305ddf8a53452398adc852b7bc482:Ba+rcHMd6CH83uUTxTBPgElhDqQqtvttBeuy9zHiaG9FaAZqjZI7h5oUdQeuIWDEUpBcQ5wBu/TRjOEMvu3QDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - delegation
 - tombstone
 description: Record a tombstone for one remote delegation digest on this node
+human_terminal_only: true
 help:
   usage: "ryeos delegation tombstone --delegator <fp:...> --delegation-digest <digest>"
 parameter_binding:

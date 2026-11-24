@@ -349,6 +349,30 @@ async def test_exit_code_is_preserved(tmp_path, monkeypatch):
         )
 
 
+@pytest.mark.asyncio
+async def test_every_call_says_its_caller_is_an_agent(tmp_path, monkeypatch):
+    """The CLI refuses verbs that need a human's terminal when it is told its
+    caller is an agent. The marker is set on every call and overrides any
+    value the server process inherited."""
+    fake = _make_fake_rye(tmp_path, 'echo "caller=$RYEOS_CALLER"\n')
+    monkeypatch.setenv("RYE_BIN", fake)
+    for inherited in (None, "", "human", "agent"):
+        if inherited is None:
+            monkeypatch.delenv("RYEOS_CALLER", raising=False)
+        else:
+            monkeypatch.setenv("RYEOS_CALLER", inherited)
+        server = RYEServer()
+        handler = server.server.request_handlers[CallToolRequest]
+        result = await handler(CallToolRequest(
+            params=CallToolRequestParams(
+                name=TOOL_NAME,
+                arguments={"args": ["endorse"]},
+            ),
+        ))
+        payload = json.loads(result.root.content[0].text)
+        assert payload["stdout"].strip() == "caller=agent", inherited
+
+
 def test_server_version_matches_package():
     """The MCP server reports the package version, kept in one place
     in `ryeosd_mcp/__init__.py` and matching `pyproject.toml`."""

@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:08Z:0a90ff8d2e39b384e24221a15b942b5563bac0a0c80b02d81af7015cec2468dd:pB91jesQqMcfGA1VhCDNAdY71pmVEcbRBN7KsEoudjLEdseO+/WtP5wZ1bT5p9ccFeZDhg6m5shZfycp7EX+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:6a241d25d27a41493e911024ae9bba9ed9c72c07a2a333b385691a3841df51e2:7i/nLEWpvWFCeAFvG3hP63bMt6BvJkHOFLnzJTALy+GjEQL/mjp8ja4xDx8oLLO0Wp+xVXhec7yYQquoR+4ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - authorize
 description: Authorize a key on a remote node
+human_terminal_only: true
 dispatch:
   kind: execute_ref
   execute: service:remote/authorize

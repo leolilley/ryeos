@@ -941,6 +941,7 @@ mod tests {
                 execute: "service:test".into(),
                 availability: Default::default(),
             },
+            human_terminal_only: false,
             source_file: PathBuf::new(),
             provenance: Default::default(),
         }

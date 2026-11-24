@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-20T23:16:10Z:7ca6522dda018ab693e2b7d552da0e124e0a72796a7988437a306d5869be681d:DY8IrLpm3Dgm3ypBa06Ik4B2fJnm84NuAjFStGbDIiPmgVkYzsKEkIpiG5A4xWobyNfNemXILC8bAjBIBDluCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:635d39d50fa7e99b9c6b2458ddb65f0cf86fc5c0875f98749ad46b254df8bdf2:e69tdb+eNbwTfwx8U83Em4/cDgtkV+PUMEoXo0Njxx7sFC5G8B6OUt+T64mgQrH7Of0nB1kwnG43qHFKuNhZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - endorse
 - revoke
 description: Withdraw one recorded endorsement by digest
+human_terminal_only: true
 help:
   usage: "ryeos endorse revoke --endorsement <digest> [--reason <text>]"
 parameter_binding:

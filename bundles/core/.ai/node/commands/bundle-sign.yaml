@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:07Z:198f009aedb4bdaa929b31a7cebd61634ab0220ba41eea03c6917325b17a6943:PSFLNIdFRIf1raNqTUw40bTSieCM3OoUBNrijlmv+6le8XU2X6/FjklZ/MTTbRtE8n608gSJ+S3iZBeW0+8vDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:9cb5717ae0879fa49a9998c56e99db62e37c2d510ba56d5ac3fe204c9fe4c1f6:65GKWE7dpmuIUsllRNxrCabLxDtdtHYwnl5ftygbCH5FHF/4r+2U3XUTone3Phg+mTezr6Xh+QblagBt2bhAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - sign
 description: Sign all signable items in a bundle source tree
+human_terminal_only: true
 forms:
 - slots:
   - field: source

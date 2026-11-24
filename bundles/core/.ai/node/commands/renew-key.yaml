@@ -1,7 +1,8 @@
-# ryeos:signed:2026-11-13T16:31:53Z:080effda22d62f68149222d5ac1d9c613a3ee627a04977dee312fa022d527fe1:eQmagu5Uypmd2Kr/J5IIVNmGAgCjnYfQmwnHJUwvmaLZGU8Es9NPdNXRQRa9xHI46+QJK3BAiTkmQePsud3dDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:8cba6191508254b06b13be03c682dfe1f64586e5ab163e6b61735c4cfff5830b:2bWvIDEoqDZpXpeXw4XdKKzIAuuO18ktzbngmiRitzLiP27hZoTZ8cXgZnOIbVugb84YH3H92r+N9qOAMwEBAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - renew-key
 description: Renew an authorized-key grant with a new expiry
+human_terminal_only: true
 help:
   usage: "ryeos renew-key --fingerprint <grant-fingerprint> [--lifetime-secs <seconds>]"
 parameter_binding:

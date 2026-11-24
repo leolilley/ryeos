@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:08Z:25f60a61796bb59964fa7ee9867ef17adf324076b27da1afe9785da73e0bb095:c1N1ZcKeMegBL9bBLcnBiPVX67et3CWfcXFUbKFLgXG8vygH1v7+mQZbGSEEzEc97twdqAn33Sn9m/i4Pl1sBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:debbabe64273dd6d4b93efa1bd2549abd70a5792e28a3e93ecd32ca1e46de861:lqsBrsj5Rrw9VLl1eszc/Eey0Dvd/VYFpLj9mXno+2LlKwFvT95/muUsiWtrr0NgNH1YH0ZZAq9zzo5o3CA0BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - bundle-install
 description: Install a bundle from a remote node
+human_terminal_only: true
 forms:
 - slots:
   - field: remote

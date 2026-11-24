@@ -1,6 +1,7 @@
-# ryeos:signed:2026-08-24T03:55:19Z:a89cb8b98914bba164a0bd3a6e059a5dbfa01fe4fd7c5ebc225db9b38b5ddc55:j2fXid5E7IhQHyCN56IgNINNAURtzaM/qQIY7KR0+Jry5F2rNteZ1rMFD+wOcY0Mc1Z0HS1Ejyl9o8fKyCO0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:36e2e143d55ccc9f948ec06442a73d29b06236bd472fc7d1b18b5a6bf0765349:y6pDPtmjsYG2nxTLmFqZwSWtqaz2gel7kYysfl+rLtWJ8tfDqokXV7IUMVNMNFaYTV0Q2xO4mZJ1lYZGAb+zDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, profile, confirm]
 description: "Confirm the sanitized account observed during projectless login"
+human_terminal_only: true
 forms:
   - slots:
       - field: profile_id

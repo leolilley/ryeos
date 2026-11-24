@@ -1,6 +1,7 @@
-# ryeos:signed:2026-11-16T09:15:43Z:4788ebdd776cd1a014a44c53fe582345d802375fe63d4611567929a436711901:KwtmArKpwWBjZehux7JneXL+LXRV/37NGrg5M3g1Y/TTSrc/1o2WDNwev2BHxgJSwBmTNMrr4DFn01vCwoF8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:6ff1b3379eabf8cb6870c1aeb45a58ca8a9cbfee0cb678df7164b2f8a6ee34c9:lNMwtQET9AjLACszAI3BznxTBo8QhSmpFFzf1mBAgJ5BTrEE7H/NhVaqZnF9m02v1USwDiqjkp/BBD4Gv41aAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, profile, create]
 description: "Create one node-private Codex credential profile"
+human_terminal_only: true
 forms:
   - slots:
       - field: profile_id

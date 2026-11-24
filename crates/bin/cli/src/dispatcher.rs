@@ -211,6 +211,21 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // so every dispatch path observes one data-driven project policy.
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
+    // A verb that changes what the node trusts runs only from a human's
+    // terminal. Resolve it here, once, before any command path (composite,
+    // client handler, offline or daemon dispatch) can act on it.
+    if let Ok(registry) =
+        CommandRegistry::from_records(&snapshot.commands, &command_registration_policy)
+        && let Ok(matched) = registry.resolve(&dispatch_rest)
+    {
+        crate::human_terminal::guard_command(&matched.command, &dispatch_rest)?;
+        // An unmarked verb that dispatches to the same service as a marked one
+        // is the same act.
+        if let CommandDispatch::ExecuteRef { execute, .. } = &matched.command.dispatch {
+            crate::human_terminal::guard_target(execute, &snapshot.commands)?;
+        }
+    }
+
     // `codex login device` is a client composite: it sequences verified node
     // commands and needs the terminal for the device code and confirmation.
     // Every step is an ordinary signed request the daemon authorizes itself.
@@ -1052,6 +1067,7 @@ fn resolve_command_for_daemon_with_commands(
     let matched = registry.resolve(rest).map_err(|error| CliError::Local {
         detail: error.to_string(),
     })?;
+    crate::human_terminal::guard_command(&matched.command, rest)?;
     let command_label = command_display_label(rest, &matched);
     let cwd =
         std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
@@ -1070,6 +1086,7 @@ fn resolve_command_for_daemon_with_commands(
             &rest[..matched.consumed],
         ))
     })?;
+    crate::human_terminal::guard_target(&compiled.item_ref, commands)?;
     let control = compiled.controls;
     Ok(CliResolvedExecute {
         item_ref: compiled.item_ref,
@@ -2017,6 +2034,7 @@ mod tests {
                 execute: "tool:test/command".into(),
                 availability: ryeos_runtime::CommandAvailability::Auto,
             },
+            human_terminal_only: false,
             source_file: PathBuf::new(),
             provenance: ryeos_runtime::CommandProvenance::default(),
         }
@@ -2432,6 +2450,7 @@ mod tests {
                 validate_only: false,
                 availability: ryeos_runtime::CommandAvailability::Both,
             },
+            human_terminal_only: false,
             source_file: PathBuf::new(),
             provenance: ryeos_runtime::CommandProvenance::default(),
         }

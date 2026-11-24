@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:10Z:72f5468f0011a799ea36a293587286f260abbe39341409a255f7747c131d594e:ScXK696lSkRftWGNb3Em/DW/y9XKcMGKxhgYXg9rLcW4ZVVrw6+PAhPPpMoBUbE9Jdmu/zQOHzTmSXYiIIw2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:41a52da44a7a34f11c8c30e09cc3aa139bce97cb6607429b2fecb959d88b44dd:8Bf/3jvjnyW6abElB8SsTBpF5xaFz3AfQ309om+nk2DkMFQvd6uiYDMXQCT86fEaoUD24+s78eilq3M8OQvcCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - delete
 description: Delete a secret from the node vault
+human_terminal_only: true
 forms:
 - slots:
   - field: name

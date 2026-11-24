@@ -1,6 +1,7 @@
-# ryeos:signed:2026-11-20T23:17:05Z:de7966f33e42812b20979f586e1ddb8c5316f52a2661419207beaec9a16c3b66:wFQW1LG5F/Sf0O/3TXWaQD5argmUh+7t3bMiseqGF7ZE8kGZSfRQOlI299whL6cXm6M5cA1oyJFMPAJpubcODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:fe257063de3c2d3b13d5382d85757a4d8977d41453cec9b2405ee2679c911ce9:nXMt4HzOcLnzShUacZOOceSxwz5+Phlwr1/A9wm4umwNx45xzIf4QJ9MRRwu5AaG8kdgV9rDnqS9CUVJw65mBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [item, remove]
 description: Remove a project item with your operator key, in this CLI, and record the removal as a signed tombstone revision
+human_terminal_only: true
 help:
   usage: "ryeos [--project <path>] item remove <canonical-ref>"
   examples:

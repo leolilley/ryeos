@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T21:33:09Z:3a979b6ade3e1f6c3b2accdda378d4ba3e6187b26711e78a78361dce62fe9567:WGO0lTACei2aZzgGJVAXUvxGZelIQb/FLM2mLbScOZd5lzMIM4JiiBc66dcn6PG6jePVp3583FgsB30dwVrPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T01:34:36Z:21b38259d4a98c26df90a606080ecdceac4eb9f361ca81037f6d054b671d5ada:uZ7NCBTb4b/rcf73w8jpzozvyurIoFJM3dVdWL6bvK2r0W2XBARfeupAzIJlBOkGEQ6ZpGlifi+kH9wKpc2cCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1016,6 +1016,33 @@ Both are signed offline operations (`node.operator.rotate`,
 They refuse on a running node with `node_running_trust_change`. See
 [Identity Model](../identity-model.md#key-lifecycle) for what each does and the
 refusal codes.
+
+## Verbs that need a human's terminal
+
+An agent that drives `ryeos` through a tool (the MCP server, a worker's shell) must
+not be able to change what the node trusts, or approve something for a person,
+because injected text told it to. A caller that sets `RYEOS_CALLER=agent` (the MCP
+server does it for every call; unset means a human's terminal, and any other value
+is refused with `caller_marker_unknown`) is refused, with `verb_needs_human_terminal`,
+for:
+
+- every signed command item that says `human_terminal_only: true`: endorsement,
+  signing, key and grant changes, secrets, installing or removing bundles, remote
+  trust, approvals, credential profiles, schedule registration;
+- the hardcoded lifecycle commands that change trust: `init`, `setup`, `trust pin|scope|retire|revoke|succeed`,
+  `project register|unregister`, `node operator|authoring rotate`, `node policy-apply`,
+  `node reset ...`, `node host-access grant|revoke`, `node bundle-state import|remove`,
+  `node external-execution ...` and the other `node` repair and compose commands;
+- **any verb that reaches the same service as a marked item.** The CLI derives the
+  dispatch targets of every `human_terminal_only` item from the verified command
+  registry and refuses an agent caller on those targets however they are reached:
+  `ryeos execute service:vault/set ...` is refused exactly as `ryeos vault set` is, and
+  so is an unmarked verb that dispatches to the same service. A composite that runs a
+  marked step is refused at that step.
+
+The check runs after the CLI has resolved the verb, so flag order and aliases do not
+get around it. It stops an honest or prompt-injected agent; it is not containment. On
+a node whose runs are not enclosed, a hostile run can read the key files directly.
 
 ## Core daemon-backed verbs
 

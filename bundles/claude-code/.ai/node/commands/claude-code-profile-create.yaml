@@ -1,6 +1,7 @@
-# ryeos:signed:2026-11-16T09:38:06Z:58822786b56adade4e2c65755bafa124b57435a64663a577f603296b93b432b7:hvKG9wzIAxcGzFUULErkZQGHC2FtUq1SGoSeAuO2tytKZdD1TMIu9ZlLcM0b20f1QZmp5zXEV6GbTmz0mYkFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:98a6395a2f70b32f5971d5b52ed85a5d37c6699cbfe714e8b3be8e88c737dfee:ioitfK1y/2sdMegoJlVncKPZySU+HAFKtHbfiDCYkMEKqTT5g5jH9wHOs+DVXkT8FEiezxsSW8nZKXHO7SE4Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [claude-code, profile, create]
 description: "Create one node-private Claude Code credential profile that activates from the delivered model key and gateway address"
+human_terminal_only: true
 forms:
   - slots:
       - field: profile_id

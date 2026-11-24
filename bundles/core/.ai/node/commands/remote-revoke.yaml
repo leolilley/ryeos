@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-14T05:54:19Z:daa8a989ddea3f43ef056467df37b440074b5ce1d27321d3905b76a0e5e46b12:RbxNsaQpwfzFYwWo+hNWJfl6Aw/dCNq3D7giTvuQWrL9p77wKx9UWaOebh+vofzsSD2Ix62x2qoEu6o+DhpNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:f06d66ef8a2079107cbf2348ed0c1ce2c5d9ea7da2d1ab853eda39294ef7539a:2bCc1MfF0rDlnnetdEFnlE01lgpPi53khbKv1K5l6d281V64DaJNDNhZYZqXulds74xiyLWB1uQlDLtoLBtoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - revoke
 description: Revoke an authorized-key grant on a remote node
+human_terminal_only: true
 parameter_binding:
   mode: tail_object
   flag_key_normalization: hyphen_to_underscore

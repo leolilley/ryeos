@@ -1,6 +1,7 @@
-# ryeos:signed:2026-08-26T10:18:38Z:09360dc8e5eb9601560e6ddae2e745289d11f2da7e63c7aac4a98732f87d7e23:RiWjlX72EgaiDCWcMtDReFVCerMZQrVlv0PHR6l6dICyyA65R6BYMPXpsSd3pSbTDY657E4yePWZvP0cKi/PDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:14Z:3e4c40ce3c19dec39767c194124bc3af0f1d7b399d277ce88077cbd9b170c5c4:OkXrGH9TdISkFxYzFkbZ79KPk2v5LHXGm6Wt17/A9rhFll5exCH6d0otzEV8bGCkscQxZrwxzSLhGbv2UoXQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [worker, session, approval]
 description: "Resolve one digest-fenced hosted worker approval"
+human_terminal_only: true
 forms:
   - slots:
       - field: chain_root_id

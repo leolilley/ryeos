@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T01:08:33Z:3d528865fa9a93c011c87c760dcc03badc3e349c755bc02b7d021600caf42c4f:3Opc+WrKTp3QfMVlBOsNvNURLh7GE2sWDZ9IW3MLSv3dz1/KQInk8sFq6MbWCCsUiJdloljBnQ0uDVASzCYdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:33:13Z:a80a93079b76c22108174b7c15e47b0ec6c3d7956d15741bcc58950db81ee1c7:nhKHwGLWplIA60th3mGkZQKUbPO+x/SI2tp47OW3Sh8H1ymfV7nul6nma374hwH/b0smR6pv57FvCpIfygniDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - register
@@ -11,6 +11,7 @@ description: >-
   Optional bounds: limits (a per-fire ceiling of turns, tokens, spend_usd, spawns,
   depth, duration_seconds), max_fires and expires_at (an RFC 3339 instant). A schedule
   that reaches max_fires or expires_at pauses itself.
+human_terminal_only: true
 arguments:
 - name: params
   kind: json

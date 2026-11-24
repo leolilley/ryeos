@@ -209,6 +209,7 @@ mod tests {
                 execute: "example:namespace/status".into(),
                 availability: CommandAvailability::Local,
             },
+            human_terminal_only: false,
             source_file: PathBuf::new(),
             provenance: CommandProvenance::default(),
         }

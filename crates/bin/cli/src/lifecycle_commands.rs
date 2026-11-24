@@ -372,6 +372,7 @@ pub async fn try_dispatch(
     if argv.is_empty() {
         return Ok(false);
     }
+    crate::human_terminal::guard_builtin(argv)?;
     match (argv[0].as_str(), argv.get(1).map(String::as_str)) {
         ("identity", _) => {
             run_identity_command(&argv[1..], console).map_err(map_local_err)?;
