@@ -436,6 +436,7 @@ pub async fn handle_candidate(
         "evaluator_item_ref":evaluation.and_then(|value| value.pointer("/evaluator/item_ref")),
         "evaluator_definition_digest":evaluation.and_then(|value| value.pointer("/evaluator/effective_definition_digest")),
         "evaluator_result_digest":evaluation.and_then(|value| value.pointer("/result/result_digest")),
+        "evaluator_evidence_scope":evaluation.and_then(|value| value.pointer("/result/evidence_scope")),
         "publication_result":session.publication_result,
         "terminal_reason":session.terminal_reason,
         "completion":completion,
