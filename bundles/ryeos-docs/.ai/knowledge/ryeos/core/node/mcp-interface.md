@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T02:35:40Z:ea8913c3c1e82e0ff3e6318db18b6223df858badeb511657def0221d1a4d53dc:GBPg8RoxgPhetVbFnJxvjbaQPxfqTHciRvGREtwtAtj2TUr+begk5J3YdFEUjxmS/ju37YPBvLKf+/SdaySaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:36:11Z:d7c3a714c3012698159803f9c6d2ad06abc906fe4adb56b7d0e287175e9a0c7d:9b+eWQptOg2WTsY5eeP00ZEmO10s1mUR9l7aNPtzuGLepfg5jlnWDtvrbJvslAE3UOBLQpewYTlzenExg9+aCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -64,12 +64,21 @@ read or write capabilities for the projects it works in. Leave out
 `ryeos.execute.service.identity/authorize-key`, the endorsement, vault, bundle
 and remote-trust services. The daemon enforces what the grant actually says.
 
+Grant hygiene:
+
+- Give the grant a lifetime, and authorize the key again when it lapses.
+- Withdraw it with `ryeos revoke-key` when the server is retired or the key may
+  have leaked.
+- Name each capability. Do not grant wildcard scopes.
+
 ### Threads and projects belong to the key
 
 The MCP key is its own principal. Threads it starts are its own, not the
-operator's, and the operator's registered checkouts are not registered for it,
-so a project path it names is judged on its own terms. Until keys can be paired,
-use `ryeos` as the operator to see its work.
+operator's: list them with `RYEOS_CLIENT_KEY=<path> ryeos thread list`; the
+operator's own list does not show them. No registration speaks for this key, so
+it has no project identity, and operator-scoped signers are not trusted in its
+runs. The operator can register a checkout with `--owner <the key's principal>`,
+or wait until keys can be paired.
 
 ### What this does not cover
 
@@ -92,7 +101,7 @@ The server exposes one tool:
 ```json
 {
   "tool": "cli",
-  "args": ["execute", "tool:ryeos/core/sign"],
+  "args": ["fetch", "tool:my/helper", "--with-content"],
   "project_path": "/path/to/project"
 }
 ```
