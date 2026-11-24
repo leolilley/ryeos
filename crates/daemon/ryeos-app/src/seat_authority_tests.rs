@@ -230,8 +230,7 @@ fn a_rotated_principal_keeps_its_threads_and_the_retired_key_loses_them() {
 
 /// A seat bound to a project is a view of that project: it reads no thread
 /// of another project, even one its own principal launched, and not one of
-/// the same owner under another name. A seat bound to a checkout with no
-/// identity reads no stated thread.
+/// the same owner under another name.
 #[test]
 fn a_project_seat_reads_only_its_own_project() {
     let k = keys();
@@ -243,15 +242,44 @@ fn a_project_seat_reads_only_its_own_project() {
     );
     assert!(!reader(&k.alpha_now, SeatProjectState::Stated(alpha)).admits(&k.trust, &thread));
     assert!(reader(&k.alpha_now, SeatProjectState::Stated(other)).admits(&k.trust, &thread));
-    assert!(
-        !reader(
-            &k.alpha_now,
-            SeatProjectState::Absent(SeatProjectAbsence::CheckoutNameChanged)
-        )
-        .admits(&k.trust, &thread)
-    );
     // A seat bound to no project may read across its principal's projects.
     assert!(reader(&k.alpha_now, SeatProjectState::Projectless).admits(&k.trust, &thread));
+}
+
+/// A seat bound to a checkout that states no identity now (renamed, or its
+/// registration lapsed) still reads a stated thread its own key launched,
+/// and no other key's, even one that speaks for the same owner.
+#[test]
+fn an_absent_seat_reads_stated_threads_its_key_launched() {
+    let k = keys();
+    let alpha = project(&k.alpha, "alpha");
+    let thread = subject(
+        &k.alpha_now,
+        live("/work/alpha", LogicalProject::Stated(alpha.clone())),
+    );
+    for absence in [
+        SeatProjectAbsence::CheckoutNameChanged,
+        SeatProjectAbsence::Unregistered,
+    ] {
+        let seat = SeatProjectState::Absent(absence);
+        assert!(
+            reader(&k.alpha_now, seat.clone()).admits(&k.trust, &thread),
+            "{absence:?}"
+        );
+        assert!(
+            !reader(&k.beta, seat.clone()).admits(&k.trust, &thread),
+            "{absence:?}"
+        );
+    }
+    // Launched by the retired key: the launcher path needs an active key, and
+    // the identity path is closed to a seat that is not this project's view.
+    let before_rotation = subject(
+        &k.alpha_root,
+        live("/work/alpha", LogicalProject::Stated(alpha)),
+    );
+    let seat = SeatProjectState::Absent(SeatProjectAbsence::CheckoutNameChanged);
+    assert!(!reader(&k.alpha_root, seat.clone()).admits(&k.trust, &before_rotation));
+    assert!(!reader(&k.alpha_now, seat).admits(&k.trust, &before_rotation));
 }
 
 /// A thread with no identity, a projectless thread, and a pinned generation

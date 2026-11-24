@@ -260,9 +260,12 @@ impl ThreadReader {
                     seat == project && trust.speaks_for(&self.key, project.owner())
                 }
                 SeatProjectState::Projectless => trust.speaks_for(&self.key, project.owner()),
-                // Bound to a checkout that states no identity, so not to this
-                // project.
-                SeatProjectState::Absent(_) => false,
+                // Bound to a checkout that states no identity now (renamed, or
+                // its registration lapsed): the key still reads what it
+                // launched itself, and nothing else of the project.
+                SeatProjectState::Absent(_) => {
+                    subject.requested_by.as_deref() == Some(self.key.as_str())
+                }
             },
             None => subject.requested_by.as_deref() == Some(self.key.as_str()),
         }
