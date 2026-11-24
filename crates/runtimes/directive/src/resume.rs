@@ -3898,18 +3898,16 @@ mod tests {
 
     #[test]
     fn a_recovered_usage_carries_the_status_its_turns_earned() {
-        let events = vec![
-            usage_event(1, 1),
-            usage_event_with_status(2, 2, "partial"),
-            usage_event_with_status(3, 3, "partial"),
-        ];
+        // One settlement ahead of an empty transcript is the pre-cognition
+        // crash cut resume accepts; the status rides with that settlement.
+        let events = vec![usage_event_with_status(1, 1, "partial")];
         let progress = recover_turn_progress(&events).unwrap();
         let usage = recover_thread_usage(&events, progress).unwrap().unwrap();
         assert_eq!(
             usage.usage_status,
             ryeos_runtime::envelope::UsageStatus::Partial
         );
-        assert_eq!(usage.completed_turns, 3);
+        assert_eq!(usage.completed_turns, 1);
     }
 
     #[test]
