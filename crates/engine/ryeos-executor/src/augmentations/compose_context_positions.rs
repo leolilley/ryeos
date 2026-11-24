@@ -21,7 +21,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::contracts::LogicalProject;
 use ryeos_engine::kind_registry::LaunchAugmentationDecl;
 use ryeos_engine::resolution::ResolutionOutput;
 use serde_json::{Value, json};
@@ -126,10 +125,7 @@ pub async fn run(
     .then_some(project_path);
     let engine_roots = engine.resolution_roots(
         resolution_project_root.map(Path::to_path_buf),
-        LogicalProject::from_optional(
-            provenance.logical_project_root(&plan_ctx.current_site_id),
-            &subject_authority,
-        ),
+        provenance.signer_project(),
     );
     let node_config_root = engine.node_config_root();
     let resolution_materialization =
@@ -1559,7 +1555,7 @@ async fn load_runtime_config_snapshot_cached(
     let trusted_signers = state
         .engine
         .node_trust_store
-        .launch_signer_entries(request_trust, engine_roots.signer_project_root());
+        .launch_signer_entries(request_trust, engine_roots.signer_project());
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1926,7 +1922,7 @@ async fn runtime_config_snapshot_is_valid(
         &state
             .engine
             .node_trust_store
-            .launch_signer_entries(request_trust, engine_roots.signer_project_root()),
+            .launch_signer_entries(request_trust, engine_roots.signer_project()),
         Some(materialization),
     )
     .await

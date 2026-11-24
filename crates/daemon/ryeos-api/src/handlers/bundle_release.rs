@@ -89,9 +89,21 @@ async fn resolve_release_source_generation(
     Arc<ReleaseSourceGeneration>,
     ryeos_executor::execution::project_source::ResolvedProjectContext,
 )> {
-    // Bind the content coordinate to the authenticated principal's canonical
-    // project HEAD. Knowledge of an arbitrary CAS hash is not project access.
-    let source = ryeos_executor::execution::project_source::ProjectSource::PushedHead;
+    // Bind the content coordinate to the authenticated principal's own
+    // project HEAD, under the name the local checkout declares now.
+    // Knowledge of an arbitrary CAS hash is not project access.
+    let project_name =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name(project_identity)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "project_manifest_missing: release source {} has no {}; a project's name is the `name:` of its manifest",
+                    project_identity.display(),
+                    ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+                )
+            })?;
+    let source = ryeos_executor::execution::project_source::ProjectSource::PushedHead {
+        project: ryeos_state::project_identity::PushedProject::Named { name: project_name },
+    };
     let mut project =
         crate::routes::response_modes::execute_mode::resolve_project_context_off_thread(
             crate::routes::response_modes::execute_mode::ResolveProjectContextRequest {
@@ -2171,6 +2183,7 @@ async fn remote_catalog_call(
             &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
+            None,
         )
         .await
 }
@@ -2539,7 +2552,12 @@ async fn run_release_graph(
         let site_id = state.threads.site_id().to_owned();
         let origin_site_id = context.execution_origin(&site_id);
         let plan_ctx = ryeos_engine::contracts::PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            logical_project: ryeos_app::project_registry::live_logical_project(
+                &state,
+                &context.fingerprint,
+                &context.scopes,
+                &project_path,
+            ),
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: context.fingerprint.clone(),
