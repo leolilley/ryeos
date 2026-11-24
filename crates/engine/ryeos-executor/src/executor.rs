@@ -482,15 +482,27 @@ fn disclose_service_result(
                     // can carry a path or a key, so only the stable code, the
                     // retry flag and a fixed sentence reach a non-operator.
                     Some(HandlerError::Structured { code, status, body }) => {
+                        let mut shown = serde_json::json!({
+                            "code": code,
+                            "error": "the service refused the request",
+                            "retryable": body
+                                .get("retryable")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        });
+                        // `outcome` is a two-valued enum a client branches on
+                        // ("unknown" means do not resubmit a mutation that may
+                        // have happened). It passes only when it is exactly one
+                        // of the two, never as free text.
+                        if let Some(outcome) = body
+                            .get("outcome")
+                            .and_then(Value::as_str)
+                            .filter(|outcome| matches!(*outcome, "refused" | "unknown"))
+                        {
+                            shown["outcome"] = Value::from(outcome);
+                        }
                         anyhow::Error::new(HandlerError::Structured {
-                            body: serde_json::json!({
-                                "code": code,
-                                "error": "the service refused the request",
-                                "retryable": body
-                                    .get("retryable")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(false),
-                            }),
+                            body: shown,
                             code,
                             status,
                         })
@@ -1426,6 +1438,41 @@ mod tests {
                 assert_eq!(body["retryable"], false);
             }
             other => panic!("typed refusal lost: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refusal_outcome_passes_only_as_its_two_enum_values() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let shown = |outcome: serde_json::Value| {
+            let refused = disclose_service_result(
+                DisclosureClass::Principal,
+                None,
+                Err(anyhow::Error::new(
+                    ryeos_app::handler_error::HandlerError::Structured {
+                        code: "write_unconfirmed".to_owned(),
+                        status: 502,
+                        body: serde_json::json!({"outcome": outcome, "detail": "/srv/private"}),
+                    },
+                )),
+            )
+            .unwrap_err();
+            match ryeos_app::handler_error::extract_handler_error(&refused) {
+                Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body,
+                other => panic!("typed refusal lost: {other:?}"),
+            }
+        };
+        assert_eq!(shown(serde_json::json!("unknown"))["outcome"], "unknown");
+        assert_eq!(shown(serde_json::json!("refused"))["outcome"], "refused");
+        for other in [
+            serde_json::json!("failed"),
+            serde_json::json!("/srv/private/path"),
+            serde_json::json!(7),
+            serde_json::json!({"a": "unknown"}),
+        ] {
+            let body = shown(other);
+            assert!(body.get("outcome").is_none(), "{body}");
+            assert!(!body.to_string().contains("/srv/private"), "{body}");
         }
     }
 
