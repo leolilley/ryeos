@@ -6368,7 +6368,7 @@ impl ThreadLifecycleService {
         {
             return false;
         }
-        if filter.exclude_kinds.iter().any(|kind| item.kind == *kind) {
+        if filter.exclude_kinds.contains(&item.kind) {
             return false;
         }
         if let Some(project_root) = &filter.project_root
