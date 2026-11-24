@@ -296,8 +296,8 @@ fn project_file_at_a_bundle_service_ref_never_wins_resolution() {
     );
 }
 
-/// The refusal is confined to the kinds that declare it (picture, surface, view,
-/// view_set). Every other shipped
+/// The refusal is confined to the kinds that declare it (picture, surface, theme,
+/// view, view_set). Every other shipped
 /// kind declares nothing, and each one that takes items from both project and
 /// bundle space still resolves project-first with the bundle item recorded
 /// as shadowed, exactly as before.
@@ -313,7 +313,7 @@ fn every_other_kind_still_resolves_project_first() {
         })
         .collect();
     refusing.sort_unstable();
-    assert_eq!(refusing, ["picture", "surface", "view", "view_set"]);
+    assert_eq!(refusing, ["picture", "surface", "theme", "view", "view_set"]);
 
     let mut checked = Vec::new();
     for kind in ["directive", "tool", "graph", "knowledge", "config"] {
