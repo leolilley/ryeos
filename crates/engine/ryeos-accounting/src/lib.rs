@@ -13,6 +13,7 @@ pub mod money;
 pub mod resource;
 pub mod rpc;
 pub mod state;
+pub mod usage_status;
 
 pub use admission::{
     AdmittedFinancialAuthority, FINANCIAL_AUTHORITY_KIND, SpendBoundClass,
@@ -61,3 +62,4 @@ pub use rpc::{
 pub use state::{
     AccountHealth, AttemptBudgetState, AuthorityHealth, ChargeBasis, ReconciliationReason,
 };
+pub use usage_status::{InvalidUsageStatus, UsageStatus};
