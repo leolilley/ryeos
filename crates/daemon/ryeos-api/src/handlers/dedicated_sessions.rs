@@ -11529,12 +11529,13 @@ mod tests {
     #[test]
     fn a_project_item_standing_in_for_a_bundle_item_is_not_an_accepted_evaluator() {
         // A project's own evaluator, under its own ref, is fine.
-        refuse_project_item_standing_for_a_bundle_item("base_project_generation", false).unwrap();
+        super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", false)
+            .unwrap();
         // The bundle's own item is fine.
-        refuse_project_item_standing_for_a_bundle_item("installed_bundle", false).unwrap();
+        super::refuse_project_item_standing_for_a_bundle_item("installed_bundle", false).unwrap();
         // A project file that took a bundle item's ref is refused.
         let refused =
-            refuse_project_item_standing_for_a_bundle_item("base_project_generation", true)
+            super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", true)
                 .unwrap_err();
         assert!(
             format!("{refused:?}").contains("standing in for an installed bundle item"),
