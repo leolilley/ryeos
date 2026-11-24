@@ -6,24 +6,26 @@ bundles (e.g. `bundles/codex/.ai/node/commands/`), read by the CLI on
 every invocation, so new verbs become callable immediately after bundle
 install with no MCP redeploy.
 
-THREAT MODEL — MCP SERVER
+THE MCP SERVER IS A KEY HOLDER
 
-The MCP server is intended for LOCAL SINGLE-USER use:
+The server acts with a key of its own, never the operator's. The key's file is
+named by `RYEOS_CLIENT_KEY` in the server's environment (the server refuses to
+start without it) and the server hands that same key to every `ryeos` it
+spawns. Whatever the server may do is exactly what that key's grant allows:
+the daemon authorizes each request by the key and its capabilities, the way it
+does for any other key. A person gives the key a narrowed grant (see the
+`mcp-interface` doc); a verb the grant does not cover is refused by the daemon
+with a missing-capability error, for whoever holds the key.
 
-  * Transport: stdio over a process owned by the operator's OS user.
-  * Caller authentication: assumed (the OS user IS the operator).
-  * Capability gating: none at the MCP layer — every CLI verb that
-    the wrapped `ryeos` binary exposes is available to any caller
-    that reaches the transport.
-
-This means:
-
-  * Do NOT expose the MCP server over the network without a separate
-    auth-terminating proxy.
-  * Do NOT run the MCP server as a system service available to other
-    OS users.
-  * DO use it from a single-operator IDE harness (Claude Code,
-    Cursor, etc.) on the operator's own machine.
+  * Transport: stdio over a process the operator starts.
+  * Authority: the key's grant, nothing else. The server adds no gating of
+    its own and does not look at what is calling it.
+  * Commands that act directly on a node's files (key rotation, trust pin,
+    project register, resets) need the node's operator key, so `ryeos` refuses
+    them for this key with `operator_key_required`.
+  * On a node that does not enclose its processes, a process of the same OS
+    user can still read the operator's key files. To keep them out of reach,
+    run the server as another OS user or inside the enclosure.
 
 The proper auth design (signed-request from delegated principal,
 audience binding, replay protection) is tracked in
@@ -49,6 +51,9 @@ from ryeosd_mcp import __version__
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 60.0
+# Names the key file the CLI signs with. The server holds a key of its own and
+# passes it to every `ryeos` it starts.
+CLIENT_KEY_ENV = "RYEOS_CLIENT_KEY"
 TOOL_NAME = "cli"
 TOOL_DESCRIPTION = (
     "Run any Rye CLI verb. Verbs are loaded data-driven from signed "
@@ -108,6 +113,23 @@ def _error_result(message: str, error_type: str) -> list[TextContent]:
     )]
 
 
+def _resolve_client_key() -> str:
+    """The server's own key file, from `RYEOS_CLIENT_KEY`.
+
+    There is no fallback: a server without a key of its own would act with
+    whatever key the CLI finds by default, which is the operator's.
+    """
+    key = os.environ.get(CLIENT_KEY_ENV)
+    if not key:
+        raise RuntimeError(
+            f"{CLIENT_KEY_ENV} is not set. The MCP server acts with a key of its "
+            "own: create one (`openssl genpkey -algorithm ed25519 -out "
+            "mcp-key.pem && chmod 600 mcp-key.pem`), authorize it with a "
+            "narrowed grant, and set the variable to its absolute path."
+        )
+    return key
+
+
 def _resolve_bin() -> str:
     """Find the `ryeos` binary via RYE_BIN env var or PATH lookup."""
     explicit = os.environ.get("RYE_BIN")
@@ -125,6 +147,7 @@ def _resolve_bin() -> str:
 
 async def _run_rye(
     bin_path: str,
+    client_key: str,
     args: list[str],
     project_path: str | None,
     timeout_s: float,
@@ -141,6 +164,7 @@ async def _run_rye(
         bin_path,
         *args,
         cwd=project_path if project_path is not None else None,
+        env={**os.environ, CLIENT_KEY_ENV: client_key},
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -176,6 +200,7 @@ class RYEServer:
 
     def __init__(self) -> None:
         self._bin = _resolve_bin()
+        self._client_key = _resolve_client_key()
         self.server = Server("ryeos")
         self._setup()
 
@@ -242,7 +267,7 @@ class RYEServer:
 
             try:
                 result = await _run_rye(
-                    self._bin, args, project_path, timeout_s,
+                    self._bin, self._client_key, args, project_path, timeout_s,
                 )
             except asyncio.TimeoutError as e:
                 # _run_rye raises RuntimeError on its own timeout, but

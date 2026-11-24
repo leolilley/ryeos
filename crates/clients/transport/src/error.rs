@@ -24,6 +24,14 @@ pub enum TransportError {
     #[error("signing key unloadable at {path}: {detail}")]
     SigningKeyUnloadable { path: PathBuf, detail: String },
 
+    /// `RYEOS_CLIENT_KEY` names a key this client will not use. There is no
+    /// fallback to the operator key: a client that asked for its own key
+    /// signs with it or does not run.
+    #[error(
+        "client_key_unreadable: the key {path} selected by RYEOS_CLIENT_KEY cannot be used: {detail}"
+    )]
+    ClientKeyUnreadable { path: PathBuf, detail: String },
+
     #[error("audience discovery failed for {url}: {detail}")]
     AudienceDiscoveryFailed { url: String, detail: String },
 }

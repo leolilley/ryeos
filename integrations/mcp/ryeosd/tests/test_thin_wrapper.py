@@ -17,6 +17,7 @@ from ryeosd_mcp.server import (
     TOOL_DESCRIPTION,
     TOOL_NAME,
     _resolve_bin,
+    _resolve_client_key,
 )
 
 
@@ -45,6 +46,16 @@ def rye_bin():
 def _env_rye_bin(rye_bin, monkeypatch):
     """Ensure RYE_BIN points at our freshly built binary."""
     monkeypatch.setenv("RYE_BIN", rye_bin)
+
+
+@pytest.fixture(autouse=True)
+def _env_client_key(tmp_path_factory, monkeypatch):
+    """The server holds a key of its own; give every test one (owner-only)."""
+    key = tmp_path_factory.mktemp("mcp-key") / "mcp-key.pem"
+    key.write_text("not a real key; only the path matters to these tests")
+    key.chmod(0o600)
+    monkeypatch.setenv("RYEOS_CLIENT_KEY", str(key))
+    return str(key)
 
 
 @pytest.fixture
@@ -347,6 +358,35 @@ async def test_exit_code_is_preserved(tmp_path, monkeypatch):
         assert payload["exit_code"] == code, (
             f"expected exit {code}, got {payload['exit_code']}"
         )
+
+
+def test_the_server_refuses_to_start_without_a_key_of_its_own(monkeypatch):
+    """No fallback to whatever key the CLI finds by default (the operator's)."""
+    monkeypatch.delenv("RYEOS_CLIENT_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="RYEOS_CLIENT_KEY is not set"):
+        _resolve_client_key()
+    monkeypatch.setenv("RYEOS_CLIENT_KEY", "")
+    with pytest.raises(RuntimeError, match="RYEOS_CLIENT_KEY is not set"):
+        RYEServer()
+
+
+@pytest.mark.asyncio
+async def test_every_call_carries_the_servers_own_key(
+    tmp_path, monkeypatch, _env_client_key
+):
+    """The key the server holds is handed to each `ryeos` it starts."""
+    fake = _make_fake_rye(tmp_path, 'echo "key=$RYEOS_CLIENT_KEY"\n')
+    monkeypatch.setenv("RYE_BIN", fake)
+    server = RYEServer()
+    handler = server.server.request_handlers[CallToolRequest]
+    result = await handler(CallToolRequest(
+        params=CallToolRequestParams(
+            name=TOOL_NAME,
+            arguments={"args": ["endorse"]},
+        ),
+    ))
+    payload = json.loads(result.root.content[0].text)
+    assert payload["stdout"].strip() == f"key={_env_client_key}"
 
 
 def test_server_version_matches_package():
