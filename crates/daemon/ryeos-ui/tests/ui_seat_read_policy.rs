@@ -654,7 +654,7 @@ mod revisions {
             Some(RequestFacts {
                 params,
                 session: SessionFacts {
-                    principal_id: "fp:test",
+                    principal_id: "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                     project_root,
                 },
             }),
