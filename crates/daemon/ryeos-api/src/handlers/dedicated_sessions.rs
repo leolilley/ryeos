@@ -6216,6 +6216,18 @@ async fn approvals(
         .into_iter()
         .filter(|approval| approval.state == "pending")
         .map(|approval| {
+            let mut public = ryeos_app::dedicated_session_service::public_approval_authority(
+                &approval.requested_authority,
+            );
+            // Offer accept only where the admitted profile allows it too.
+            if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
+                &state,
+                &approval.placement_thread_id,
+                &approval.operation_class,
+                &approval.requested_authority,
+            ) {
+                public["accept_allowed"] = Value::Bool(false);
+            }
             Ok(json!({
                 "chain_root_id":session.chain_root_id.clone(),
                 "placement_thread_id":approval.placement_thread_id,
@@ -6223,19 +6235,7 @@ async fn approvals(
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
                 "operation_class":approval.operation_class,
-                "requested_authority":{
-                    let mut public = ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority);
-                    // Offer accept only where the admitted profile allows it too.
-                    if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
-                        &state,
-                        &approval.placement_thread_id,
-                        &approval.operation_class,
-                        &approval.requested_authority,
-                    ) {
-                        public["accept_allowed"] = Value::Bool(false);
-                    }
-                    public
-                },
+                "requested_authority":public,
                 "state":approval.state,
                 "expires_at_ms":approval.expires_at_ms,
                 "created_at_ms":approval.created_at_ms,

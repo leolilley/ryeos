@@ -308,6 +308,17 @@ pub async fn handle_approval_history(
         )?
         .into_iter()
         .map(|entry| {
+            let mut public = ryeos_app::dedicated_session_service::public_approval_authority(
+                &entry.requested_authority,
+            );
+            if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
+                &state,
+                &entry.placement_thread_id,
+                &entry.operation_class,
+                &entry.requested_authority,
+            ) {
+                public["accept_allowed"] = serde_json::Value::Bool(false);
+            }
             serde_json::json!({
                 "schema_version":"ryeos.ui.approval_history_item.v1",
                 "kind":"worker_approval",
@@ -317,18 +328,7 @@ pub async fn handle_approval_history(
                 "worker_boot_epoch":entry.worker_boot_epoch,
                 "request_digest":entry.request_digest,
                 "operation_class":entry.operation_class,
-                "requested_authority":{
-                    let mut public = ryeos_app::dedicated_session_service::public_approval_authority(&entry.requested_authority);
-                    if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
-                        &state,
-                        &entry.placement_thread_id,
-                        &entry.operation_class,
-                        &entry.requested_authority,
-                    ) {
-                        public["accept_allowed"] = serde_json::Value::Bool(false);
-                    }
-                    public
-                },
+                "requested_authority":public,
                 "state":entry.state,
                 "decision":entry.decision,
                 "decision_principal":entry.decision_principal,
