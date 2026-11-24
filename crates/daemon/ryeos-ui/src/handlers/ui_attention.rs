@@ -390,7 +390,14 @@ fn collect_raised(
                         limit,
                     )?
                 {
-                    items.push(approval_item(source, &entry));
+                    let profile_accept =
+                        ryeos_app::dedicated_session_service::approval_accept_ceiling(
+                            state,
+                            &entry.approval.placement_thread_id,
+                            &entry.approval.operation_class,
+                            &entry.approval.requested_authority,
+                        );
+                    items.push(approval_item(source, &entry, profile_accept));
                 }
                 fill_placement_projects(state, &mut items[from..])?;
             }
@@ -607,13 +614,23 @@ fn item(
     })
 }
 
-fn approval_item(source: &Source, entry: &DedicatedSessionApprovalProjection) -> Value {
+/// `profile_accept` is the admitted profile's ceiling for this request class;
+/// accept is offered only when the worker's report and the profile both allow it.
+fn approval_item(
+    source: &Source,
+    entry: &DedicatedSessionApprovalProjection,
+    profile_accept: bool,
+) -> Value {
     let approval = &entry.approval;
-    let authority = ryeos_app::dedicated_session_service::public_approval_authority(
+    let mut authority = ryeos_app::dedicated_session_service::public_approval_authority(
         &approval.requested_authority,
     );
+    if !profile_accept {
+        authority["accept_allowed"] = Value::Bool(false);
+    }
     let pending = approval.state == "pending";
-    let accept = pending && authority["accept_allowed"].as_bool().unwrap_or(false);
+    let accept =
+        pending && profile_accept && authority["accept_allowed"].as_bool().unwrap_or(false);
     item(
         source,
         &approval.approval_id,
@@ -785,7 +802,11 @@ mod tests {
     #[test]
     fn approval_item_carries_the_common_shape_and_eligibility() {
         let config = shipped_config();
-        let value = approval_item(&source(&config, "approval"), &approval("pending", true));
+        let value = approval_item(
+            &source(&config, "approval"),
+            &approval("pending", true),
+            true,
+        );
         assert_eq!(value["schema_version"], ITEM_SCHEMA);
         assert_eq!(value["id"], "approval:A-1");
         assert_eq!(value["kind"], "approval");
@@ -805,12 +826,37 @@ mod tests {
             json!({"open": true, "accept": true, "decline": true, "acknowledge": false})
         );
 
-        let refused = approval_item(&source(&config, "approval"), &approval("pending", false));
+        let refused = approval_item(
+            &source(&config, "approval"),
+            &approval("pending", false),
+            true,
+        );
         assert_eq!(refused["actions"]["accept"], false);
         assert_eq!(refused["actions"]["decline"], true);
-        let settled = approval_item(&source(&config, "approval"), &approval("expired", true));
+        let settled = approval_item(
+            &source(&config, "approval"),
+            &approval("expired", true),
+            true,
+        );
         assert_eq!(settled["actions"]["accept"], false);
         assert_eq!(settled["actions"]["decline"], false);
+    }
+
+    #[test]
+    fn a_profile_ceiling_hides_the_accept_the_worker_offered() {
+        let config = shipped_config();
+        // The worker reports accept_allowed=true; the admitted profile says no.
+        let capped = approval_item(
+            &source(&config, "approval"),
+            &approval("pending", true),
+            false,
+        );
+        assert_eq!(capped["actions"]["accept"], false);
+        assert_eq!(capped["actions"]["decline"], true);
+        assert_eq!(
+            capped["detail"]["requested_authority"]["accept_allowed"],
+            false
+        );
     }
 
     #[test]
@@ -1164,7 +1210,11 @@ mod tests {
     #[test]
     fn every_item_kind_carries_a_project_root() {
         let config = shipped_config();
-        let approval = approval_item(&source(&config, "approval"), &approval("pending", true));
+        let approval = approval_item(
+            &source(&config, "approval"),
+            &approval("pending", true),
+            true,
+        );
         assert_eq!(approval["project_root"], Value::Null);
         let candidate = candidate_item(
             &source(&config, "candidate"),
@@ -1222,9 +1272,21 @@ mod tests {
             .unwrap();
         let config = shipped_config();
         let mut items = vec![
-            approval_item(&source(&config, "approval"), &approval("pending", true)),
-            approval_item(&source(&config, "approval"), &approval("pending", true)),
-            approval_item(&source(&config, "approval"), &approval("pending", true)),
+            approval_item(
+                &source(&config, "approval"),
+                &approval("pending", true),
+                true,
+            ),
+            approval_item(
+                &source(&config, "approval"),
+                &approval("pending", true),
+                true,
+            ),
+            approval_item(
+                &source(&config, "approval"),
+                &approval("pending", true),
+                true,
+            ),
         ];
         items[0]["subject"]["thread_id"] = json!("T-place");
         items[1]["subject"]["thread_id"] = json!("T-place");
@@ -1253,7 +1315,11 @@ mod tests {
         .unwrap();
         state.state_store.create_thread_for_test(&placed).unwrap();
         let config = shipped_config();
-        let mut approval = approval_item(&source(&config, "approval"), &approval("pending", true));
+        let mut approval = approval_item(
+            &source(&config, "approval"),
+            &approval("pending", true),
+            true,
+        );
         approval["subject"]["thread_id"] = json!("T-place");
         let mut candidate = candidate_item(
             &source(&config, "candidate"),

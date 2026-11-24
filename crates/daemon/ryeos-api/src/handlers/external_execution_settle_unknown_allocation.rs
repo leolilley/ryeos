@@ -28,7 +28,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.external-execution/settle-unknown-allocation"],
     handler: |params, ctx, state: Arc<AppState>| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             let phase = ryeos_app::provider_inventory::settle_unknown_allocation(
                 &state,
                 &ctx.fingerprint,

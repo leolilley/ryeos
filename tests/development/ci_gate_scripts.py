@@ -402,6 +402,46 @@ class BundleBins(unittest.TestCase):
                 self.assertIn("could not decide", why)
 
 
+class SourceGuards(unittest.TestCase):
+    """Workspace source guards run on any Rust change under crates/."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        write(self.root, "Cargo.toml", '[workspace]\nmembers = ["crates/state/ryeos-state", "crates/other"]\n')
+        write(self.root, "crates/state/ryeos-state/Cargo.toml", '[package]\nname = "ryeos-state"\n')
+        write(self.root, "crates/other/Cargo.toml", '[package]\nname = "other"\n')
+        for _, binary in classify_mod.SOURCE_GUARD_TESTS:
+            write(self.root, f"crates/state/ryeos-state/tests/{binary}.rs", "a")
+
+    def guards(self) -> list[str]:
+        return [a for _, b in classify_mod.SOURCE_GUARD_TESTS for a in ("--test", b)]
+
+    def test_another_crates_rust_change_adds_the_guards(self):
+        packages = [{"package": "other", "manifest": None, "args": []}]
+        out = classify_mod.add_source_guards(str(self.root), ["crates/other/src/lib.rs"], packages)
+        self.assertEqual(out, [packages[0], {"package": "ryeos-state", "manifest": None, "args": self.guards()}])
+
+    def test_a_whole_package_run_already_covers_them(self):
+        packages = [{"package": "ryeos-state", "manifest": None, "args": []}]
+        out = classify_mod.add_source_guards(str(self.root), ["crates/state/ryeos-state/src/lib.rs"], packages)
+        self.assertEqual(out, [{"package": "ryeos-state", "manifest": None, "args": []}])
+
+    def test_non_rust_changes_add_nothing(self):
+        out = classify_mod.add_source_guards(str(self.root), ["crates/other/Cargo.toml", "docs/a.rs"], [])
+        self.assertEqual(out, [])
+
+    def test_a_missing_guard_is_an_error(self):
+        (self.root / f"crates/state/ryeos-state/tests/{classify_mod.SOURCE_GUARD_TESTS[0][1]}.rs").unlink()
+        with self.assertRaises(RuntimeError):
+            classify_mod.add_source_guards(str(self.root), ["crates/other/src/lib.rs"], [])
+
+    def test_the_listed_guards_exist_in_this_repository(self):
+        repo = Path(__file__).resolve().parents[2]
+        classify_mod.add_source_guards(str(repo), ["crates/x/src/lib.rs"], [])
+
+
 class Digest(unittest.TestCase):
     def repo(self) -> Path:
         tmp = tempfile.TemporaryDirectory()

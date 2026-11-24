@@ -1774,8 +1774,14 @@ fn run_execution_history_reset_command(
                 |rows| rows.to_string(),
             ),
         ),
+        // The dry run counts the fire journal files it would retire; a
+        // performed reset counts the signed retirement records it published.
         crate::tty::Row::key_value(
-            "scheduler journal artifacts",
+            if report.dry_run {
+                "scheduler fire journal files"
+            } else {
+                "scheduler retirement records"
+            },
             report.scheduler_journal_artifacts.to_string(),
         ),
         crate::tty::Row::key_value(
@@ -4453,11 +4459,16 @@ fn inspect_capability_report(
             None,
         ),
         Ok(Some(signed)) => {
-            // The same policy generation digest the daemon recorded.
+            // The report records the whole node policy generation, not the
+            // isolation policy's own digest.
             let policy_generation =
-                ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+                crate::node_descriptors::load_verified_policy_snapshot(app_root)
                     .ok()
-                    .and_then(|runtime| runtime.digest().map(str::to_owned));
+                    .map(|snapshot| {
+                        ryeos_node::capability_report::report_policy_generation(
+                            snapshot.generation_digest(),
+                        )
+                    });
             let staleness = signed
                 .staleness(policy_generation.as_deref())
                 .map_err(|error| format!("{error:#}"));

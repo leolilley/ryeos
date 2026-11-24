@@ -83,7 +83,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
             let req: Request = if params.is_null() {
                 Request::default()
             } else {
-                serde_json::from_value(params)?
+                crate::handler_error::parse_request(params)?
             };
             handle(req, state).await
         })
