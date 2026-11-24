@@ -78,6 +78,12 @@ impl ProjectFixture {
             .to_owned();
         let source = TempDir::new()?;
         let source_root = source.path().canonicalize()?;
+        // Both checkouts name the same project in their manifests: the push
+        // target and the snapshot's declared name must agree.
+        for root in [&live_root, &source_root] {
+            std::fs::create_dir_all(root.join(".ai"))?;
+            std::fs::write(root.join(".ai/manifest.yaml"), "name: schedule-project\n")?;
+        }
         Ok(Self {
             _live: live,
             _source: source,

@@ -21,6 +21,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use ryeos_state::project_identity::PushedProject;
+
 use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{PullResultsError, extract_snapshot_hash, pull_results};
@@ -55,8 +57,17 @@ pub struct RemoteForwardRequest<'a> {
     /// Exact already-admitted local generation to upload. When absent, the
     /// explicit remote-execute workflow captures `local_project_path` now.
     pub source_snapshot_hash: Option<&'a str>,
-    /// Remote project path used in push-head ref and /execute body.
+    /// Remote project path used in the /execute body.
     pub remote_project_path: &'a str,
+    /// The bound project name the pushed head is keyed by. `None` only for
+    /// --no-project mode, which pushes the caller's no-project head.
+    pub project_name: Option<&'a ryeos_state::project_identity::ProjectName>,
+    /// The project owner the binding recorded at bind. Sent as
+    /// `expected_owner` on every head push and on the execute call; the
+    /// remote compares it with its own resolver and refuses
+    /// `remote_owner_changed`. Never used as the owner. `None` only without a
+    /// binding (--no-project mode).
+    pub remote_owner: Option<&'a ryeos_state::principal_id::PrincipalId>,
     /// Parameters for the item.
     pub parameters: Value,
     /// Exact execution contract to present to the destination node. Routing
@@ -335,13 +346,13 @@ fn validate_forward_policy_authority(
                         });
                     }
                 }
-                PinnedSource::CurrentHead if admitted_snapshot_hash.is_none() => {
+                PinnedSource::CurrentHead { .. } if admitted_snapshot_hash.is_none() => {
                     return Err(RemoteForwardError::ExecutionPolicyInvalid {
                         message: "current_head remote forwarding requires exact locally admitted snapshot authority"
                             .to_string(),
                     });
                 }
-                PinnedSource::CurrentHead | PinnedSource::CaptureLive { .. } => {}
+                PinnedSource::CurrentHead { .. } | PinnedSource::CaptureLive { .. } => {}
             }
         }
     }
@@ -449,42 +460,48 @@ pub async fn execute_unary_forward(
 
     // 1. Push project (or no-project user-space-only push).
     let push_result = match (req.source_snapshot_hash, req.local_project_path) {
-        (Some(snapshot_hash), _) => {
-            push_snapshot_generation(client, &authority, snapshot_hash, req.remote_project_path)
-                .await
-                .map_err(|e| {
-                    let message = format!("{e:#}");
-                    let _ = finish_sync_job_attempt_and_update_job(
-                        state,
-                        &attempt_id,
-                        FinishSyncJobAttempt {
-                            state: SyncJobAttemptState::Failed,
-                            phase: "push_failed".to_string(),
-                            error: Some(message.clone()),
-                            result: None,
-                        },
-                        &job_id,
-                        SyncJobUpdate {
-                            state: SyncJobState::Failed,
-                            phase: "push_failed".to_string(),
-                            roots: None,
-                            heads: None,
-                            uploaded_hashes: Vec::new(),
-                            fetched_hashes: Vec::new(),
-                            last_error: Some(message.clone()),
-                            result: None,
-                        },
-                    );
-                    RemoteForwardError::PushFailed(message)
-                })?
-        }
+        (Some(snapshot_hash), _) => push_snapshot_generation(
+            client,
+            &authority,
+            snapshot_hash,
+            req.remote_project_path,
+            required_project_name(req.project_name)?,
+            req.remote_owner,
+        )
+        .await
+        .map_err(|e| {
+            let message = format!("{e:#}");
+            let _ = finish_sync_job_attempt_and_update_job(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "push_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+                &job_id,
+                SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "push_failed".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: Vec::new(),
+                    last_error: Some(message.clone()),
+                    result: None,
+                },
+            );
+            RemoteForwardError::PushFailed(message)
+        })?,
         (None, Some(proj_path)) => push_project(
             client,
             state,
             &authority,
             proj_path,
-            req.remote_project_path,
+            required_project_name(req.project_name)?,
             req.remote_ignore,
+            req.remote_owner,
         )
         .await
         .map_err(|e| {
@@ -518,14 +535,7 @@ pub async fn execute_unary_forward(
                 .ignore_matcher
                 .union(req.remote_ignore)
                 .map_err(|error| RemoteForwardError::PushFailed(format!("{error:#}")))?;
-            match push_no_project(
-                &authority,
-                client,
-                req.remote_project_path,
-                &transfer_ignore,
-            )
-            .await
-            {
+            match push_no_project(&authority, client, &transfer_ignore, req.remote_owner).await {
                 Ok(value) => value,
                 Err(err) => {
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -616,6 +626,7 @@ pub async fn execute_unary_forward(
             &req.parameters,
             req.call,
             &destination_policy,
+            req.remote_owner,
         )
         .await
     {
@@ -953,8 +964,8 @@ fn update_sync_job(
 async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
-    remote_project_path: &str,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult, RemoteForwardError> {
     use crate::remote::push::{
         collect_snapshot_upload_hashes, finish_staged_roots, upload_missing,
@@ -985,7 +996,7 @@ async fn push_no_project(
         };
 
         let upload_session = client
-            .objects_put(None, remote_project_path, &[], &[])
+            .objects_put(None, &PushedProject::NoProject, &[], &[], expected_owner)
             .await?;
 
         let snapshot = ryeos_state::objects::ProjectSnapshot {
@@ -1025,17 +1036,19 @@ async fn push_no_project(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            remote_project_path,
+            &PushedProject::NoProject,
             upload_session,
+            expected_owner,
         )
         .await?;
 
         client
             .push_head(
-                remote_project_path,
+                &PushedProject::NoProject,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -1052,6 +1065,16 @@ async fn push_no_project(
 
     finish_staged_roots(authority, &mut staged_roots, operation)
         .map_err(|e| RemoteForwardError::PushFailed(format!("{e:#}")))
+}
+
+/// The project name a project push needs; a project push without one is a
+/// caller bug, refused before anything is uploaded.
+fn required_project_name(
+    name: Option<&ryeos_state::project_identity::ProjectName>,
+) -> Result<&ryeos_state::project_identity::ProjectName, RemoteForwardError> {
+    name.ok_or_else(|| {
+        RemoteForwardError::PushFailed("a project push needs the bound project name".to_owned())
+    })
 }
 
 fn no_project_snapshot_policy(
@@ -1237,7 +1260,12 @@ mod tests {
     #[test]
     fn current_head_is_bound_only_from_exact_local_admission() {
         let admitted = "22".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(
+            PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
+            PinnedRealization::ReadOnly,
+        );
 
         let bound = bind_destination_execution_policy(&policy, Some(&admitted), &admitted).unwrap();
 
@@ -1279,7 +1307,12 @@ mod tests {
     fn pushed_snapshot_must_match_local_admission() {
         let admitted = "55".repeat(32);
         let pushed = "66".repeat(32);
-        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+        let policy = pinned_policy(
+            PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
+            PinnedRealization::ReadOnly,
+        );
 
         assert!(matches!(
             bind_destination_execution_policy(&policy, Some(&admitted), &pushed),
