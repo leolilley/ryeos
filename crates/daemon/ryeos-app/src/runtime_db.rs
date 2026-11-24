@@ -19333,10 +19333,9 @@ impl RuntimeDb {
         })
     }
 
-    /// Read while the caller holds the authoritative chain runtime-pin lock.
-    /// The reaping marker remains durable until settlement removes the lease.
     /// Whether the seat's lease is held by a holder other than `holder`. A
-    /// seat with no lease yet is held by no one.
+    /// seat with no lease yet is held by no one. Read while the caller holds
+    /// the authoritative chain runtime-pin lock.
     pub fn seat_lease_held_by_another(&self, seat_thread_id: &str, holder: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
             Ok(conn.query_row(
@@ -19348,6 +19347,8 @@ impl RuntimeDb {
         })
     }
 
+    /// Read while the caller holds the authoritative chain runtime-pin lock.
+    /// The reaping marker remains durable until settlement removes the lease.
     pub fn seat_lease_is_reaping(&self, seat_thread_id: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
             Ok(conn.query_row(
