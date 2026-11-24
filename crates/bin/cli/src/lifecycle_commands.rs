@@ -3239,7 +3239,13 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         checks.push(process_quarantine_check(&config.app_root));
         checks.push(sync_apply_quarantine_check(&config.app_root));
         checks.push(stale_publication_check(&config.app_root));
+        checks.push(node_journal_check(&config.app_root));
     } else {
+        checks.push(check(
+            "node_journal",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
         checks.push(check(
             "stale_publication",
             NA,
@@ -4177,6 +4183,59 @@ fn sync_apply_quarantine_details(
         "note": "the apply's transaction directory is kept untouched under <project>/.ai/state/project-apply-transactions/<transaction id>; surfaces the apply moved aside were not restored",
         "fix": "inspect each named transaction directory; restore the originals it holds by hand if the project needs them, then remove the directory to clear this warning on the next start. A job whose operation is undecodable has no directory to inspect",
     })
+}
+
+/// The node journal must verify for the daemon to append to it: a project open
+/// whose journal write fails is refused with `journal_write_failed`. Reading
+/// the chain here finds a broken journal before an open does.
+fn node_journal_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::WARN;
+    let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let node = match ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())
+    {
+        Ok(node) => node,
+        Err(error) => {
+            return check(
+                "node_journal",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "the node key is needed to verify the journal's signatures",
+                }),
+            );
+        }
+    };
+    node_journal_check_with(ryeos_node::node_journal::NodeJournal::for_app_root(
+        app_root, node,
+    ))
+}
+
+fn node_journal_check_with(
+    journal: ryeos_node::node_journal::NodeJournal,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match journal.load() {
+        Ok(state) => check(
+            "node_journal",
+            OK,
+            serde_json::json!({
+                "last_sequence": state.last_sequence,
+                "retained": state.retained,
+                "dropped_records": state.dropped_records,
+                "head": state.head,
+            }),
+        ),
+        Err(error) => check(
+            "node_journal",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "the journal does not verify, so every project open is refused with `journal_write_failed` (cause `chain_integrity`) until it is repaired",
+            }),
+        ),
+    }
 }
 
 fn stale_publication_check(
@@ -6316,6 +6375,49 @@ mod tests {
         let fix = stale["fix"].as_str().unwrap();
         assert!(fix.contains("compose it again"));
         assert!(fix.contains("ryeos node external-execution retire external_execution/w9"));
+    }
+
+    mod node_journal_doctor {
+        use super::*;
+        use ryeos_core_tools::actions::doctor::{FAIL, OK};
+
+        fn journal(root: &std::path::Path) -> ryeos_node::node_journal::NodeJournal {
+            let key =
+                ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).node_signing_key_path();
+            let node = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
+            ryeos_node::node_journal::NodeJournal::for_app_root(root, node)
+        }
+
+        #[test]
+        fn a_verifying_journal_is_ok() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, OK, "{:?}", result.detail);
+            assert_eq!(result.detail["last_sequence"], 1);
+        }
+
+        #[test]
+        fn a_journal_that_does_not_verify_fails_and_names_the_refusal() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let record = ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf())
+                .state()
+                .join("node-journal")
+                .join(format!("{:020}.json", 1));
+            let text = std::fs::read_to_string(&record).unwrap();
+            std::fs::write(&record, text.replacen("standard", "tampered", 1)).unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, FAIL, "{:?}", result.detail);
+            assert!(
+                result.detail["note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("journal_write_failed")
+            );
+        }
     }
 
     mod sync_apply_quarantine_doctor {
