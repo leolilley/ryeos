@@ -50,10 +50,13 @@ use super::{
 // authority; an explicit live demand is refused wherever the resolved root is
 // not live. V39 seals the external-effect authority's unknown-outcome retry
 // ceiling, the number of leading retries a runtime may issue after a failure
-// that leaves it unknown whether the external system acted. Every schema change here requires a matching
+// that leaves it unknown whether the external system acted. V40 seals the
+// thread workload ceiling: the explicit bound on the effect class and
+// workspace access that any tool call made from the launch's thread tree may
+// reach. Every schema change here requires a matching
 // Operational dispatch-effect replay-index epoch bump, which retires effects
 // sealed under predecessor capsule contracts.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 39;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 40;
 pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
@@ -692,6 +695,92 @@ impl AdmittedAccountingScope {
             anyhow::bail!("accounting scope ledger epoch must be positive");
         }
         Ok(())
+    }
+}
+
+/// Highest durable-effect class a ceilinged thread's tool calls may reach.
+/// `Live` is the widest (an unrecorded, externally acting call); `Recorded` is
+/// the narrowest. A ceiling admits its own class and every narrower one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadEffectCeiling {
+    Recorded,
+    Sealed,
+    Live,
+}
+
+impl ThreadEffectCeiling {
+    /// Effect-class labels this ceiling admits, using the grant's spelling
+    /// (`live` is the label of a call that declares no durable class).
+    pub const fn admitted_labels(self) -> &'static [&'static str] {
+        match self {
+            Self::Recorded => &["recorded"],
+            Self::Sealed => &["recorded", "sealed"],
+            Self::Live => &["live", "recorded", "sealed"],
+        }
+    }
+}
+
+/// Workspace relationship a ceilinged thread's tool calls may use. A ceiling
+/// never admits exclusive access to the live workspace: exclusivity needs the
+/// owning root quiesced, which a thread that keeps running cannot offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadWorkspaceCeiling {
+    ImmutableCurrentGeneration,
+}
+
+/// Bound on the workload authority of every tool call made from a thread and
+/// from the threads it spawns. It is sealed with the launch, carried on the
+/// thread's callback bearer, and only ever narrowed when a thread spawns
+/// another.
+///
+/// There is deliberately no `Default`: every launch and spawn context must
+/// state its ceiling, so a spawn path that forgets to carry it does not
+/// compile. `Unbounded` is the explicit statement that nothing bounds the
+/// thread; it belongs to a launch with no parent execution context and is
+/// obtained through [`ThreadWorkloadCeiling::node_root`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "ceiling", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadWorkloadCeiling {
+    Unbounded,
+    Bounded {
+        max_effect_class: ThreadEffectCeiling,
+        workspace_access: ThreadWorkspaceCeiling,
+    },
+}
+
+impl ThreadWorkloadCeiling {
+    /// The ceiling of a launch that has no parent execution context. Only
+    /// root launch sites (and tests) may call this; every spawn from a running
+    /// thread derives its ceiling from the parent's with [`Self::meet`].
+    pub const fn node_root() -> Self {
+        Self::Unbounded
+    }
+
+    pub const fn is_bounded(&self) -> bool {
+        matches!(self, Self::Bounded { .. })
+    }
+
+    /// The greatest ceiling no wider than either operand: `Unbounded` is the
+    /// identity and two bounded ceilings take the narrower value per field.
+    pub fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unbounded, narrowed) | (narrowed, Self::Unbounded) => narrowed,
+            (
+                Self::Bounded {
+                    max_effect_class: left_effect,
+                    workspace_access: left_workspace,
+                },
+                Self::Bounded {
+                    max_effect_class: right_effect,
+                    workspace_access: right_workspace,
+                },
+            ) => Self::Bounded {
+                max_effect_class: left_effect.min(right_effect),
+                workspace_access: left_workspace.min(right_workspace),
+            },
+        }
     }
 }
 
@@ -1456,6 +1545,10 @@ pub struct AdmittedLaunchCapsule {
     /// provider work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<AdmittedAccountingScope>,
+    /// Sealed bound on the workload authority of every tool call made from
+    /// this launch's thread tree. Required: a launch states its ceiling, and
+    /// only a launch with no parent execution context states `Unbounded`.
+    pub thread_ceiling: ThreadWorkloadCeiling,
     pub effective_caps: Vec<String>,
     /// Delegating parent's exact capability set for a followed or detached
     /// child. Required-nullable so cross-site continuation preserves the
@@ -1482,6 +1575,7 @@ pub struct AdmittedLaunchAuthority {
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
     pub execution_closure: AdmittedExecutionClosure,
     pub accounting_scope: Option<AdmittedAccountingScope>,
+    pub thread_ceiling: ThreadWorkloadCeiling,
     pub effective_caps: Vec<String>,
     pub parent_delegation_caps: Option<Vec<String>>,
     pub runtime_ref: String,
@@ -1574,6 +1668,7 @@ impl AdmittedLaunchAuthority {
             artifact_identity: &'a AdmittedLaunchArtifactIdentity,
             execution_closure: &'a AdmittedExecutionClosure,
             accounting_authority: Option<AccountingAuthority<'a>>,
+            thread_ceiling: &'a ThreadWorkloadCeiling,
             effective_caps: &'a [String],
             parent_delegation_caps: &'a Option<Vec<String>>,
             runtime_ref: &'a str,
@@ -1589,6 +1684,7 @@ impl AdmittedLaunchAuthority {
             artifact_identity,
             execution_closure,
             accounting_scope,
+            thread_ceiling,
             effective_caps,
             parent_delegation_caps,
             runtime_ref,
@@ -1616,6 +1712,7 @@ impl AdmittedLaunchAuthority {
             artifact_identity,
             execution_closure,
             accounting_authority,
+            thread_ceiling,
             effective_caps,
             parent_delegation_caps,
             runtime_ref,
@@ -1783,6 +1880,7 @@ impl AdmittedLaunchCapsule {
             artifact_identity: self.artifact_identity.clone(),
             execution_closure: self.execution_closure.clone(),
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: self.thread_ceiling,
             effective_caps: self.effective_caps.clone(),
             parent_delegation_caps: self.parent_delegation_caps.clone(),
             runtime_ref: self.runtime_ref.clone(),
@@ -2327,6 +2425,7 @@ impl AdmittedLaunchCapsule {
             && self.artifact_identity == other.artifact_identity
             && self.execution_closure == other.execution_closure
             && self.accounting_scope == other.accounting_scope
+            && self.thread_ceiling == other.thread_ceiling
             && self.effective_caps == other.effective_caps
             && self.parent_delegation_caps == other.parent_delegation_caps
             && self.runtime_ref == other.runtime_ref
@@ -2396,6 +2495,7 @@ impl AdmittedLaunchCapsule {
             execution_realization_hash: _,
             source_binding_hash,
             accounting_scope,
+            thread_ceiling,
             effective_caps,
             parent_delegation_caps,
             runtime_ref,
@@ -2437,6 +2537,7 @@ impl AdmittedLaunchCapsule {
             && executor_blob_hash == successor_executor_blob_hash
             && *source_binding_hash == successor.source_binding_hash
             && *accounting_scope == successor.accounting_scope
+            && *thread_ceiling == successor.thread_ceiling
             && *effective_caps == successor.effective_caps
             && *parent_delegation_caps == successor.parent_delegation_caps
             && *runtime_ref == successor.runtime_ref
@@ -2478,6 +2579,7 @@ impl AdmittedLaunchCapsule {
                 &target.execution_closure,
             )?
             && self.source_binding_hash == target.source_binding_hash
+            && self.thread_ceiling == target.thread_ceiling
             && self.effective_caps == target.effective_caps
             && self.parent_delegation_caps == target.parent_delegation_caps
             && self.runtime_ref == target.runtime_ref
@@ -3053,6 +3155,7 @@ mod tests {
             execution_realization_hash: "9".repeat(64),
             source_binding_hash: None,
             accounting_scope: None,
+            thread_ceiling: ThreadWorkloadCeiling::node_root(),
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             parent_delegation_caps: None,
             runtime_ref: "runtime:direct".to_string(),
@@ -3213,6 +3316,7 @@ mod tests {
             execution_realization_hash: "9".repeat(64),
             source_binding_hash: None,
             accounting_scope: None,
+            thread_ceiling: ThreadWorkloadCeiling::node_root(),
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             parent_delegation_caps: None,
             runtime_ref: "runtime:test/directive".to_string(),
@@ -3666,7 +3770,7 @@ mod tests {
         scope.directive_budget_id = Some("directive:second".into());
         assert_ne!(exact, next.digest().unwrap());
         assert_eq!(reusable, next.product_build_replay_digest().unwrap());
-        for change in 0..8 {
+        for change in 0..9 {
             let mut changed = authority.clone();
             match change {
                 0 => changed.accounting_scope.as_mut().unwrap().ledger_epoch += 1,
@@ -3689,6 +3793,7 @@ mod tests {
                 5 => changed.parent_delegation_caps = Some(vec!["ryeos.test.delegate".into()]),
                 6 => changed.exact_program_hash = "f".repeat(64),
                 7 => changed.runtime_ref = "runtime:test/other".into(),
+                8 => changed.thread_ceiling = bounded_ceiling(ThreadEffectCeiling::Recorded),
                 _ => unreachable!(),
             }
             assert_ne!(
@@ -3703,6 +3808,113 @@ mod tests {
             .execution_budget_id
             .clear();
         assert!(next.product_build_replay_digest().is_err());
+    }
+
+    fn bounded_ceiling(max_effect_class: ThreadEffectCeiling) -> ThreadWorkloadCeiling {
+        ThreadWorkloadCeiling::Bounded {
+            max_effect_class,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        }
+    }
+
+    #[test]
+    fn thread_ceiling_meet_is_never_wider_than_either_operand() {
+        let unbounded = ThreadWorkloadCeiling::node_root();
+        let recorded = bounded_ceiling(ThreadEffectCeiling::Recorded);
+        let sealed = bounded_ceiling(ThreadEffectCeiling::Sealed);
+        let live = bounded_ceiling(ThreadEffectCeiling::Live);
+
+        assert_eq!(unbounded.meet(unbounded), unbounded);
+        for narrowed in [recorded, sealed, live] {
+            assert_eq!(unbounded.meet(narrowed), narrowed);
+            assert_eq!(narrowed.meet(unbounded), narrowed);
+            assert_eq!(narrowed.meet(narrowed), narrowed);
+        }
+        assert_eq!(sealed.meet(recorded), recorded);
+        assert_eq!(recorded.meet(sealed), recorded);
+        assert_eq!(live.meet(sealed), sealed);
+        assert_eq!(sealed.meet(live), sealed);
+        for left in [unbounded, recorded, sealed, live] {
+            for right in [unbounded, recorded, sealed, live] {
+                assert_eq!(left.meet(right), right.meet(left), "meet is commutative");
+                let met = left.meet(right);
+                assert_eq!(
+                    met.meet(left),
+                    met,
+                    "meet is no wider than its left operand"
+                );
+                assert_eq!(
+                    met.meet(right),
+                    met,
+                    "meet is no wider than its right operand"
+                );
+            }
+        }
+        assert!(!unbounded.is_bounded());
+        assert!(recorded.is_bounded());
+    }
+
+    #[test]
+    fn thread_ceiling_effect_labels_nest() {
+        assert_eq!(
+            ThreadEffectCeiling::Recorded.admitted_labels(),
+            ["recorded"]
+        );
+        assert_eq!(
+            ThreadEffectCeiling::Sealed.admitted_labels(),
+            ["recorded", "sealed"]
+        );
+        assert_eq!(
+            ThreadEffectCeiling::Live.admitted_labels(),
+            ["live", "recorded", "sealed"]
+        );
+    }
+
+    #[test]
+    fn thread_ceiling_wire_form_round_trips_and_requires_its_tag() {
+        for ceiling in [
+            ThreadWorkloadCeiling::node_root(),
+            bounded_ceiling(ThreadEffectCeiling::Sealed),
+        ] {
+            let value = serde_json::to_value(ceiling).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ThreadWorkloadCeiling>(value).unwrap(),
+                ceiling
+            );
+        }
+        assert!(serde_json::from_value::<ThreadWorkloadCeiling>(serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn capsule_requires_and_commits_its_thread_ceiling() {
+        let capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        let mut value = capsule.to_value();
+        assert_eq!(
+            AdmittedLaunchCapsule::from_current_value(value.clone()).unwrap(),
+            capsule
+        );
+        value.as_object_mut().unwrap().remove("thread_ceiling");
+        assert!(AdmittedLaunchCapsule::from_current_value(value).is_err());
+
+        let mut narrowed = capsule.clone();
+        narrowed.thread_ceiling = bounded_ceiling(ThreadEffectCeiling::Recorded);
+        let round_trip = AdmittedLaunchCapsule::from_current_value(narrowed.to_value()).unwrap();
+        assert_eq!(round_trip.thread_ceiling, narrowed.thread_ceiling);
+        assert_ne!(
+            capsule.launch_authority_digest().unwrap(),
+            narrowed.launch_authority_digest().unwrap(),
+            "the ceiling is part of the committed launch authority"
+        );
+        assert!(
+            !capsule.same_continuation_admission(&narrowed).unwrap(),
+            "a continuation cannot change its ceiling"
+        );
+        assert_eq!(
+            narrowed.launch_authority().thread_ceiling,
+            narrowed.thread_ceiling
+        );
     }
 
     #[test]

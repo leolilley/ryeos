@@ -33,9 +33,7 @@ use serde_json::{Value, json};
 
 use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
 use ryeos_app::execution_provenance::ExecutionProvenance;
-use ryeos_app::launch_metadata::{
-    FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
-};
+use ryeos_app::launch_metadata::{FollowLaunchWindow, ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::new_thread_id;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -515,21 +513,12 @@ pub async fn spawn_detached_child(
                     .into_iter()
                     .collect(),
             ),
+            thread_ceiling: cap.thread_ceiling,
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         });
-    let launch_parent_context = crate::dispatch::ParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-        accounting_scope: cap.accounting_scope.clone(),
-    };
-    meta.follow_parent_context = Some(PersistedParentExecutionContext {
-        parent_thread_id: launch_parent_context.parent_thread_id.clone(),
-        hard_limits: launch_parent_context.hard_limits.clone(),
-        depth: launch_parent_context.depth,
-        accounting_scope: launch_parent_context.accounting_scope.clone(),
-    });
+    let launch_parent_context = crate::dispatch::ParentExecutionContext::for_child_of(cap);
+    meta.follow_parent_context = Some(launch_parent_context.persisted());
     meta.follow_launch_window = persisted_launch_window.clone();
     let prepared = crate::execution::launch::prepare_follow_child_launch(
         state,
