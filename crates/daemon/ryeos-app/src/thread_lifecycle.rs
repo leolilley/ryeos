@@ -6368,6 +6368,9 @@ impl ThreadLifecycleService {
         {
             return false;
         }
+        if filter.exclude_kinds.iter().any(|kind| item.kind == *kind) {
+            return false;
+        }
         if let Some(project_root) = &filter.project_root
             && item.project_root.as_deref().map(Path::new) != Some(project_root.as_path())
         {

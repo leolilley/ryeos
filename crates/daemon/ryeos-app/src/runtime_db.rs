@@ -19274,9 +19274,11 @@ impl RuntimeDb {
                 (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, NULL)
              ON CONFLICT(seat_thread_id) DO UPDATE SET
-                owner=excluded.owner, surface=excluded.surface,
-                client_ref=excluded.client_ref, last_seen_at_ms=excluded.last_seen_at_ms
-             WHERE seat_lease.reaping_at_ms IS NULL",
+                last_seen_at_ms=excluded.last_seen_at_ms
+             WHERE seat_lease.reaping_at_ms IS NULL
+                AND seat_lease.owner=excluded.owner
+                AND seat_lease.surface=excluded.surface
+                AND seat_lease.client_ref=excluded.client_ref",
                 params![seat_thread_id, owner, surface, client_ref, now],
             )? > 0)
         })
@@ -19333,6 +19335,19 @@ impl RuntimeDb {
 
     /// Read while the caller holds the authoritative chain runtime-pin lock.
     /// The reaping marker remains durable until settlement removes the lease.
+    /// Whether the seat's lease is held by a holder other than `holder`. A
+    /// seat with no lease yet is held by no one.
+    pub fn seat_lease_held_by_another(&self, seat_thread_id: &str, holder: &str) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM seat_lease
+             WHERE seat_thread_id=?1 AND owner<>?2)",
+                params![seat_thread_id, holder],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
     pub fn seat_lease_is_reaping(&self, seat_thread_id: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
             Ok(conn.query_row(

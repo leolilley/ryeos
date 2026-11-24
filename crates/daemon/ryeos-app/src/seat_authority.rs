@@ -216,9 +216,8 @@ fn seat_state_from_outcome(
     }
 }
 
-/// One reader of threads: a key, the project its seat is bound to, whether
-/// the read is made by a source a project-authored item declared, and the
-/// browser session the read is made through, if any.
+/// One reader of threads: a key, the project its seat is bound to, and
+/// whether the read is made by a source a project-authored item declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReader {
     /// The reader key, `fp:<hex>`.
@@ -227,12 +226,6 @@ pub struct ThreadReader {
     /// A source a project-authored view or Surface declared reads threads of
     /// its seat's own project and nothing else.
     pub project_authored_source: bool,
-    /// The id of the browser session this read is made through. A browser
-    /// session is a credential minted for one key, and a seat's own threads
-    /// record it as their launcher (`session:<id>`). The builder sets it only
-    /// from the authenticated session, and only while that session is live
-    /// and minted for `key`. A read outside a browser session has none.
-    pub own_session: Option<String>,
 }
 
 impl ThreadReader {
@@ -270,22 +263,12 @@ impl ThreadReader {
                 // Bound to a checkout that states no identity now (renamed, or
                 // its registration lapsed): the key still reads what it
                 // launched itself, and nothing else of the project.
-                SeatProjectState::Absent(_) => self.launched(subject),
+                SeatProjectState::Absent(_) => {
+                    subject.requested_by.as_deref() == Some(self.key.as_str())
+                }
             },
-            None => self.launched(subject),
+            None => subject.requested_by.as_deref() == Some(self.key.as_str()),
         }
-    }
-
-    /// Whether this reader launched `subject`: its key, or the browser
-    /// session it reads through, exactly as recorded.
-    fn launched(&self, subject: &AuthoritativeThreadSubject) -> bool {
-        let Some(launcher) = subject.requested_by.as_deref() else {
-            return false;
-        };
-        launcher == self.key
-            || self.own_session.as_deref().is_some_and(|session| {
-                launcher.strip_prefix("session:") == Some(session) && !session.is_empty()
-            })
     }
 }
 

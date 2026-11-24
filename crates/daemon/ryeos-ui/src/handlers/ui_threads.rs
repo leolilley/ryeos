@@ -187,6 +187,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
         exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
+        // A seat is the UI's own session thread. It is read by exact id, never
+        // listed.
+        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
         project_root,
     };
 
