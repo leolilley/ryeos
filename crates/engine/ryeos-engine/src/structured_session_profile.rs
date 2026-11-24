@@ -2299,7 +2299,11 @@ fn reject_nonlocal_refs(value: &Value, depth: usize) -> Result<()> {
 mod tests {
     #[test]
     fn the_effect_class_vocabulary_is_sorted_and_unique() {
-        assert!(super::EFFECT_CLASSES.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            super::EFFECT_CLASSES
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
     }
 
     use super::*;
