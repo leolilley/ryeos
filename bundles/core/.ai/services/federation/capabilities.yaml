@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:a03cfb529e4c98c95ea6417e53bc8c0fefdd9b3df5efd60b6057f4a368dbda43:XKBP9XIwJhn5CPCXZzoILQgrcLe7WXcCsw5WhwJsWTpHxCmEZPgwOtCvDZvHjwhbT9pmt3HgcRTXnKI98NiPCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T15:39:50Z:1c50f3b2d1970ef603c0d8e53908f9d86417e930ce1fd4a402fd5e391d999d66:Xzhf48b4Wbr4r9OoTC7vsSH74SxIOP5nv4XE5RxJNGxsN7BVxZWXnnnPKg+Jm+1yQ274tRjAMBJ3zmb3lAeJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: federation.capabilities
 required_caps: []
@@ -6,6 +6,14 @@ schema: {}
 description: "Advertise distributed-substrate protocol capabilities for peer handshakes"
 disclosure:
   principal:
+    - "/protocol"
+    - "/identity/principal_id"
+    - "/identity/fingerprint"
+    - "/identity/site_id"
+    - "/object_kinds"
+    - "/services"
+    - "/limits"
+  public:
     - "/protocol"
     - "/identity/principal_id"
     - "/identity/fingerprint"

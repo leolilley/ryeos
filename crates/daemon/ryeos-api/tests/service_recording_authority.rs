@@ -48,7 +48,7 @@ fn route_handler(
     _context: HandlerContext,
     _state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> {
-    Box::pin(async { Ok(json!({"status": "ok"})) })
+    Box::pin(async { Ok(json!({"protocol": "ok"})) })
 }
 
 fn failing_route_handler(
@@ -93,7 +93,6 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
             scheduled_fire: None,
             validate_only: false,
         },
-        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
         requested_call: None,
     };
 
@@ -127,13 +126,13 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
 async fn compiled_recorded_route_returns_thread_identity_and_persists_attribution() {
     let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("health.status", route_handler);
+    services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
 
     let invoker = CompiledServiceInvocation {
-        service_ref: "service:health/status".to_string(),
+        service_ref: "service:federation/capabilities".to_string(),
         subject_kind: "service".to_string(),
-        endpoint: "health.status".to_string(),
+        endpoint: "federation.capabilities".to_string(),
     };
     let principal = RoutePrincipal {
         id: "route:identity/public-key".to_string(),
@@ -166,7 +165,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
     let RouteInvocationResult::Json { value, thread_id } = result else {
         panic!("compiled service route did not return JSON");
     };
-    assert_eq!(value, json!({"status": "ok"}));
+    assert_eq!(value, json!({"protocol": "ok"}));
     let thread_id = thread_id.expect("recorded route must return its durable thread id");
 
     let thread = state
@@ -236,7 +235,7 @@ async fn public_identity_bootstrap_is_unrecorded() {
 async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
     let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("health.status", route_handler);
+    services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
 
     let raw = RawRouteSpec {
@@ -248,7 +247,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
         limits: RawLimits::default(),
         response: RawResponseSpec {
             mode: "json".to_string(),
-            source: Some("service:health/status".to_string()),
+            source: Some("service:federation/capabilities".to_string()),
             source_config: Value::Null,
             status: None,
             content_type: None,
