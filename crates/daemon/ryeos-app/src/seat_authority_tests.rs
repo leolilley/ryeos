@@ -165,7 +165,6 @@ fn reader(key: &str, seat_project: SeatProjectState) -> ThreadReader {
         key: key.to_string(),
         seat_project,
         project_authored_source: false,
-        own_session: None,
     }
 }
 
@@ -319,7 +318,6 @@ fn a_project_authored_source_is_confined_to_its_seat_project() {
         key: k.alpha_now.clone(),
         seat_project: SeatProjectState::Stated(alpha.clone()),
         project_authored_source: true,
-        own_session: None,
     };
     assert!(source.admits(
         &k.trust,
@@ -353,78 +351,6 @@ fn a_project_authored_source_is_confined_to_its_seat_project() {
             live("/work/alpha", LogicalProject::Stated(alpha))
         )
     ));
-}
-
-/// A seat's own thread records the browser session it was opened through as
-/// its launcher. A reader made through that session reads it; another session,
-/// a read with no session, a near-miss spelling, a retired or revoked key and
-/// a project-authored source do not.
-#[test]
-fn a_seat_reads_the_thread_its_own_session_launched() {
-    let k = keys();
-    let through = |key: &str, session: Option<&str>, seat: SeatProjectState| ThreadReader {
-        own_session: session.map(str::to_string),
-        ..reader(key, seat)
-    };
-    let alpha = project(&k.alpha, "alpha");
-    for authority in [
-        live("/work/alpha", absent()),
-        pinned(absent()),
-        ExecutionProjectAuthority::PROJECTLESS,
-        live("/work/alpha", LogicalProject::Stated(alpha.clone())),
-    ] {
-        let seat_thread = subject("session:S-1", authority.clone());
-        for seat in [
-            SeatProjectState::Absent(SeatProjectAbsence::Unregistered),
-            SeatProjectState::Projectless,
-        ] {
-            let stated = matches!(
-                &authority,
-                ExecutionProjectAuthority::LiveProject {
-                    signer_project: LogicalProject::Stated(_),
-                    ..
-                }
-            );
-            // A stated thread under a projectless seat is read by speaks_for,
-            // which a session launcher is not part of.
-            if !(stated && seat == SeatProjectState::Projectless) {
-                assert!(
-                    through(&k.alpha_now, Some("S-1"), seat.clone()).admits(&k.trust, &seat_thread),
-                    "{authority:?} {seat:?}"
-                );
-            }
-            for (key, session) in [
-                (&k.alpha_now, None),
-                (&k.alpha_now, Some("S-2")),
-                (&k.alpha_now, Some("")),
-                (&k.alpha_now, Some("S-")),
-                (&k.alpha_root, Some("S-1")),
-                (&k.revoked, Some("S-1")),
-            ] {
-                if stated && seat == SeatProjectState::Projectless && key == &k.alpha_now {
-                    continue;
-                }
-                assert!(
-                    !through(key, session, seat.clone()).admits(&k.trust, &seat_thread),
-                    "{authority:?} {seat:?} {key} {session:?}"
-                );
-            }
-        }
-        let source = ThreadReader {
-            project_authored_source: true,
-            ..through(
-                &k.alpha_now,
-                Some("S-1"),
-                SeatProjectState::Absent(SeatProjectAbsence::Unregistered),
-            )
-        };
-        assert!(!source.admits(&k.trust, &seat_thread), "{authority:?}");
-    }
-    // An empty recorded session never matches an empty or absent one.
-    let empty = subject("session:", ExecutionProjectAuthority::PROJECTLESS);
-    assert!(
-        !through(&k.alpha_now, Some(""), SeatProjectState::Projectless).admits(&k.trust, &empty)
-    );
 }
 
 /// Another principal's stated thread is never read through speaks_for.

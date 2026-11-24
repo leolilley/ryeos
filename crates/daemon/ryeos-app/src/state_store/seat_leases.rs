@@ -144,7 +144,7 @@ impl StateStore {
             && snapshot.thread_id == seat.root_id
             && fenced.contains(&snapshot.kind_name)
             && snapshot.status == ThreadStatus::Running
-            && snapshot.requested_by.as_deref() == Some(seat.owner)
+            && snapshot.requested_by.as_deref() == Some(seat.launcher)
             && snapshot.item_ref == seat.item_ref
             && snapshot.executor_ref == seat.executor_ref
     }
@@ -208,6 +208,11 @@ impl StateStore {
         let outcome =
             Self::with_cut_locked(&g, permit.cas_guard(), cut.anchors, cut.retired, || {
                 if refuse_claimed && g.runtime_db.seat_lease_is_reaping(seat.root_id)? {
+                    return Ok(None);
+                }
+                if g.runtime_db
+                    .seat_lease_held_by_another(seat.root_id, seat.holder)?
+                {
                     return Ok(None);
                 }
                 action(&g.runtime_db).map(Some)
@@ -293,7 +298,7 @@ impl StateStore {
         cut: &SeatCut<'_>,
     ) -> Result<bool> {
         self.with_exact_seat_cut(seat, cut, false, true, |db| {
-            db.touch_seat_lease(seat.root_id, seat.owner, seat.item_ref, seat.executor_ref)
+            db.touch_seat_lease(seat.root_id, seat.holder, seat.item_ref, seat.executor_ref)
         })
         .map(|renewed| renewed.unwrap_or(false))
     }
@@ -327,7 +332,7 @@ impl StateStore {
             return Ok(false);
         }
         self.with_exact_seat_cut(seat, cut, false, false, |db| {
-            db.claim_closed_seat_lease(seat.root_id, seat.owner, seat.item_ref, seat.executor_ref)
+            db.claim_closed_seat_lease(seat.root_id, seat.holder, seat.item_ref, seat.executor_ref)
         })
         .map(|claimed| claimed.unwrap_or(false))
     }
@@ -599,6 +604,8 @@ impl StateStore {
         let admit_seat = |view: MixedCutAdmission<'_>| -> Result<bool> {
             if !Self::seat_snapshot_matches(view.target, seat, fenced)
                 || g.runtime_db.seat_lease_is_reaping(seat.root_id)?
+                || g.runtime_db
+                    .seat_lease_held_by_another(seat.root_id, seat.holder)?
             {
                 refused.set(true);
                 return Ok(false);
@@ -675,7 +682,7 @@ impl StateStore {
                 if matches!(result, CutAppendResult::Committed(_)) {
                     match g.runtime_db.touch_seat_lease(
                         seat.root_id,
-                        seat.owner,
+                        seat.holder,
                         seat.item_ref,
                         seat.executor_ref,
                     ) {
@@ -759,6 +766,8 @@ impl StateStore {
             for (snapshot, seat) in [(view.target, first), (view.counterpart, second)] {
                 if !Self::seat_snapshot_matches(snapshot, seat, fenced)
                     || g.runtime_db.seat_lease_is_reaping(seat.root_id)?
+                    || g.runtime_db
+                        .seat_lease_held_by_another(seat.root_id, seat.holder)?
                     || !Self::stop_intent_clear(&g, seat.root_id)?
                 {
                     refused.set(true);
@@ -819,7 +828,7 @@ impl StateStore {
                 for seat in [first, second] {
                     match g.runtime_db.touch_seat_lease(
                         seat.root_id,
-                        seat.owner,
+                        seat.holder,
                         seat.item_ref,
                         seat.executor_ref,
                     ) {
