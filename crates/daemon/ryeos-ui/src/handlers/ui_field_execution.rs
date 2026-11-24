@@ -3299,6 +3299,7 @@ mod tests {
                 project: None,
                 pending: 0,
                 facets: BTreeMap::new(),
+                title: None,
                 current_node: None,
                 error: None,
             },
