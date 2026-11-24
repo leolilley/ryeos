@@ -108,7 +108,7 @@ pub async fn handle(
     let retained_current_head = matches!(
         &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
-            source: ryeos_app::execution_policy::PinnedSource::CurrentHead,
+            source: ryeos_app::execution_policy::PinnedSource::CurrentHead { .. },
             realization: ryeos_app::execution_policy::PinnedRealization::Cow {
                 terminal_publication:
                     ryeos_app::execution_policy::TerminalPublication::RetainCurrentHead,
@@ -184,12 +184,33 @@ pub async fn handle(
         }
         (false, None) => {}
     }
+    // A current-head policy names the head it runs; it must be the bound
+    // project, never a name the binding does not carry.
+    if let ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+        source: ryeos_app::execution_policy::PinnedSource::CurrentHead { project },
+        ..
+    } = &req.execution_policy.project
+    {
+        let bound =
+            binding.as_ref().map(
+                |binding| ryeos_state::project_identity::PushedProject::Named {
+                    name: binding.project_name.clone(),
+                },
+            );
+        if bound.as_ref() != Some(project) {
+            return Err(HandlerError::BadRequest(format!(
+                "project_name_mismatch: the current-head policy names project {project} but the binding names {}",
+                bound.map_or_else(|| "none".to_owned(), |bound| bound.to_string())
+            )));
+        }
+    }
     let remote_result = submit_remote_request(
         &client,
         &req,
         binding
             .as_ref()
             .map(|binding| binding.remote_project_path.as_str()),
+        binding.as_ref().map(|binding| &binding.remote_owner),
         contact_deadline,
     )
         .await
@@ -254,6 +275,7 @@ async fn submit_remote_request(
     client: &RemoteClient,
     req: &Request,
     project_path: Option<&str>,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     contact_deadline: Option<lillux::time::MonotonicDeadline>,
 ) -> anyhow::Result<Value> {
     let remaining = contact_deadline.map(|deadline| deadline.remaining());
@@ -279,6 +301,7 @@ async fn submit_remote_request(
                 &req.execution_policy,
                 launch_id,
                 remaining,
+                expected_owner,
             )
             .await?
     } else {
@@ -290,6 +313,7 @@ async fn submit_remote_request(
             &req.parameters,
             &req.execution_policy,
             req.launch_id.as_deref(),
+            expected_owner,
         );
         if let Some(remaining) = remaining {
             tokio::time::timeout(remaining, call).await.map_err(|_| {
@@ -608,7 +632,7 @@ mod tests {
                 let project = (!projectless).then_some("/target-project");
                 let error = tokio::time::timeout(
                     Duration::from_secs(1),
-                    submit_remote_request(&client, &request, project, Some(deadline)),
+                    submit_remote_request(&client, &request, project, None, Some(deadline)),
                 )
                 .await
                 .unwrap()
@@ -640,7 +664,7 @@ mod tests {
                     serde_json::to_value(&request.execution_policy).unwrap()
                 );
                 assert!(
-                    submit_remote_request(&client, &request, project, Some(deadline))
+                    submit_remote_request(&client, &request, project, None, Some(deadline))
                         .await
                         .is_err()
                 );
@@ -698,7 +722,7 @@ mod tests {
         let client = peer.operator_client(&fixture);
         let original = fixture.context.original_execution_budget().unwrap().clone();
         let deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
-        let envelope = submit_remote_request(&client, &request, None, Some(deadline))
+        let envelope = submit_remote_request(&client, &request, None, None, Some(deadline))
             .await
             .unwrap();
         assert_eq!(envelope["thread"]["thread_id"], "T-peer-fixture");
@@ -727,7 +751,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_secs(1),
-                submit_remote_request(&client, &request, None, Some(cancel_deadline))
+                submit_remote_request(&client, &request, None, None, Some(cancel_deadline))
             )
             .await
             .unwrap()
@@ -738,7 +762,7 @@ mod tests {
         stalled.wait_for_requests(1).await;
         assert_eq!(stalled.state.requests.lock().unwrap().len(), 1);
         assert!(
-            submit_remote_request(&client, &request, None, Some(cancel_deadline))
+            submit_remote_request(&client, &request, None, None, Some(cancel_deadline))
                 .await
                 .is_err()
         );
@@ -751,9 +775,10 @@ mod tests {
             crate::handler_context::HandlerContext::new("session:test".into(), Vec::new(), true);
         assert!(remote_contact_deadline(&request, &unscoped).is_none());
         let peer = Peer::start(PeerMode::EchoAfter(Duration::from_millis(60))).await;
-        let result = submit_remote_request(&peer.operator_client(&fixture), &request, None, None)
-            .await
-            .unwrap();
+        let result =
+            submit_remote_request(&peer.operator_client(&fixture), &request, None, None, None)
+                .await
+                .unwrap();
         assert_eq!(
             result["result"]["request"]["parameters"],
             request.parameters
@@ -790,7 +815,10 @@ mod tests {
                 "environment": {"kind": "none"},
                 "project": {
                     "kind": "pinned",
-                    "source": {"kind": "current_head"},
+                    "source": {
+                        "kind": "current_head",
+                        "project": {"kind": "named", "name": "fixture"}
+                    },
                     "realization": {
                         "kind": "cow",
                         "terminal_publication": {"kind": "retain_current_head"}

@@ -362,12 +362,13 @@ mod tests {
     fn scheduled_execution_preserves_explicit_pinned_lane() {
         let value = execution(ExecutionPolicy::local_pinned_current_head(
             ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
         ));
         validate_schedule_execution(&value).unwrap();
         assert!(matches!(
             value.policy.project,
             ProjectExecutionPolicy::Pinned {
-                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead { .. },
                 ..
             }
         ));

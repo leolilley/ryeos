@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::contracts::ItemSpace;
 
 /// Schema identifier of one signer record.
-pub const SIGNER_RECORD_SCHEMA: &str = "ryeos/trust-signer/v1";
+pub const SIGNER_RECORD_SCHEMA: &str = "ryeos/trust-signer/v2";
+/// The previous record schema, whose project entries were paths.
+pub const SIGNER_RECORD_SCHEMA_V1: &str = "ryeos/trust-signer/v1";
 /// Schema identifier of one key event.
 pub const TRUST_EVENT_SCHEMA: &str = "ryeos/trust-event/v1";
 /// Schema identifier of a succession statement.
@@ -302,10 +304,84 @@ pub struct SignerScope {
     pub spaces: Vec<SignerSpace>,
     /// `["*"]` or an explicit list of item kinds. Empty admits no kind.
     pub kinds: Vec<String>,
-    /// Project roots the signer may sign for; empty means every project.
-    /// Only meaningful when `spaces` contains `project`.
+    /// Projects the signer may sign for, by owner+name identity. Empty means
+    /// unscoped: every project context, stated or absent. A scoped signer
+    /// matches only a stated identity equal to an entry. Only meaningful
+    /// when `spaces` contains `project`.
     #[serde(default)]
-    pub projects: Vec<String>,
+    pub projects: Vec<ProjectScopeEntry>,
+}
+
+/// One project a scoped signer may sign for.
+///
+/// Written `pid:v1:<64 hex>/<name>` for a named owner principal, or
+/// `own:<name>` for the principal the signer's key speaks for on the judging
+/// node. Nothing else parses: a path is never a scope, and a key fingerprint
+/// is never an owner.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ProjectScopeEntry {
+    Identity(ryeos_state::project_identity::ProjectIdentity),
+    Own(ryeos_state::project_identity::ProjectName),
+}
+
+impl ProjectScopeEntry {
+    /// Whether this entry names `identity` for a signer whose key speaks
+    /// for `signer_owner` on this node (from the node's ownership resolver;
+    /// `None` when the key speaks for no principal, so `own:` names nothing).
+    pub fn names(
+        &self,
+        identity: &ryeos_state::project_identity::ProjectIdentity,
+        signer_owner: Option<&ryeos_state::principal_id::PrincipalId>,
+    ) -> bool {
+        match self {
+            Self::Identity(entry) => entry == identity,
+            Self::Own(name) => identity.name() == name && signer_owner == Some(identity.owner()),
+        }
+    }
+}
+
+impl std::str::FromStr for ProjectScopeEntry {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        if let Some(name) = value.strip_prefix("own:") {
+            return ryeos_state::project_identity::ProjectName::new(name)
+                .map(Self::Own)
+                .map_err(|error| format!("project scope `{value}`: {error:#}"));
+        }
+        value
+            .parse::<ryeos_state::project_identity::ProjectIdentity>()
+            .map(Self::Identity)
+            .map_err(|error| {
+                format!(
+                    "project scope `{value}` must be pid:v1:<owner>/<name> or own:<name>: {error:#}"
+                )
+            })
+    }
+}
+
+impl TryFrom<String> for ProjectScopeEntry {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        value.parse()
+    }
+}
+
+impl From<ProjectScopeEntry> for String {
+    fn from(value: ProjectScopeEntry) -> Self {
+        value.to_string()
+    }
+}
+
+impl std::fmt::Display for ProjectScopeEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Identity(identity) => write!(formatter, "{identity}"),
+            Self::Own(name) => write!(formatter, "own:{name}"),
+        }
+    }
 }
 
 impl SignerScope {
@@ -348,8 +424,17 @@ impl SignerScope {
         }
     }
 
-    /// Whether the scope admits one signature context.
-    pub fn admits(&self, space: SignerSpace, kind: &str, project_root: Option<&Path>) -> bool {
+    /// Whether the scope admits one signature context, for a signer whose
+    /// key speaks for `signer_owner` on this node. An unscoped scope (empty
+    /// `projects`) admits every project context; a scoped one admits only a
+    /// stated identity that one of its entries names, never an absent one.
+    pub fn admits(
+        &self,
+        space: SignerSpace,
+        kind: &str,
+        project: &ryeos_state::project_identity::LogicalProject,
+        signer_owner: Option<&ryeos_state::principal_id::PrincipalId>,
+    ) -> bool {
         if !self.spaces.contains(&space) {
             return false;
         }
@@ -357,10 +442,13 @@ impl SignerScope {
             return false;
         }
         if space == SignerSpace::Project && !self.projects.is_empty() {
-            let Some(root) = project_root else {
+            let Some(identity) = project.identity() else {
                 return false;
             };
-            return self.projects.iter().any(|p| Path::new(p) == root);
+            return self
+                .projects
+                .iter()
+                .any(|entry| entry.names(identity, signer_owner));
         }
         true
     }
@@ -375,7 +463,13 @@ impl SignerScope {
             .join(",");
         let mut out = format!("{{spaces: [{spaces}], kinds: [{}]", self.kinds.join(","));
         if !self.projects.is_empty() {
-            out.push_str(&format!(", projects: [{}]", self.projects.join(",")));
+            let projects = self
+                .projects
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(", projects: [{projects}]"));
         }
         out.push('}');
         out
@@ -401,9 +495,10 @@ impl SignerScope {
         if !self.projects.is_empty() && !self.spaces.contains(&SignerSpace::Project) {
             return Err("scope.projects is only meaningful with the `project` space".to_string());
         }
+        let mut seen_projects = std::collections::BTreeSet::new();
         for project in &self.projects {
-            if !Path::new(project).is_absolute() {
-                return Err(format!("scope.projects entry `{project}` is not absolute"));
+            if !seen_projects.insert(project) {
+                return Err(format!("scope.projects lists `{project}` twice"));
             }
         }
         Ok(())
@@ -647,7 +742,17 @@ pub fn parse_signer_record(
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
-    if schema != SIGNER_RECORD_SCHEMA {
+    // A v1 record with no project entries means exactly what a v2 one does
+    // (unscoped), so it reads unchanged. A v1 record that lists project entries
+    // names paths, which are no longer a scope: it is refused by name until
+    // the operator re-scopes it.
+    let v1_without_projects = schema == SIGNER_RECORD_SCHEMA_V1
+        && value
+            .get("scope")
+            .and_then(|scope| scope.get("projects"))
+            .and_then(|projects| projects.as_sequence())
+            .is_none_or(|projects| projects.is_empty());
+    if schema != SIGNER_RECORD_SCHEMA && !v1_without_projects {
         return Err(TrustError::RecordSchemaUnsupported {
             path: path.to_path_buf(),
             seen: schema,
@@ -729,10 +834,31 @@ pub fn load_node_verifying_key(app_root: &Path) -> Result<VerifyingKey, TrustErr
 
 /// Read every record under `signers_dir`, verifying each under `node_key`.
 /// A missing directory is an empty registry.
+/// Load every signer record, dropping each record whose schema this node no
+/// longer reads (a v1 record with path project entries). A dropped record
+/// makes only that signer unusable; it is logged by file. Every other
+/// refusal still refuses the whole registry.
 pub fn load_signer_records(
     signers_dir: &Path,
     node_key: &VerifyingKey,
 ) -> Result<Vec<SignerRecord>, TrustError> {
+    let (records, refused) = load_signer_records_reporting(signers_dir, node_key)?;
+    for refusal in &refused {
+        tracing::warn!(
+            code = refusal.code(),
+            error = %refusal,
+            "signer record refused; that signer is unusable until it is re-scoped"
+        );
+    }
+    Ok(records)
+}
+
+/// [`load_signer_records`], returning the dropped records' refusals for
+/// reports (doctor, `ryeos trust list`).
+pub fn load_signer_records_reporting(
+    signers_dir: &Path,
+    node_key: &VerifyingKey,
+) -> Result<(Vec<SignerRecord>, Vec<TrustError>), TrustError> {
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut count = 0_usize;
     let mut total = 0_u64;
@@ -777,6 +903,7 @@ pub fn load_signer_records(
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut records = Vec::with_capacity(files.len());
+    let mut refused = Vec::new();
     for (path, bytes) in files {
         let is_yaml = path.extension().and_then(|e| e.to_str()) == Some("yaml");
         if !is_yaml {
@@ -785,9 +912,13 @@ pub fn load_signer_records(
                 reason: "is not a `<fingerprint>.yaml` record".to_string(),
             });
         }
-        records.push(parse_signer_record(&path, &bytes, node_key)?);
+        match parse_signer_record(&path, &bytes, node_key) {
+            Ok(record) => records.push(record),
+            Err(refusal @ TrustError::RecordSchemaUnsupported { .. }) => refused.push(refusal),
+            Err(error) => return Err(error),
+        }
     }
-    Ok(records)
+    Ok((records, refused))
 }
 
 // ── Key events ──────────────────────────────────────────────────────

@@ -23,10 +23,18 @@ pub struct ExplicitExpectedHash(Option<String>);
 pub struct Request {
     /// Principal-bound durable upload capability returned by `objects/put`.
     pub staging_id: String,
-    /// Project path (used to derive the project hash).
-    pub project_path: String,
+    /// The caller's head this publishes: a project, keyed by (the caller,
+    /// its name) and whose snapshot must declare that name, or the caller's
+    /// `--no-project` head of an empty tree.
+    pub project: ryeos_state::project_identity::PushedProject,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
+    /// The project owner the caller recorded when it bound this project. It
+    /// is compared with the owner this node resolves for the caller's key and
+    /// refused as `remote_owner_changed` on a difference; it is never used as
+    /// the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
     /// Exact principal HEAD observed when the server minted `staging_id`.
     /// The field is mandatory and nullable for a first publication.
     pub expected_previous_hash: ExplicitExpectedHash,
@@ -40,34 +48,32 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity used for principal-scoped storage — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &ctx.fingerprint,
+        req.expected_owner.as_ref(),
+    )?;
     ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         req.required_origin_site_id.as_deref(),
         ctx.authorized_key_class,
         ctx.authenticated_origin_site_id.as_deref(),
     )?;
 
-    // Compute principal-scoped project key before acquiring mutation locks.
-    //
-    // project_ref must be canonical. Both push HEAD writes (here) and
-    // execute HEAD reads (project_source.rs) go through
-    // `canonical_project_ref` — the single source of truth — so both
-    // sides agree on the hash key. The `NO_PROJECT_SENTINEL` is the
-    // only path string that bypasses canonicalize (per-principal scope
-    // for --no-project mode).
-    let canonical_project_path =
-        ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)
-            .map_err(|e| anyhow!("push_head: {}", e))?;
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
-    let project_hash = lillux::cas::sha256_hex(canonical_project_path.as_bytes());
-    let publication_key =
-        ryeos_state::DurableCasPublicationKey::project_head(principal_key, &project_hash)?;
+    // The head is the caller's own under the requested name: the owner is
+    // the authenticated principal, never request input.
+    let owner = ryeos_app::project_owner::owner_principal(&state, &ctx.fingerprint)?;
+    let head_key = req.project.head_key(&owner);
+    let principal_key = head_key.owner_component();
+    let project_hash = head_key.name_hash();
+    let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
     let expected_previous_hash = req.expected_previous_hash.0.as_deref();
 
     // One publication critical section: serialize this project and staging
     // capability, then hold the shared CAS guard from closure verification
     // through signed HEAD publication and lease consumption.
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&project_hash);
+    let project_lock =
+        crate::handlers::project_apply_snapshot::project_apply_lock(&head_key.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let authority = state
         .state_store
@@ -92,7 +98,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            .with_state_db(|db| db.read_project_head(&head_key))?;
         if current.as_deref() != Some(req.snapshot_hash.as_str()) {
             return Err(anyhow!(
                 "upload receipt target {} is no longer the current project HEAD",
@@ -157,6 +163,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_object(&snapshot.project_tree_hash)?
         .ok_or_else(|| anyhow!("project tree {} is missing", snapshot.project_tree_hash))?;
     let tree = ryeos_state::objects::ProjectTree::from_value(&tree_obj)?;
+    let declared =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)?;
+    req.project
+        .require_content(declared.as_ref(), tree.files.len())?;
     let policy_obj = cas
         .get_object(&snapshot.effective_policy_hash)?
         .ok_or_else(|| {
@@ -180,7 +190,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // Otherwise, write a new ref.
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&head_key))?;
     if current.as_deref() != Some(req.snapshot_hash.as_str()) {
         if current.as_deref() != expected_previous_hash {
             anyhow::bail!(
@@ -189,19 +199,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 current
             );
         }
+        let advancer =
+            ryeos_app::project_owner::head_advancer(&state, &ctx.fingerprint, head_key.owner())?;
         match expected_previous_hash {
             Some(expected) => state.state_store.advance_project_head_ref(
-                principal_key,
-                &project_hash,
+                &head_key,
                 &req.snapshot_hash,
                 expected,
+                &advancer,
                 &signer,
                 &cas_guard,
             ),
             None => state.state_store.write_project_head_ref(
-                principal_key,
-                &project_hash,
+                &head_key,
                 &req.snapshot_hash,
+                &advancer,
                 &signer,
                 &cas_guard,
             ),
@@ -222,6 +234,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     Ok(serde_json::json!({
         "principal_key": principal_key,
         "project_hash": project_hash,
+        "project": req.project,
         "snapshot_hash": req.snapshot_hash,
         "tree_entries": tree.files.len(),
     }))

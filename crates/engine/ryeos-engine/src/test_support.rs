@@ -128,6 +128,9 @@ pub fn live_trust_store() -> TrustStore {
             label: Some("test-support: dev publisher".into()),
         },
     ])
+    // The node registry with no recorded succession: every key owns its own
+    // solo principal, as on a node that never rotated a key.
+    .with_succession_chain(&[])
 }
 
 /// Load the signed kind schemas from the live core, workflow and ryeos-ui bundles.
