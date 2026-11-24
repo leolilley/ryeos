@@ -580,11 +580,26 @@ fn trust_scope(
     if !kinds.is_empty() {
         scope.kinds = kinds.to_vec();
     }
-    scope.projects = projects.to_vec();
+    scope.projects = trust_scope_projects(projects)?;
     scope
         .validate()
         .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))?;
     Ok(scope)
+}
+
+/// Parse project scope entries: `pid:v1:<owner>/<name>` or `own:<name>`. A path
+/// is refused: it is not a project scope.
+fn trust_scope_projects(
+    projects: &[String],
+) -> Result<Vec<ryeos_engine::trust::ProjectScopeEntry>> {
+    projects
+        .iter()
+        .map(|project| {
+            project
+                .parse()
+                .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))
+        })
+        .collect()
 }
 
 fn validate_trust_scope_lists(
@@ -622,7 +637,7 @@ impl TrustScopeArguments {
                 })
                 .collect::<Result<_>>()?,
             kinds: self.kinds.clone(),
-            projects: self.projects.clone(),
+            projects: trust_scope_projects(&self.projects)?,
         };
         scope
             .validate()
@@ -708,7 +723,7 @@ pub(super) fn trust_scope_change(ctx: &HandlerContext<'_>) -> Result<Value> {
             })
             .collect::<Result<_>>()?,
         kinds: arguments.kinds,
-        projects: arguments.projects,
+        projects: trust_scope_projects(&arguments.projects)?,
     };
     run_trust_change(
         ctx,
@@ -1009,11 +1024,15 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         ctx.sealing_signer(),
     )
     .context("commit updated node policy generation into initialized state")?;
+    // The generation replaced is the one the request was checked against;
+    // a receipt reader sees the pair without re-deriving either.
     Ok(json!({
         "section": arguments.section,
         "signer_fingerprint": ctx.node.fingerprint(),
         "policy_generation": expected,
         "capacity_amendment": capacity_amendment,
+        "before_ref": ctx.request.precondition.get(super::facts::FACT_POLICY_GENERATION),
+        "after_ref": expected,
     }))
 }
 
@@ -1570,11 +1589,12 @@ pub struct ProjectRegistrationArguments {
     /// Absolute checkout path; the node canonicalizes it.
     pub path: String,
     /// The project name. Register defaults it to the name the checkout's
-    /// `.ai/project.yaml` declares and requires the two to agree.
+    /// `.ai/manifest.yaml` declares and requires the two to agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// `fp:<64 lowercase hex>`; defaults to the node's operator. Never the
-    /// node key or the authoring key.
+    /// The owner principal, `pid:v1:<64 lowercase hex>`; defaults to the
+    /// principal the node's operator key acts for. Never the principal of
+    /// the node key or of the authoring key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
@@ -1591,32 +1611,52 @@ impl ProjectRegistrationArguments {
             ryeos_state::project_identity::ProjectName::new(name.as_str())?;
         }
         if let Some(owner) = &self.owner {
-            ryeos_state::refs::principal_storage_key(owner)?;
+            owner.parse::<ryeos_state::principal_id::PrincipalId>()?;
         }
         Ok(())
     }
 }
 
-/// The owner a registration names: the operator by default; never the node
-/// key or the authoring key, which sign on the node's behalf and own no
-/// project.
-fn registration_owner(ctx: &HandlerContext<'_>, requested: Option<&str>) -> Result<String> {
+/// The owner principal a registration names: by default the principal the
+/// operator key acts for, from the node's ownership resolver; an explicit
+/// owner is the operator granting that principal a place on this node. Never
+/// the principal of the node key or of the authoring key, which sign on the
+/// node's behalf and own no project.
+fn registration_owner(
+    ctx: &HandlerContext<'_>,
+    requested: Option<&str>,
+) -> Result<ryeos_state::principal_id::PrincipalId> {
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .map_err(|error| anyhow::anyhow!("load the node signer registry: {error}"))?;
     let owner = match requested {
-        Some(owner) => owner.to_owned(),
-        None => operator_public(ctx)?.principal_id(),
+        Some(owner) => owner.parse::<ryeos_state::principal_id::PrincipalId>()?,
+        None => {
+            ryeos_app::project_owner::owner_for_in(&trust, &operator_public(ctx)?.principal_id())?
+                .principal
+        }
     };
-    let key = ryeos_state::refs::principal_storage_key(&owner)?;
+    let node_owner = trust
+        .owner_for(ctx.node.fingerprint())
+        .map(|resolved| resolved.principal)
+        .ok();
     ensure!(
-        key != ctx.node.fingerprint(),
+        node_owner.as_ref() != Some(&owner),
         "project_owner_is_node_key: the node key signs on the node's behalf and owns no project"
     );
-    let signers = ryeos_engine::trust::load_signer_records(
-        &ryeos_engine::trust::signers_dir(ctx.app_root),
-        ctx.node.verifying_key(),
-    )?;
+    let authoring_owns = trust
+        .records()
+        .filter(|record| record.role == ryeos_engine::trust::SignerRole::Authoring)
+        .filter_map(|record| {
+            trust.succession().and_then(|graph| {
+                graph
+                    .signing_principal_of(&record.fingerprint)
+                    .ok()
+                    .flatten()
+            })
+        })
+        .any(|principal| principal == owner);
     ensure!(
-        !signers.iter().any(|record| record.fingerprint == key
-            && record.role == ryeos_engine::trust::SignerRole::Authoring),
+        !authoring_owns,
         "project_owner_is_authoring_key: the authoring key signs runtime drafts and owns no project"
     );
     Ok(owner)
@@ -1630,7 +1670,7 @@ pub(super) fn project_register(ctx: &HandlerContext<'_>) -> Result<Value> {
         crate::project_registry::inspect_checkout(ctx.app_root, Path::new(&arguments.path))?;
     let declared = declared.with_context(|| {
         format!(
-            "project_undeclared: {} has no {}; a registered checkout must declare its name",
+            "project_manifest_missing: {} has no {}; a registered checkout's name is the `name:` of its manifest",
             path.display(),
             ryeos_state::project_identity::PROJECT_DECLARATION_PATH
         )
@@ -1644,7 +1684,7 @@ pub(super) fn project_register(ctx: &HandlerContext<'_>) -> Result<Value> {
         "project_name_mismatch: {} declares `{declared}`, not `{name}`",
         path.display()
     );
-    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
     let outcome =
         crate::project_registry::register(&crate::project_registry::RegistrationChange {
             app_root: ctx.app_root,
@@ -1675,7 +1715,7 @@ pub(super) fn project_unregister(ctx: &HandlerContext<'_>) -> Result<Value> {
             path.display()
         ),
     };
-    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
     let outcome =
         crate::project_registry::unregister(&crate::project_registry::RegistrationChange {
             app_root: ctx.app_root,
@@ -1702,14 +1742,36 @@ pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
 pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: BundleReplaceArguments = ctx.arguments()?;
     arguments.validate()?;
-    ctx.host.replace_bundle(super::host::BundleReplace {
+    let registration = ctx
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/bundles")
+        .join(format!("{}.yaml", arguments.name));
+    let registration_digest = || -> Result<Option<String>> {
+        match std::fs::read(&registration) {
+            Ok(bytes) => Ok(Some(format!("sha256:{}", lillux::sha256_hex(&bytes)))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("read bundle registration {}", registration.display())),
+        }
+    };
+    let before = registration_digest()?;
+    let mut result = ctx.host.replace_bundle(super::host::BundleReplace {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
         node: ctx.node,
         name: &arguments.name,
         archive: ctx.inputs.require("archive")?,
         preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
-    })
+    })?;
+    // The registration digests before and after, so a receipt reader sees
+    // what was replaced without re-deriving it.
+    let after = registration_digest()?;
+    if let Value::Object(map) = &mut result {
+        map.insert("before_ref".to_owned(), json!(before));
+        map.insert("after_ref".to_owned(), json!(after));
+    }
+    Ok(result)
 }
 
 // ── Bundle state homes ───────────────────────────────────────────────────

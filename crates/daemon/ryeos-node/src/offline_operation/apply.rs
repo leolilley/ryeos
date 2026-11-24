@@ -1496,6 +1496,40 @@ pub fn read_node_fingerprint(app_root: &Path) -> Result<String> {
 }
 
 /// The node's ledger chain tip, verified.
+/// The verified retained receipts, oldest first, and where the held history
+/// starts when rotation dropped older ones.
+pub struct ReceiptsRead {
+    pub receipts: Vec<crate::offline_operation::contract::SignedReceipt>,
+    /// When the oldest retained receipt was recorded, present exactly when
+    /// rotation has dropped earlier ones.
+    pub truncated_before: Option<String>,
+    pub dropped: u64,
+    /// Digest of the last receipt (or the checkpoint's tip, or the genesis).
+    pub head: String,
+}
+
+/// Read and verify the whole retained ledger of `node`.
+pub fn read_receipts(app_root: &Path, node: &NodeIdentity) -> Result<ReceiptsRead> {
+    let store = Store::for_app_root(app_root);
+    let ledger = Ledger::new(&store, node);
+    let state = ledger
+        .load()
+        .context("verify the offline-operation ledger")?;
+    Ok(ReceiptsRead {
+        receipts: ledger.recent(&state, usize::MAX)?,
+        truncated_before: (state.dropped_receipts > 0)
+            .then(|| {
+                state
+                    .oldest_recorded_at
+                    .clone()
+                    .or(state.checkpoint_recorded_at.clone())
+            })
+            .flatten(),
+        dropped: state.dropped_receipts,
+        head: state.head.clone(),
+    })
+}
+
 pub fn read_ledger(app_root: &Path) -> Result<LedgerState> {
     let node = node_identity(app_root)
         .map_err(|error| anyhow!("{error}"))?

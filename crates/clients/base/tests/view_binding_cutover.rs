@@ -220,7 +220,7 @@ fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
         "binding_digest":"shared-fixture-binding", "root_ref":"config:fixture/cutover",
         "root_generation":"shared-fixture-generation", "project_path":null,
         "subject":{"kind":"projectless"}, "posture":"observation_only",
-        "binding_request_bounds":attachment.binding_request_bounds,
+        "named_items": [], "binding_request_bounds":attachment.binding_request_bounds,
         "presentation":{"definition":{"kind":"shared_presentation","config":{
             "category":"ui", "shared_presentation":{"schema":2,"title":"Cutover",
                 "launcher":"launch", "dialogs":[{"id":"launch","title":"Launch",
@@ -797,6 +797,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
             "views": views,
         });
         let attachment = UiBindingAttachment {
+            named_items: Vec::new(),
             binding_attachment_id: "cutover-golden-attachment".into(),
             binding_generation: 1,
             binding_digest: "cutover-golden-binding".into(),

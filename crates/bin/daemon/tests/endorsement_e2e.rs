@@ -20,10 +20,95 @@ use ryeos_engine::trust::{
     EndorsedItem, EndorsementBody, SignedEndorsement, TrustStore, compute_fingerprint,
 };
 use ryeos_node::node_journal::{JournalType, NodeJournal};
+use ryeos_node::offline_operation::BareHost;
+use ryeos_node::offline_operation::apply::{LocalDraft, apply_local};
 use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_state::project_identity::{ProjectIdentity, ProjectName};
 use serde_json::{Value, json};
 
 const KNOWLEDGE_REF: &str = "knowledge:acme/note";
+const PROJECT_NAME: &str = "endorsed-project";
+
+/// The identity of the test project as `operator` owns it.
+fn project_identity(operator: &SigningKey) -> ProjectIdentity {
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(&compute_fingerprint(&operator.verifying_key()))
+        .expect("the operator key owns a principal")
+        .principal;
+    ProjectIdentity::new(owner, ProjectName::new(PROJECT_NAME).expect("project name"))
+}
+
+/// Make `project` the operator's registered live checkout: it declares
+/// [`PROJECT_NAME`] and the operator registers it while the node is stopped,
+/// so a launch from it states `pid:v1:<operator principal>/endorsed-project`.
+async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
+    let ai = project.join(".ai");
+    std::fs::create_dir_all(&ai).expect("project .ai directory");
+    std::fs::write(ai.join("manifest.yaml"), format!("name: {PROJECT_NAME}\n"))
+        .expect("project declaration");
+    h.kill_daemon().await.expect("stop the daemon");
+    apply_local(
+        &h.state_path,
+        &BareHost,
+        operator,
+        LocalDraft {
+            operation: "node.project.register".to_owned(),
+            arguments: json!({ "path": project.canonicalize().unwrap().to_str().unwrap() }),
+            inputs: std::collections::BTreeMap::new(),
+            expected_result: std::collections::BTreeMap::new(),
+        },
+    )
+    .expect("register the project");
+    h.respawn_with(|_| {}).await.expect("restart the daemon");
+}
+
+/// Give `project` a manifest declaring `name`.
+fn declare_name(project: &Path, name: &str) {
+    let ai = project.join(".ai");
+    std::fs::create_dir_all(&ai).expect("project .ai directory");
+    std::fs::write(ai.join("manifest.yaml"), format!("name: {name}\n")).expect("project manifest");
+}
+
+/// The authoring record `ryeos sign` leaves for the planted note: revision 1
+/// of its chain, signed by `signer`.
+fn record_authored_note(project: &Path, signer: &SigningKey) {
+    use ryeos_node_runtime::item_revision::{ActorRole, ChainItem, Change, append};
+    let signed = std::fs::read_to_string(project.join(".ai/knowledge/acme/note.md")).unwrap();
+    let recorded = append(
+        project,
+        signer,
+        ActorRole::Authoring,
+        Change {
+            item: &ChainItem::parse(KNOWLEDGE_REF).unwrap(),
+            file_ext: ".md",
+            before: None,
+            after: Some(&signed),
+            provenance: std::collections::BTreeMap::from([(
+                "action".to_owned(),
+                "sign".to_owned(),
+            )]),
+        },
+    )
+    .expect("authoring record");
+    assert_eq!(recorded.seq, 1);
+}
+
+/// The newest revision of each item the node has announced for `project`.
+fn cursor_items(h: &DaemonHarness, project: &str) -> std::collections::BTreeMap<String, u64> {
+    let cursor =
+        ryeos_engine::roots::RuntimeRoot::new(h.state_path.clone()).item_revised_cursor_dir();
+    let path = cursor.join(format!("{}.json", lillux::sha256_hex(project.as_bytes())));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Default::default();
+    };
+    let document: Value = serde_json::from_slice(&bytes).expect("cursor document");
+    assert_eq!(document["project"], json!(project), "{document:#}");
+    serde_json::from_value(document["items"].clone()).expect("cursor items")
+}
+
+fn canonical(path: &Path) -> String {
+    path.canonicalize().unwrap().to_str().unwrap().to_owned()
+}
 
 fn envelope() -> SignatureEnvelope {
     SignatureEnvelope {
@@ -73,18 +158,13 @@ async fn trust_class(h: &DaemonHarness, project: &Path) -> String {
 
 /// What `ryeos endorse` does once it has the digests: read the ledger head
 /// from the node, sign the body with the operator key here, submit it.
-async fn endorse_items(
-    h: &DaemonHarness,
-    operator: &SigningKey,
-    project: &Path,
-    digest: &str,
-) -> (u16, Value) {
+async fn endorse_items(h: &DaemonHarness, operator: &SigningKey, digest: &str) -> (u16, Value) {
     let (status, facts) = service(h, "service:endorsements/record", json!({})).await;
     assert_eq!(status, 200, "{facts:#}");
     let head = facts["result"]["ledger_head"].as_str().expect("head");
     let nonce: [u8; 16] = rand::random();
     let body = EndorsementBody::for_items(
-        project.canonicalize().unwrap().to_str().unwrap(),
+        &project_identity(operator),
         &format!("fp:{}", compute_fingerprint(&operator.verifying_key())),
         vec![EndorsedItem {
             item_ref: KNOWLEDGE_REF.to_owned(),
@@ -133,9 +213,10 @@ async fn an_endorsement_trusts_an_authored_item_until_it_changes_or_is_revoked()
     let (mut h, fixture) = start().await;
     let project = tempfile::tempdir().expect("project");
     let digest = plant_note(project.path(), "one", &fixture.authoring);
+    register_project(&mut h, &fixture.user, project.path()).await;
     assert_eq!(trust_class(&h, project.path()).await, "untrusted_project");
 
-    let (status, recorded) = endorse_items(&h, &fixture.user, project.path(), &digest).await;
+    let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
     assert_eq!(status, 200, "{recorded:#}");
     let endorsement = recorded["result"]["endorsement_digest"]
         .as_str()
@@ -219,12 +300,13 @@ async fn an_endorsement_trusts_an_authored_item_until_it_changes_or_is_revoked()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers() {
-    let (h, fixture) = start().await;
+    let (mut h, fixture) = start().await;
     let project = tempfile::tempdir().expect("project");
     let digest = plant_note(project.path(), "one", &fixture.authoring);
+    register_project(&mut h, &fixture.user, project.path()).await;
 
     // The authoring key cannot endorse its own output.
-    let (status, refused) = endorse_items(&h, &fixture.authoring, project.path(), &digest).await;
+    let (status, refused) = endorse_items(&h, &fixture.authoring, &digest).await;
     assert_eq!(status, 403, "{refused:#}");
     assert!(
         refused
@@ -244,7 +326,7 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         let nonce: [u8; 16] = rand::random();
         SignedEndorsement::sign(
             EndorsementBody::standing(
-                project.path().canonicalize().unwrap().to_str().unwrap(),
+                &project_identity(&fixture.user),
                 &format!("fp:{}", fixture.user_fp()),
                 vec![item.to_owned()],
                 None,
@@ -280,4 +362,99 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
 
     // The standing endorsement covers the knowledge kind in this project.
     assert_eq!(trust_class(&h, project.path()).await, "trusted_project");
+}
+
+/// What `ryeos endorse` does after the endorsement is recorded: tell the node,
+/// which finds the endorsement in its ledger and announces the items it covers
+/// so a seat that shows one can pick up its new trust.
+#[tokio::test(flavor = "multi_thread")]
+async fn recording_an_endorsement_announces_the_items_it_covers() {
+    let (h, fixture) = start().await;
+    let project = tempfile::tempdir().expect("project");
+    declare_name(project.path(), PROJECT_NAME);
+    let digest = plant_note(project.path(), "one", &fixture.authoring);
+    record_authored_note(project.path(), &fixture.authoring);
+    let project_path = canonical(project.path());
+    assert!(cursor_items(&h, &project_path).is_empty());
+
+    let (status, recorded) = endorse_items(&h, &fixture.user, &digest).await;
+    assert_eq!(status, 200, "{recorded:#}");
+    let endorsement = recorded["result"]["endorsement_digest"]
+        .as_str()
+        .expect("digest")
+        .to_owned();
+
+    let (status, announced) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 200, "{announced:#}");
+    let items = announced["result"]["announced"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{announced:#}");
+    assert_eq!(items[0]["item_ref"], KNOWLEDGE_REF, "{announced:#}");
+    assert_eq!(items[0]["digest"], json!(digest), "{announced:#}");
+    assert_eq!(items[0]["revision"], json!(1), "{announced:#}");
+    // The node published it: its announcement cursor, written beside the hub
+    // publish that feeds the seat fanout, now holds the item's revision.
+    assert_eq!(
+        cursor_items(&h, &project_path),
+        [(KNOWLEDGE_REF.to_owned(), 1)].into()
+    );
+
+    // The endorsement is found under the identity the checkout states, never
+    // by the path the caller names: a checkout that declares no name, or
+    // declares another name, announces nothing for it.
+    let unnamed = tempfile::tempdir().expect("unnamed project");
+    std::fs::create_dir_all(unnamed.path().join(".ai")).expect("unnamed .ai");
+    let (status, refused) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": canonical(unnamed.path()), "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 409, "{refused:#}");
+    assert!(
+        refused.to_string().contains("project_manifest_missing"),
+        "{refused:#}"
+    );
+    let other = tempfile::tempdir().expect("other project");
+    declare_name(other.path(), "other-project");
+    let (status, refused) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": canonical(other.path()), "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 404, "{refused:#}");
+    assert!(
+        refused.to_string().contains("endorsement_not_in_force"),
+        "{refused:#}"
+    );
+
+    // A digest the ledger does not hold announces nothing.
+    let (status, unknown) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": "0".repeat(64) }),
+    )
+    .await;
+    assert_eq!(status, 404, "{unknown:#}");
+
+    // A withdrawn endorsement announces nothing either.
+    let (status, revoked) = service(
+        &h,
+        "service:endorsements/revoke",
+        json!({ "endorsement": endorsement, "reason": "withdrawn in test" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{revoked:#}");
+    let (status, withdrawn) = service(
+        &h,
+        "service:items/revised",
+        json!({ "project_path": project_path, "endorsement": endorsement }),
+    )
+    .await;
+    assert_eq!(status, 409, "{withdrawn:#}");
 }

@@ -45,7 +45,12 @@ pub async fn push_snapshot_generation(
     authority: &PinnedStateAuthority,
     snapshot_hash: &str,
     project_path_for_ref: &str,
+    project_name: &ryeos_state::project_identity::ProjectName,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let local_cas = authority.cas_store()?;
     let snapshot_value = local_cas
         .get_object(snapshot_hash)?
@@ -60,6 +65,12 @@ pub async fn push_snapshot_generation(
             )
         })?;
     let tree = ProjectTree::from_value(&tree_value)?;
+    require_declared_name(
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(
+            &local_cas, &tree,
+        )?,
+        project_name,
+    )?;
     let recovery = authority.require_recovery()?;
     let mut staged_roots = {
         let guard = authority.acquire_shared_guard()?;
@@ -87,7 +98,7 @@ pub async fn push_snapshot_generation(
             });
         }
         let upload_session = client
-            .objects_put(None, project_path_for_ref, &[], &[])
+            .objects_put(None, &project, &[], &[], expected_owner)
             .await?;
         let upload_closure = collect_snapshot_upload_hashes(
             &local_cas,
@@ -107,16 +118,18 @@ pub async fn push_snapshot_generation(
             &local_cas,
             &upload_closure,
             snapshot_hash,
-            project_path_for_ref,
+            &project,
             upload_session,
+            expected_owner,
         )
         .await?;
         client
             .push_head(
-                project_path_for_ref,
+                &project,
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -146,9 +159,13 @@ pub async fn push_descendant_snapshot_with_session(
     client: &RemoteClient,
     authority: &PinnedStateAuthority,
     snapshot_hash: &str,
-    project_path_for_ref: &str,
+    project_name: &ryeos_state::project_identity::ProjectName,
     upload_session: ObjectsPutResponse,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let expected_previous_hash = upload_session
         .expected_previous_hash
         .as_deref()
@@ -178,6 +195,12 @@ pub async fn push_descendant_snapshot_with_session(
             )
         })?;
     let tree = ProjectTree::from_value(&tree_value)?;
+    require_declared_name(
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(
+            &local_cas, &tree,
+        )?,
+        project_name,
+    )?;
     let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
     let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         &local_cas,
@@ -210,16 +233,18 @@ pub async fn push_descendant_snapshot_with_session(
             &local_cas,
             &upload_closure,
             snapshot_hash,
-            project_path_for_ref,
+            &project,
             upload_session,
+            expected_owner,
         )
         .await?;
         client
             .push_head(
-                project_path_for_ref,
+                &project,
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
         Ok(PushResult {
@@ -252,11 +277,19 @@ pub async fn push_project_ai_only(
     state: &Arc<AppState>,
     authority: &PinnedStateAuthority,
     local_project_path: &Path,
-    remote_project_path_for_ref: &str,
+    project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let app_root = &state.config.app_root;
     refuse_walking_root(local_project_path, app_root)?;
+    require_declared_name(
+        ryeos_state::project_identity::ProjectDeclaration::declared_name(local_project_path)?,
+        project_name,
+    )?;
 
     let transfer_ignore = state.ignore_matcher.union(remote_ignore)?;
     let local_cas = authority.cas_store()?;
@@ -300,7 +333,7 @@ pub async fn push_project_ai_only(
         project_root.ensure_path_binding()?;
 
         let upload_session = client
-            .objects_put(None, remote_project_path_for_ref, &[], &[])
+            .objects_put(None, &project, &[], &[], expected_owner)
             .await?;
 
         let tree_hash = {
@@ -344,17 +377,19 @@ pub async fn push_project_ai_only(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            remote_project_path_for_ref,
+            &project,
             upload_session,
+            expected_owner,
         )
         .await?;
 
         client
             .push_head(
-                remote_project_path_for_ref,
+                &project,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -392,9 +427,13 @@ pub async fn push_project(
     state: &Arc<AppState>,
     authority: &PinnedStateAuthority,
     project_path: &Path,
-    project_path_for_ref: &str,
+    project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let app_root = &state.config.app_root;
 
     // Fail-fast guards: prevent the common footgun of running
@@ -405,6 +444,10 @@ pub async fn push_project(
     // walk takes minutes-to-hours and never produces a meaningful
     // snapshot. Detect both cases up front.
     refuse_walking_root(project_path, app_root)?;
+    require_declared_name(
+        ryeos_state::project_identity::ProjectDeclaration::declared_name(project_path)?,
+        project_name,
+    )?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
     let transfer_ignore = state.ignore_matcher.union(remote_ignore)?;
@@ -440,7 +483,7 @@ pub async fn push_project(
         project_root.ensure_path_binding()?;
 
         let upload_session = client
-            .objects_put(None, project_path_for_ref, &[], &[])
+            .objects_put(None, &project, &[], &[], expected_owner)
             .await?;
 
         let tree_hash = {
@@ -483,17 +526,19 @@ pub async fn push_project(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            project_path_for_ref,
+            &project,
             upload_session,
+            expected_owner,
         )
         .await?;
 
         client
             .push_head(
-                project_path_for_ref,
+                &project,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
 
@@ -581,8 +626,9 @@ pub(crate) async fn upload_missing(
     local_cas: &CasStore,
     upload_closure: &SnapshotCasClosure,
     publication_root_hash: &str,
-    project_path_for_ref: &str,
+    project: &ryeos_state::project_identity::PushedProject,
     upload_session: ObjectsPutResponse,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<StagedUploadResult> {
     if !upload_closure
         .object_hashes
@@ -598,7 +644,8 @@ pub(crate) async fn upload_missing(
     // head, so the receiver answers them absent and they are uploaded; the
     // write deduplicates. Nothing outside the pusher's own head is revealed.
     let read_root = crate::objects_read_scope::ReadRoot::ProjectHead {
-        project_path: project_path_for_ref.to_owned(),
+        project: project.clone(),
+        expected_owner: expected_owner.cloned(),
     };
     let has_resp = client
         .objects_has(
@@ -694,7 +741,7 @@ pub(crate) async fn upload_missing(
                 blob_index += 1;
             }
             let response = client
-                .objects_put(Some(&staging_id), project_path_for_ref, &batch, &[])
+                .objects_put(Some(&staging_id), project, &batch, &[], expected_owner)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.blob_hashes, &expected, "blob")?;
@@ -719,7 +766,7 @@ pub(crate) async fn upload_missing(
                 data: base64::engine::general_purpose::STANDARD.encode(&buffer[..read]),
             };
             let response = client
-                .objects_put_blob_chunk(&staging_id, project_path_for_ref, &chunk)
+                .objects_put_blob_chunk(&staging_id, project, &chunk, expected_owner)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
@@ -738,7 +785,7 @@ pub(crate) async fn upload_missing(
     // Keep only one bounded request of raw object bodies resident at a time.
     // The empty request serialization accounts for the exact staging/path and
     // array envelope, including JSON escaping in caller-controlled paths.
-    let envelope_bytes = object_put_envelope_bytes(&staging_id, project_path_for_ref)?;
+    let envelope_bytes = object_put_envelope_bytes(&staging_id, project)?;
     if envelope_bytes.saturating_add(10) > OBJECTS_PUT_BODY_BUDGET_BYTES {
         anyhow::bail!("objects/put request envelope exceeds its body budget");
     }
@@ -761,9 +808,10 @@ pub(crate) async fn upload_missing(
             send_raw_object_batch(
                 client,
                 &staging_id,
-                project_path_for_ref,
+                project,
                 &object_batch,
                 expected_previous_hash.as_deref(),
+                expected_owner,
             )
             .await?;
             object_batch.clear();
@@ -782,9 +830,10 @@ pub(crate) async fn upload_missing(
         send_raw_object_batch(
             client,
             &staging_id,
-            project_path_for_ref,
+            project,
             &object_batch,
             expected_previous_hash.as_deref(),
+            expected_owner,
         )
         .await?;
     }
@@ -795,6 +844,21 @@ pub(crate) async fn upload_missing(
         uploaded,
         skipped,
     })
+}
+
+/// Refuse unless the project tree declares `project`. The name a caller
+/// stored (a binding) is never used without re-reading the declaration.
+fn require_declared_name(
+    declared: Option<ryeos_state::project_identity::ProjectName>,
+    project_name: &ryeos_state::project_identity::ProjectName,
+) -> Result<()> {
+    if declared.as_ref() != Some(project_name) {
+        anyhow::bail!(
+            "project_name_mismatch: the push names project {project_name} but the tree declares {}",
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
+        );
+    }
+    Ok(())
 }
 
 fn inline_blob_request_size(blob_size: u64) -> Result<usize> {
@@ -828,10 +892,13 @@ fn load_canonical_object_for_upload(
     RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)
 }
 
-fn object_put_envelope_bytes(staging_id: &str, project_path: &str) -> Result<usize> {
+fn object_put_envelope_bytes(
+    staging_id: &str,
+    project: &ryeos_state::project_identity::PushedProject,
+) -> Result<usize> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "staging_id": staging_id,
-        "project_path": project_path,
+        "project": project,
         "blobs": [],
         "blob_chunks": [],
         "objects": [],
@@ -847,16 +914,17 @@ fn raw_object_entry_bytes(entry: &RawObjectUpload) -> usize {
 async fn send_raw_object_batch(
     client: &RemoteClient,
     staging_id: &str,
-    project_path: &str,
+    project: &ryeos_state::project_identity::PushedProject,
     batch: &[RawObjectUpload],
     expected_previous_hash: Option<&str>,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
 ) -> Result<()> {
     let expected = batch
         .iter()
         .map(|entry| entry.hash.clone())
         .collect::<Vec<_>>();
     let response = client
-        .objects_put_raw(Some(staging_id), project_path, &[], batch)
+        .objects_put_raw(Some(staging_id), project, &[], batch, expected_owner)
         .await?;
     validate_upload_session(&response, staging_id, expected_previous_hash)?;
     validate_upload_response(&response.blob_hashes, &[], "blob")?;
@@ -1107,10 +1175,13 @@ mod upload_batch_tests {
             br#"{"kind":"example"}"#.to_vec(),
         )
         .unwrap();
-        let envelope = object_put_envelope_bytes("stage", "/project").unwrap();
+        let project = ryeos_state::project_identity::PushedProject::Named {
+            name: ryeos_state::project_identity::ProjectName::new("project").unwrap(),
+        };
+        let envelope = object_put_envelope_bytes("stage", &project).unwrap();
         let actual = serde_json::to_vec(&serde_json::json!({
             "staging_id": "stage",
-            "project_path": "/project",
+            "project": {"kind": "named", "name": "project"},
             "blobs": [],
             "blob_chunks": [],
             "objects": [{"value": serde_json::from_str::<serde_json::Value>(value.value.get()).unwrap()}],

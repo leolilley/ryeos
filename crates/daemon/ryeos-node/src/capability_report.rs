@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn floor_admits_only_exact_named_capabilities() {
         let host = view(
-            &["accounting", "termination:enclosure", "time"],
+            &["accounting", "storage:durable_root", "time"],
             &[("termination:scope", "no writable cgroup subtree")],
         );
         let admitted = match_floor(&floor(&["accounting", "time"]), &host);
@@ -1442,7 +1442,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("can prove: accounting, termination:enclosure, time"),
+            text.contains("can prove: accounting, storage:durable_root, time"),
             "{text}"
         );
     }
@@ -1514,8 +1514,7 @@ mod tests {
     #[test]
     fn trusted_init_enclosure_names_meet_a_floor_that_names_them() {
         use lillux::process_control::{
-            RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE,
-            TERMINATION_ENCLOSURE_TRUSTED_INIT,
+            RECOVERY_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE_TRUSTED_INIT,
         };
         let mut under_tini = view(&["time"], &[]);
         for name in [
@@ -1529,8 +1528,6 @@ mod tests {
                 "pid 1 is tini, named by node policy",
             );
         }
-        under_tini.refuse(TERMINATION_ENCLOSURE, "the node is not pid 1");
-        under_tini.refuse(RECOVERY_ENCLOSURE, "the node is not pid 1");
         // The trusted-init names carry no trust of their own: the floor
         // says in data that it accepts the trusted grade.
         let bare = match_floor(
@@ -1566,24 +1563,25 @@ mod tests {
                 HOST_PROVIDER
             )
         );
-        let measured = match_floor(
-            &floor(&[RECOVERY_ENCLOSURE, TERMINATION_ENCLOSURE]),
+        // No build provides a name for a node that is itself pid 1; a floor
+        // that still names one is unmet, and an any_of beside the trusted-init
+        // name is met by it.
+        let retired = match_floor(&floor(&["termination:enclosure"]), &under_tini);
+        assert!(!retired.admitted);
+        assert!(retired.unmet.contains_key("termination:enclosure"));
+        let beside = match_floor(
+            &[CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                name: None,
+                any_of: vec![
+                    "termination:enclosure".to_owned(),
+                    TERMINATION_ENCLOSURE_TRUSTED_INIT.to_owned(),
+                ],
+                accept: vec!["measured".to_owned(), "trusted".to_owned()],
+                providers: Vec::new(),
+            })],
             &under_tini,
         );
-        assert_eq!(
-            measured.unmet[TERMINATION_ENCLOSURE],
-            "the node is not pid 1"
-        );
-        assert_eq!(measured.unmet[RECOVERY_ENCLOSURE], "the node is not pid 1");
-        // Trust offered under a measured name is still refused.
-        under_tini.provide(
-            TERMINATION_ENCLOSURE,
-            ProofSource::Trusted,
-            HOST_PROVIDER,
-            "policy",
-        );
-        let forged = match_floor(&floor(&[TERMINATION_ENCLOSURE]), &under_tini);
-        assert!(forged.unmet[TERMINATION_ENCLOSURE].contains("trusted-proven"));
+        assert!(beside.admitted, "{beside:?}");
     }
 
     #[test]

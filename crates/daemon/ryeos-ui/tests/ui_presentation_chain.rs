@@ -57,6 +57,19 @@ fn body_limit(state: &AppState, service_ref: &str) -> u64 {
 
 async fn append(chain: &Chain, seat: &mut Seat, events: &[(&str, Value)]) -> Value {
     let first = seat.next_engine_seq;
+    try_append(chain, seat, events)
+        .await
+        .unwrap_or_else(|error| panic!("append at engine sequence {first}: {error:#}"))
+}
+
+/// Append rows to the seat, returning the refusal instead of panicking. The
+/// seat's next sequence advances only when the append is accepted.
+async fn try_append(
+    chain: &Chain,
+    seat: &mut Seat,
+    events: &[(&str, Value)],
+) -> anyhow::Result<Value> {
+    let first = seat.next_engine_seq;
     let last = first + events.len() as u64 - 1;
     let rows = Value::Array(
         events
@@ -99,10 +112,9 @@ async fn append(chain: &Chain, seat: &mut Seat, events: &[(&str, Value)]) -> Val
         chain.ctx.clone(),
         chain.state.clone(),
     )
-    .await
-    .unwrap_or_else(|error| panic!("append at engine sequence {first}: {error:#}"));
+    .await?;
     seat.next_engine_seq = last + 1;
-    receipt
+    Ok(receipt)
 }
 
 /// What one presentation admission is: the dialog View it is invoked from,
@@ -685,24 +697,9 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
 
     // projects/open: a registered project opens its own Surface in seat A.
     let second_project = tempfile::TempDir::new().expect("second project");
-    let root_attachment = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .get_session(&session_id)
-        .unwrap()
-        .attachments[&chain.root.binding_attachment_id]
-        .clone();
-    let added = ryeos_ui::seat_auth::with_compiled_ui_attachment(
-        root_attachment,
-        ryeos_ui::handlers::ui_projects::handle_projects_add(
-            json!({"root": second_project.path()}),
-            chain.ctx.clone(),
-            state.clone(),
-        ),
-    )
-    .await
-    .expect("register the second project for the session principal");
-    let local_id = added["project"]["local_id"].as_str().unwrap().to_owned();
+    // Registering a host folder through `projects/add` is a local-operator
+    // act, so the non-operator session principal's registry is seeded directly.
+    let local_id = test_state::add_fixture_project(&state, second_project.path()).await;
     let project_opened = admit(
         &chain,
         &mut seat_a,
@@ -860,17 +857,21 @@ async fn project_bound_chain(state: &Arc<AppState>, project: &std::path::Path) -
 }
 
 fn open_authored_surface() -> Admission<'static> {
+    open_surface("surface:ryeos/ui/base-observe")
+}
+
+fn open_surface(surface_ref: &str) -> Admission<'static> {
     Admission {
         dialog: "surfaces",
         view_ref: "view:ryeos/surfaces/list",
         affordance_id: "open",
         purpose: "open_surface",
         surface_open_target: json!({
-            "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/base-observe"},
+            "selection": {"kind": "authored", "surface_ref": surface_ref},
             "placement": {"kind": "new_surface"},
         }),
         particular_selection: Value::Null,
-        record: json!({"canonical_ref": "surface:ryeos/ui/base-observe"}),
+        record: json!({"canonical_ref": surface_ref}),
     }
 }
 
@@ -937,5 +938,479 @@ async fn a_recorded_dispatch_is_refused_when_the_project_path_no_longer_names_th
                 if code == "ui_binding_stale"
         ),
         "{error:#}"
+    );
+}
+
+/// Append one composition request, prepared then completed, to a seat. The
+/// completion is the one the client's own replay computes for the request.
+async fn append_composition(
+    chain: &Chain,
+    seat: &mut Seat,
+    owner: ryeos_client_base::ui::composition_operation::CompositionOwner,
+    mutation: ryeos_client_base::ui::composition_operation::CompositionMutation,
+    operation_id: &str,
+) {
+    let (prepared, completion) = composition_rows(chain, seat, owner, mutation, operation_id).await;
+    append(chain, seat, &[(SURFACE_OPEN_PREPARED, prepared)]).await;
+    append(chain, seat, &[(SURFACE_OPENED_COMPLETION, completion)]).await;
+}
+
+/// The prepared row of one composition request and the completion the
+/// client's own replay computes for it, not yet appended.
+async fn composition_rows(
+    chain: &Chain,
+    seat: &Seat,
+    owner: ryeos_client_base::ui::composition_operation::CompositionOwner,
+    mutation: ryeos_client_base::ui::composition_operation::CompositionMutation,
+    operation_id: &str,
+) -> (Value, Value) {
+    let frames = history(chain, seat).await;
+    let replay = fold(chain, &seat.producer.presentation_id, &frames);
+    let maximum = body_limit(
+        &chain.state,
+        ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
+    );
+    let mut operation: UiPreparedPresentationOperation = serde_json::from_value(json!({
+        "schema": 2,
+        "prepared_engine_seq": seat.next_engine_seq,
+        "operation_id": operation_id,
+        "producer": seat.producer,
+        "root_binding": chain.root,
+        "request_bounds": {
+            "max_request_bytes": maximum,
+            "max_input_bytes": maximum,
+            "max_seat_append_bytes": body_limit(
+                &chain.state, ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref),
+        },
+        "body": {"kind": "composition", "request": {
+            "schema": 1,
+            "presentation_id": seat.producer.presentation_id,
+            "operation_id": operation_id,
+            "expected_revision": replay.revision,
+            "expected_next_mount_id": replay.next_mount_id,
+            "owner": owner,
+            "mutation": mutation,
+        }},
+    }))
+    .unwrap();
+    operation.assign_identity().unwrap();
+    let completion = replay
+        .expected_composition_completion(&operation, maximum)
+        .unwrap();
+    (
+        serde_json::to_value(&operation).unwrap(),
+        serde_json::to_value(&completion).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_rebound_surface_is_accepted_by_history_dispatch_and_detach() {
+    use ryeos_client_base::ui::UiBindingAttachmentCoordinate as Ui;
+    use ryeos_client_base::ui::composition_operation::{CompositionMutation, CompositionOwner};
+    use ryeos_ui::browser_session::{AttachmentStoreError, BindingAttachmentCandidate};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let (chain, mut seat) = project_bound_chain(&state, project.path()).await;
+    let opened = admit(&chain, &mut seat, open_authored_surface()).await;
+    let transition = &opened["result"]["ui_transition"];
+    let surface_id = transition["surface"]["surface_instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let from = BindingAttachmentCoordinate {
+        binding_attachment_id: transition["attachment"]["binding_attachment_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+        binding_generation: transition["attachment"]["binding_generation"]
+            .as_u64()
+            .unwrap(),
+        binding_digest: transition["attachment"]["binding_digest"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    let pid = seat.producer.presentation_id.clone();
+    let ui = get_ui_state(&state).unwrap();
+    let policy = state.node_policy.generation_digest().to_owned();
+    let old = ui
+        .browser_sessions
+        .get_session(&chain.session_id)
+        .unwrap()
+        .attachments[&from.binding_attachment_id]
+        .clone();
+    // The service publishes the successor beside its source. Both stay live
+    // and the source cannot be detached while the Surface still owns it.
+    let successor = ui
+        .browser_sessions
+        .publish_rebind_attachment(
+            &chain.session_id,
+            &pid,
+            &from,
+            BindingAttachmentCandidate {
+                registered_project_id: old.registered_project_id.clone(),
+                compiled_binding: old.compiled_binding.clone(),
+                presentation: old.presentation.clone(),
+                project_authority: old.project_authority.clone(),
+            },
+            16,
+            &policy,
+        )
+        .unwrap();
+    let to = successor.coordinate();
+    assert_eq!(
+        ui.browser_sessions
+            .attachment_for_detach(&chain.session_id, &from)
+            .unwrap_err(),
+        AttachmentStoreError::AttachmentInUse
+    );
+    let frames = history(&chain, &seat).await;
+    let replay = fold(&chain, &pid, &frames);
+    let bounds = replay.binding_descriptors()[&from.binding_attachment_id].binding_request_bounds;
+    // Fan-out: a revision of an item the attachment names reaches this
+    // session's bus as exactly one hint, and the public descriptor names the
+    // item, so the seat will revise it.
+    let named = old.public_descriptor(bounds).named_items;
+    assert!(!named.is_empty());
+    let mut bus = ui.session_bus.subscribe(&chain.session_id);
+    let told = ryeos_ui::item_hints::ItemHintFanout::new().publish(
+        &ui,
+        &ryeos_app::item_revised::ItemRevised {
+            project: None,
+            item_ref: named[0].clone(),
+            digest: Some("ab".repeat(32)),
+            revision: 1,
+            change_set: Some("cs".into()),
+        },
+    );
+    assert!(told.contains(&chain.session_id));
+    let hint = bus.try_recv().expect("the hint reached the session bus");
+    assert_eq!(hint.event_type, "item.hint");
+    assert_eq!(hint.payload["item_ref"], named[0]);
+    let public = |coordinate: &BindingAttachmentCoordinate| Ui {
+        binding_attachment_id: coordinate.binding_attachment_id.clone(),
+        binding_generation: coordinate.binding_generation,
+        binding_digest: coordinate.binding_digest.clone(),
+    };
+    let surface = ryeos_client_base::ids::SurfaceInstanceId::try_new(surface_id.clone()).unwrap();
+    append_composition(
+        &chain,
+        &mut seat,
+        CompositionOwner::Surface {
+            surface_instance_id: surface.clone(),
+            binding: public(&from),
+        },
+        CompositionMutation::RebindAttachment {
+            from: public(&from),
+            to: public(&to),
+            descriptor: Box::new(successor.public_descriptor(bounds)),
+        },
+        "11111111-2222-4333-8444-555555555555",
+    )
+    .await;
+
+    // History verification accepted the rebound seat; membership follows it.
+    let frames = history(&chain, &seat).await;
+    let replay = fold(&chain, &pid, &frames);
+    assert_eq!(replay.completed_rebinds().len(), 1);
+    assert_eq!(
+        replay.composition.surfaces()[&surface].binding(),
+        &public(&to)
+    );
+    // The next request, owned by the successor, is accepted too.
+    append_composition(
+        &chain,
+        &mut seat,
+        CompositionOwner::Surface {
+            surface_instance_id: surface.clone(),
+            binding: public(&to),
+        },
+        CompositionMutation::RenameSurface {
+            title: "After rebind".into(),
+        },
+        "66666666-7777-4888-8999-000000000000",
+    )
+    .await;
+    let session = ui.browser_sessions.get_session(&chain.session_id).unwrap();
+    assert_eq!(
+        session.presentations[&pid].surfaces[&surface_id].coordinate,
+        to
+    );
+    assert!(
+        ui.browser_sessions
+            .admit_presentation_dispatch(&chain.session_id, &pid, &to, &policy)
+            .is_ok(),
+        "dispatch from a rebound tile is admitted"
+    );
+    assert!(
+        ui.browser_sessions
+            .attachment_for_detach(&chain.session_id, &from)
+            .unwrap()
+            .is_none(),
+        "the settled source is gone: detach is the idempotent no-op"
+    );
+}
+
+const REBIND_SURFACE: &str = "surface:test/rebind-source";
+
+/// A Surface of the fixture bundle whose signed content a test can revise.
+/// Revising the title changes the effective Surface identity, so a binding
+/// compiled before the revision no longer matches current signed content.
+fn install_rebind_fixture(state: &AppState, title: &str) {
+    test_state::write_fixture_bundle_item(
+        state,
+        "views/test/rebind-source.yaml",
+        "name: rebind-source\nversion: \"1.0.0\"\ndescription: Fixture view binding the core thread list\n\nwidget: rows\nsources:\n  default:\n    ref: service:threads/list\n    collection: threads\nprojections:\n  primary: item_ref\n",
+    );
+    test_state::write_fixture_bundle_item(
+        state,
+        "surfaces/test/rebind-source.yaml",
+        &format!(
+            "name: rebind-source\ntitle: {title}\nversion: \"1.0.0\"\ndescription: Fixture Surface\n\ncapabilities:\n  sources:\n    - ryeos.execute.service.threads/list\n  affordances: []\n\nsources: {{}}\naffordances: []\n\ntiling:\n  mode: master_stack\n  master: {{ side: left, arrange: vertical, ratio: 0.5, count: 1 }}\n  stack: {{ arrange: vertical }}\n  insert: end\n\ntiles: []\n\nstyle:\n  border: thin\n\nlibrary:\n  - group: Test\n    views:\n      - view:test/rebind-source\n"
+        ),
+    );
+}
+
+fn transition_coordinate(transition: &Value) -> BindingAttachmentCoordinate {
+    BindingAttachmentCoordinate {
+        binding_attachment_id: transition["attachment"]["binding_attachment_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+        binding_generation: transition["attachment"]["binding_generation"]
+            .as_u64()
+            .unwrap(),
+        binding_digest: transition["attachment"]["binding_digest"]
+            .as_str()
+            .unwrap()
+            .into(),
+    }
+}
+
+fn public_coordinate(
+    coordinate: &BindingAttachmentCoordinate,
+) -> ryeos_client_base::ui::UiBindingAttachmentCoordinate {
+    ryeos_client_base::ui::UiBindingAttachmentCoordinate {
+        binding_attachment_id: coordinate.binding_attachment_id.clone(),
+        binding_generation: coordinate.binding_generation,
+        binding_digest: coordinate.binding_digest.clone(),
+    }
+}
+
+struct RebindSeat {
+    chain: Chain,
+    seat: Seat,
+    /// The Surface's attachment, compiled before its signed content is revised.
+    from: BindingAttachmentCoordinate,
+    surface_id: String,
+    /// A second attachment of the same Surface opened after the revision: it
+    /// is compiled from current signed content.
+    current: BindingAttachmentCoordinate,
+}
+
+/// Open the fixture Surface, revise its signed content, then open it again so
+/// a content-current attachment exists beside the now content-stale one.
+async fn revised_after_mint(state: &Arc<AppState>, project: &std::path::Path) -> RebindSeat {
+    install_rebind_fixture(state, "Rebind source");
+    let (chain, mut seat) = project_bound_chain(state, project).await;
+    let opened = admit(&chain, &mut seat, open_surface(REBIND_SURFACE)).await;
+    let from = transition_coordinate(&opened["result"]["ui_transition"]);
+    let surface_id = opened["result"]["ui_transition"]["surface"]["surface_instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    install_rebind_fixture(state, "Rebind source, revised");
+    let reopened = admit(&chain, &mut seat, open_surface(REBIND_SURFACE)).await;
+    let current = transition_coordinate(&reopened["result"]["ui_transition"]);
+    RebindSeat {
+        chain,
+        seat,
+        from,
+        surface_id,
+        current,
+    }
+}
+
+fn candidate_of(
+    state: &AppState,
+    chain: &Chain,
+    coordinate: &BindingAttachmentCoordinate,
+) -> ryeos_ui::browser_session::BindingAttachmentCandidate {
+    let session = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&chain.session_id)
+        .unwrap();
+    let attachment = &session.attachments[&coordinate.binding_attachment_id];
+    ryeos_ui::browser_session::BindingAttachmentCandidate {
+        registered_project_id: attachment.registered_project_id.clone(),
+        compiled_binding: attachment.compiled_binding.clone(),
+        presentation: attachment.presentation.clone(),
+        project_authority: attachment.project_authority.clone(),
+    }
+}
+
+/// The prepared RebindAttachment row of `from` to `to`, with the successor's
+/// own public descriptor.
+async fn rebind_prepared_row(
+    state: &AppState,
+    rebind: &RebindSeat,
+    to: &BindingAttachmentCoordinate,
+) -> (Value, Value) {
+    use ryeos_client_base::ui::composition_operation::{CompositionMutation, CompositionOwner};
+    let frames = history(&rebind.chain, &rebind.seat).await;
+    let replay = fold(
+        &rebind.chain,
+        &rebind.seat.producer.presentation_id,
+        &frames,
+    );
+    let bounds =
+        replay.binding_descriptors()[&rebind.from.binding_attachment_id].binding_request_bounds;
+    let target = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&rebind.chain.session_id)
+        .unwrap()
+        .attachments[&to.binding_attachment_id]
+        .clone();
+    composition_rows(
+        &rebind.chain,
+        &rebind.seat,
+        CompositionOwner::Surface {
+            surface_instance_id: ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                rebind.surface_id.clone(),
+            )
+            .unwrap(),
+            binding: public_coordinate(&rebind.from),
+        },
+        CompositionMutation::RebindAttachment {
+            from: public_coordinate(&rebind.from),
+            to: public_coordinate(to),
+            descriptor: Box::new(target.public_descriptor(bounds)),
+        },
+        "11111111-2222-4333-8444-555555555555",
+    )
+    .await
+}
+
+fn publish_successor(
+    state: &AppState,
+    rebind: &RebindSeat,
+    candidate: ryeos_ui::browser_session::BindingAttachmentCandidate,
+) -> BindingAttachmentCoordinate {
+    get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .publish_rebind_attachment(
+            &rebind.chain.session_id,
+            &rebind.seat.producer.presentation_id,
+            &rebind.from,
+            candidate,
+            16,
+            state.node_policy.generation_digest(),
+        )
+        .unwrap()
+        .coordinate()
+}
+
+fn is_refused_as(error: &anyhow::Error, expected: &str) -> bool {
+    format!("{error:#}").contains(expected)
+}
+
+/// A rebind exists because the source's signed content was revised, so the
+/// source is content-stale by construction. It must still be admitted when
+/// the published successor, compiled from current content, is the one being
+/// adopted.
+#[tokio::test]
+async fn a_rebind_is_admitted_although_its_source_content_was_revised_after_mint() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let mut rebind = revised_after_mint(&state, project.path()).await;
+    let to = publish_successor(
+        &state,
+        &rebind,
+        candidate_of(&state, &rebind.chain, &rebind.current),
+    );
+    let (prepared, completion) = rebind_prepared_row(&state, &rebind, &to).await;
+    append(
+        &rebind.chain,
+        &mut rebind.seat,
+        &[(SURFACE_OPEN_PREPARED, prepared)],
+    )
+    .await;
+    append(
+        &rebind.chain,
+        &mut rebind.seat,
+        &[(SURFACE_OPENED_COMPLETION, completion)],
+    )
+    .await;
+    let frames = history(&rebind.chain, &rebind.seat).await;
+    let replay = fold(
+        &rebind.chain,
+        &rebind.seat.producer.presentation_id,
+        &frames,
+    );
+    assert_eq!(replay.completed_rebinds().len(), 1);
+    let surface =
+        ryeos_client_base::ids::SurfaceInstanceId::try_new(rebind.surface_id.clone()).unwrap();
+    assert_eq!(
+        replay.composition.surfaces()[&surface].binding(),
+        &public_coordinate(&to)
+    );
+}
+
+/// The successor is what is adopted, so its content is revalidated: a
+/// successor compiled from the revised-away content is refused.
+#[tokio::test]
+async fn a_rebind_to_a_content_stale_successor_is_refused() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let mut rebind = revised_after_mint(&state, project.path()).await;
+    let to = publish_successor(
+        &state,
+        &rebind,
+        candidate_of(&state, &rebind.chain, &rebind.from),
+    );
+    let (prepared, _) = rebind_prepared_row(&state, &rebind, &to).await;
+    let refused = try_append(
+        &rebind.chain,
+        &mut rebind.seat,
+        &[(SURFACE_OPEN_PREPARED, prepared)],
+    )
+    .await
+    .expect_err("a stale successor is not adopted");
+    assert!(
+        is_refused_as(&refused, "changed after session mint")
+            || is_refused_as(&refused, "ui_binding_stale"),
+        "{refused:#}"
+    );
+}
+
+/// A successor that was never published for this exact source is refused,
+/// even though it is a live, content-current attachment of the session.
+#[tokio::test]
+async fn a_rebind_to_an_unpublished_pair_is_refused() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let mut rebind = revised_after_mint(&state, project.path()).await;
+    let (prepared, _) = rebind_prepared_row(&state, &rebind, &rebind.current).await;
+    let refused = try_append(
+        &rebind.chain,
+        &mut rebind.seat,
+        &[(SURFACE_OPEN_PREPARED, prepared)],
+    )
+    .await
+    .expect_err("an unpublished pair is not admitted");
+    assert!(
+        is_refused_as(&refused, "was not published for this exact source"),
+        "{refused:#}"
     );
 }

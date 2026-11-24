@@ -703,7 +703,9 @@ pub(crate) fn pending_request_affects_export(
     match &request.mutation {
         CompositionMutation::SetSubject { mount, .. }
         | CompositionMutation::FocusView { mount } => instances.contains(mount),
-        CompositionMutation::RestoreTabs { .. } => true,
+        CompositionMutation::RestoreTabs { .. } | CompositionMutation::RebindAttachment { .. } => {
+            true
+        }
         CompositionMutation::InsertTab { .. } | CompositionMutation::AppendTabs { .. } => false,
         CompositionMutation::RenameSurface { .. } => false,
         CompositionMutation::RenameTab { tab_id, .. }

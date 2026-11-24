@@ -222,7 +222,7 @@ pub async fn handle(
 
     let mut cache_invalidated = false;
     let mut durability_uncertain = false;
-    let activation: Result<PathBuf> = (|| {
+    let activation: Result<(PathBuf, PathBuf)> = (|| {
         let registration = serde_json::json!({ "kind": "node", "path": local_target });
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
@@ -266,14 +266,14 @@ pub async fn handle(
         let canonical = local_target
             .canonicalize()
             .context("canonicalize installed bundle path")?;
-        transaction
+        let registration = transaction
             .commit_present(state.identity.signing_key())
             .context("commit remote bundle registration")?;
-        Ok(canonical)
+        Ok((canonical, registration))
     })();
 
-    let canonical_target = match activation {
-        Ok(path) => path,
+    let (canonical_target, registration) = match activation {
+        Ok(paths) => paths,
         Err(error) => {
             // A durable-rename error can report failure after committing the
             // namespace, and mark/registration writes can fail after a normal
@@ -295,13 +295,64 @@ pub async fn handle(
         }
     };
 
+    // The install is committed; the journal records it. A journal failure is
+    // reported, never turned into a failed install.
+    let journaled = journal_install(
+        &state,
+        &ctx.fingerprint,
+        &req.bundle_name,
+        &req.remote,
+        &registration,
+        files_installed,
+        total_bytes,
+    );
+
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
         "files_installed": files_installed,
         "total_bytes": total_bytes,
         "path": canonical_target.display().to_string(),
         "durability_uncertain": durability_uncertain,
+        "journal": journaled,
     }))
+}
+
+/// Record a committed install in the node journal; the outcome as data.
+fn journal_install(
+    state: &AppState,
+    actor: &str,
+    bundle: &str,
+    remote: &str,
+    registration: &Path,
+    files: usize,
+    bytes: u64,
+) -> Value {
+    let outcome = std::fs::read(registration)
+        .with_context(|| format!("read bundle registration {}", registration.display()))
+        .map_err(|error| format!("{error:#}"))
+        .and_then(|signed| {
+            let digest = format!("sha256:{}", lillux::sha256_hex(&signed));
+            ryeos_node::node_journal::NodeJournal::for_app_root(
+                &state.config.app_root,
+                (*state.identity).clone(),
+            )
+            .record_bundle_installed(&ryeos_node::node_journal::BundleInstalledFacts {
+                bundle,
+                source: &format!("remote:{remote}"),
+                registration_digest: &digest,
+                actor,
+                files: u64::try_from(files).unwrap_or(u64::MAX),
+                bytes,
+            })
+            .map_err(|error| error.to_string())
+        });
+    match outcome {
+        Ok(_) => serde_json::json!({ "recorded": true }),
+        Err(error) => {
+            tracing::error!(bundle, error = %error, "failed to journal a bundle install");
+            serde_json::json!({ "recorded": false, "error": error })
+        }
+    }
 }
 
 /// Reconcile one bundle transaction while the caller holds its lock. Visible

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-23T02:43:18Z:c89b19ab4da05720e9797b342611b8fdd3089b171a13512c26880d2fcdd8c9d0:jbIpeUZJpOzp8sZY7kMMQNGj32V9+i4zJC36S+YI/lE4vzd9xnqWVskYwVeJO0p5L8BLMy6YBA47HtLfqP46Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.journal
+availability: both
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.node/journal"]
+schema:
+  types: string[]?
+  since: string?
+  until: string?
+  subject: string?
+  cursor: string?
+  limit: integer?
+  if_revision: string?
+description: "Read the node's signed histories as one page in the shared read envelope, newest first: the node journal, offline-operation receipts and trust key events, each row naming its source, where its time comes from and what stands behind its actor key. Nothing is copied; a record that does not verify refuses the read"

@@ -352,7 +352,10 @@ pub(crate) fn derive_pinned_child_authority(
         environment,
         capability_ceiling,
     )?
-    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
+    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)?
+    // A child pinned from its parent's project carries the identity the
+    // parent sealed at admission.
+    .with_signer_project(parent.signer_project())
 }
 
 /// Capture a live project tree under a durable recovery root. The
@@ -2020,25 +2023,8 @@ fn advance_head_to_frozen_runtime_result(
     expected_hash: &str,
     generation: &ryeos_state::objects::WorkspaceGenerationPair,
 ) -> Result<()> {
-    let mut components = head_ref.split('/');
-    let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-    ) else {
-        anyhow::bail!("managed runtime advance-head authority has a non-canonical ref");
-    };
-    let canonical_component = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    if !canonical_component(principal_key) || !canonical_component(project_hash) {
-        anyhow::bail!("managed runtime advance-head authority has a non-canonical identity");
-    }
+    let head = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
+        .context("managed runtime advance-head authority has a non-canonical ref")?;
 
     let authority = pinned_state_authority(state)?;
     let cas_guard = authority.acquire_shared_guard()?;
@@ -2048,15 +2034,23 @@ fn advance_head_to_frozen_runtime_result(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    // The key moving the head is the thread's acting principal from its
+    // authoritative record, never the launch-owner claim token.
+    let acting_principal = state
+        .state_store
+        .get_thread(thread_id)?
+        .and_then(|thread| thread.requested_by)
+        .with_context(|| format!("thread {thread_id} has no acting principal to advance HEAD"))?;
+    let advancer = ryeos_app::project_owner::head_advancer(state, &acting_principal, head.owner())?;
     state
         .state_store
         .advance_project_head_ref_owned(
             thread_id,
             launch_owner,
-            principal_key,
-            project_hash,
+            &head,
             &generation.snapshot_hash,
             expected_hash,
+            &advancer,
             &signer,
             &cas_guard,
         )
@@ -3489,5 +3483,121 @@ mod head_advance_not_applied_tests {
             HeadAdvanceNotApplied::find(&anyhow::anyhow!("fold-back capture failed")).is_none(),
             "an untyped fold-back failure stays foldback_failed"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod managed_advance_owner_tests {
+    use super::*;
+    use lillux::crypto::SigningKey;
+    use ryeos_engine::trust::{
+        SignerRecord, SignerRole, SignerScope, SignerStatus, TrustStore, compute_fingerprint,
+    };
+    use ryeos_state::project_identity::{ProjectHeadKey, ProjectName};
+
+    fn engine_trusting(
+        key: &SigningKey,
+        status: SignerStatus,
+    ) -> std::sync::Arc<ryeos_engine::engine::Engine> {
+        let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let record = SignerRecord::new(
+            &key.verifying_key(),
+            "launcher",
+            SignerRole::ProjectAuthor,
+            SignerScope::authoring_default(),
+            status,
+        );
+        let trust = TrustStore::from_registry(node, vec![record])
+            .unwrap()
+            .with_succession_chain(&[]);
+        std::sync::Arc::new(
+            ryeos_engine::engine::Engine::new(
+                ryeos_engine::kind_registry::KindRegistry::empty(),
+                ryeos_engine::parsers::ParserDispatcher::new(
+                    ryeos_engine::parsers::ParserRegistry::empty(),
+                    std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+                ),
+                Vec::new(),
+            )
+            .with_trust_store(trust),
+        )
+    }
+
+    fn advance_as(
+        status: SignerStatus,
+    ) -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+        Result<()>,
+        ProjectHeadKey,
+    ) {
+        let (temp, store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::lifecycle_test_state();
+        let launcher = SigningKey::from_bytes(&[7u8; 32]);
+        let fingerprint = compute_fingerprint(&launcher.verifying_key());
+        let state = ryeos_app::state::AppState {
+            engine: engine_trusting(&launcher, status),
+            ..state
+        };
+        let mut record =
+            crate::augmentations::compose_context_positions::tests::augmentation_child_record(
+                "T-managed-advance",
+            );
+        record.requested_by = Some(fingerprint.clone());
+        state.state_store.create_thread_for_test(&record).unwrap();
+
+        let owner = ryeos_engine::trust::SuccessionGraph::default()
+            .ownership_of(&fingerprint)
+            .unwrap()
+            .principal;
+        let head = ProjectHeadKey::owned_by(&owner, &ProjectName::new("managed-advance").unwrap());
+        let generation = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: None,
+        };
+        let result = advance_head_to_frozen_runtime_result(
+            &state,
+            "T-managed-advance",
+            "launch-owner-token",
+            &head.ref_path(),
+            &"b".repeat(64),
+            &generation,
+        );
+        // Destructured in this order, the application drops before the Store
+        // owner closes, as the fixture requires.
+        (temp, store_owner, state, result, head)
+    }
+
+    #[test]
+    fn a_launcher_key_retired_before_the_advance_is_refused_with_no_head_written() {
+        let (_temp, _store_owner, state, result, head) = advance_as(SignerStatus::Retired);
+        let error = result.expect_err("a retired launcher key must not advance HEAD");
+        assert!(
+            format!("{error:#}").contains("owner_key_not_active"),
+            "{error:#}"
+        );
+        assert!(
+            state
+                .state_store
+                .with_state_db(|db| db.read_project_head(&head))
+                .unwrap()
+                .is_none(),
+            "the refused advance left a head behind"
+        );
+        // No head ref was ever written, so no head directory exists to hold
+        // an advance record either.
+    }
+
+    #[test]
+    fn an_active_launcher_key_passes_the_owner_check() {
+        let (_temp, _store_owner, _state, result, _head) = advance_as(SignerStatus::Active);
+        // The fixture holds no CAS objects, so the advance may still refuse
+        // later; it must not refuse on ownership.
+        if let Err(error) = result {
+            let message = format!("{error:#}");
+            assert!(!message.contains("owner_key_not_active"), "{message}");
+            assert!(!message.contains("owner_not_spoken_for"), "{message}");
+        }
     }
 }

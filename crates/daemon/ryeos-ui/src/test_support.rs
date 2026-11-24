@@ -41,7 +41,7 @@ async fn live_presentation_seeded(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let root = fixture_project_root(state);
-    live_presentation_in_project(state, &root, &root, initial_surface).await
+    live_presentation_in_project(state, &root, initial_surface).await
 }
 
 /// A project directory for the default presentation fixtures, beside the
@@ -59,12 +59,11 @@ pub fn fixture_project_root(state: &AppState) -> std::path::PathBuf {
     project
 }
 
-/// The presentation fixture bound to `project_root`. Its signed shared
-/// Config is an item of the state's fixture bundle. `spelling` is the path the launch names that project by; it
-/// may be any equivalent path of the canonical root.
+/// The presentation fixture bound to the project `spelling` names, launched
+/// by the node operator. Its signed shared Config is an item of the state's
+/// fixture bundle. `spelling` may be any equivalent path of the canonical root.
 async fn live_presentation_in_project(
     state: &AppState,
-    project_root: &std::path::Path,
     spelling: &std::path::Path,
     initial_surface: Option<&str>,
 ) -> (
@@ -89,7 +88,8 @@ async fn live_presentation_in_project(
     let fixture_id = NEXT_FIXTURE_CONFIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let config_name = format!("test/presentation-{fixture_id}");
     write_fixture_bundle_item(state, &format!("config/{config_name}.yaml"), &body);
-    let principal = register_fixture_project(state, project_root).await;
+    let operator = operator_launch_context(state);
+    let principal = operator.fingerprint.clone();
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
@@ -98,7 +98,7 @@ async fn live_presentation_in_project(
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await
@@ -106,40 +106,46 @@ async fn live_presentation_in_project(
     claim_minted_presentation(state, &minted).await
 }
 
-/// Register `project_root` as the one project of the verified non-operator
-/// fixture principal, returning that principal.
-pub async fn register_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
+/// The node operator's launch authority: the context a project-bound launch
+/// mints under. A non-operator seat is refused project roots until the
+/// identity cut, so project-bound fixtures run as the configured operator.
+/// The project is not registered: the operator's registry is node-global and
+/// a launch only retains the directory it names.
+pub fn operator_launch_context(state: &AppState) -> ryeos_app::handler_context::HandlerContext {
+    local_operator_context(state, vec!["*".into()])
+}
+
+/// Append `project_root` to the verified non-operator fixture principal's
+/// private registry and return its local id. Seat registration through `projects/add` is a
+/// local-operator act, so a non-operator fixture seeds its registry here.
+pub async fn add_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
     let principal = format!("fp:{}", "ab".repeat(32));
     let project_root = project_root.canonicalize().unwrap();
-    // This verified non-operator principal selects only its private, explicitly
-    // registered temporary project; no test touches the user's local registry.
     let resolver =
         ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
-    {
-        let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
-            .await
-            .unwrap();
-        store
-            .write_yaml(
-                &store.paths().projects_config(),
-                &crate::handlers::ui_projects::ProjectsFile {
-                    version: 1,
-                    projects: vec![crate::handlers::ui_projects::ProjectEntry {
-                        local_id: "prj_fixture".into(),
-                        name: "Fixture".into(),
-                        root: project_root.display().to_string(),
-                        added_at: lillux::time::iso8601_now(),
-                        tags: vec![],
-                    }],
-                },
-            )
-            .unwrap();
-    }
-    principal
+    let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
+        .await
+        .unwrap();
+    let mut projects: crate::handlers::ui_projects::ProjectsFile =
+        store.load_yaml(&store.paths().projects_config()).unwrap();
+    let local_id = format!("prj_{}", uuid::Uuid::new_v4().simple());
+    projects
+        .projects
+        .push(crate::handlers::ui_projects::ProjectEntry {
+            local_id: local_id.clone(),
+            name: "Second".into(),
+            root: project_root.display().to_string(),
+            added_at: lillux::time::iso8601_now(),
+            tags: vec![],
+        });
+    store
+        .write_yaml(&store.paths().projects_config(), &projects)
+        .unwrap();
+    local_id
 }
 
 /// A presentation under the shipped shared Config bound to `project_root`,
-/// registered for a verified non-operator principal. Its dialogs carry the
+/// launched by the node operator. Its dialogs carry the
 /// real project registry and Surface affordances, and the session retains the
 /// pinned project directory.
 pub async fn live_shipped_presentation_in_project(
@@ -151,7 +157,8 @@ pub async fn live_shipped_presentation_in_project(
     ryeos_client_base::ui::UiPresentationProducer,
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
-    let principal = register_fixture_project(state, project_root).await;
+    let operator = operator_launch_context(state);
+    let principal = operator.fingerprint.clone();
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
@@ -160,7 +167,7 @@ pub async fn live_shipped_presentation_in_project(
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await
@@ -320,7 +327,7 @@ pub async fn live_presentation_with_surface(
 /// coordinate of its one authored initial Surface rather than the root.
 pub async fn live_presentation_with_surface_in_project(
     state: &AppState,
-    project_root: &std::path::Path,
+    _project_root: &std::path::Path,
     spelling: &std::path::Path,
     surface_ref: &str,
 ) -> (
@@ -330,7 +337,7 @@ pub async fn live_presentation_with_surface_in_project(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let (id, ctx, producer, _) =
-        live_presentation_in_project(state, project_root, spelling, Some(surface_ref)).await;
+        live_presentation_in_project(state, spelling, Some(surface_ref)).await;
     let session = crate::state::get_ui_state(state)
         .unwrap()
         .browser_sessions
@@ -368,10 +375,14 @@ pub fn launch_context(
                 view_sets: Default::default(),
                 contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
                 principal_id: "fp:test".to_string(),
+                signer_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+                ),
                 project_root: project_root.map(str::to_string),
                 request_engine_generation_identity: "generation:test".to_string(),
                 node_policy_generation_digest: "22".repeat(32),
                 surface: EffectiveUiItemIdentity {
+                    chain: Vec::new(),
                     canonical_ref: surface_ref.to_string(),
                     effective_definition_digest: EffectiveDefinitionDigest::parse("33".repeat(32))
                         .expect("valid fixture digest"),

@@ -62,7 +62,7 @@ class Classifier(unittest.TestCase):
         return str(root)
 
     def run_classify(self, root: str) -> tuple[str, bool]:
-        mode, _, _, bundles = classify_mod.classify(root, "origin/next")
+        mode, _, _, bundles, _ = classify_mod.classify(root, "origin/next")
         return mode, bundles
 
     def test_ui_only(self):
@@ -211,6 +211,195 @@ class TouchedPackages(unittest.TestCase):
                 ["python3", "-I", str(CLASSIFY), "--root", tmp], capture_output=True, text=True
             )
         self.assertIn("test_packages=ERROR", done.stdout.splitlines())
+
+
+class E2ESelection(unittest.TestCase):
+    """Which daemon end-to-end binaries a merge gate runs, from the coverage map."""
+
+    MAP = (
+        '[tests.one_e2e]\ncovers = ["pkg-a"]\n\n'
+        '[tests.two_e2e]\ncovers = []\npaths = ["crates/k/src/proc/**"]\n'
+    )
+    BASE_FILES = {
+        "Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/b", "crates/k", "crates/bin/daemon"]\n',
+        "crates/a/Cargo.toml": '[package]\nname = "pkg-a"\nversion = "0"\n',
+        "crates/a/src/lib.rs": "pub fn f() {}\n",
+        "crates/b/Cargo.toml": '[package]\nname = "pkg-b"\nversion = "0"\n',
+        "crates/b/src/lib.rs": "pub fn f() {}\n",
+        "crates/k/Cargo.toml": '[package]\nname = "pkg-k"\nversion = "0"\n',
+        "crates/k/src/lib.rs": "pub fn f() {}\n",
+        "crates/k/src/proc/mod.rs": "pub fn p() {}\n",
+        "crates/bin/daemon/Cargo.toml": '[package]\nname = "ryeosd"\nversion = "0"\n',
+        "crates/bin/daemon/src/main.rs": "fn main() {}\n",
+        "crates/bin/daemon/tests/one_e2e.rs": "// e2e\n",
+        "crates/bin/daemon/tests/two_e2e.rs": "// e2e\n",
+        "crates/bin/daemon/tests/common/mod.rs": "// helper\n",
+        "crates/bin/daemon/tests/e2e-coverage.toml": MAP,
+    }
+
+    def repo(self, changed: dict[str, str], removed: tuple[str, ...] = ()) -> tuple[str, list[str]]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        for name, text in self.BASE_FILES.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        for name in removed:
+            (root / name).unlink()
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "--allow-empty", "-m", "change")
+        paths = [n for n in classify_mod.git(str(root), "diff", "--name-only", "-z", "origin/next", "HEAD").decode().split("\0") if n]
+        return str(root), sorted(paths)
+
+    def select(self, changed: dict[str, str], removed: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+        root, paths = self.repo(changed, removed)
+        selected, uncovered, _ = classify_mod.select_e2e_tests(root, paths)
+        return selected, uncovered
+
+    def test_covered_package_selects_its_binaries(self):
+        self.assertEqual(self.select({"crates/a/src/lib.rs": "pub fn f() { }\n"}), (["one_e2e"], []))
+
+    def test_path_glob_selects_and_other_paths_of_that_crate_do_not(self):
+        self.assertEqual(self.select({"crates/k/src/proc/mod.rs": "pub fn p() { }\n"}), (["two_e2e"], []))
+        self.assertEqual(self.select({"crates/k/src/lib.rs": "pub fn f() { }\n"}), ([], ["pkg-k"]))
+
+    def test_uncovered_package_is_reported(self):
+        self.assertEqual(self.select({"crates/b/src/lib.rs": "pub fn f() { }\n"}), ([], ["pkg-b"]))
+
+    def test_changed_test_binary_selects_itself(self):
+        self.assertEqual(self.select({"crates/bin/daemon/tests/two_e2e.rs": "// changed\n"}), (["two_e2e"], []))
+
+    def test_removed_test_binary_selects_nothing(self):
+        self.assertEqual(self.select({}, removed=("crates/bin/daemon/tests/two_e2e.rs",)), ([], []))
+
+    def test_daemon_source_and_shared_helpers_select_everything(self):
+        everything = (["one_e2e", "two_e2e"], [])
+        self.assertEqual(self.select({"crates/bin/daemon/src/main.rs": "fn main() { }\n"}), everything)
+        self.assertEqual(self.select({"crates/bin/daemon/tests/common/mod.rs": "// changed\n"}), everything)
+        self.assertEqual(self.select({"crates/bin/daemon/Cargo.toml": '[package]\nname = "ryeosd"\nversion = "1"\n'}), everything)
+
+    def test_docs_and_the_map_itself_select_nothing(self):
+        self.assertEqual(self.select({"crates/a/README.md": "x"}), ([], []))
+        self.assertEqual(self.select({"crates/bin/daemon/tests/e2e-coverage.toml": self.MAP + "\n"}), ([], []))
+
+    def test_broken_map_is_an_error_not_none(self):
+        root, paths = self.repo({"crates/bin/daemon/tests/e2e-coverage.toml": "[tests.one_e2e]\nwhat = 1\n",
+                                 "crates/a/src/lib.rs": "pub fn f() { }\n"})
+        with self.assertRaises(ValueError):
+            classify_mod.select_e2e_tests(root, paths)
+        done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True)
+        self.assertIn("e2e_tests=ERROR", done.stdout.splitlines())
+
+    def test_cli_prints_selection_and_shards(self):
+        root, _ = self.repo({"crates/a/src/lib.rs": "pub fn f() { }\n", "crates/b/src/lib.rs": "pub fn f() { }\n"})
+        out = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn('e2e_tests=["one_e2e"]', out)
+        self.assertIn("e2e_shards=[1]", out)
+        self.assertIn('e2e_uncovered=["pkg-b"]', out)
+
+    def test_shard_count_steps(self):
+        self.assertEqual([classify_mod.e2e_shard_count(n) for n in (1, 8, 9, 30, 31, 200)], [1, 1, 2, 2, 4, 4])
+
+    def test_glob(self):
+        g = classify_mod.glob_regex
+        self.assertTrue(g("a/**/c.rs").match("a/c.rs"))
+        self.assertTrue(g("a/**/c.rs").match("a/b/x/c.rs"))
+        self.assertTrue(g("a/**").match("a/b/c"))
+        self.assertFalse(g("a/*.rs").match("a/b/c.rs"))
+        self.assertFalse(g("a/b").match("a/bc"))
+
+    def test_lint(self):
+        root, _ = self.repo({})
+        self.assertEqual(classify_mod.check_e2e_coverage(root), ([], ["pkg-b"]))
+        bad = (
+            '[tests.one_e2e]\ncovers = ["pkg-a", "nope", "ryeosd"]\n\n'
+            '[tests.gone_e2e]\ncovers = []\npaths = ["crates/zz/**"]\n'
+        )
+        root, _ = self.repo({"crates/bin/daemon/tests/e2e-coverage.toml": bad})
+        faults, _ = classify_mod.check_e2e_coverage(root)
+        joined = "\n".join(faults)
+        for needle in ("tests/two_e2e.rs has no", "[tests.gone_e2e] names no test file", "unknown package 'nope'",
+                       "covers ryeosd", "matches no tracked file"):
+            self.assertIn(needle, joined)
+        done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root, "--check-e2e-coverage"], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 1)
+
+
+class BundleBins(unittest.TestCase):
+    """A change that reaches a bundle bin needs the branch's own refresh."""
+
+    OWNERSHIP = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+
+    def decide(self, changed: dict[str, str], ownership: str | None = "cargo_package: bin-a") -> tuple[bool, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        names = ("bin-a", "shared", "leaf", "built", "targeted", "devonly", "apart")
+        members = ", ".join(f'"crates/{n}"' for n in names)
+        write(
+            root,
+            "Cargo.toml",
+            f'[workspace]\nmembers = [{members}]\n[workspace.dependencies]\nalias = {{ path = "crates/shared", package = "shared" }}\n',
+        )
+        tables = {
+            "bin-a": '[dependencies]\nserde = "1"\nalias = { workspace = true }\n'
+            '[build-dependencies]\nbuilt = { path = "../built" }\n'
+            '[target."cfg(unix)".dependencies]\ntargeted = { path = "../targeted" }\n'
+            '[dev-dependencies]\ndevonly = { path = "../devonly" }\n',
+            "shared": '[dependencies]\nleaf = { path = "../leaf" }\n',
+        }
+        for name in names:
+            write(root, f"crates/{name}/Cargo.toml", f'[package]\nname = "{name}"\n' + tables.get(name, ""))
+            write(root, f"crates/{name}/src/lib.rs", "a")
+        write(root, "Cargo.lock", "a")
+        if ownership is not None:
+            write(root, self.OWNERSHIP, f"payloads:\n  - {ownership}\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "change")
+        _, _, _, changed_flag, why = classify_mod.classify(str(root), "origin/next")
+        return changed_flag, why
+
+    def test_crates_a_bin_is_built_from_refresh(self):
+        for name in ("bin-a", "shared", "leaf", "built", "targeted"):
+            with self.subTest(name):
+                flag, why = self.decide({f"crates/{name}/src/lib.rs": "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"is in {name}, which bundle bin package bin-a is built from", why)
+
+    def test_other_crates_restore(self):
+        for name in ("devonly", "apart"):
+            with self.subTest(name):
+                self.assertFalse(self.decide({f"crates/{name}/src/lib.rs": "b"})[0])
+
+    def test_shared_build_inputs_refresh(self):
+        for path in ("Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml"):
+            with self.subTest(path):
+                flag, why = self.decide({path: "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"{path} is a build input", why)
+
+    def test_non_crate_path_restores(self):
+        self.assertFalse(self.decide({"docs/x.md": "b"})[0])
+
+    def test_faults_refresh(self):
+        for ownership in (None, "nothing: here", "cargo_package: missing"):
+            with self.subTest(ownership):
+                flag, why = self.decide({"crates/apart/src/lib.rs": "b"}, ownership)
+                self.assertTrue(flag)
+                self.assertIn("could not decide", why)
 
 
 class Digest(unittest.TestCase):
