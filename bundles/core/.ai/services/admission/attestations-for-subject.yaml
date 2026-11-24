@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:48921a8eae6d41d8d95491664928361a4610b1c3c6a4ed6846dc4d97730fbcb7:OwZkUH+LKfkSLy5hB2b8bxrgsFbH65M/xo7lmFIPuk5H2vFusWUiYZBVPpo136wt1yvkuFvBAZ726nBQtbuxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:6da8b4f6c72a577163a2c7a8c8a76b583938ba8275c873b1e94e021a8246583c:5oAqiaZ2+uE7sXjnSbbZ1ERWKDWJ6Ew3fUFBAk3arwXIqOYj0TRo5/D2bdBonyAU4muXUgzglg8ko06dwaRGDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.attestations-for-subject
 required_caps: ["ryeos.execute.service.admission/attestations-for-subject"]
@@ -20,6 +20,5 @@ disclosure:
     - "/attestations/*/head_ref_path"
     - "/attestations/*/indexed_at"
     - "/attestations/*/state"
-  free_text:
     - "/attestations/*/attestation"
   max_items: 4096

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:23Z:85f9127c991598578a539c02c9deee4525fc9f22dcb6523f93e3c9a5d341e40b:QNaUM024zLGbRg/w/6mjNeTRy+MUn3vO2HMdfiz5ptGA4P662RXsgtinP5oh88j89GS2BaLeJ5ITc7WKa3ptCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:f02d2b6dd87ba067ae76e7a482479d2a655cebd01d5a05bff5b58ead3a76740e:9RCdWkCNlW0rH4f7xFkfPv0E1maxyhSFAyRkw24nBdaZ/8pyf5trvgg5bQqIAIE0vOknKh4zSgNAkn8AFVyiCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: qualify-candidate
 kind: service
@@ -6,3 +6,5 @@ endpoint: worker-executions.qualify-candidate
 required_caps: ["ryeos.execute.service.worker-executions/qualify-candidate"]
 schema: {chain_root_id: string, candidate_snapshot_hash: string, candidate_validation_hash: string, evaluator_chain_root_id: string, evaluator_terminal_thread_id: string, evaluator_capsule_hash: string, evaluator_item_ref: string, evaluator_definition_digest: string, evaluator_parameters_digest: string, integration: object?, integration_launch_id: string?}
 description: Adopt exact successful immutable evaluator testimony for one retained candidate and reserve its sole integration coordinate when required.
+# Hosted worker executions are a single configured-operator trust domain; the handler requires the admitted operator, so no principal is served.
+disclosure: {}

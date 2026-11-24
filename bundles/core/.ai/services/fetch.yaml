@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:47Z:a4db9778906b81e92189067505793c697b06459b3ba820cb8d1c9e1fc88642c4:IbMG9ZOHgxIZW8glA0DR6+x9GZQBSDfgnVJwJzdwsnvlvJQJbKGHHS6/Wy/xXB1ffKOsKG4NE1i98vJRHLpyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:90e0e1129596290eed354b3bb15f8ba486e8c67dec66a8a885e9700c67170979:ZlyhVYIP7yygTI6TtIf7PK8XEOOXmFYZNjEDLPra9Ydd3e+2371UoNgACBprkbJlyvrE8ikMyUSBkLMwFswsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: fetch
 availability: local
@@ -10,3 +10,5 @@ schema:
   verify: boolean?
   project_path: string?
 description: "Resolve, optionally verify, and read an item via the engine"
+# Local-only item reader that returns file content and project paths; nothing for a principal.
+disclosure: {}

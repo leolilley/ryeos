@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T16:27:42Z:705cc57b83e2417b71520ad0fd668481fcb45f1affa6327f93b9d9bf773dc6fb:SpiCwiwhmLpiJBoB4imPyY/pCdafmrI1bt3oGNewOwF8aY/Z2n6/GyrIIsT47zASjSc7+AynrLgWHHwjE0wkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:536ca2fb322010b533af2cac2854afe496529c32a28020d31e2ac2ceb695d628:KtK1GRSlfJfdrjHNyd0hCiYIG0Sx4LgjwbNYZHMEEWQ2L3K1o6rXmNDK06FFEIp2iBNjG21GlkItSy0e+RunBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: federation.follow-terminal-deliver
 required_caps: ["ryeos.execute.service.federation/follow-terminal-deliver"]
@@ -11,3 +11,10 @@ schema:
   parent_site_id: string
   target_site_id: string
 description: "Deliver one target-signed followed-execution terminal to its exact parent reservation"
+disclosure:
+  principal:
+    - "/operation_id"
+    - "/child_chain_root_id"
+    - "/parent_chain_root_id"
+    - "/parent_successor_thread_id"
+    - "/delivery"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:7ae1617671ecd24104c3c4a5cc4834467b00b636b941bdd4de145bfabe6a19a6:JQ5CfyOeUfIHTiCqwT17VfhCTmzUjbY3axnaHyExMNg1aDCsUzPCk9JVGZGGX/IxXwbaYZL22LnjdkdzuY8JBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:dbbcc75d9795de3722baf359c30b3397ac5d5bf8207e9c86d5be26e5f45f82b2:8MpKwgEi7lPnLwiErnMzyqd9iLkDVhIKg6tLpUbMyzuRuoh7NFIdPEOB/afx+jMI/WgYNNy21FHTqkO0vD5GDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.preflight
 required_caps: ["ryeos.execute.service.worker-placements/preflight"]
@@ -22,3 +22,41 @@ schema:
   credential_subject_digest: string
   follow_delivery_reservation_attestation_hash: string?
 description: Check one proposed remote worker placement without reserving credentials, importing authority, or starting a process.
+disclosure:
+  principal:
+    - "/preflight_id"
+    - "/preflight_attestation_hash"
+    - "/preflight_attestation"
+    - "/evidence/schema"
+    - "/evidence/operation_type"
+    - "/evidence/preflight_id"
+    - "/evidence/owner_principal"
+    - "/evidence/chain_root_id"
+    - "/evidence/origin_site_id"
+    - "/evidence/source_site_id"
+    - "/evidence/target_site_id"
+    - "/evidence/source_placement_thread_id"
+    - "/evidence/successor_placement_thread_id"
+    - "/evidence/source_chain_head_hash"
+    - "/evidence/source_last_event_hash"
+    - "/evidence/source_launch_capsule_hash"
+    - "/evidence/outer_exact_program_hash"
+    - "/evidence/persistent_dependency_programs/*"
+    - "/evidence/target_persistent_session_capsules/*"
+    - "/evidence/target_execution_realization_hash"
+    - "/evidence/target_isolation_digest"
+    - "/evidence/target_project_path"
+    - "/evidence/project_route_digest"
+    - "/evidence/target_project_head_hash"
+    - "/evidence/target_credential_profile_id"
+    - "/evidence/target_credential_generation"
+    - "/evidence/target_operator_authority/owner_principal"
+    - "/evidence/target_operator_authority/origin_site_id"
+    - "/evidence/target_operator_authority/principal_class"
+    - "/evidence/target_operator_authority/grant_digest"
+    - "/evidence/target_operator_authority/scopes"
+    - "/evidence/target_chain_owner_anchor_hash"
+    - "/evidence/upstream_session_id"
+    - "/evidence/credential_subject_contract_digest"
+    - "/evidence/credential_subject_digest"
+    - "/evidence/follow_delivery_reservation_attestation_hash"

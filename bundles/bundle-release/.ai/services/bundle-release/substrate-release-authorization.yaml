@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:f288a3dc6305804049a1af06c0d760d2308d93e2b692e213ddca700223589def:NlZBaHwop7GtF3BnRce+ymysay46CV44Jb7o+Btwgj3ky3FXtFTL2IpwmmfkjLPkzEF1+bgFoZdPnWEQT0AzAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:1238a794b73090258fdd3d3fb482bde5472a6fd5b10bac4e0feed24c98f1f857:if34ZGjJNYPvHT/lkCYADJ77bAu89tGXmi+DaYDXYf34mgS2CN9CvquXcHxZVFQffglp34V7iV6bidIq55OJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-release-authorization
 version: "1.0.0"
@@ -15,3 +15,5 @@ schema:
   trust_epoch: integer
   substrate_release_hash: string
   expected_publisher_fingerprint: string
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

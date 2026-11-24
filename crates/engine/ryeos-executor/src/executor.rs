@@ -482,27 +482,8 @@ fn disclose_service_result(
                     // can carry a path or a key, so only the stable code, the
                     // retry flag and a fixed sentence reach a non-operator.
                     Some(HandlerError::Structured { code, status, body }) => {
-                        let mut shown = serde_json::json!({
-                            "code": code,
-                            "error": "the service refused the request",
-                            "retryable": body
-                                .get("retryable")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
-                        });
-                        // `outcome` is a two-valued enum a client branches on
-                        // ("unknown" means do not resubmit a mutation that may
-                        // have happened). It passes only when it is exactly one
-                        // of the two, never as free text.
-                        if let Some(outcome) = body
-                            .get("outcome")
-                            .and_then(Value::as_str)
-                            .filter(|outcome| matches!(*outcome, "refused" | "unknown"))
-                        {
-                            shown["outcome"] = Value::from(outcome);
-                        }
                         anyhow::Error::new(HandlerError::Structured {
-                            body: shown,
+                            body: redact_refusal_body(&body),
                             code,
                             status,
                         })
@@ -520,6 +501,50 @@ fn disclose_service_result(
             )
         }
     }
+}
+
+/// What a non-operator caller is told of a typed refusal's body: the same
+/// shape the client already reads (`code`, `error_code`, a nested `error`
+/// object, `retryable`, `outcome`), with every value reduced to a stable code,
+/// a flag, an enum, or the fixed sentence. Free text, paths and detail fields
+/// are dropped, so nothing the refusal carried can leak.
+fn redact_refusal_body(body: &Value) -> Value {
+    const FIXED: &str = "the service refused the request";
+    let safe_code = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    let Value::Object(map) = body else {
+        return serde_json::json!({"error": FIXED});
+    };
+    let mut shown = serde_json::Map::new();
+    for (key, value) in map {
+        match (key.as_str(), value) {
+            ("code" | "error_code", Value::String(text)) if safe_code(text) => {
+                shown.insert(key.clone(), value.clone());
+            }
+            ("retryable", Value::Bool(_)) => {
+                shown.insert(key.clone(), value.clone());
+            }
+            // `outcome` is a two-valued enum a client branches on ("unknown"
+            // means do not resubmit a mutation that may have happened). It
+            // passes only when it is exactly one of the two.
+            ("outcome", Value::String(text)) if matches!(text.as_str(), "refused" | "unknown") => {
+                shown.insert(key.clone(), value.clone());
+            }
+            ("error" | "message", Value::String(_)) => {
+                shown.insert(key.clone(), Value::from(FIXED));
+            }
+            ("error", Value::Object(_)) => {
+                shown.insert(key.clone(), redact_refusal_body(value));
+            }
+            _ => {}
+        }
+    }
+    Value::Object(shown)
 }
 
 /// Build the exact daemon-owned terminal that the recorded service path will
@@ -1439,6 +1464,31 @@ mod tests {
             }
             other => panic!("typed refusal lost: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_redacted_refusal_keeps_the_wire_shape_the_client_reads() {
+        let shown = redact_refusal_body(&serde_json::json!({
+            "error_code": "grant_renewal_not_permitted",
+            "error": {"code": "grant_renewal_not_permitted", "message": "granter fp:abc at /home/x"},
+            "retryable": false,
+            "hint": "/home/x",
+            "details": {"path": "/home/x"},
+        }));
+        assert_eq!(
+            shown,
+            serde_json::json!({
+                "error_code": "grant_renewal_not_permitted",
+                "error": {
+                    "code": "grant_renewal_not_permitted",
+                    "message": "the service refused the request"
+                },
+                "retryable": false,
+            })
+        );
+        // A code that is not a plain code never reaches the caller.
+        let odd = redact_refusal_body(&serde_json::json!({"code": "has /path in it"}));
+        assert_eq!(odd, serde_json::json!({}));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:6aa9051da32ca2c41eddd7be891b18d7cef7c484901427c427763b39afbcd0b9:vpsjQHRZM1Chg29zt7R7zTsmk+DOnnnH6HEaHCOKEGHAguqh5EiGKWNPILDJDCad6jjfVycpf3EFV/1Xho9bDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:448bd37bda6c567cd27cb0d4993b10e9c744bc5ef7d126ad9fda7111e17bf230:vDVndUVdaDtRYJvbzXiV3/BIyCwpjYVbWphI23oI8s0feQ6HAME+MHwLm+k39CIt7rMOI3lVj3qjp56mKPwQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.status
 required_caps: ["ryeos.execute.service.admission/status"]
@@ -15,6 +15,5 @@ disclosure:
     - "/head/ref_path"
     - "/head/signer"
     - "/head/updated_at"
-  free_text:
     - "/head/signed_ref"
     - "/attestation"

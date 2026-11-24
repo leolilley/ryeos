@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T03:32:01Z:062bdde0c5c54bb38c75fbfdd1f298289bfce95c22171e5671f37b1476f8b4d7:v8y1h7bpk/CTmcjO0jvJc5MltFmhg3c5SntHi2d7X0eIuxd45JGdFJYOamVb3HcQxG8ZAblybH4f0XHvY4UrAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:bc46c8f4eb2a545c420c8428f16fd4e659b2bf4f73f69f628b5f601abb734511:8sbhq8KgFvtjJpquPByU3VDslviUJwE3HuMdxiOoBnQ6x60NxjmziGAtLmNgYZ5Q9w8Zk7IaPtuCGfJ33F4oDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote-worker-workflows.resume
 availability: daemon_only
@@ -8,3 +8,5 @@ required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   source_work_id: string
 description: "Explicitly drive one retained operator-owned remote-worker workflow: recover launch contact or observe its exact target Graph terminal and candidate-result testimony. A pending target remains running; completion returns allowed_next_action=pull_result."
+# Driving a retained remote-worker workflow requires the local configured operator.
+disclosure: {}

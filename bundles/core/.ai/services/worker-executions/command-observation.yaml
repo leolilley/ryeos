@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T00:23:34Z:263ae924f573997e57707b55da3ebec977195d3a8b89d9409346fb0c7fcc572f:r5y4lVkOVWqojZDedhwwJ/eqj0k05XU5LNiY9/Ht6KhlvVCjxbVdYFo3POBkhX6r72XVfq1jACbgDtKC/9vmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:e04f9dae6a71e8f5218dd5f174cebb07c7be1d61ac76595d936d08c0499d06fe:XeIS5hi+IEFn6EEhvlVlWBsLTpmONiLt7uoJqkbjmCfXtIQvHxdx7vqNVtc7bH83bJ4NajVTtYZXdGzaiJdmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.command-observation
 required_caps: ["ryeos.execute.service.worker-executions/command-observation"]
@@ -6,3 +6,42 @@ state_access: read_only_existing
 ui_read_only: true
 schema: {chain_root_id: string, placement_thread_id: string, command_sequence: integer}
 description: Read one authoritatively settled command, its asynchronous turn observation, and every retained workload-client child execution of that exact command-started turn.
+disclosure:
+  principal:
+    - "/chain_root_id"
+    - "/placement_thread_id"
+    - "/admitted_capsule_hash"
+    - "/worker_boot_epoch"
+    - "/command_sequence"
+    - "/command_kind"
+    - "/idempotency_key"
+    - "/route_id"
+    - "/request_digest"
+    - "/command_state"
+    - "/response_digest"
+    - "/operation/kind"
+    - "/operation/id"
+    - "/operation/state"
+    - "/operation/start_operation_id"
+    - "/operation/completion_operation_id"
+    - "/completion_fence/placement_thread_id"
+    - "/completion_fence/admitted_capsule_hash"
+    - "/completion_fence/worker_boot_epoch"
+    - "/completion_fence/command_sequence"
+    - "/completion_fence/request_digest"
+    - "/completion_fence/turn_id"
+    - "/completion_fence/completion_operation_id"
+    - "/child_executions/*/operation_id"
+    - "/child_executions/*/mode"
+    - "/child_executions/*/child_thread_id"
+    - "/child_executions/*/created_at_ms"
+    - "/child_executions/*/item_ref"
+    - "/child_executions/*/status"
+    - "/child_executions/*/outcome_code"
+    - "/child_executions/*/finished_at"
+    - "/child_executions/*/admitted_launch_capsule_hash"
+  free_text:
+    - "/operation/completion_source"
+    - "/child_executions/*/invocation"
+    - "/child_executions/*/error"
+    - "/child_executions/*/result"

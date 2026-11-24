@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:713f0d0341f397d85a81c23f177b15d56bab9981c8931d7ebe468e33a38ee0cd:ZpLuPzeVLE7Nld95eC0RQJ9xrLg/ndjstgIEXJEWxWnexDE+wk0Q3zIarxlj0iN1/UL619zLao6SQi8Ug1y9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:4cc5be524f20ee3c7208f5adf5c541e93db9c10d27434c0e5397875fa7813eb9:5aOa3m5SOR37E15aQqYsSL7zlcptf/YDAzG8Z/qHzlugpTPNJdUxhZY6stvDY0kyWMeWD8AzdTO718PMRml7AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: upload
 version: "1.0.0"
@@ -14,3 +14,10 @@ schema:
   objects: array
   blobs_base64: array
   blob_chunks: array
+disclosure:
+  principal:
+    - "/upload_session_id"
+    - "/expected_catalog_head"
+    - "/object_hashes"
+    - "/blob_hashes"
+  max_items: 4096

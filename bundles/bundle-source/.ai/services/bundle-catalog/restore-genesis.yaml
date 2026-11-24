@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:f5b4165001c9b2487dda0b272d70b685dfd177284e860b949e0c4ae4c01fad5e:2UafOmPbWJFumDy3l7FW3ItEu0Sf+ZgZ/NiGa8Bj04Xt/Qjy4Y/TjHO0FfbNKzUauCkjsOpfaaYUBBI4XR1sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:6d12c87293c840c267e0de0544d816fdc7ea154fd0d0e5b5fd2d2b30107e0e73:rwgNCgkRhcVxE2ZhZODp4WjhFIw4i8cxLFCYy2E36VclM+leq7gLozCT1pdkcpZMj4wytVysyx+a8zO7/FbgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: restore-genesis
 version: "1.0.0"
@@ -12,3 +12,9 @@ schema:
   upload_session_id: string
   bundle_publication_policy_section_digest: string
   node_policy_generation_digest: string
+disclosure:
+  principal:
+    - "/catalog_namespace"
+    - "/catalog_publication_attestation_hash"
+    - "/sequence"
+    - "/idempotent"
