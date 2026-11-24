@@ -8,7 +8,7 @@
 //! that exact login epoch and account digest. The node keeps the two-step
 //! authority: observation by the login worker, confirmation by the operator.
 
-use std::io::{BufRead as _, IsTerminal as _};
+use std::io::BufRead as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -46,8 +46,9 @@ struct Args {
     #[arg(long)]
     trusted: bool,
 
-    /// Confirm the observed account without asking. Required when stdin is
-    /// not a terminal.
+    /// Confirm the observed account without asking. Without it the decision
+    /// is read from stdin as an explicit `y`/`yes` line; anything else,
+    /// including a closed stdin, declines.
     #[arg(long)]
     yes: bool,
 
@@ -111,12 +112,6 @@ pub(crate) async fn run(
             _ => return Err(local(error.to_string())),
         },
     };
-    if !args.yes && !std::io::stdin().is_terminal() {
-        return Err(local(
-            "stdin is not a terminal, so the observed account cannot be confirmed interactively; \
-             pass --yes to confirm it without asking",
-        ));
-    }
     let mut node = DaemonCommands {
         app_root,
         snapshot,
@@ -512,8 +507,14 @@ impl Operator for TerminalOperator<'_> {
             .prompt("Confirm this account for the profile? [y/N] ")?;
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer)?;
-        Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+        Ok(answer_confirms(&answer))
     }
+}
+
+/// Whether the line the person typed is an explicit yes. An empty line (a
+/// closed stdin included) is no decision, so it declines.
+fn answer_confirms(answer: &str) -> bool {
+    matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes")
 }
 
 #[cfg(test)]
@@ -790,6 +791,16 @@ mod tests {
         .to_string();
         assert!(error.contains("ryeos codex profile abandon-login personal 4"));
         assert_eq!(node.calls.len(), 1, "nothing is opened for a stuck profile");
+    }
+
+    #[test]
+    fn only_an_explicit_yes_confirms_the_account() {
+        for yes in ["y", "Y", "yes", "YES", "Yes", " yes \n"] {
+            assert!(answer_confirms(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "yep", "ok", "true"] {
+            assert!(!answer_confirms(no), "{no:?}");
+        }
     }
 
     #[tokio::test]
