@@ -327,6 +327,24 @@ fn owner_base_head_key(
     ))
 }
 
+/// A pinned generation that sealed an owner+name identity at admission must
+/// name exactly the head integration and publication target. `Absent` seals
+/// nothing and is allowed: the head comes from the base and the fresh owner.
+fn require_sealed_identity_matches(
+    signer_project: &ryeos_state::project_identity::LogicalProject,
+    head: &ryeos_state::project_identity::ProjectHeadKey,
+) -> Result<(), HandlerError> {
+    let Some(sealed) = signer_project.identity() else {
+        return Ok(());
+    };
+    if ryeos_state::project_identity::ProjectHeadKey::for_project(sealed) == *head {
+        return Ok(());
+    }
+    Err(HandlerError::Conflict(format!(
+        "candidate_project_identity_mismatch: the generation sealed project {sealed}, which is not the owner's head this candidate targets"
+    )))
+}
+
 /// Whether a hosted session's pinned terminal publication is consistent with
 /// its recorded disposition. A pin that carries a HEAD destination must name
 /// the owner, the target project and the base snapshot exactly, whichever
@@ -7738,6 +7756,7 @@ async fn start_candidate_operation(
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
     ) {
         let head = owner_base_head_key(&state, &session.owner_principal, &base_snapshot_hash)?;
+        require_sealed_identity_matches(&source.project_authority.signer_project(), &head)?;
         let principal_key = head.owner_component();
         let project_hash = head.name_hash().to_owned();
         let current = state
@@ -9057,6 +9076,11 @@ fn verify_candidate_integration_terminal(
         }
     };
     let expected_head = owner_base_head_key(state, &session.owner_principal, base_snapshot_hash)?;
+    require_sealed_identity_matches(&source.project_authority.signer_project(), &expected_head)?;
+    require_sealed_identity_matches(
+        &integration.project_authority.signer_project(),
+        &expected_head,
+    )?;
     let expected_principal_key = expected_head.owner_component();
     let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(
@@ -11474,6 +11498,37 @@ mod tests {
             assert!(!check(disposition, &Discard));
         }
     }
+    #[test]
+    fn a_sealed_identity_must_name_the_targeted_head() {
+        use ryeos_state::project_identity::{
+            LogicalProject, LogicalProjectAbsence, ProjectHeadKey, ProjectIdentity, ProjectName,
+        };
+        let owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
+        let other: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "c".repeat(64)).parse().unwrap();
+        let name = |value: &str| ProjectName::new(value).unwrap();
+        let head = ProjectHeadKey::owned_by(&owner, &name("demo"));
+        let sealed = |owner: &ryeos_state::principal_id::PrincipalId, project: &str| {
+            LogicalProject::Stated(ProjectIdentity::new(owner.clone(), name(project)))
+        };
+        super::require_sealed_identity_matches(&sealed(&owner, "demo"), &head).unwrap();
+        super::require_sealed_identity_matches(
+            &LogicalProject::Absent(LogicalProjectAbsence::ForeignHeadNotHeld),
+            &head,
+        )
+        .unwrap();
+        for mismatch in [sealed(&owner, "renamed"), sealed(&other, "demo")] {
+            match super::require_sealed_identity_matches(&mismatch, &head) {
+                Err(super::HandlerError::Conflict(message)) => assert!(
+                    message.starts_with("candidate_project_identity_mismatch:"),
+                    "{message}"
+                ),
+                other => panic!("a sealed mismatch must refuse by code: {other:?}"),
+            }
+        }
+    }
+
     use super::{discard_placement_admitted, qualification_placement_admitted};
 
     #[test]

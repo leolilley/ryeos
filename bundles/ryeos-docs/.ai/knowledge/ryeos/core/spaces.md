@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:fa20c5dff18a4304f2a571727efe8909e4ba2329247be73b6330670a93bef5b3:GOj0yQnR4EtCQx7LtJQCNrNGN0ymN9Ct5TZwYsQv9SvIt32NrRryYpfLIkfJYI64zKs1/jHFzGyK8XflQVH7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:7b6f1435d7554973cccac56396cd81e09f7f9813f147ca81e692a9b0ac701620:nrD5qU6y8beHijDVYpc+rH/C0v7nn5jIBcWOY+DPYgS1hc1izI5LrLVsxAr4c1U3Uw9EPKJuHKs6CHfeMYGNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -26,7 +26,7 @@ directory, the project space is checked first.
 Examples:
 - `.ai/directives/deploy.md` — project deploy workflow
 - `.ai/tools/my-helper.sh` — project-specific tool
-- `.ai/knowledge/project/architecture.md` — project context for agents
+- `.ai/knowledge/project/architecture.md` — project context for workers
 
 Project space items are signed by the operator's local key. They are
 typically tracked in git (or at least `.ai/knowledge/` is).
