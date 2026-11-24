@@ -2580,11 +2580,13 @@ fn a_worker_claiming_accept_for_a_deny_only_method_or_the_wrong_class_is_refused
             operation_class: "command_execution".to_owned()
         })
     );
-    // A method the profile names without deny_only is accepted when the worker
-    // offered it, and not when the worker did not.
+    // A method the profile names without deny_only passes the profile, but the
+    // shipped node policy lists no class `allow`, so the node refuses it.
     assert_eq!(
         check_accept(&state, &capsule, "file_change", &claims(file, true)).unwrap(),
-        None
+        Some(AcceptRefusal::RefusedByNodePolicy {
+            operation_class: "file_change".to_owned()
+        })
     );
     assert_eq!(
         check_accept(&state, &capsule, "file_change", &claims(file, false)).unwrap(),

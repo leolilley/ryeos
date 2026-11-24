@@ -6966,6 +6966,17 @@ async fn resolve_approval(
                     "the admitted structured-session contract does not allow accepting this authority delta".into(),
                 )
             }
+            ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByNodePolicy {
+                operation_class,
+            } => HandlerError::Structured {
+                code: "approval_accept_refused_by_node_policy".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_accept_refused_by_node_policy",
+                    "error": "this node's approval ceiling does not list this class of request `allow`; decline it, or have the node operator list the class",
+                    "operation_class": operation_class,
+                }),
+            },
             ryeos_app::dedicated_session_service::AcceptRefusal::UnnamedMethod => {
                 HandlerError::Structured {
                     code: "approval_method_unnamed".to_owned(),

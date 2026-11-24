@@ -208,6 +208,7 @@ fn build_test_state_with_hosted_policy_choices(
             ryeos_node_runtime::node_policy::default_authorization_record(),
             ryeos_node_runtime::node_policy::shipped_event_storage_record(),
             ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+            ryeos_node_runtime::node_policy::shipped_approval_ceiling_record(),
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(test_object_closure_policy()),
             Arc::new(
@@ -292,6 +293,7 @@ fn build_app_state(
                 ryeos_node_runtime::node_policy::default_authorization_record(),
                 ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+                ryeos_node_runtime::node_policy::shipped_approval_ceiling_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),
