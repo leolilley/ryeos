@@ -1,4 +1,6 @@
-pub use ryeos_client_transport::signing::{SignHeaders, Signer, operator_signing_key_path};
+pub use ryeos_client_transport::signing::{
+    CLIENT_KEY_ENV, SignHeaders, Signer, client_signing_key_path, operator_signing_key_path,
+};
 
 #[cfg(test)]
 mod tests {

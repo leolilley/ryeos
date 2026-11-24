@@ -51,9 +51,9 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 fn operator_key_path(app_root: Option<PathBuf>, signing_key: Option<PathBuf>) -> Result<PathBuf> {
     match signing_key {
         Some(path) => Ok(path),
-        None => Ok(crate::transport::signing::operator_signing_key_path(
+        None => Ok(crate::transport::signing::client_signing_key_path(
             &ryeos_node::NodeConfig::load_local(app_root)?.app_root,
-        )),
+        )?),
     }
 }
 
@@ -333,7 +333,7 @@ async fn call(
     };
     let key_path = match (signing_key, config_root.as_deref()) {
         (Some(path), _) => path,
-        (None, Some(root)) => crate::transport::signing::operator_signing_key_path(root),
+        (None, Some(root)) => crate::transport::signing::client_signing_key_path(root)?,
         (None, None) => bail!("no --signing-key given and no local operator key to use"),
     };
     let signer = crate::transport::signing::Signer::load(&key_path)?;
@@ -367,8 +367,10 @@ pub(crate) async fn through_own_node(
     parameters: Value,
 ) -> Result<Value> {
     let root = ryeos_node::NodeConfig::load_local(app_root)?.app_root;
-    let key_path =
-        signing_key.unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&root));
+    let key_path = match signing_key {
+        Some(path) => path,
+        None => crate::transport::signing::client_signing_key_path(&root)?,
+    };
     let signer = crate::transport::signing::Signer::load(&key_path)?;
     let base = crate::transport::http::resolve_daemon_url(&root).await?;
     let discovered = crate::transport::discovery::discover_audience(&base).await?;

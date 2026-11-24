@@ -84,9 +84,11 @@ impl CliHost {
         inputs: BTreeMap<String, Vec<u8>>,
         expected_result: BTreeMap<String, String>,
     ) -> Result<LocalApplied> {
-        // The operator's own process is where the operator key is read.
-        let key_path = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
-            .operator_signing_key_path();
+        // The operator's own process is where the operator key is read. An
+        // offline operation applies to the node's own files, so the key it is
+        // signed with must be the node's operator key, not another client key.
+        crate::client_key::require_operator_key(app_root)?;
+        let key_path = crate::transport::signing::client_signing_key_path(app_root)?;
         let operator = lillux::crypto::load_signing_key(&key_path)
             .with_context(|| format!("load the operator key {}", key_path.display()))?;
         apply_local(

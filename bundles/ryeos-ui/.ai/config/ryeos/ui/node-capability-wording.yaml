@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:05:27Z:6b63ee25d0ad162bc72b5af19851128ced16d7792388d7acaf0623bf927512e5:55YT+F/n4WxvSPwKQb/dO4ST+JmRHv2D0NWTntVj3FqzguFOKbyWNon3Q/M0K2+ZRmOTyfA4/uPLbbVUuSZVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T07:28:13Z:f5b1ea8360acd51b379d5d9a1cde625fe9b11032adf4d63d4ab8110a9be68dba:UU01JxD+h9cXi8PFihl20ahzQ9EAsHGaBNSPtuGyFZpmdbrb5JJGfQeDTW8x+Y4R+59dP2107koFpR/IL4bnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone the node moment shows for each fact the node capability service reports.
@@ -43,7 +43,7 @@ isolation_modes:
     tone: good
   disabled:
     label: Trusted, not contained
-    detail: This host cannot prove jobs are kept apart, so anything that runs here is code you are trusting.
+    detail: This host cannot keep jobs apart. Runs are operator-equivalent here, able to read the node's keys and change its files, so only run code you would run yourself.
     tone: warn
 host_classes:
   local:
