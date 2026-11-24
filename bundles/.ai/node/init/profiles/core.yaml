@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:3b6e5e12147672264335ba784df7bd176b0ff96e059397630c83cdc7d6666dc1:/S1x8oBdaJFO2bbwgUxpfyfU/HtB2luqBbcCKSnN8JhiQokzI2gHxdMwFMxKOuzBB0oMhezB3qCilxxV+08wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:52:38Z:77d91b288171284e38a4e8c6ec41a09e9159fb95663e00d051c5aeaa9649162b:6hqGqo75UYD9H75Cq2I8unLJGC3js6b9xu9l7khjf/gCIDMZA6RzVRjXDePYEh7/1lJwyu2mGgSLtgrrhIhyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -416,7 +416,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -450,6 +450,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

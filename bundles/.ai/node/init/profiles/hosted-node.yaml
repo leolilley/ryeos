@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T07:47:34Z:560552708830538c7fb1295ced14fd82766522c6945015e29cf84acc3727d4ae:Exr66M8q57tkcjbZduYB1t2e4PIqWlxo7JzxuPNEsxeNb2fCqWwXiIxUWsweK2RbNdyQsjefWOy2nstaJVjBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:52:38Z:93d2d7ffc8bc3f28d9b2d20cced717e7554fad77797c192c4a9490f2ed8835a2:hqFlI1Fbn1XJkfkH3v2a/FUCFs8lDgqwLY5hyH88gbT3KfCNWerot53kSU9IRxyipnTWCosWzwxVQ4kLOzSBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -383,7 +383,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -410,6 +410,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16
