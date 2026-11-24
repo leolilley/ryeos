@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:d5354212b07863b483106f6c01bf6cf4b6a43692481f006d8f99dd827d076c08:LcSGpbjigZJyLVw+4leobVPQQ+GKO58KXafUbSY0m/qfcXeSTWFS9lg5hhrA41GjUwdKrhmHjt4jVBTIdJ5EBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:7f9aab69dc83fcdc486a9f31b11ebcc8e3491803f7808b2fe9a3833b7b2f923e:KsJOmo8GJ67zy0WlG2bDJ1mZVXS8S5Vnna+FMDfV0bZlppXjh5Zgt3N9xnV9JAJJZYd3JdDWrsBT2p09BO/nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: launch-mint
 version: "1.0.0"
@@ -7,3 +7,22 @@ endpoint: ui.launch.mint
 availability: daemon_only
 required_caps:
   - ryeos.execute.service.ui/launch/mint
+disclosure:
+  principal:
+    - "/ui_binding_contract_revision"
+    - "/session_id"
+    - "/granted_caps"
+    - "/attachment/binding_attachment_id"
+    - "/attachment/binding_generation"
+    - "/attachment/binding_digest"
+    - "/attachment/root_ref"
+    - "/attachment/root_generation"
+    - "/attachment/presentation"
+    - "/attachment/subject"
+    - "/attachment/posture"
+    - "/attachment/binding_request_bounds"
+    - "/attachment/named_items"
+  free_text:
+    - "/token"
+    - "/launch_url"
+    - "/attachment/project_path"

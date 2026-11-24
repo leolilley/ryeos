@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:20:41Z:bc5c5ac37c0eeaff74f2995f5a2fcebc36e746aface9d5d975e4405f15d92934:kAev9RJonM3dPUsLXX/vq5SJZEWdrNJNoG/3V0gz5m3us3vuvWE8+YvssoennthWhMU1R0c6tq6vaKb//vAoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:0c8ffd2dc1cfd809884c7a97c2604fa6a077919ef7a97689bbf3ae66e120380c:jkOV9udYolk8+Q9WjJDqroae0tkFMZ5U5dxAdpyvDfcfWyGAgpbEAMFJn3wcxE/NmSUlZq1ZVZH7zevK2G/WAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: session-attachment-revise
 version: "1.0.0"
@@ -8,3 +8,18 @@ endpoint: ui.session.attachments.revise
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/revised"
+    - "/from"
+    - "/ui_transition/kind"
+    - "/ui_transition/presentation_id"
+    - "/ui_transition/creation_request_id"
+  interim_free_text:
+    - "/attachment"  # removed by: m4
+    - "/ui_transition/surface"  # removed by: m4
+    - "/ui_transition/attachment"  # removed by: m4
+    - "/ui_transition/opening"  # removed by: m4
+    - "/ui_transition/tab_attachments"  # removed by: m4
+    - "/ui_transition/prepared"  # removed by: m4
+  max_result_bytes: 1048576

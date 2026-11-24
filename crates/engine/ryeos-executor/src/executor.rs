@@ -504,6 +504,10 @@ fn recorded_service_terminal_projection(
     Option<anyhow::Error>,
 ) {
     let (durable_result, durable_error, result_retention_error) = match dispatch_result {
+        // An answer that is `null` (an acknowledgement a non-operator tier
+        // leaves empty) is stored as no result, the way the thread store
+        // reads it back.
+        Ok(Value::Null) => (None, None, None),
         Ok(value) => {
             match ryeos_app::thread_lifecycle::retained_thread_result(value, result_policy) {
                 Ok(value) => (Some(value), None, None),

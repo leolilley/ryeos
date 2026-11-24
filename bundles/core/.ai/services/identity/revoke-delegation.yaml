@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T14:29:21Z:bee9c13d8f2082649d1eba2d85ad4e81e6f4cdb483a93102a2990eb3ddf7b8e1:1csRunShg1va5D7x9I7pwI98L+T7Gt4z3Pe/WdeGK/3tAqsQLpwG4eBbZWYKsYG7F+llwbSOiGrurksJ8CGuCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:add2ab9e0272283b91a81d793ca17ef821427a93786e995745ba4fb44d82ebe9:66DFL6E8xGBf5SWFtW7w4o/Zp5ZEr4oZzigG1PPnuk6AsVTcLlOFJol9t17rIc8wb3RJ74b+W0tdBNdLzCC5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.revoke-delegation
 required_caps: ["ryeos.execute.service.identity/revoke-delegation"]
@@ -6,3 +6,11 @@ schema:
   delegator: string
   delegation_digest: string
 description: "Record a tombstone for one remote delegation digest on this node. Only the delegating principal or this node's operator may revoke a delegation."
+disclosure:
+  principal:
+    - "/delegation_digest"
+    - "/revoked_at"
+  free_text:
+    - "/delegator"
+    - "/revoked_by"
+    - "/delegated_via"

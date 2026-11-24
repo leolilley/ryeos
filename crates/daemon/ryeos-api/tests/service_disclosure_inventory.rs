@@ -86,12 +86,44 @@ fn covers(pattern: &str, name: &str) -> bool {
     }
 }
 
-fn is_reachable(name: &str, body: &Value, patterns: &[String]) -> bool {
+/// The services each route serves, with whether the route needs no
+/// authentication. A route's caller is whoever the route admits, so a service
+/// behind one is reachable by callers other than the operator.
+fn route_targets() -> Vec<(String, bool)> {
+    let mut found = Vec::new();
+    let bundles = repo().join("bundles");
+    for bundle in std::fs::read_dir(&bundles).unwrap().flatten() {
+        let mut files = Vec::new();
+        collect(&bundle.path().join(".ai/node/routes"), &mut files);
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let open = text.lines().any(|line| line.trim() == "auth: none");
+            for line in text.lines() {
+                let mut rest = line;
+                while let Some(at) = rest.find("service:") {
+                    rest = &rest[at + "service:".len()..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || "/_-.".contains(*c))
+                        .collect();
+                    if !name.is_empty() {
+                        found.push((name, open));
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+fn is_reachable(name: &str, body: &Value, patterns: &[String], routed: &BTreeSet<String>) -> bool {
     let open = body
         .get("required_caps")
         .and_then(Value::as_array)
         .is_some_and(Vec::is_empty);
-    open || patterns.iter().any(|pattern| covers(pattern, name))
+    open || name.starts_with("ui/")
+        || routed.contains(name)
+        || patterns.iter().any(|pattern| covers(pattern, name))
 }
 
 /// Services deliberately served to no caller but the operator. Adding to this
@@ -101,18 +133,28 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/profile-sign",
     "bundle/publish",
     "bundle/sign",
+    "external-content/export-qualification-testimony",
+    "external-content/push-product",
     "node/doctor",
     "node/logs",
-    "system/ingest-ignore",
+    "ui/sessions/list",
 ];
 
 #[test]
 fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
     let patterns = session_service_patterns();
+    let routes = route_targets();
+    let routed: BTreeSet<String> = routes.iter().map(|(name, _)| name.clone()).collect();
+    let unauthenticated: BTreeSet<String> = routes
+        .iter()
+        .filter(|(_, open)| *open)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut no_public_tier = Vec::new();
     let mut missing = Vec::new();
     let mut declared_operator_only = BTreeSet::new();
     for (name, body) in services() {
-        if !is_reachable(&name, &body, &patterns) {
+        if !is_reachable(&name, &body, &patterns, &routed) {
             continue;
         }
         let Some(block) = body.get("disclosure") else {
@@ -127,10 +169,17 @@ fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
                 .and_then(Value::as_array)
                 .is_some_and(|entries| !entries.is_empty())
         };
+        if unauthenticated.contains(&name) && !lists("public") {
+            no_public_tier.push(name.clone());
+        }
         if !lists("principal") && !lists("public") {
             declared_operator_only.insert(name);
         }
     }
+    assert!(
+        no_public_tier.is_empty(),
+        "services behind an unauthenticated route need a `public` tier: {no_public_tier:#?}"
+    );
     assert!(
         missing.is_empty(),
         "services reachable by a hosted session with no `disclosure` block \
@@ -161,6 +210,16 @@ fn every_declared_block_parses() {
 /// it. Each is an exception to the rule that free text never sits in a tier.
 /// The list is pinned: it can only change by a reviewed edit here.
 const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
+    ("objects/closure/get", "/entries/*/value", "m4"),
+    ("objects/closure/get", "/entries/*/data", "m4"),
+    ("objects/get-any", "/entries/*/value", "m4"),
+    ("objects/get-any", "/entries/*/data", "m4"),
+    ("objects/get-any", "/blob_chunk/data", "m4"),
+    ("objects/get-any", "/large_object_chunk/data", "m4"),
+    ("objects/get", "/entries/*/value", "m4"),
+    ("objects/get", "/entries/*/data", "m4"),
+    ("objects/get", "/blob_chunk/data", "m4"),
+    ("objects/get", "/large_object_chunk/data", "m4"),
     (
         "worker-executions/approvals",
         "/approvals/*/requested_authority/display",
@@ -188,6 +247,11 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
         "/result",
         "per-chain publication",
     ),
+    ("ui/projects/open", "/ui_transition/surface", "m4"),
+    ("ui/projects/open", "/ui_transition/attachment", "m4"),
+    ("ui/projects/open", "/ui_transition/opening", "m4"),
+    ("ui/projects/open", "/ui_transition/tab_attachments", "m4"),
+    ("ui/projects/open", "/ui_transition/prepared", "m4"),
     ("ui/ryeos-ui/config/get", "/saved_view_sets", "m4"),
     ("ui/ryeos-ui/config/get", "/particular_view_sets", "m4"),
     ("ui/ryeos-ui/config/get", "/reusable_surfaces", "m4"),
@@ -556,6 +620,36 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
     ("ui/ryeos-ui/work/list", "/work/*/owner_principal_id", "m4"),
     ("ui/ryeos-ui/work/list", "/work/*/project/name", "m4"),
     ("ui/ryeos-ui/work/list", "/work/*/project/path", "m4"),
+    ("ui/seat/append", "/events/*/payload", "m4"),
+    ("ui/seat/replay", "/receipt/events/*/payload", "m4"),
+    ("ui/session/attachments/revise", "/attachment", "m4"),
+    (
+        "ui/session/attachments/revise",
+        "/ui_transition/surface",
+        "m4",
+    ),
+    (
+        "ui/session/attachments/revise",
+        "/ui_transition/attachment",
+        "m4",
+    ),
+    (
+        "ui/session/attachments/revise",
+        "/ui_transition/opening",
+        "m4",
+    ),
+    (
+        "ui/session/attachments/revise",
+        "/ui_transition/tab_attachments",
+        "m4",
+    ),
+    (
+        "ui/session/attachments/revise",
+        "/ui_transition/prepared",
+        "m4",
+    ),
+    ("ui/session/current", "/presentations", "m4"),
+    ("ui/session/current", "/binding_attachments", "m4"),
     ("ui/session/surfaces/open", "/ui_transition/surface", "m4"),
     (
         "ui/session/surfaces/open",

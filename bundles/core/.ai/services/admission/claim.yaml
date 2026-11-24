@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:ca8eac1802b105d77dde7b3c9723e1c8052446f01905a419b4e9ba33a63b021f:O55EWxfukuuRLHZd3r1zTPFWYEsAK+4QS9BTjXteR6f25an287GvFzcq0tmfqO/ctm2xBArunMlkh5YYM8OOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:7c868fc286d9439e0cc45b2f4853a6778685df3d047829bda51cc4722c5313ba:BuKlUnFQA0b6wdzS1gZlPQw5J7K9Y2gB/gGXxuW558qExl3un/9eBe3/UxSCJIqGyLIxVPZkDHE5BGiGo8z7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.claim
 required_caps: []
@@ -28,3 +28,11 @@ disclosure:
   free_text:
     - "/label"
     - "/granted_by"
+  public:
+    - /admitted
+    - /fingerprint
+    - /scopes
+    - /created_at
+    - /principal_class
+    - /origin_site_id
+    - /expires_at

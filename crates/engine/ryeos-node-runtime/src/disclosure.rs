@@ -60,7 +60,12 @@ impl ServiceDisclosure {
         if let Some(unknown) = map.keys().find(|key| {
             !matches!(
                 key.as_str(),
-                "principal" | "public" | "free_text" | "interim_free_text"
+                "principal"
+                    | "public"
+                    | "free_text"
+                    | "interim_free_text"
+                    | "max_result_bytes"
+                    | "max_items"
             )
         }) {
             bail!("`disclosure` has an unknown key `{unknown}`");
