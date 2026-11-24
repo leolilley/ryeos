@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-17T22:20:51Z:3c95ccd161dfaed78db6c851d23ccbfe0fbe8edca4b7bc56320b5556a217ab1f:RkuxqJomhBtuGZYi0Y7VaQE/6KzvYToHSDU9GkpLVdtGsRjZgwxlZ9PzelWPywpreuvv7pLaFMchBMbMZ4UyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T09:52:16Z:9b709f622711eeb10968e6dc93d13b56200b6297bc5e0e558d1fab3e1fe9c054:JqfPatNp8TUW1nQM/DZ28sfn1FA9CXg37OTF/JQ/1v2PNgJ4YbaagYwZVQyEEIdz9CStJGYSFh43gfnP4UzRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
