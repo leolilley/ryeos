@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use rand::rngs::OsRng;
-use ryeos_engine::contracts::{SignatureEnvelope, SignatureHeader, TrustClass};
+use ryeos_engine::contracts::{
+    LogicalProject, LogicalProjectAbsence, SignatureEnvelope, SignatureHeader, TrustClass,
+};
 use ryeos_engine::error::EngineError;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_engine::trust::{
@@ -24,8 +26,26 @@ use ryeos_node::offline_operation::apply::{LocalDraft, apply_local};
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
-const PROJECT: &str = "/srv/projects/alpha";
-const OTHER_PROJECT: &str = "/srv/projects/beta";
+/// Project scope entries are owner+name identities, never paths.
+const PROJECT: &str =
+    "pid:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/alpha";
+const OTHER_PROJECT: &str =
+    "pid:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/beta";
+
+/// The project context a launch of `identity` states.
+fn stated(identity: &str) -> LogicalProject {
+    LogicalProject::Stated(identity.parse().expect("project identity"))
+}
+
+/// No project at all.
+fn projectless() -> LogicalProject {
+    LogicalProject::Absent(LogicalProjectAbsence::Projectless)
+}
+
+/// The scope entry `text` writes.
+fn scope_entry(text: &str) -> ryeos_engine::trust::ProjectScopeEntry {
+    text.parse().expect("project scope entry")
+}
 
 /// A stopped node with an identity, a local operator key and an empty
 /// registry.
@@ -195,7 +215,7 @@ fn pin_writes_a_node_signed_record_and_a_key_event() {
     let record = store.signer(&fingerprint(&key)).expect("pinned record");
     assert_eq!(record.role, SignerRole::ProjectAuthor);
     assert_eq!(record.status, SignerStatus::Active);
-    assert_eq!(record.scope.projects, vec![PROJECT.to_owned()]);
+    assert_eq!(record.scope.projects, vec![scope_entry(PROJECT)]);
     // The record on disk is signed by the node key and no other.
     let path = RuntimeRoot::new(node.path().to_path_buf())
         .trust_signers_dir()
@@ -203,6 +223,49 @@ fn pin_writes_a_node_signed_record_and_a_key_event() {
     let text = std::fs::read_to_string(path).expect("record file");
     assert!(text.starts_with("# ryeos:signed:"), "{text}");
     assert!(text.contains(&compute_fingerprint(node.identity.verifying_key())));
+}
+
+#[test]
+fn a_path_is_refused_as_a_project_scope_by_pin_and_by_scope() {
+    let node = StoppedNode::new();
+    let key = author_key();
+
+    let refusal = node
+        .pin(&key, "project_author", &[], &["/srv/projects/alpha"])
+        .expect_err("a path is not a project scope");
+    assert!(
+        format!("{refusal:#}").contains("trust_scope_invalid"),
+        "{refusal:#}"
+    );
+    assert!(node.registry().signer(&fingerprint(&key)).is_none());
+
+    node.pin(&key, "project_author", &[], &[PROJECT])
+        .expect("pin with an identity");
+    let refusal = node
+        .try_apply(
+            "node.trust.scope",
+            json!({
+                "fingerprint": fingerprint(&key),
+                "spaces": ["project"],
+                "kinds": ["*"],
+                "projects": ["/srv/projects/beta"],
+            }),
+            &[],
+        )
+        .expect_err("a path is not a project scope");
+    assert!(
+        format!("{refusal:#}").contains("trust_scope_invalid"),
+        "{refusal:#}"
+    );
+    assert_eq!(
+        node.registry()
+            .signer(&fingerprint(&key))
+            .unwrap()
+            .scope
+            .projects,
+        vec![scope_entry(PROJECT)],
+        "the refused scope changed nothing"
+    );
 }
 
 #[test]
@@ -225,13 +288,13 @@ fn scope_replaces_the_projects_a_signer_may_sign_for() {
     node.pin(&key, "project_author", &[], &[PROJECT])
         .expect("pin");
     let (content, header) = signed_by(&key);
-    let other = Path::new(OTHER_PROJECT);
+    let other = stated(OTHER_PROJECT);
     assert_eq!(
         verify(
             &node.registry(),
             &content,
             &header,
-            &SignerContext::project("tool", Some(other))
+            &SignerContext::project("tool", &other)
         )
         .unwrap(),
         TrustClass::Untrusted
@@ -255,7 +318,7 @@ fn scope_replaces_the_projects_a_signer_may_sign_for() {
             &node.registry(),
             &content,
             &header,
-            &SignerContext::project("tool", Some(other))
+            &SignerContext::project("tool", &other)
         )
         .unwrap(),
         TrustClass::Trusted
@@ -272,16 +335,19 @@ fn scoped_signer_out_of_scope_is_untrusted_in_a_project_and_refused_elsewhere() 
     let (content, header) = signed_by(&key);
 
     // In the project it is scoped to, the signer is trusted.
-    let listed = SignerContext::project("tool", Some(Path::new(PROJECT)));
+    let alpha = stated(PROJECT);
+    let listed = SignerContext::project("tool", &alpha);
     assert_eq!(
         verify(&store, &content, &header, &listed).unwrap(),
         TrustClass::Trusted
     );
     // In another project, or with no project, its items are untrusted but
     // still load as untrusted project items.
+    let beta = stated(OTHER_PROJECT);
+    let none = projectless();
     for context in [
-        SignerContext::project("tool", Some(Path::new(OTHER_PROJECT))),
-        SignerContext::project("tool", None),
+        SignerContext::project("tool", &beta),
+        SignerContext::project("tool", &none),
     ] {
         assert_eq!(
             verify(&store, &content, &header, &context).unwrap(),
@@ -328,12 +394,13 @@ fn pinned_publisher_verifies_bundle_items_and_not_project_items() {
         verify(&store, &content, &header, &SignerContext::bundle("tool")).unwrap(),
         TrustClass::Trusted
     );
+    let alpha = stated(PROJECT);
     assert_eq!(
         verify(
             &store,
             &content,
             &header,
-            &SignerContext::project("tool", Some(Path::new(PROJECT)))
+            &SignerContext::project("tool", &alpha)
         )
         .unwrap(),
         TrustClass::Untrusted
@@ -360,7 +427,8 @@ fn retired_signer_still_verifies_existing_items() {
         SignerStatus::Retired
     );
     let (content, header) = signed_by(&key);
-    let listed = SignerContext::project("tool", Some(Path::new(PROJECT)));
+    let alpha = stated(PROJECT);
+    let listed = SignerContext::project("tool", &alpha);
     assert_eq!(
         verify(&store, &content, &header, &listed).unwrap(),
         TrustClass::Trusted
@@ -386,7 +454,8 @@ fn revoked_signer_verifies_nothing_and_cannot_be_pinned_again() {
         SignerStatus::Revoked
     );
     let (content, header) = signed_by(&key);
-    let listed = SignerContext::project("tool", Some(Path::new(PROJECT)));
+    let alpha = stated(PROJECT);
+    let listed = SignerContext::project("tool", &alpha);
     let error = verify(&store, &content, &header, &listed).unwrap_err();
     assert_eq!(trust_code(&error), "trust_signer_revoked");
 
@@ -427,9 +496,10 @@ fn succession_moves_role_and_scope_to_the_new_key_and_retires_the_old() {
     let new_record = store.signer(&fingerprint(&new)).expect("new record");
     assert_eq!(new_record.status, SignerStatus::Active);
     assert_eq!(new_record.role, SignerRole::ProjectAuthor);
-    assert_eq!(new_record.scope.projects, vec![PROJECT.to_owned()]);
+    assert_eq!(new_record.scope.projects, vec![scope_entry(PROJECT)]);
     let (content, header) = signed_by(&new);
-    let listed = SignerContext::project("tool", Some(Path::new(PROJECT)));
+    let alpha = stated(PROJECT);
+    let listed = SignerContext::project("tool", &alpha);
     assert_eq!(
         verify(&store, &content, &header, &listed).unwrap(),
         TrustClass::Trusted

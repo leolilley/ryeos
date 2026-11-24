@@ -63,6 +63,14 @@ pub struct UiCompositionReplay {
     /// replay never makes an old move into a new local instruction.
     pub(crate) completed_mount_remaps:
         BTreeMap<String, BTreeMap<RyeOsViewInstanceKey, RyeOsViewInstanceKey>>,
+    /// Settled attachment rebinds by operation: the exact coordinates swapped
+    /// and the successor descriptor. The live ACK owner migrates transient
+    /// local state once from this; historical replay never re-applies it.
+    completed_rebinds: Vec<(
+        String,
+        UiBindingAttachmentCoordinate,
+        UiBindingAttachmentCoordinate,
+    )>,
     pub lens_frames:
         BTreeMap<RyeOsViewInstanceKey, Vec<super::composition_lens::RetainedLensFrame>>,
     pub input_routes: BTreeMap<RyeOsViewInstanceKey, (u64, Option<serde_json::Value>)>,
@@ -261,6 +269,7 @@ impl UiCompositionReplay {
             settled: Arc::new(BTreeSet::new()),
             subjects: BTreeMap::new(),
             completed_mount_remaps: BTreeMap::new(),
+            completed_rebinds: Vec::new(),
             lens_frames: BTreeMap::new(),
             input_routes: BTreeMap::new(),
             transfer_drafts: BTreeMap::new(),
@@ -344,6 +353,17 @@ impl UiCompositionReplay {
         events: &[SeatEvent],
     ) -> Result<Self, String> {
         Self::from_history(initial, events)
+    }
+
+    /// Settled rebinds in history order: (operation id, from, to).
+    pub fn completed_rebinds(
+        &self,
+    ) -> &[(
+        String,
+        UiBindingAttachmentCoordinate,
+        UiBindingAttachmentCoordinate,
+    )] {
+        &self.completed_rebinds
     }
 
     pub fn binding_descriptors(&self) -> &BTreeMap<String, UiBindingAttachment> {
@@ -1520,6 +1540,16 @@ impl UiCompositionReplay {
                             "composition completion differs from its exact staged delta".into()
                         );
                     }
+                    let rebind = if let super::composition_operation::CompositionMutation::RebindAttachment {
+                        from,
+                        to,
+                        descriptor,
+                    } = &request.mutation
+                    {
+                        Some((from.clone(), to.clone(), (**descriptor).clone()))
+                    } else {
+                        None
+                    };
                     if let Some(instance) = replaced_instance {
                         self.lens_frames.remove(&instance);
                         self.input_routes.remove(&instance);
@@ -1534,6 +1564,12 @@ impl UiCompositionReplay {
                         }
                     }
                     self.remap_completed_mount_metadata(&delta)?;
+                    if let Some((from, to, descriptor)) = rebind {
+                        self.apply_rebind_metadata(&from, &to, &descriptor, &delta.composition);
+                        self.retain_descriptor(descriptor)?;
+                        self.completed_rebinds
+                            .push((completed.operation_id.clone(), from, to));
+                    }
                     if !delta.mount_remaps.is_empty()
                         && self
                             .completed_mount_remaps
@@ -2448,6 +2484,51 @@ impl UiCompositionReplay {
         Ok(())
     }
 
+    /// Carry replay-owned metadata across a settled rebind: subject and lens
+    /// frame coordinates follow their mount; frames over a View the successor
+    /// no longer declares are dropped with their route and label.
+    fn apply_rebind_metadata(
+        &mut self,
+        from: &UiBindingAttachmentCoordinate,
+        to: &UiBindingAttachmentCoordinate,
+        descriptor: &UiBindingAttachment,
+        rebound: &PresentationComposition,
+    ) {
+        for (instance, subject) in &mut self.subjects {
+            if subject.binding == *from
+                && rebound
+                    .mount(instance)
+                    .is_some_and(|mount| mount.binding() == to)
+            {
+                subject.binding = to.clone();
+            }
+        }
+        let mut dropped = Vec::new();
+        for (instance, frames) in &mut self.lens_frames {
+            let vanished = frames.iter().any(|frame| {
+                frame.binding == *from
+                    && !descriptor.presentation.views.contains_key(&frame.view_ref)
+            });
+            if vanished {
+                dropped.push(instance.clone());
+                continue;
+            }
+            for frame in frames.iter_mut().filter(|frame| frame.binding == *from) {
+                frame.binding = to.clone();
+            }
+        }
+        for instance in dropped {
+            self.lens_frames.remove(&instance);
+            self.input_routes.remove(&instance);
+            self.lens_labels.remove(&instance);
+        }
+        for binding in self.insertion_bindings.values_mut() {
+            if binding == from {
+                *binding = to.clone();
+            }
+        }
+    }
+
     fn retain_descriptor(&mut self, descriptor: UiBindingAttachment) -> Result<(), String> {
         descriptor.validate().map_err(str::to_owned)?;
         if self
@@ -3135,6 +3216,139 @@ mod tests {
         assert_eq!(cold.completed_mount_remaps, replay.completed_mount_remaps);
         assert!(cold.composition.mount(&old).is_none());
         assert!(cold.composition.mount(&new).is_some());
+    }
+
+    #[test]
+    fn completed_rebind_keeps_tiles_pins_and_replays_identically_from_cold_prefix() {
+        use super::super::admission_operation::UiPreparedPresentationOperationBody;
+        use super::super::attachment::SelectionAttachment;
+        use super::super::composition_operation::{
+            CompositionMutation, CompositionOwner, UiCompositionRequest,
+        };
+        use sha2::{Digest, Sha256};
+        let initial = initial();
+        let first = initial.surfaces[0].clone();
+        let mut history = vec![event(&initial)];
+        let mut replay = UiCompositionReplay::begin(&initial, &history[0]).unwrap();
+        let surface_id = first.mount_manifest.surface_instance_id.clone();
+        let set = replay.composition.surfaces()[&surface_id]
+            .active_view_set()
+            .unwrap();
+        let (set_id, tile_id) = (set.id, set.focused_tile);
+        let instance = set.tiles[&tile_id].instance_key.clone();
+        let view_ref = set.tiles[&tile_id].view.view_ref.clone();
+        let from = replay
+            .composition
+            .mount(&instance)
+            .unwrap()
+            .binding()
+            .clone();
+        let source = replay.descriptors[&from.binding_attachment_id].clone();
+        let view: super::super::content::ViewBinding =
+            serde_json::from_value(source.presentation.views[&view_ref].clone()).unwrap();
+        let values = super::super::attachment::selection_dependencies(&view)
+            .into_iter()
+            .map(|facet| (facet, serde_json::json!({"subject":"fixed"})))
+            .collect::<BTreeMap<_, _>>();
+        let pinned = SelectionAttachment::Pinned {
+            fingerprint: format!("{:x}", Sha256::digest(serde_json::to_vec(&values).unwrap())),
+            values,
+        };
+        let bounds = source.binding_request_bounds;
+        let producer = super::super::binding::UiPresentationProducer {
+            presentation_id: initial.presentation_id.clone(),
+            thread_id: "fixture-seat".into(),
+            producer_incarnation: "a".repeat(64),
+        };
+        let owner = CompositionOwner::Surface {
+            surface_instance_id: surface_id.clone(),
+            binding: first.binding.clone(),
+        };
+        let run = |replay: &mut UiCompositionReplay,
+                   history: &mut Vec<SeatEvent>,
+                   id: &str,
+                   mutation: CompositionMutation| {
+            let mut operation = UiPreparedPresentationOperation {
+                schema: 2,
+                prepared_engine_seq: 0,
+                operation_id: id.into(),
+                producer: producer.clone(),
+                root_binding: initial.root_binding.clone(),
+                request_bounds: bounds,
+                body: UiPreparedPresentationOperationBody::Composition {
+                    request: UiCompositionRequest {
+                        schema: 1,
+                        presentation_id: replay.composition.id().clone(),
+                        operation_id: id.into(),
+                        expected_revision: replay.revision,
+                        expected_next_mount_id: replay.next_mount_id,
+                        owner: owner.clone(),
+                        mutation,
+                    },
+                },
+            };
+            operation.assign_identity().unwrap();
+            let completion = replay
+                .expected_composition_completion(&operation, bounds.max_request_bytes)
+                .unwrap();
+            let seq = history.last().unwrap().seq + 1;
+            let prepared = SeatEvent {
+                producer_engine_seq: None,
+                seq,
+                kind: SeatEventKind::PresentationOperationPrepared(operation),
+            };
+            replay.apply_ordered_event(&prepared).unwrap();
+            history.push(prepared);
+            let completed = SeatEvent {
+                producer_engine_seq: None,
+                seq: seq + 1,
+                kind: SeatEventKind::PresentationOperationCompleted(completion),
+            };
+            replay.apply_ordered_event(&completed).unwrap();
+            history.push(completed);
+        };
+        run(
+            &mut replay,
+            &mut history,
+            "55555555-5555-4555-8555-555555555555",
+            CompositionMutation::SetSubject {
+                mount: instance.clone(),
+                attachment: pinned.clone(),
+            },
+        );
+        let mut successor = source.clone();
+        successor.binding_attachment_id = "successor".into();
+        successor.binding_generation += 1;
+        let to = UiBindingAttachmentCoordinate {
+            binding_attachment_id: successor.binding_attachment_id.clone(),
+            binding_generation: successor.binding_generation,
+            binding_digest: successor.binding_digest.clone(),
+        };
+        run(
+            &mut replay,
+            &mut history,
+            "66666666-6666-4666-8666-666666666666",
+            CompositionMutation::RebindAttachment {
+                from: from.clone(),
+                to: to.clone(),
+                descriptor: Box::new(successor.clone()),
+            },
+        );
+        assert_eq!(replay.composition.mount(&instance).unwrap().binding(), &to);
+        assert_eq!(replay.composition.surfaces()[&surface_id].binding(), &to);
+        assert_eq!(replay.subjects[&instance].attachment, pinned);
+        assert_eq!(replay.subjects[&instance].binding, to);
+        assert_eq!(replay.insertion_bindings[&set_id], to);
+        assert!(replay.binding_descriptors().contains_key("successor"));
+        assert_eq!(replay.completed_rebinds().len(), 1);
+        let cold = UiCompositionReplay::from_acknowledged_prefix(&initial, &history).unwrap();
+        assert_eq!(cold.subjects, replay.subjects);
+        assert_eq!(cold.insertion_bindings, replay.insertion_bindings);
+        assert_eq!(cold.completed_rebinds(), replay.completed_rebinds());
+        assert_eq!(
+            format!("{:?}", cold.composition),
+            format!("{:?}", replay.composition)
+        );
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub mod hosted_operation;
 pub mod ignore;
 #[path = "io/mod.rs"]
 pub mod io;
+pub mod item_revised;
 pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
@@ -85,6 +86,8 @@ pub mod principal;
 pub mod private_artifact_home;
 pub mod process;
 pub mod process_quarantine_report;
+pub mod project_owner;
+pub mod project_registry;
 pub mod project_root_guard;
 pub mod projection_health;
 pub mod projection_repair;

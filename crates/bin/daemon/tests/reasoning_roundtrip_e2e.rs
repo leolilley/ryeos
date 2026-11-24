@@ -101,12 +101,14 @@ async fn turn_parts(rig: &Rig, thread_id: &str) -> Vec<Vec<Value>> {
         .collect()
 }
 
-async fn failure_message(rig: &Rig, thread_id: &str) -> String {
+/// The typed code on the daemon's finalization `thread_failed` event (the
+/// runtime appends no terminal event of its own).
+async fn failure_code(rig: &Rig, thread_id: &str) -> String {
     chain_event_list(&rig.h, thread_id)
         .await
         .into_iter()
         .find(|(_, kind, _)| kind == "thread_failed")
-        .map(|(_, _, payload)| payload["message"].as_str().unwrap_or("").to_string())
+        .map(|(_, _, payload)| payload["error"]["code"].as_str().unwrap_or("").to_string())
         .unwrap_or_default()
 }
 
@@ -240,10 +242,9 @@ async fn a_turn_that_owes_a_signature_and_has_none_fails_before_its_tool_runs() 
     .expect("start rig");
     let (thread_id, status) = run_to_terminal(&rig).await;
     assert_eq!(status, "failed");
-    assert!(
-        failure_message(&rig, &thread_id)
-            .await
-            .starts_with("reasoning_artefact_missing"),
+    assert_eq!(
+        failure_code(&rig, &thread_id).await,
+        "reasoning_artefact_missing",
         "{}",
         thread_detail(&rig.h, &thread_id, 800).await
     );

@@ -63,8 +63,15 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         crate::seat_auth::SeatCaller::Attachment(attachment) => Some(attachment.root_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,
     };
+    let signer_project = super::signed_item_topology::seat_live_project(
+        &state,
+        caller.principal_id(),
+        &ctx.scopes,
+        project_access.as_ref().map(|access| access.path()),
+    );
     let topology = super::signed_item_topology::build_topology(
         &state,
+        &signer_project,
         project_root.clone(),
         project_access.as_ref(),
         project_query_identity
@@ -73,7 +80,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         root_surface,
     );
     let plan_context = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        logical_project: signer_project,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),

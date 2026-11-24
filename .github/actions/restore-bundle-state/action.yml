@@ -1,0 +1,33 @@
+name: Restore or refresh the bundle state
+description: >-
+  Gives a test job populated bundles. A branch that changes bundle sources
+  refreshes them from the branch. Otherwise the bundle state of the newest
+  retained next CI run whose commit has no bundle-source difference from the
+  branch head is restored (newer next commits the branch differs from are
+  skipped); when none qualifies the bundles are refreshed from the branch
+  instead (about 45 minutes). The job summary says which was used.
+inputs:
+  bundles-changed:
+    description: "'true' when the branch changes bundle sources (the classifier's bundles_changed)."
+    required: true
+  github-token:
+    description: Token that can read this repository's Actions runs and artifacts.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Restore next's bundle state
+      id: restore
+      if: ${{ inputs.bundles-changed != 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/restore-next-bundle-state.sh"'
+
+    - name: Refresh the bundles from this branch
+      if: ${{ inputs.bundles-changed == 'true' || steps.restore.outcome == 'failure' }}
+      shell: bash
+      env:
+        GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+      run: ./scripts/gate.sh --refresh-bundles --no-tests

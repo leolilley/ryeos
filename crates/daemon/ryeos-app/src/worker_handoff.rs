@@ -4197,10 +4197,11 @@ pub fn build_remote_project_rebind(
     source: &ExecutionProjectAuthority,
     target_project_path: &std::path::Path,
     target_site_id: &str,
-    owner_principal: &str,
+    trust: &ryeos_engine::trust::TrustStore,
+    owner_key: &str,
     source_candidate_snapshot_hash: &str,
     target_expected_head_hash: &str,
-    target_project_hash: &str,
+    target_project: &ryeos_state::project_identity::ProjectIdentity,
     route_digest: &str,
 ) -> anyhow::Result<(
     ProjectAuthorityRebind,
@@ -4218,7 +4219,9 @@ pub fn build_remote_project_rebind(
     }
     hash("source candidate snapshot", source_candidate_snapshot_hash)?;
     hash("target expected project head", target_expected_head_hash)?;
-    hash("target project hash", target_project_hash)?;
+    crate::project_owner::require_speaks_for_in(trust, owner_key, target_project.owner())
+        .context("the handoff target project is not the handoff owner's")?;
+    let target_head = ryeos_state::project_identity::ProjectHeadKey::for_project(target_project);
     hash("project route", route_digest)?;
     let ExecutionProjectAuthority::PinnedGeneration {
         stable_project_identity: source_identity,
@@ -4270,9 +4273,8 @@ pub fn build_remote_project_rebind(
         snapshot_hash: source_candidate_snapshot_hash.to_owned(),
         realization: PinnedProjectRealization::Cow {
             terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: ryeos_state::refs::principal_storage_key(owner_principal)?
-                    .to_owned(),
-                project_hash: target_project_hash.to_owned(),
+                owner_component: target_head.owner_component(),
+                project_hash: target_head.name_hash().to_owned(),
                 expected_hash: target_expected_head_hash.to_owned(),
             },
         },
@@ -4280,6 +4282,12 @@ pub fn build_remote_project_rebind(
         capability_ceiling: capability_ceiling.clone(),
         child_policy: child_policy.clone(),
         workspace_outputs: None,
+        // This node holds the owner's head for the target project at exactly
+        // the base generation (checked above), so the target states it. The
+        // source node's identity is never adopted.
+        signer_project: ryeos_state::project_identity::LogicalProject::Stated(
+            target_project.clone(),
+        ),
     };
     let rebind = ProjectAuthorityRebind {
         route_digest: route_digest.to_owned(),
@@ -5169,13 +5177,16 @@ mod tests {
         current: &str,
     ) -> ExecutionProjectAuthority {
         ExecutionProjectAuthority::PinnedGeneration {
+            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotStated,
+            ),
             stable_project_identity: format!("{site}:{path}"),
             display_path: Some(PathBuf::from(path)),
             base_snapshot_hash: base.to_owned(),
             snapshot_hash: current.to_owned(),
             realization: PinnedProjectRealization::Cow {
                 terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: "a".repeat(64),
+                    owner_component: format!("pid-v1-{}", "a".repeat(64)),
                     project_hash: "b".repeat(64),
                     expected_hash: base.to_owned(),
                 },

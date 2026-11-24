@@ -711,7 +711,7 @@ fn resolve_executor_chain(
                     &crate::trust::SignerContext::new(
                         source_space,
                         &ref_.kind,
-                        roots.signer_project_root_under(project_authority.map(|(root, _)| root)),
+                        roots.signer_project(),
                     ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
@@ -2009,7 +2009,9 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -2050,7 +2052,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
-            logical_project: LogicalProject::from_optional(None, &subject_resolution_authority),
+            logical_project: crate::contracts::unestablished_project(&subject_resolution_authority),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -2209,7 +2211,7 @@ config:
                 name: "bundle-release".into(),
                 canonical_root: installed.path().to_path_buf(),
             }],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let context = test_plan_context(Some(project.path().to_path_buf()));
         let caller = json!({"resolved_config":{"forged":true},"release_input":{}});
@@ -2295,7 +2297,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         for endpoint in [
             None,
@@ -2406,7 +2408,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         for (authored, expected) in [
@@ -2519,7 +2521,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let plan = build_plan(BuildPlanInput {
@@ -2585,7 +2587,10 @@ config:
 
         // A chain terminal that declares a source scope, signed by a key that
         // is scoped to one registered project that is not the checkout path.
-        let logical = PathBuf::from("/work/registered-project");
+        let logical: ryeos_state::project_identity::ProjectIdentity =
+            format!("pid:v1:{}/registered-project", "a".repeat(64))
+                .parse()
+                .unwrap();
         let author = SigningKey::from_bytes(&[43u8; 32]);
         let node_key = SigningKey::from_bytes(&[44u8; 32]).verifying_key();
         let mut record = SignerRecord::new(
@@ -2595,7 +2600,7 @@ config:
             SignerScope {
                 spaces: vec![SignerSpace::Project],
                 kinds: vec!["*".to_string()],
-                projects: vec![logical.to_string_lossy().into_owned()],
+                projects: vec![logical.to_string().parse().unwrap()],
             },
             SignerStatus::Active,
         );
@@ -2635,7 +2640,7 @@ config:
         let by_checkout = ResolutionRoots::from_flat(
             Some(checkout.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let refusal = resolve(&by_checkout).unwrap_err().to_string();
         assert!(
@@ -2647,7 +2652,11 @@ config:
         // stating some other project is not a way in.
         let by_other = by_checkout
             .clone()
-            .with_logical_project(LogicalProject::Stated(PathBuf::from("/work/other-project")));
+            .with_logical_project(LogicalProject::Stated(
+                format!("pid:v1:{}/other-project", "a".repeat(64))
+                    .parse()
+                    .unwrap(),
+            ));
         let refusal = resolve(&by_other).unwrap_err().to_string();
         assert!(
             refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
@@ -2686,7 +2695,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2764,7 +2773,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2818,7 +2827,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2928,7 +2937,7 @@ config:
         let project_roots = ResolutionRoots::from_flat(
             Some(temp.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         assert!(check(&item, &ctx, &project_roots, Some(logical)).is_err());
         let local_ctx = test_plan_context(Some(temp.path().to_path_buf()));
@@ -3433,7 +3442,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -3669,7 +3678,7 @@ category: ryeos/core/subprocess\n";
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         // 5. Build plan — this walks the full 3-hop chain

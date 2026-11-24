@@ -17,15 +17,6 @@ use ryeos_handler_protocol::{
     ValidateLaunchPreparerConfigResponse, ValidateLaunchPreparerConfigSuccess,
 };
 
-const ALLOWED_SECRET_NAMES: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "ZAI_API_KEY",
-    "ZEN_API_KEY",
-];
 // A 64-byte lowercase SHA-256 hex string occupies 66 bytes as canonical JSON:
 // one byte for each surrounding quote plus the 64-byte value.
 const SHA256_HEX_CANONICAL_JSON_BYTES: u32 = 66;
@@ -165,18 +156,10 @@ fn prepare_inner(
         )
     })?;
 
-    if prepared
-        .required_secret
-        .as_ref()
-        .is_some_and(|secret| !ALLOWED_SECRET_NAMES.contains(&secret.name.as_str()))
-    {
-        return Err(wire_error(
-            "provider_secret_not_allowed",
-            "the selected provider requests a secret outside the signed directive allow-list",
-            LaunchPrepareErrorClass::Configuration,
-            Some(MODEL_BINDING),
-        ));
-    }
+    // Which secret names a launch may request is the signed runtime
+    // descriptor's `launch_contract.secret_policy.allowed_names`; the daemon
+    // checks every requirement this preparer returns against it. The names a
+    // provider needs come from that provider's own signed `auth.env_var`.
 
     let snapshot = serde_json::to_value(&prepared.snapshot).map_err(|error| {
         wire_error(
@@ -603,11 +586,6 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         return Err("secret_policy.max_requirements must be 4".into());
     }
     exact_strings(
-        "secret_policy.allowed_names",
-        &request.secret_policy.allowed_names,
-        ALLOWED_SECRET_NAMES,
-    )?;
-    exact_strings(
         "required_runtime_data",
         &request.required_runtime_data,
         &[PROVIDER_SNAPSHOT_KEY],
@@ -817,8 +795,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    use super::ALLOWED_SECRET_NAMES;
-
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
     }
@@ -900,15 +876,6 @@ mod tests {
                     .to_owned()
             })
             .collect::<BTreeSet<_>>();
-        let handler_allowed = ALLOWED_SECRET_NAMES
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            descriptor_allowed, handler_allowed,
-            "signed runtime descriptor and launch preparer must agree"
-        );
-
         let providers =
             repository.join("bundles/directive/.ai/config/ryeos-runtime/model-providers");
         for entry in std::fs::read_dir(providers).expect("read bundled provider configs") {
@@ -922,8 +889,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
             if let Some(env_var) = provider["auth"]["env_var"].as_str() {
                 assert!(
-                    handler_allowed.contains(env_var),
-                    "{} requests provider secret {env_var} outside the directive launch allow-list",
+                    descriptor_allowed.contains(env_var),
+                    "{} requests provider secret {env_var} outside the signed runtime descriptor's allow-list",
                     path.display()
                 );
             }

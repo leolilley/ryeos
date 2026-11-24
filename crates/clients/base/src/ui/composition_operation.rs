@@ -306,6 +306,16 @@ pub enum CompositionMutation {
         tab_id: ViewSetId,
         tile_id: TileId,
     },
+    /// Swap one non-root attachment for its recompiled successor in place.
+    /// `descriptor` is the complete public descriptor of `to`: replay and the
+    /// daemon's history verification take it from this retained request, so a
+    /// rebind needs no other admission record. Tiles, groups and instance keys
+    /// stay; only the coordinates they name change.
+    RebindAttachment {
+        from: UiBindingAttachmentCoordinate,
+        to: UiBindingAttachmentCoordinate,
+        descriptor: Box<super::binding::UiBindingAttachment>,
+    },
 }
 fn positive(id: u64) -> Result<(), String> {
     if id == 0 {
@@ -702,6 +712,24 @@ impl UiCompositionRequest {
                 positive(tab_id.0)?;
                 if let Some(id) = tile_id {
                     positive(id.0)?;
+                }
+            }
+            RebindAttachment {
+                from,
+                to,
+                descriptor,
+            } => {
+                binding(from)?;
+                binding(to)?;
+                if from == to || self.owner.surface_instance_id().is_none() {
+                    return Err("rebind requires distinct coordinates and a Surface owner".into());
+                }
+                descriptor.validate().map_err(str::to_owned)?;
+                if descriptor.binding_attachment_id != to.binding_attachment_id
+                    || descriptor.binding_generation != to.binding_generation
+                    || descriptor.binding_digest != to.binding_digest
+                {
+                    return Err("rebind descriptor differs from its target coordinate".into());
                 }
             }
         }
