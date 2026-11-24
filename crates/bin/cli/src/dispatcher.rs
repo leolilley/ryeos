@@ -2145,6 +2145,92 @@ mod tests {
         assert_eq!(out.parameters, serde_json::json!({}));
     }
 
+    /// A shipped core command item, read the way the CLI reads it.
+    fn shipped_core_command(name: &str) -> CommandDef {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/node/commands")
+            .join(format!("{name}.yaml"));
+        let text = std::fs::read_to_string(&path).expect("a shipped command item");
+        let mut command: CommandDef = serde_yaml::from_str(&text).expect("a command item");
+        command.name = name.to_owned();
+        command
+    }
+
+    #[test]
+    fn worker_session_evaluate_binds_its_four_slots_and_the_json_object() {
+        let hash = |c: char| c.to_string().repeat(64);
+        let rest = s(&[
+            "worker",
+            "session",
+            "evaluate",
+            "T-1",
+            &hash('a'),
+            &hash('b'),
+            "tool:ryeos/core/evaluate/unchecked",
+            r#"{"launch_id":"L-0123456789abcdef0123456789abcdef","evaluator_parameters":{"accept_unchecked":true}}"#,
+        ]);
+        let resolved = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[shipped_core_command("worker-session-evaluate")],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("the four positional slots and the JSON object bind");
+        assert_eq!(
+            resolved.item_ref,
+            "service:worker-executions/start-candidate-evaluation"
+        );
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({
+                "chain_root_id": "T-1",
+                "candidate_snapshot_hash": hash('a'),
+                "candidate_validation_hash": hash('b'),
+                "evaluator_item_ref": "tool:ryeos/core/evaluate/unchecked",
+                "launch_id": "L-0123456789abcdef0123456789abcdef",
+                "evaluator_parameters": {"accept_unchecked": true},
+            })
+        );
+    }
+
+    #[test]
+    fn worker_session_qualify_binds_its_six_slots() {
+        let hash = |c: char| c.to_string().repeat(64);
+        let rest = s(&[
+            "worker",
+            "session",
+            "qualify",
+            "T-1",
+            &hash('a'),
+            &hash('b'),
+            "T-eval",
+            "T-eval",
+            "tool:ryeos/core/evaluate/unchecked",
+        ]);
+        let resolved = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[shipped_core_command("worker-session-qualify")],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("the six positional slots bind");
+        assert_eq!(
+            resolved.item_ref,
+            "service:worker-executions/qualify-candidate"
+        );
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({
+                "chain_root_id": "T-1",
+                "candidate_snapshot_hash": hash('a'),
+                "candidate_validation_hash": hash('b'),
+                "evaluator_chain_root_id": "T-eval",
+                "evaluator_terminal_thread_id": "T-eval",
+                "evaluator_item_ref": "tool:ryeos/core/evaluate/unchecked",
+            })
+        );
+    }
+
     #[test]
     fn projectless_form_consumes_global_no_project_before_service_payload() {
         let mut cmd = command(

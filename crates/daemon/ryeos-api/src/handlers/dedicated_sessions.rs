@@ -9281,6 +9281,23 @@ fn verified_candidate_source(
     })
 }
 
+/// An evaluator the person names by a bundle's ref must be that bundle's item.
+/// A project may carry its own evaluator under its own ref, but a project file
+/// that took a bundle item's ref (so `tool:ryeos/core/evaluate/unchecked` would
+/// run the project's file instead) is refused, whatever its trust.
+fn refuse_project_item_standing_for_a_bundle_item(
+    authority_kind: &str,
+    shadows_bundle_item: bool,
+) -> Result<(), HandlerError> {
+    if authority_kind == "base_project_generation" && shadows_bundle_item {
+        return Err(HandlerError::BadRequest(
+            "candidate operation program is a project item standing in for an installed bundle item under the same ref"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn immutable_base_program_evidence(
     sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
     base_snapshot_hash: &str,
@@ -9313,6 +9330,10 @@ fn immutable_base_program_evidence(
             ));
         }
     };
+    refuse_project_item_standing_for_a_bundle_item(
+        authority_kind,
+        sealed.admitted_subject_shadows_bundle_item(),
+    )?;
     let trusted_effective = match authority_kind {
         "installed_bundle" => resolution.effective_trust_class == TrustClass::TrustedBundle,
         "base_project_generation" => matches!(
@@ -11505,6 +11526,22 @@ mod tests {
             assert!(!check(disposition, &Discard));
         }
     }
+    #[test]
+    fn a_project_item_standing_in_for_a_bundle_item_is_not_an_accepted_evaluator() {
+        // A project's own evaluator, under its own ref, is fine.
+        refuse_project_item_standing_for_a_bundle_item("base_project_generation", false).unwrap();
+        // The bundle's own item is fine.
+        refuse_project_item_standing_for_a_bundle_item("installed_bundle", false).unwrap();
+        // A project file that took a bundle item's ref is refused.
+        let refused =
+            refuse_project_item_standing_for_a_bundle_item("base_project_generation", true)
+                .unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("standing in for an installed bundle item"),
+            "{refused:?}"
+        );
+    }
+
     #[test]
     fn a_sealed_identity_must_name_the_targeted_head() {
         use ryeos_state::project_identity::{
