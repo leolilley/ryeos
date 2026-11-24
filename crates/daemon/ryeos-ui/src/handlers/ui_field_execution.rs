@@ -2882,10 +2882,7 @@ fn bounded_event_attributes(
             attributes.insert(key.clone(), value.clone());
         }
     }
-    if policy
-        .inline_payload_events
-        .iter()
-        .any(|event_type| *event_type == event.event_type)
+    if policy.inline_payload_events.contains(&event.event_type)
         && let Some(payload) = event.payload.get("payload")
     {
         attributes.insert("payload".to_string(), bounded_inline_value(payload.clone()));
