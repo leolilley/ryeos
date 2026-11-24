@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T02:36:11Z:d7c3a714c3012698159803f9c6d2ad06abc906fe4adb56b7d0e287175e9a0c7d:9b+eWQptOg2WTsY5eeP00ZEmO10s1mUR9l7aNPtzuGLepfg5jlnWDtvrbJvslAE3UOBLQpewYTlzenExg9+aCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:54:16Z:5f6700c314179d1aa9af3a2d683f4f030ed85e42a1078bc5f484d817d0368e68:MAxJ2jZgI7eiV1Teez9r2F6D2oqoCCJmhLBpTj+eZJUS/5rdv/8j83xaoq7JSs+nwbR/MEDjfPg8VW4X3gp0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -76,9 +76,8 @@ Grant hygiene:
 The MCP key is its own principal. Threads it starts are its own, not the
 operator's: list them with `RYEOS_CLIENT_KEY=<path> ryeos thread list`; the
 operator's own list does not show them. No registration speaks for this key, so
-it has no project identity, and operator-scoped signers are not trusted in its
-runs. The operator can register a checkout with `--owner <the key's principal>`,
-or wait until keys can be paired.
+runs under it have no live project identity, and operator-scoped signers are not
+trusted in them. That is intended for a narrowed key.
 
 ### What this does not cover
 
