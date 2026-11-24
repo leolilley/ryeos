@@ -2558,7 +2558,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
 fn a_worker_claiming_accept_for_a_deny_only_method_or_the_wrong_class_is_refused_by_the_frozen_profile()
  {
     use ryeos_app::dedicated_session_service::{AcceptRefusal, check_accept};
-    let state = ryeos_app::state::AppState::new_for_test();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (capsule, _profile, _schemas) = store_capsule_with_contract(
         &state,
         json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION),
