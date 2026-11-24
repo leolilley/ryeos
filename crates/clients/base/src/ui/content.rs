@@ -1360,12 +1360,11 @@ pub fn source_collection<'a>(
     let source = binding.primary_source().map(|(_, source)| source);
     // A shared read envelope carries its own rows; no per-view path is needed,
     // and a failed answer draws none.
-    if let Some(envelope) = super::read_envelope::read_envelope(response) {
-        if source.is_none_or(|source| source.collection.is_none())
-            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed
-        {
-            return Cow::Borrowed(envelope.records());
-        }
+    if let Some(envelope) = super::read_envelope::read_envelope(response)
+        && (source.is_none_or(|source| source.collection.is_none())
+            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed)
+    {
+        return Cow::Borrowed(envelope.records());
     }
     let Some(spec) = source.and_then(|source| source.collection.as_ref()) else {
         return Cow::Borrowed(&[]);
@@ -1535,12 +1534,11 @@ pub fn source_collection_for_section<'a>(
     response: &'a Value,
 ) -> Vec<std::borrow::Cow<'a, Value>> {
     use std::borrow::Cow;
-    if let Some(envelope) = super::read_envelope::read_envelope(response) {
-        if section.collection.is_none()
-            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed
-        {
-            return envelope.records().iter().map(Cow::Borrowed).collect();
-        }
+    if let Some(envelope) = super::read_envelope::read_envelope(response)
+        && (section.collection.is_none()
+            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed)
+    {
+        return envelope.records().iter().map(Cow::Borrowed).collect();
     }
     match section.collection.as_ref() {
         // A `collection` path selects a sub-value of the response. An array is a
