@@ -18,6 +18,20 @@ use ryeos_state::objects::{
     validate_session_runtime_configs,
 };
 
+/// The closed vocabulary of effect classes a worker route can declare and a
+/// dedicated-session start can cap, sorted. It names what the implementation
+/// can account for (reads, session mutation, credential access, external
+/// effects), not a product or a kind of caller. Which classes a given worker
+/// may use is signed data (its worker-execution item and profile).
+pub const EFFECT_CLASSES: &[&str] = &[
+    "credential_delete",
+    "credential_read",
+    "credential_write",
+    "external_effect",
+    "pure_read",
+    "session_mutation",
+];
+
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 /// v11 seals the finite absence inventory checked before workload bootstrap.
@@ -298,14 +312,6 @@ pub fn compile(
     let routes = bounded_array(object, "routes", 1, 128)?;
     let mut route_ids = BTreeSet::new();
     let mut upstream_methods = BTreeSet::new();
-    let allowed_effects = [
-        "pure_read",
-        "session_mutation",
-        "external_effect",
-        "credential_read",
-        "credential_write",
-        "credential_delete",
-    ];
     let mut schema_ids = BTreeSet::new();
     if http_transport {
         let http = object["http_sse"]
@@ -357,7 +363,7 @@ pub fn compile(
             .and_then(Value::as_object)
             .and_then(|binding| binding.get("action"))
             .and_then(Value::as_str);
-        if !allowed_effects.contains(&value_string(route, "effect_class")?) {
+        if !EFFECT_CLASSES.contains(&value_string(route, "effect_class")?) {
             bail!("structured-session route has an unknown effect class");
         }
         if let Some(audience) = route.get("audience") {
@@ -2291,6 +2297,11 @@ fn reject_nonlocal_refs(value: &Value, depth: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_effect_class_vocabulary_is_sorted_and_unique() {
+        assert!(super::EFFECT_CLASSES.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
     use super::*;
     use serde_json::json;
 

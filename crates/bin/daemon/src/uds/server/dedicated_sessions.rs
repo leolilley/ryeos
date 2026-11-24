@@ -1180,14 +1180,7 @@ pub(super) async fn start(
     {
         bail!("dedicated-session route set is not canonical");
     }
-    const ALLOWED_EFFECT_CLASSES: &[&str] = &[
-        "credential_delete",
-        "credential_read",
-        "credential_write",
-        "external_effect",
-        "pure_read",
-        "session_mutation",
-    ];
+    use ryeos_engine::structured_session_profile::EFFECT_CLASSES as ALLOWED_EFFECT_CLASSES;
     if request.allowed_effect_classes.is_empty()
         || request.allowed_effect_classes.len() > ALLOWED_EFFECT_CLASSES.len()
         || request
