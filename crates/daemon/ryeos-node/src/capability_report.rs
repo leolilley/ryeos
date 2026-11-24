@@ -957,6 +957,13 @@ fn current_report_and_view(
     Ok((signed, view))
 }
 
+/// The spelling a report's `composition.policy_generation` records for a node
+/// policy generation digest. The daemon writes it and doctor compares with it,
+/// so both go through here.
+pub fn report_policy_generation(generation_digest: &str) -> String {
+    format!("sha256:{generation_digest}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
