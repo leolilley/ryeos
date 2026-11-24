@@ -1,88 +1,64 @@
 //! Exact-thread authorization shared by RyeOS UI read services.
 //!
-//! Seat authentication establishes a caller lane. It does not prove that the
-//! caller may observe an arbitrary thread ID. This module reads the signed
-//! thread subject first and applies project/owner authority before any result,
-//! event, artifact, child, capsule, or definition evidence is loaded.
+//! Seat authentication establishes who is reading. It does not prove that the
+//! reader may observe an arbitrary thread ID. This module reads the signed
+//! thread subject first and judges it with `ryeos_app::seat_authority` before
+//! any result, event, artifact, child, capsule, or definition evidence is
+//! loaded. The judgement is by key and principal only; this crate builds the
+//! reader from the seat and makes no ownership call of its own.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
+use ryeos_app::seat_authority::{SeatProjectState, ThreadReader};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{AuthoritativeThreadSubject, ExecutionTreeEdgeCandidate};
 use ryeos_app::thread_lifecycle::ExecutionTreeResult;
-use ryeos_state::objects::ExecutionProjectAuthority;
 
 use crate::seat_auth::SeatCaller;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ExactThreadCaller {
-    Session {
-        canonical_project_root: Option<PathBuf>,
-        principal_id: Option<String>,
-        /// The read is made by a source a project-authored view or Surface
-        /// declared. Such a source reads threads of the session's own live
-        /// project and nothing else.
-        project_authored_source: bool,
-    },
-    Operator {
-        principal_id: String,
-    },
-}
-
-impl ExactThreadCaller {
-    fn from_seat(caller: &SeatCaller) -> Result<Self, HandlerError> {
-        Ok(match caller {
-            SeatCaller::Attachment(attachment) => Self::Session {
-                canonical_project_root: crate::seat_auth::attachment_project_query_identity(
-                    attachment,
-                )
-                .map_err(|_| HandlerError::NotFound)?,
-                principal_id: Some(attachment.compiled_binding.binding.principal_id.clone()),
+/// The reader a seat reads threads as: its key, the project its binding
+/// sealed at mint, and whether the read comes from a project-authored source.
+/// A seat whose project authority no longer validates reads nothing.
+fn thread_reader(state: &AppState, caller: &SeatCaller) -> Result<ThreadReader, HandlerError> {
+    Ok(match caller {
+        SeatCaller::Attachment(attachment) => {
+            let bound_to_checkout = crate::seat_auth::attachment_project_query_identity(attachment)
+                .map_err(|_| HandlerError::NotFound)?
+                .is_some();
+            let binding = &attachment.compiled_binding.binding;
+            ThreadReader {
+                key: binding.principal_id.clone(),
+                seat_project: SeatProjectState::from_sealed(
+                    bound_to_checkout,
+                    &binding.signer_project,
+                ),
                 project_authored_source: crate::seat_auth::compiled_ui_source_is_project_authored(),
-            },
-            SeatCaller::Operator { principal_id } => Self::Operator {
-                principal_id: principal_id.clone(),
-            },
-        })
-    }
-
-    fn principal_id(&self) -> Option<&str> {
-        match self {
-            Self::Session { principal_id, .. } => principal_id.as_deref(),
-            Self::Operator { principal_id } => Some(principal_id),
-        }
-    }
-
-    fn authorizes(&self, subject: &AuthoritativeThreadSubject) -> bool {
-        match (&subject.project_authority, self) {
-            (
-                ExecutionProjectAuthority::LiveProject { canonical_root, .. },
-                Self::Session {
-                    canonical_project_root,
-                    ..
-                },
-            ) => canonical_project_root.as_ref() == Some(canonical_root),
-            // A projectless or pinned-generation thread belongs to no live
-            // project, so a project-authored source never reads one, whoever
-            // launched it.
-            (
-                ExecutionProjectAuthority::Projectless { .. }
-                | ExecutionProjectAuthority::PinnedGeneration { .. },
-                Self::Session {
-                    project_authored_source: true,
-                    ..
-                },
-            ) => false,
-            (ExecutionProjectAuthority::LiveProject { .. }, Self::Operator { .. })
-            | (ExecutionProjectAuthority::Projectless { .. }, _)
-            | (ExecutionProjectAuthority::PinnedGeneration { .. }, _) => {
-                self.principal_id() == subject.requested_by.as_deref()
+                own_session: live_own_session(
+                    state,
+                    crate::seat_auth::compiled_ui_browser_session_id().as_deref(),
+                    &binding.principal_id,
+                ),
             }
         }
-    }
+        SeatCaller::Operator { principal_id } => ThreadReader {
+            key: principal_id.clone(),
+            seat_project: SeatProjectState::Projectless,
+            project_authored_source: false,
+            own_session: None,
+        },
+    })
+}
+
+/// `session_id` when it names a live browser session minted for `key`. The
+/// id comes only from the authenticated session association of this read;
+/// an ended, revoked or expired session, or one minted for another key, is
+/// none.
+fn live_own_session(state: &AppState, session_id: Option<&str>, key: &str) -> Option<String> {
+    let session_id = session_id?;
+    let ui = crate::state::get_ui_state(state)?;
+    (ui.browser_sessions.live_session_principal(session_id)? == key).then(|| session_id.to_owned())
 }
 
 /// Authorize one or two exact thread subjects as one indistinguishable read.
@@ -108,24 +84,8 @@ pub(crate) fn authorize_exact_thread_subjects_for(
     caller: &SeatCaller,
     thread_ids: &[&str],
 ) -> Result<Vec<AuthoritativeThreadSubject>, HandlerError> {
-    let subjects = state
-        .state_store
-        .authoritative_thread_subjects(thread_ids)
-        .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), "exact thread authority read failed");
-            HandlerError::Internal("exact thread authority read failed".to_string())
-        })?;
-    if subjects.iter().any(Option::is_none) {
-        return Err(HandlerError::NotFound);
-    }
-
-    let caller = ExactThreadCaller::from_seat(caller)?;
-    let subjects = subjects.into_iter().flatten().collect::<Vec<_>>();
-    if subjects.iter().all(|subject| caller.authorizes(subject)) {
-        Ok(subjects)
-    } else {
-        Err(HandlerError::NotFound)
-    }
+    let reader = thread_reader(state, caller)?;
+    ryeos_app::seat_authority::authorize_thread_subjects(state, &reader, thread_ids)
 }
 
 /// The signed subject of one thread, `None` when no such thread exists.
@@ -135,41 +95,51 @@ pub(crate) fn load_thread_subject(
     state: &AppState,
     thread_id: &str,
 ) -> Result<Option<AuthoritativeThreadSubject>, HandlerError> {
-    let mut subjects = state
-        .state_store
-        .authoritative_thread_subjects(&[thread_id])
-        .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), "exact thread authority read failed");
-            HandlerError::Internal("exact thread authority read failed".to_string())
-        })?;
-    Ok(subjects.pop().flatten())
+    Ok(
+        ryeos_app::seat_authority::load_thread_subjects(state, &[thread_id])?
+            .pop()
+            .flatten(),
+    )
 }
 
 /// What one browser session may observe: the union of what each of its
 /// attachments authorizes as a seat, by the same signed-subject judgement as
 /// [`authorize_exact_thread_subjects_for`]. An attachment whose project
 /// authority cannot be validated authorizes nothing, and a session with no
-/// attachment observes nothing.
+/// attachment observes nothing. The ownership check runs on every
+/// observation, so a key retired while the session is open stops observing.
 pub(crate) struct SessionObserver {
-    callers: Vec<ExactThreadCaller>,
+    readers: Vec<ThreadReader>,
 }
 
 impl SessionObserver {
+    /// The observer for the live browser session `session_id` and its
+    /// attachments. Each attachment reads as its key through this session,
+    /// so the session's own seat threads are observed while it is live and
+    /// minted for that key.
     pub(crate) fn new(
+        state: &AppState,
+        session_id: &str,
         attachments: &[std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>],
     ) -> Self {
         Self {
-            callers: attachments
+            readers: attachments
                 .iter()
                 .filter_map(|attachment| {
-                    ExactThreadCaller::from_seat(&SeatCaller::Attachment(attachment.clone())).ok()
+                    let mut reader =
+                        thread_reader(state, &SeatCaller::Attachment(attachment.clone())).ok()?;
+                    reader.own_session = live_own_session(state, Some(session_id), &reader.key);
+                    Some(reader)
                 })
                 .collect(),
         }
     }
 
-    pub(crate) fn observes(&self, subject: &AuthoritativeThreadSubject) -> bool {
-        self.callers.iter().any(|caller| caller.authorizes(subject))
+    pub(crate) fn observes(&self, state: &AppState, subject: &AuthoritativeThreadSubject) -> bool {
+        let trust = &state.engine.trust_store;
+        self.readers
+            .iter()
+            .any(|reader| reader.admits(trust, subject))
     }
 }
 
@@ -339,12 +309,9 @@ pub(crate) fn mask_unverified_tree_edges(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use ryeos_state::objects::{
-        ChildProjectAuthorityPolicy, EnvironmentAuthority, LiveAccessAuthority,
-        LiveFilesystemConfinement, LiveProjectAccess, LiveProjectIntent, PinnedProjectRealization,
-        ThreadStatus,
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        PinnedProjectRealization, ThreadStatus,
     };
 
     use super::*;
@@ -377,26 +344,6 @@ mod tests {
         }
     }
 
-    fn live(root: &str) -> ExecutionProjectAuthority {
-        ExecutionProjectAuthority::LiveProject {
-            authority_id: "authority".to_string(),
-            authored_project_identity: "project".to_string(),
-            canonical_root: PathBuf::from(root),
-            live_access: LiveAccessAuthority {
-                access: LiveProjectAccess::ReadOnly,
-                intent: LiveProjectIntent::Default,
-                authorized_write_namespaces: Vec::new(),
-                confinement: LiveFilesystemConfinement::UnconfinedHost,
-            },
-            environment: EnvironmentAuthority::None,
-            capability_ceiling: Vec::new(),
-            child_policy: ChildProjectAuthorityPolicy::Inherit,
-            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
-                ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
-            ),
-        }
-    }
-
     fn pinned() -> ExecutionProjectAuthority {
         ExecutionProjectAuthority::PinnedGeneration {
             stable_project_identity: "project".to_string(),
@@ -412,80 +359,6 @@ mod tests {
                 ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
             ),
         }
-    }
-
-    #[test]
-    fn live_session_requires_the_same_canonical_project() {
-        let caller = ExactThreadCaller::Session {
-            project_authored_source: false,
-            canonical_project_root: Some(Path::new("/project/a").to_path_buf()),
-            principal_id: Some("fp:owner".to_string()),
-        };
-        assert!(caller.authorizes(&subject(None, live("/project/a"))));
-        assert!(!caller.authorizes(&subject(None, live("/project/b"))));
-    }
-
-    #[test]
-    fn operator_requires_durable_ownership_for_live_subjects() {
-        let owner = ExactThreadCaller::Operator {
-            principal_id: "fp:owner".to_string(),
-        };
-        assert!(owner.authorizes(&subject(Some("fp:owner"), live("/project"))));
-        assert!(!owner.authorizes(&subject(Some("fp:other"), live("/project"))));
-    }
-
-    #[test]
-    fn pinned_and_projectless_sessions_require_durable_ownership() {
-        let owner = ExactThreadCaller::Session {
-            project_authored_source: false,
-            canonical_project_root: None,
-            principal_id: Some("fp:owner".to_string()),
-        };
-        let anonymous = ExactThreadCaller::Session {
-            project_authored_source: false,
-            canonical_project_root: None,
-            principal_id: None,
-        };
-        assert!(owner.authorizes(&subject(Some("fp:owner"), pinned())));
-        assert!(owner.authorizes(&subject(
-            Some("fp:owner"),
-            ExecutionProjectAuthority::PROJECTLESS,
-        )));
-        assert!(!anonymous.authorizes(&subject(
-            Some("fp:owner"),
-            ExecutionProjectAuthority::PROJECTLESS,
-        )));
-    }
-
-    /// A source a project-authored item declared reads threads of the
-    /// session's own live project only. A pinned-generation or projectless
-    /// thread is refused even to the principal that launched it, and so is a
-    /// thread of another project. The same session reading through a
-    /// node-authored source keeps the owner rule.
-    #[test]
-    fn project_authored_source_reads_only_threads_of_the_session_live_project() {
-        let session = |project_authored_source| ExactThreadCaller::Session {
-            project_authored_source,
-            canonical_project_root: Some(PathBuf::from("/project/a")),
-            principal_id: Some("fp:owner".to_string()),
-        };
-        let project_authored = session(true);
-        assert!(project_authored.authorizes(&subject(Some("fp:owner"), live("/project/a"))));
-        assert!(!project_authored.authorizes(&subject(Some("fp:owner"), live("/project/b"))));
-        assert!(!project_authored.authorizes(&subject(Some("fp:owner"), pinned())));
-        assert!(!project_authored.authorizes(&subject(
-            Some("fp:owner"),
-            ExecutionProjectAuthority::PROJECTLESS,
-        )));
-
-        let node_authored = session(false);
-        assert!(node_authored.authorizes(&subject(Some("fp:owner"), live("/project/a"))));
-        assert!(!node_authored.authorizes(&subject(Some("fp:owner"), live("/project/b"))));
-        assert!(node_authored.authorizes(&subject(Some("fp:owner"), pinned())));
-        assert!(node_authored.authorizes(&subject(
-            Some("fp:owner"),
-            ExecutionProjectAuthority::PROJECTLESS,
-        )));
     }
 
     #[test]
