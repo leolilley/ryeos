@@ -620,6 +620,53 @@ fn collection_shape_status(
     })
 }
 
+/// The coverage a shared read envelope states, worded by the signed coverage
+/// wording. A complete answer says nothing; every other state is stated, with
+/// the reason's own sentence when the wording has one. Without loaded wording
+/// it reads as the fixed "not known" sentence, never as a code.
+fn envelope_coverage_status(core: &RyeOsCore, response: &Value) -> Option<RyeOsSourceStatusVm> {
+    let envelope = super::read_envelope::read_envelope(response)?;
+    if envelope.state == super::read_envelope::EnvelopeCoverageState::Complete {
+        return None;
+    }
+    let message = core
+        .data
+        .coverage_wording
+        .as_ref()
+        .map(|wording| {
+            wording
+                .resolve(envelope.state.code(), envelope.reason.unwrap_or(""))
+                .label
+                .clone()
+        })
+        .unwrap_or_else(|| COVERAGE_UNKNOWN_LABEL.to_owned());
+    Some(RyeOsSourceStatusVm {
+        state: envelope.state.code().into(),
+        message,
+        stale: false,
+    })
+}
+
+/// The page facts of a shared read envelope, for a view that says how many
+/// rows exist beyond the ones shown.
+fn envelope_page(response: &Value) -> Option<RyeOsPageVm> {
+    let page = super::read_envelope::read_envelope(response)?.page?;
+    Some(RyeOsPageVm {
+        next_cursor: page.next_cursor,
+        total: page.total,
+        total_basis: page.total_basis,
+    })
+}
+
+/// How many rows a source holds in all, as its read envelope states it. The
+/// cursor is the client's to hold; no paging control reads it yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RyeOsPageVm {
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+    pub total_basis: super::read_envelope::EnvelopeTotalBasis,
+}
+
 /// The stated partial coverage of a source cut at the shared row limit. The
 /// sentence is the signed wording's `source_row_limit` reason, with `{limit}`
 /// and `{total}` filled in. Without loaded wording there is no limit to cut at.
@@ -832,6 +879,10 @@ pub enum RyeOsViewVm {
         /// render window around the cursor for large lists.
         #[serde(default)]
         total_rows: usize,
+        /// The page facts a shared read envelope reports: the next cursor, and
+        /// how many rows exist and on what basis. Absent for any other source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<RyeOsPageVm>,
         /// Service-reported collection coverage, separate from rendered row
         /// count. An absent or malformed report never implies completeness.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1717,6 +1768,7 @@ fn bound_view_vm_keyed(
                     source_status: source_status(core, &key).or_else(|| {
                         let response = core.data.sources.get(&key)?;
                         collection_shape_status(core, section.collection.as_ref(), response)
+                            .or_else(|| envelope_coverage_status(core, response))
                             .or_else(|| {
                                 row_cut_status(
                                     core,
@@ -1770,6 +1822,7 @@ fn bound_view_vm_keyed(
                         .and_then(|(_, source)| source.collection.as_ref()),
                     response,
                 )
+                .or_else(|| envelope_coverage_status(core, response))
                 .or_else(|| {
                     // A timeline is windowed by its own `older` count, not cut.
                     (binding.widget != "timeline")
@@ -2212,6 +2265,7 @@ fn bound_view_vm_keyed(
                 columns: column_labels,
                 column_roles,
                 total_rows,
+                page: envelope_page(response),
                 coverage: table_source_coverage(
                     binding,
                     response,

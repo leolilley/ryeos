@@ -727,7 +727,29 @@ impl RyeOsCore {
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     let mut data = data;
-                    if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                    if result_id >= floor
+                        && stored.is_none_or(|s| result_id >= s)
+                        && crate::ui::read_envelope::is_not_modified(&data)
+                    {
+                        // The server says the revision this client sent is
+                        // still current: the stored answer stays, and it
+                        // counts as freshly read.
+                        if self.data.sources.contains_key(tile_id) {
+                            self.data.source_errors.remove(tile_id);
+                            self.data
+                                .source_stored_epoch
+                                .insert(tile_id.clone(), result_id);
+                        } else {
+                            self.data.source_errors.insert(
+                                tile_id.clone(),
+                                crate::ui::effect::RyeOsUiError::definite(
+                                    "not_modified_without_rows",
+                                    "The source reported no change but this view holds no rows to keep"
+                                        .to_owned(),
+                                ),
+                            );
+                        }
+                    } else if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
                         // A timeline response of another contract version is
                         // refused whole; there is no reader for it.
                         if let Some(message) = self.timeline_refusal(tile_id, &data) {

@@ -433,6 +433,7 @@ mod tests {
             columns: vec!["thread".into()],
             column_roles: Vec::new(),
             total_rows: 1,
+            page: None,
             coverage: None,
             empty: None,
             provenance: None,

@@ -2016,6 +2016,35 @@ impl RyeOsCore {
         params
     }
 
+    /// A source that declares the `if_revision` parameter and holds a read
+    /// envelope sends that envelope's revision, so an unchanged source answers
+    /// `not_modified` and the held rows stay. A source with no held envelope
+    /// sends nothing.
+    fn with_if_revision(
+        &self,
+        source_key: &str,
+        source: &super::content::SourceBinding,
+        mut params: serde_json::Value,
+    ) -> serde_json::Value {
+        const IF_REVISION: &str = "if_revision";
+        if !source
+            .dynamic_parameters
+            .iter()
+            .any(|name| name == IF_REVISION)
+        {
+            return params;
+        }
+        let revision = self
+            .data
+            .sources
+            .get(source_key)
+            .and_then(super::read_envelope::stored_revision);
+        if let (Some(revision), Some(fields)) = (revision, params.as_object_mut()) {
+            fields.insert(IF_REVISION.to_string(), revision.into());
+        }
+        params
+    }
+
     /// Refetch a timeline source's whole window, after an incremental update
     /// that the stored window could not absorb.
     pub(crate) fn refetch_window_in_full(&mut self, source_key: &str) -> Vec<RyeOsEffect> {
@@ -2086,6 +2115,7 @@ impl RyeOsCore {
             return None;
         }
         let params = self.with_window_since(&source_key, source, params);
+        let params = self.with_if_revision(&source_key, source, params);
         if hint_single_flight
             && self.pending_effects.values().any(|kind| {
                 matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &source_key)

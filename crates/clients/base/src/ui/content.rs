@@ -1357,10 +1357,17 @@ pub fn source_collection<'a>(
     response: &'a Value,
 ) -> std::borrow::Cow<'a, [Value]> {
     use std::borrow::Cow;
-    let Some(spec) = binding
-        .primary_source()
-        .and_then(|(_, source)| source.collection.as_ref())
-    else {
+    let source = binding.primary_source().map(|(_, source)| source);
+    // A shared read envelope carries its own rows; no per-view path is needed,
+    // and a failed answer draws none.
+    if let Some(envelope) = super::read_envelope::read_envelope(response) {
+        if source.is_none_or(|source| source.collection.is_none())
+            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed
+        {
+            return Cow::Borrowed(envelope.records());
+        }
+    }
+    let Some(spec) = source.and_then(|source| source.collection.as_ref()) else {
         return Cow::Borrowed(&[]);
     };
     match read_collection(spec, response).0 {
@@ -1528,6 +1535,13 @@ pub fn source_collection_for_section<'a>(
     response: &'a Value,
 ) -> Vec<std::borrow::Cow<'a, Value>> {
     use std::borrow::Cow;
+    if let Some(envelope) = super::read_envelope::read_envelope(response) {
+        if section.collection.is_none()
+            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed
+        {
+            return envelope.records().iter().map(Cow::Borrowed).collect();
+        }
+    }
     match section.collection.as_ref() {
         // A `collection` path selects a sub-value of the response. An array is a
         // list source (one row per element); a single object is a detail source
@@ -2788,6 +2802,64 @@ mod tests {
             Some(RowCut { limit: 2, total: 3 })
         );
         assert_eq!(section_row_cut(&section, &response, Some(3)), None);
+    }
+
+    fn envelope_response(state: &str) -> Value {
+        json!({
+            "schema": "ryeos.read.test.rows/v1", "as_of": "t", "revision": "rev1:a",
+            "coverage": {"state": state, "reason": null},
+            "rows": [{"name": "a"}, {"name": "b"}],
+            "page": {"next_cursor": null, "total": 2, "total_basis": "exact"},
+            "signers": {}
+        })
+    }
+
+    #[test]
+    fn an_envelope_source_reads_its_rows_without_a_collection_path() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "sources": { "default": { "ref": "service:x" } },
+        }))
+        .unwrap();
+        let response = envelope_response("observed");
+        assert_eq!(source_collection(&binding, &response).len(), 2);
+        // The older shape with no path still yields nothing.
+        assert!(source_collection(&binding, &json!({"rows": [{}]})).is_empty());
+        // A failed answer draws no rows.
+        assert!(source_collection(&binding, &envelope_response("failed")).is_empty());
+    }
+
+    #[test]
+    fn an_envelope_source_obeys_the_shared_row_limit() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "sources": { "default": { "ref": "service:x" } },
+        }))
+        .unwrap();
+        let (rows, cut) =
+            source_collection_limited(&binding, &envelope_response("complete"), Some(1));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(cut, Some(RowCut { limit: 1, total: 2 }));
+    }
+
+    #[test]
+    fn a_section_without_a_path_reads_envelope_rows_and_a_record_is_one_row() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "t", "source_channel": "default", "projection": {"primary": "name"}
+        }))
+        .unwrap();
+        assert_eq!(
+            project_section(&section, &envelope_response("complete")).len(),
+            2
+        );
+        assert!(project_section(&section, &envelope_response("failed")).is_empty());
+        let one = json!({
+            "schema": "ryeos.read.test.one/v1", "revision": "r",
+            "coverage": {"state": "complete"}, "record": {"name": "solo"}
+        });
+        let rows = project_section(&section, &one);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "solo");
     }
 
     #[test]

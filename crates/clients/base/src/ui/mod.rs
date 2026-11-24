@@ -30,6 +30,7 @@ pub mod local_projection;
 pub mod model;
 pub mod presentation_initialization;
 pub mod presentation_state;
+pub mod read_envelope;
 pub mod reducer;
 mod reproof;
 pub mod seat;
