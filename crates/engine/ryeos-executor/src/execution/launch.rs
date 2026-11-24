@@ -44,8 +44,8 @@ mod terminal;
 
 use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
-    fallback_finalization, head_advance_not_applied_finalization, is_thread_terminal_status,
-    reconcile_terminal_finalization, runtime_terminal_status,
+    fallback_finalization, fallback_finalization_with_exit, head_advance_not_applied_finalization,
+    is_thread_terminal_status, reconcile_terminal_finalization, runtime_terminal_status,
 };
 
 const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: u64 = 256 * 1024;
@@ -8468,6 +8468,7 @@ async fn run_claimed_thread_row_inner(
     } else {
         lifecycle_owner.revoke_tokens_after_unsettled_wait();
     }
+    let runtime_exit = wait_result.exit;
     let spawn_result = wait_result.result;
 
     // Prune stale capabilities from other completed threads
@@ -9013,7 +9014,12 @@ async fn run_claimed_thread_row_inner(
             {
                 head_advance_not_applied_finalization(&thread_id, &runtime_result, not_applied)
             }
-            _ => fallback_finalization(&thread_id, &runtime_result, terminal_status),
+            _ => fallback_finalization_with_exit(
+                &thread_id,
+                &runtime_result,
+                terminal_status,
+                runtime_exit,
+            ),
         };
         runtime_result = fallback.runtime_result;
         if !retires_before_capture && state.state_store.dedicated_session(&thread_id)?.is_some() {
