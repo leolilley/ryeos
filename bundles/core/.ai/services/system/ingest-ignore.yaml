@@ -1,6 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:19Z:b3b226f43f7c8d2f02bec3dcd7ae353699cb21a56a24f174bd319e32af04e300:gtGFNtcsdFugcp2tIRgczdAo9bLtBXMhPu88ewZBJyXPveYqWvGjs1BR8PxR0wkIrioU0d7S/xSiN6c2j8aLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:a902e34e5611e85041264e8f3ed2df9b67a139d92994a7308eb1497fcd0ee690:+pUIhqgRtVQWkdaDb6yatHUDb+1xQ1Xr0R9bwv21iD28P9BXIqXeLmDbEfFp7qsIl9TwD921xJ+rSctvq51cAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: system.ingest-ignore
 required_caps: []
 description: "Get the remote node's ingest ignore rules"
+disclosure:
+  free_text:
+    - "/patterns"

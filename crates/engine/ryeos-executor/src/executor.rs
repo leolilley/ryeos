@@ -432,9 +432,6 @@ fn confirm_recorded_service_terminal(
     Ok(())
 }
 
-/// Build the exact daemon-owned terminal that the recorded service path will
-/// commit. The handler's live result remains untouched for its caller; only
-/// this durable terminal projection applies the frozen, kind-declared policy.
 /// What the caller of a service receives of its outcome. The operator gets
 /// the outcome whole. Any other caller gets the item's declared tier of an
 /// answer, or a refusal when the item declares none, and a failure shows only
@@ -495,6 +492,9 @@ fn disclose_service_result(
     }
 }
 
+/// Build the exact daemon-owned terminal that the recorded service path will
+/// commit. The handler's live result remains untouched for its caller; only
+/// this durable terminal projection applies the frozen, kind-declared policy.
 fn recorded_service_terminal_projection(
     thread_id: &str,
     dispatch_result: &Result<Value>,
@@ -1331,6 +1331,69 @@ pub async fn execute_service_verified(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn principal_tier(pointers: &[&str]) -> ryeos_node_runtime::disclosure::ServiceDisclosure {
+        ryeos_node_runtime::disclosure::ServiceDisclosure::parse(&serde_json::json!({
+            "principal": pointers,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_principal_receives_the_tier_and_never_an_unlisted_field() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let tier = principal_tier(&["/id", "/items/*/name"]);
+        let answer = serde_json::json!({
+            "id": "x",
+            "path": "/home/someone/secret",
+            "items": [{"name": "a", "path": "/etc/passwd"}],
+            "added_later": 1,
+        });
+        let shaped =
+            disclose_service_result(DisclosureClass::Principal, Some(&tier), Ok(answer.clone()))
+                .unwrap();
+        assert_eq!(
+            shaped,
+            serde_json::json!({"id": "x", "items": [{"name": "a"}]})
+        );
+        let operator =
+            disclose_service_result(DisclosureClass::Operator, Some(&tier), Ok(answer.clone()))
+                .unwrap();
+        assert_eq!(operator, answer);
+    }
+
+    #[test]
+    fn a_service_without_a_block_is_refused_to_a_principal_but_not_the_operator() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let answer = serde_json::json!({"id": "x"});
+        let refused = disclose_service_result(DisclosureClass::Principal, None, Ok(answer.clone()))
+            .unwrap_err();
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&refused),
+            Some(ryeos_app::handler_error::HandlerError::Forbidden(_))
+        ));
+        assert_eq!(
+            disclose_service_result(DisclosureClass::Operator, None, Ok(answer.clone())).unwrap(),
+            answer
+        );
+    }
+
+    #[test]
+    fn a_failure_reaches_a_principal_as_a_fixed_sentence_without_its_text() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let tier = principal_tier(&["/id"]);
+        let failed = disclose_service_result(
+            DisclosureClass::Principal,
+            Some(&tier),
+            Err(anyhow::anyhow!(
+                "read_failed: could not read /home/someone/secret"
+            )),
+        )
+        .unwrap_err();
+        let shown = format!("{failed:#}");
+        assert!(!shown.contains("/home/someone"), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
+    }
 
     #[test]
     fn service_invocation_identity_is_a_distinct_strict_coordinate() {

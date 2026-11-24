@@ -1,7 +1,49 @@
-# ryeos:signed:2026-08-11T02:28:44Z:be5b0d8a83ef6ade36a438e01e2bf1e9e1590dea5f2008ee32dca891285ce902:MjVGiNWGRzZkxFzXgzQwsFGQ6+dgDPylp5pgh+93xsadLPNyOaduFgjqCC8MI8AccryYpTqyGMFa1FFHyhjpDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:9a0b54a9d15d28b150ac2b5710558d3f3012ba7458591a4ccb020f2e707dfcf1:kneCVk5a3gG7mbXRzLtycalJLydaXjUtss1x5v6skwZSQyXnQMkf9NB5EA4VXynjfwyCg29FsMSwYx/rYaWNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "explain"
 kind: service
 endpoint: scheduler.explain
 required_caps: []
 description: "Explain a schedule's current planning state"
+disclosure:
+  principal:
+    - /schedule_id
+    - /item_ref
+    - /schedule_type
+    - /expression
+    - /timezone
+    - /enabled
+    - /registered_at
+    - /misfire_policy
+    - /overlap_policy
+    - /lateness_grace_secs
+    - /now
+    - /last_scheduled_at
+    - /last_dispatched_at
+    - /current_due_at
+    - /current_due_within_grace
+    - /misfire_horizon_exclusive
+    - /next_fire_at
+    - /cursor_last_scheduled_at
+    - /cursor_next_fire_at
+    - /cursor_updated_at
+    - /cursor_fresh
+    - /decision
+    - /decision_reason
+    - /total_fires
+    - /lifetime
+    - /authority/valid
+    - /authority/refusal
+    - /authority/outcome
+    - /authority/expires_at
+    - /last_fire/fire_id scheduled_at reserved_at dispatched_at completed_at thread_id status trigger_reason outcome schedule_spec_hash admitted_capsule_hash
+  free_text:
+    - /ref_bindings
+    - /signer_fingerprint
+    - /execution
+    - /limits
+    - /paused_reason
+    - /authority/detail
+    - /authority/error
+    - /last_fire/signer_fingerprint
+    - /last_fire/project_authority

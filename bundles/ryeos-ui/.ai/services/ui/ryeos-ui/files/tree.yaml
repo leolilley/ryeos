@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:16Z:2ed172cbc3e2ef9e97a14fc636af8acf00d3fe6af70a90cd7911b9fddbc78b9b:p6O4d+OFYKh220px7JPbtuYN7aS1RWcmK75grIYIAEZ0Tyi+tuEbvbyVlXuaxD/orjeNBQRec+DitSSayKL+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:670d9150ff45026375e6f81f4b72cf5001b02c59db30effc35feb8ea0156d228:vrCOYnYbbxGNoX4E0owxIMQrwHfAMApXut5Tjw/AbDyijCe03VzjYYTj0XRG8mWORGvdr7ulbPj4tlI1BtaCDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/tree
 version: "1.0.0"
@@ -8,3 +8,5 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+# Every entry is a filesystem path or file name; a principal receives nothing.
+disclosure: {}

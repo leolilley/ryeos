@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:15:18Z:b0ccf4ed90dc985efce98affe93afafc0c020459685c6863206256b001415aef:ItRuZJg0wXLgG+1Wbs8t/wxuJflR3dLf+kxLcmRAfVCpYNzr3sapsI4zjit8QYZiCC+7VFh0wheyYfzpIeLlCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:b7ebcdaf3f21d3eb3e0402f08df85d30be294d137b783418c6f266617539b079:z54KolNEgoKkUHkDkdcHPXXmp7rE8sebJzsDcP3lUU+n/DyUWjU+EAUrvcyhfgt/6g/dpowZAUJZGwPjndsbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/timeline/raw
 version: "1.0.0"
@@ -8,3 +8,21 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /events/*/event_id
+    - /events/*/event_hash
+    - /events/*/chain_seq
+    - /events/*/thread_id
+    - /events/*/thread_seq
+    - /events/*/event_type
+    - /events/*/storage_class
+    - /events/*/ts
+    - /chain_root_id
+    - /from_chain_seq
+    - /to_chain_seq
+    - /truncated
+  free_text:
+    - /events/*/payload
+    - /events/*/prev_chain_event_hash
+    - /events/*/prev_thread_event_hash

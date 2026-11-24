@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:c923a0d4fb1ba330c28c799c08d8bb44896501de9370a09d84ffeb65d0d1cbee:Hc6cFPhL2p4HPHcz4HRQJwxdiaOpyhHNtBf6XT8LN8X8/gC0zFVumRZh9EQTgJdd2trzAauN3b/i9ukyUL7JBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:5aa6787fcd10d865dd2224d7f35b114d546e63d938ebef91fe25be1ad85a09e2:JOw1twfxPtS7NSCkMa5oy8zKzPHClPL08+VpMlnxY4c9X4rDTbBF/uTUb+f6UysqP9v03ocK9QYi+FLq6W5nCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/recent/list
 version: "1.0.0"
@@ -8,3 +8,8 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /version
+    - /recent_projects/*/local_id
+    - /recent_projects/*/opened_at

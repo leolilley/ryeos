@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:29:33Z:29d6a8c9ac7fe1629eca8a9d855e9017ee1c1b4e42b06b68b26823cbf4adee07:GBAGyM/GPrpF2We9lrPnkYtyhO2jxlQ/P3VuG/CsySaaeLJmCUgBLZ+vkZvllFfF64XuzWw4h1PLYT5M8RlyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:5813cc6513d92d8326fb8a4ea99dd302332ee4c251244ddbbaf58990294d1b00:wP6vu/QEFnm9By17Uf8yRQfrdskK7AJpczUIMRaIFjeZdJ4TA9A17evLrI8X12ed9vBmwyGPNzLhSlCnze2VBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/usage
 version: "1.0.0"
@@ -11,3 +11,21 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /totals/*/label
+    - /totals/*/value
+    - /chains/*/chain_root_id
+    - /chains/*/item_ref
+    - /chains/*/status
+    - /chains/*/updated_at
+    - /chains/*/summary
+    - /chains/*/input_tokens
+    - /chains/*/output_tokens
+    - /chains/*/spend_usd
+    - /chains/*/completed_turns
+    - /chains/*/thread_count
+    - /coverage/state
+    - /coverage/reason
+    - /coverage/observed_threads

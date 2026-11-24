@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:34:37Z:da47787605b36c49415308a7fba0247fdaa121421953ad6d9d1c40b93374bb8d:MCQYdBAbaKbtZinGa1AckIeOIS4YFqR3bXQWyRdZzdsdJuvtCZoiNcbh/K0jPM2nNdzjfkd3nt+ySnzsE/XeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:5b72ebbaf2f66cd9fd5677b7132c1809e9f19d49c45cd64f6353f6e8613e06c5:BP/JEfyBawTwjseXSBD2FfceWVDE16SzPvpIhrtC2eubm9awvU45Y2Jmh/UMbXLbXlTtEJX031xIsbmdPLVNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/attention
 version: "1.0.0"
@@ -8,3 +8,50 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /attention/*/schema_version
+    - /attention/*/id
+    - /attention/*/kind
+    - /attention/*/subject
+    - /attention/*/title
+    - /attention/*/tone
+    - /attention/*/state
+    - /attention/*/since_ms
+    - /attention/*/expires_at_ms
+    - /attention/*/actions
+    - /attention/*/detail/approval_id
+    - /attention/*/detail/worker_boot_epoch
+    - /attention/*/detail/request_digest
+    - /attention/*/detail/operation_class
+    - /attention/*/detail/candidate_snapshot_hash
+    - /attention/*/detail/candidate_validation_hash
+    - /attention/*/detail/candidate_evaluation_hash
+    - /attention/*/detail/item_ref
+    - /attention/*/detail/status
+    - /counts/total
+    - /counts/by_kind
+    - /counts/chains
+    - /counts/chains_truncated
+    - /running/count
+    - /running/label
+    - /running/tone
+    - /running/chains
+    - /running/chains_truncated
+    - /running/items/*/id
+    - /running/items/*/title
+    - /running/items/*/tone
+    - /running/items/*/item_ref
+    - /running/items/*/subject
+    - /running/items/*/state
+    - /running/items/*/since_ms
+  free_text:
+    - /attention/*/project_root
+    - /attention/*/detail/summary
+    - /attention/*/detail/requested_authority
+    - /attention/*/detail/publication_result
+    - /attention/*/detail/project_root
+    - /counts/by_project
+    - /running/by_project
+    - /running/items/*/project_root

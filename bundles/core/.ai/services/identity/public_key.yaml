@@ -1,6 +1,15 @@
-# ryeos:signed:2026-08-18T22:04:38Z:d69eed18525c1ce479c93ae99bc24b4dbdd87132a608c69df752c0f5f820d9c5:nSxlRtWuv1EycPSJe90zuk1r1o4n3Cf2uA3FW+9GEPuPb7gf/NYOpCkp9W8Zo3Vy6WA+n8PXCmQCV8KVK9NVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:fa67806a18d54d153ef96c53544f8fbdaf05334aa96f24e175f3aed21d0d5ed7:gBJ5RxY9Ek9erJNB3hyrlDAy8tlsXGP7vSh+2l930W9WbxJmCCPRxuxPLJt3wkEYXZOTJ4+/LUC/RKIh1PdeDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.public_key
 required_caps: []
 record_thread: false
 description: "Return the node's public identity document"
+disclosure:
+  principal:
+    - "/principal_id"
+    - "/fingerprint"
+    - "/signing_key"
+    - "/site_id"
+    - "/version"
+  free_text:
+    - "/vault_fingerprint"

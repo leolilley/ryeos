@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:10Z:837792e0805d1e6d4e52be592b6701a920ca5d9c8e78a11b03e72b73c9dab904:rNPs8JCJnvjbPtut9MB65O3c39IJjmQgottLCTVP3gEha/Fga5LVCwZE7lhsP5KJvsW9nj8u8KMqwKS8+dpiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:06222f9887b680de1c395300d17d3a7bfe38083dd72a065ea3b9e1fa09a29720:benqIXkpeaZ68LcWtPDsRO/k1UC8WWo5Zimj2frDZ8oaVCIMpZA40n9pk5I4v/zw8cFFmP2H8Ot1ATcXFUrlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "events"
 name: "chain_replay"
 kind: service
@@ -12,3 +12,24 @@ schema:
   after_chain_seq: integer?
   limit: integer?
 description: "Replay events for a chain (by chain_root_id)"
+disclosure:
+  principal:
+    - "/events/*/event_id"
+    - "/events/*/event_hash"
+    - "/events/*/chain_root_id"
+    - "/events/*/chain_seq"
+    - "/events/*/thread_id"
+    - "/events/*/thread_seq"
+    - "/events/*/event_type"
+    - "/events/*/storage_class"
+    - "/events/*/ts"
+    - "/events/*/prev_chain_event_hash"
+    - "/events/*/prev_thread_event_hash"
+    - "/next_cursor"
+    - "/summary/status"
+    - "/summary/input_tokens"
+    - "/summary/output_tokens"
+    - "/summary/spend_usd"
+    - "/summary/turns"
+  free_text:
+    - "/events/*/payload"

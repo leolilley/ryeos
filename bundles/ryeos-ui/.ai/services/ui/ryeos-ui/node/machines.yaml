@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T05:28:58Z:b5288cedbccb71ff05f7f1fc4b8195aa94725663847434aa245d511388dd0fcb:6xvEE7+ggBpMUqKFpW3VyJNO+ikaoT8RV9y9WS5cokpw1Zwz4iWTyJFGfbRPJF4WmHCGUahDnug8R5hYdAjUAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:b5f310a2f8009270f1c9fdf1576a5a9e29ff00289cdf4acbd553d8e54bcb90b8:4ehQRlSWzeJ60Gn/u20oFv17N6pr7Szke66noqzRcoEOhFn7ikne8Q62vl+t1BybyhCvGSs0OkwU8enbmhy9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/machines
 version: "1.0.0"
@@ -13,3 +13,37 @@ record_thread: false
 availability: daemon_only
 required_caps:
   - ryeos.execute.service.node/locality/groups
+disclosure:
+  principal:
+    - /schema
+    - /as_of
+    - /rows/*/id
+    - /rows/*/parent
+    - /rows/*/kind
+    - /rows/*/node_id
+    - /rows/*/member_kind
+    - /rows/*/answer
+    - /rows/*/status
+    - /rows/*/state
+    - /rows/*/state_text
+    - /rows/*/place
+    - /rows/*/as_of
+    - /rows/*/declared
+    - /rows/*/disagrees
+    - /rows/*/this_computer
+    - /rows/*/reason
+    - /rows/*/code
+    - /rows/*/facts/*/grade
+    - /rows/*/facts/*/reason
+  free_text:
+    - /rows/*/name
+    - /rows/*/label
+    - /rows/*/disagreeing
+    - /rows/*/declared_missing
+    - /rows/*/relations_text
+    - /rows/*/disagreeing_text
+    - /rows/*/missing_text
+    - /rows/*/facts_text
+    - /rows/*/facts/*/text
+    - /rows/*/facts/*/shared_with
+    - /rows/*/facts/*/shared_with_names

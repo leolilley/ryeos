@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:67d7d2c14d860131e1cf606e887b6cf18701fab9fa840552ba86bd8be59f35aa:Z52GXwnP+8IYpnCFHvgCfMBt4OI+QUb9k2PoLsqMr1hLofGGalvSz2ImrjrrKR4whq+RnlrMm94lOoT84h6ZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:2c2dc54aa263b57dcf14f12dd2b4d48d5e6c14bd68485aa52319210cdd2bc6bd:KmQffA5fx3TAuEy9REWrh26gGrgA0ytHHkcEC3+m6idey9BPfcyJwj+7wv1LohOUoi1eLRvaS6Z7QcC8XRUuCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/projects/list
 version: "1.0.0"
@@ -8,3 +8,15 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /version
+    - /projects/*/local_id
+    - /projects/*/added_at
+    - /projects/*/exists
+    - /projects/*/current
+    - /projects/*/registered
+  free_text:
+    - /projects/*/name
+    - /projects/*/root
+    - /projects/*/tags

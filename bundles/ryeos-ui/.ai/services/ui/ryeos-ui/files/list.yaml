@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:4bcf26df2035b7b72a8510a99958d1c6137e3ef2fa839781a43fff5244a60b8b:rC9GkE/UzCpNWT6+PypHdZtvjmK5jtSY/e3+x01xDU+4thKwiedUBeS3zUOHlVfn4DPD0z2vTVcIRBiCYTUpDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:fdb09e9a9c0f8e044980c43eaea6eb1b6ee4b8cbc79c3e27606c91b57222e62b:Zrn7btxvJj7XX4Y4H8nIUFv5hlUJf2EjU1hm44tyHvxqx4sIHMU/7rs84tlp3aIlJjsfTC7W29JEwODFCHy2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/list
 version: "1.0.0"
@@ -8,3 +8,23 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/root"
+    - "/truncated"
+    - "/entries/*/is_dir"
+    - "/entries/*/size"
+    - "/coverage/exhausted"
+    - "/coverage/work_used"
+    - "/coverage/max_work"
+    - "/coverage/directory/coverage"
+    - "/coverage/directory/names_read"
+    - "/coverage/directory/reported"
+    - "/coverage/directory/excluded"
+    - "/coverage/directory/vanished"
+    - "/coverage/directory/failed_entries"
+    - "/coverage/directory/changed"
+  free_text:
+    - "/path"
+    - "/entries/*/name"
+    - "/coverage/directory/failure"

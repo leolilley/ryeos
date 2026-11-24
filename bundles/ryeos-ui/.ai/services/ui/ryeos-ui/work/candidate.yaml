@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:16:49Z:a0f7f29663bf9b06a5e6a8f57ec6c461f86338c0d5539702e5879ac8a41d5d5f:8aipUv2llcsvnysQHbkDfFjwyeeBUO+cYDr1GDj1RCYxMEZs3XUey39R02WNFejtp6uRvk90rjdDoouBUJ/WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:0765387d6e46fd4a89f369bb9ec45d098ffade27fc10dd879f673fd4b0d6f762:fmdT/WkQnqh6kweP6I4U2L0gQUAHAjdH63z8OYYwKUuQDB5qWbowCgc3nD+7SjmFIrw45QJg4zO+s4Mgz026Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/candidate
 version: "1.0.0"
@@ -8,3 +8,29 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /availability
+    - /candidates/*/schema_version
+    - /candidates/*/chain_root_id
+    - /candidates/*/placement_thread_id
+    - /candidates/*/state
+    - /candidates/*/candidate_disposition
+    - /candidates/*/candidate_snapshot_hash
+    - /candidates/*/base_snapshot_hash
+    - /candidates/*/candidate_validation_hash
+    - /candidates/*/candidate_evaluation_hash
+    - /candidates/*/evaluation_accepted
+    - /candidates/*/evaluator_item_ref
+    - /candidates/*/evaluator_definition_digest
+    - /candidates/*/evaluator_result_digest
+    - /candidates/*/completion
+    - /change_summary/schema_version
+    - /change_summary/state
+    - /change_summary/total
+    - /change_summary/truncated
+  free_text:
+    - /candidates/*/publication_result
+    - /candidates/*/terminal_reason
+    - /changes

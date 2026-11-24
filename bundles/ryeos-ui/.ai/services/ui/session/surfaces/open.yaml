@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:9123cc33128216b800a4ce36b8baf93a493a44054a68eec2cee3fe3e49038bf4:vpyHnizSmGhH//DN9gJs25NwstAdikWFT5LHbohOoNZ5rYGfRx15T1Y5LjR5nzJKJ67rKgnD6tYUtqM9THJfDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:4eac0d3318dfd4f2e0363968706f4ed6a28c31d56ab1f2b348b90ce6b0d21562:Fn7D/3XfjgRKofwpqUgk97ZOZAi3hBsKQVIRxaul2f2Ivums5EBQ0baWBQhCHyjDcgr+1H+WV1tFrRsj9E6TDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/session/surfaces/open"]
 name: session/surfaces/open
@@ -12,3 +12,15 @@ schema:
   creation_request_id: string
   selection: object
   placement: object
+# Session-local transition: a principal gets the acknowledgement only; the descriptors carry titles, project paths and binding material.
+disclosure:
+  principal:
+    - /ui_transition/kind
+    - /ui_transition/presentation_id
+    - /ui_transition/creation_request_id
+  free_text:
+    - /project
+    - /ui_transition/surface
+    - /ui_transition/attachment
+    - /ui_transition/tab_attachments
+    - /ui_transition/opening

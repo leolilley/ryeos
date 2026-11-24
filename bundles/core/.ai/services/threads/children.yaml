@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:46Z:b9994a683c87e872a56cfe5849b3a0c958ef183337f3d7113a76f7277a752b91:Vnfhxvyedbws2jiE7fH2XSpLV4MG3obwoE1JxWHAjn248Dd1Bj52Apg6RkYlJ4QfNVB0MuR+snHErdr5dAHHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:2ae02390006de1b12fca87d102b064f19018ec8a8fb59190de4a2fb8950d9e27:XobXbpHf2jA1l5XzaBD11JByTYG5EtTaHvuzUTgN1JZC3zeH1w0ri10vzRfchtNyg8sVpH9FZjdmdqQ8gCAdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "children"
 kind: service
@@ -8,3 +8,41 @@ required_caps: []
 schema:
   thread_id: string
 description: "List child threads of a parent thread"
+disclosure:
+  principal:
+    - "/children/*/thread_id"
+    - "/children/*/chain_root_id"
+    - "/children/*/kind"
+    - "/children/*/status"
+    - "/children/*/item_ref"
+    - "/children/*/executor_ref"
+    - "/children/*/launch_mode"
+    - "/children/*/current_site_id"
+    - "/children/*/origin_site_id"
+    - "/children/*/upstream_thread_id"
+    - "/children/*/successor_thread_id"
+    - "/children/*/created_at"
+    - "/children/*/updated_at"
+    - "/children/*/started_at"
+    - "/children/*/finished_at"
+    - "/children/*/pending"
+    - "/children/*/execution/supports_continuation"
+    - "/children/*/execution/supports_operator_followup"
+    - "/children/*/follow/role"
+    - "/children/*/follow/display_state"
+    - "/children/*/follow/phase"
+    - "/children/*/follow/child_thread_id"
+    - "/children/*/follow/child_chain_root_id"
+    - "/children/*/follow/child_terminal_status"
+  free_text:
+    - "/children/*/requested_by"
+    - "/children/*/project_root"
+    - "/children/*/project/path"
+    - "/children/*/project/name"
+    - "/children/*/project_authority"
+    - "/children/*/lifecycle_authority"
+    - "/children/*/admitted_launch_capsule_hash"
+    - "/children/*/result_project_snapshot_hash"
+    - "/children/*/result_workspace_output_capture_hash"
+    - "/children/*/runtime"
+    - "/children/*/follow/follow_node"

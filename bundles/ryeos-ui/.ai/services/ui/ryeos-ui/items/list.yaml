@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:c81a81bc4a31ed24f8c9f77d74d93c90e5eea7f114456aefb1f4b53e56375303:yDeHRqh4PztFcMsDPFYVRAOp9L/h6GMXNmyi6APDEl1jVZaFPFflW2heZq6YMdcWbPcsgIyfu1+v8eEqJ+ZUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:589b04bccce91ad67b8726aea1d6552f2c006c54c3c266c6ae7a19e46f1ec633:1SN6oT1s4KxEamNG/0SC0LKUwwb6YCAtkPKxB0jLMQ8PYtbyfSdOxEZgYVR5aBL3V8C/P8M2/yvPteA0KBgqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/items/list
 version: "1.0.0"
@@ -8,3 +8,24 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /counts/by_kind/*
+    - /counts/by_space/*
+    - /items/*/domain
+    - /items/*/canonical_ref
+    - /items/*/item_kind
+    - /items/*/bare_id
+    - /items/*/label
+    - /items/*/title_source
+    - /items/*/namespace
+    - /items/*/space
+    - /items/*/executable
+    - /items/*/trust/class
+  free_text:
+    - /items/*/title
+    - /items/*/source_path
+    - /items/*/trust/signer
+    - /items/*/trust/reason
+    - /items/*/shadowed

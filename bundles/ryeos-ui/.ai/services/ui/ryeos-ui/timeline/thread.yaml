@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T07:56:53Z:ab3921d33b1decb16b16dd3b21b9316f27e4759d0879e0e33a313db9d63f0912:WbarEqJQIze/VhFSitFEl7owPi6fvID2uKw75e/kZNbFdN3lZ+9JXIRSs8lzTFc87a4BPJxAAuqJ0WhmWSSACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:2d5bbb1efe6b9d5c4898be2936f102a51baac9f6777a7cc9f32a703c9b63a4c2:hYWXsRgGYbZR+a7Be5dVOeLp2S3HWNOy5vlHEO1dJGDDA35IYCHoKTP1rGUO9UZqI571dhaclT97CdCZ/hOQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/timeline/thread
 version: "1.0.0"
@@ -8,3 +8,19 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /timeline_contract
+    - /chain_root_id
+    - /definition_ref
+    - /definition_digest
+    - /highest_chain_seq
+    - /older
+    - /next_limit
+    - /summary
+    - /notice_noun
+    - /lane
+  free_text:
+    - /items
+    - /order
+    - /undeclared

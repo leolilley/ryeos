@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:b5f042eff332c54417cd455a3b315a2d060ac96eba406f78f70e50660c619610:4OLyXXXzF+x/4vh4P/jYi3B7K2hi2UytvGR56UL7GHO33xlBiyfBU7hwzrlqTUi0f7M4nPDfNHt5IqcoYr1MDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:a228b82a11a2a95058a1ac18cae0be04271ee027361e00c9b0a52aa0d9a2a322:Dn/sA4bOhaLfWV31VMps/yEkSEtu4Xwfg+2qyIFd0mUK15/QRJV0clPTm6Um7JzsOr7udZ+tTLWlKV9FiiMBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: invocations/dispatch
 version: "1.0.0"
@@ -7,3 +7,14 @@ endpoint: ui.invocations.dispatch
 availability: daemon_only
 required_caps: []
 record_thread: false
+disclosure:
+  principal:
+    - "/status"
+    - "/target/kind"
+    - "/target/ref"
+    - "/invocation_id"
+    - "/binding_attachment_id"
+    - "/binding_generation"
+    - "/binding_digest"
+  free_text:
+    - "/result"
