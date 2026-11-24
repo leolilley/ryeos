@@ -440,10 +440,12 @@ pub(crate) async fn endorse_items(
         let not_after = lifetime_secs
             .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs)));
         if let Some(not_after) = &not_after {
-            eprintln!(
-                "standing endorsement of {} in {project_text}, ending {not_after}",
-                kinds.join(", ")
-            );
+            console
+                .info(&crate::tty::Diagnostic::info(format!(
+                    "standing endorsement of {} in {project_text}, ending {not_after}",
+                    kinds.join(", ")
+                )))
+                .map_err(CliError::Io)?;
         }
         EndorsementBody::standing(
             &project_identity,
