@@ -2468,6 +2468,58 @@ pub fn profile_allows_accept(
     Ok(contract_allows_accept(&profile.contract, operation_class))
 }
 
+/// Why an owner's accept is not taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    /// The retained request was not offered as acceptable (the worker's own
+    /// report says so; it can only narrow).
+    NotOffered,
+    /// The admitted profile does not let this class of request be accepted.
+    RefusedByProfile { operation_class: String },
+}
+
+/// Whether an owner's accept of a pending approval may be taken: the worker's
+/// report must allow it AND the admitted profile must. `None` means it may.
+pub fn check_accept(
+    state: &AppState,
+    capsule_hash: &str,
+    operation_class: &str,
+    requested_authority: &Value,
+) -> Result<Option<AcceptRefusal>> {
+    if requested_authority
+        .get("accept_allowed")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(Some(AcceptRefusal::NotOffered));
+    }
+    if !profile_allows_accept(state, capsule_hash, operation_class)? {
+        return Ok(Some(AcceptRefusal::RefusedByProfile {
+            operation_class: operation_class.to_owned(),
+        }));
+    }
+    Ok(None)
+}
+
+/// Whether surfaces may offer accept for a request of this class in this
+/// session: the admitted profile's ceiling, failing closed when the session or
+/// its profile cannot be read.
+pub fn approval_accept_ceiling(
+    state: &AppState,
+    placement_thread_id: &str,
+    operation_class: &str,
+) -> bool {
+    state
+        .state_store
+        .dedicated_session(placement_thread_id)
+        .ok()
+        .flatten()
+        .and_then(|session| {
+            profile_allows_accept(state, &session.admitted_capsule_hash, operation_class).ok()
+        })
+        .unwrap_or(false)
+}
+
 fn contract_allows_accept(contract: &Value, operation_class: &str) -> bool {
     let rules: Vec<&Value> = contract
         .get("server_requests")

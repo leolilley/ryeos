@@ -6226,13 +6226,11 @@ async fn approvals(
                 "requested_authority":{
                     let mut public = ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority);
                     // Offer accept only where the admitted profile allows it too.
-                    if !ryeos_app::dedicated_session_service::profile_allows_accept(
+                    if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
                         &state,
-                        &session.admitted_capsule_hash,
+                        &approval.placement_thread_id,
                         &approval.operation_class,
-                    )
-                    .map_err(internal)?
-                    {
+                    ) {
                         public["accept_allowed"] = Value::Bool(false);
                     }
                     public
@@ -6883,36 +6881,36 @@ async fn resolve_approval(
             "approval request digest does not match pending authority".into(),
         ));
     }
+    // The worker's report is not the ceiling: whether this class of request may
+    // be accepted at all is the admitted, frozen profile's rule, and the
+    // worker's own report can only narrow it.
     if req.accept
-        && approval
-            .requested_authority
-            .get("accept_allowed")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return Err(HandlerError::BadRequest(
-            "the admitted structured-session contract does not allow accepting this authority delta".into(),
-        ));
-    }
-    // The worker's report is not the ceiling. Whether this class of request
-    // may be accepted at all is the admitted, frozen profile's rule.
-    if req.accept
-        && !ryeos_app::dedicated_session_service::profile_allows_accept(
+        && let Some(refusal) = ryeos_app::dedicated_session_service::check_accept(
             &state,
             &session.admitted_capsule_hash,
             &approval.operation_class,
+            &approval.requested_authority,
         )
         .map_err(internal)?
     {
-        return Err(HandlerError::Structured {
-            code: "approval_accept_refused_by_profile".to_owned(),
-            status: 403,
-            body: json!({
-                "code": "approval_accept_refused_by_profile",
-                "error": "the admitted profile does not let this class of request be accepted \
-                          (its rule is deny-only, or the profile names no rule for it); decline it",
-                "operation_class": approval.operation_class,
-            }),
+        return Err(match refusal {
+            ryeos_app::dedicated_session_service::AcceptRefusal::NotOffered => {
+                HandlerError::BadRequest(
+                    "the admitted structured-session contract does not allow accepting this authority delta".into(),
+                )
+            }
+            ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByProfile {
+                operation_class,
+            } => HandlerError::Structured {
+                code: "approval_accept_refused_by_profile".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_accept_refused_by_profile",
+                    "error": "the admitted profile does not let this class of request be accepted \
+                              (its rule is deny-only, or the profile names no rule for it); decline it",
+                    "operation_class": operation_class,
+                }),
+            },
         });
     }
     let request_id = approval
