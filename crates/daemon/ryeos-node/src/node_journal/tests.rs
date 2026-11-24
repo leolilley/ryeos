@@ -507,10 +507,11 @@ fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
     let fx = Fixture::new();
     let digest = "a".repeat(64);
     let endorser = format!("fp:{}", "b".repeat(64));
+    let project = format!("{endorser}/alpha");
     let facts = EndorsementFacts {
         digest: &digest,
         actor: &endorser,
-        project: "/srv/projects/alpha",
+        project: &project,
         target: "items",
         count: 3,
         ledger_head: &"c".repeat(64),
@@ -534,7 +535,7 @@ fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
         assert_eq!(record.body.attested_by, None);
         assert_eq!(record.body.detail["count"], 3);
         assert_eq!(record.body.detail["target"], "items");
-        assert_eq!(record.body.detail["project"], "/srv/projects/alpha");
+        assert_eq!(record.body.detail["project"], project.as_str());
     }
     assert_eq!(revoked.body.detail["reason"], "withdrawn");
     assert!(!accepted.body.detail.contains_key("reason"));

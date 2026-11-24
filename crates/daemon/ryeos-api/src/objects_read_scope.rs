@@ -49,8 +49,16 @@ pub const OBJECT_NOT_IN_SCOPE: &str = "object_not_in_scope";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadRoot {
-    /// The caller's own head of `project_path`, with that head's history.
-    ProjectHead { project_path: String },
+    /// One of the caller's own heads, with that head's history. The owner is
+    /// never chosen here: another owner's head is not readable. A caller that
+    /// bound the project may assert the owner it recorded (`expected_owner`);
+    /// it is compared with this node's resolver and refused as
+    /// `remote_owner_changed` on a difference, never used as the owner.
+    ProjectHead {
+        project: ryeos_state::project_identity::PushedProject,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
+    },
     /// A thread the caller owns.
     ThreadResult { thread_id: String },
     /// An installed bundle's exported files.
@@ -67,7 +75,7 @@ pub enum ReadRoot {
 impl ReadRoot {
     fn describe(&self) -> String {
         match self {
-            Self::ProjectHead { project_path } => format!("project_head {project_path}"),
+            Self::ProjectHead { project, .. } => format!("project_head {project}"),
             Self::ThreadResult { thread_id } => format!("thread_result {thread_id}"),
             Self::BundleExport { bundle_name } => format!("bundle_export {bundle_name}"),
             Self::Placement { placement_id } => format!("placement {placement_id}"),
@@ -140,7 +148,10 @@ pub fn resolve_scope(
     ctx.require_verified()
         .map_err(|_| not_in_scope("an unauthenticated caller has no readable root"))?;
     let resolved = match root {
-        ReadRoot::ProjectHead { project_path } => resolve_project_head(project_path, ctx, state)?,
+        ReadRoot::ProjectHead {
+            project,
+            expected_owner,
+        } => resolve_project_head(project, expected_owner.as_ref(), ctx, state)?,
         ReadRoot::ThreadResult { thread_id } => resolve_thread_result(thread_id, ctx, state)?,
         ReadRoot::BundleExport { bundle_name } => resolve_bundle_export(bundle_name, ctx, state)?,
         ReadRoot::Placement { placement_id } => resolve_placement(placement_id, ctx, state)?,
@@ -207,19 +218,20 @@ pub fn require_large_object_in_scope(
 // ── root resolution ────────────────────────────────────────────────────────
 
 fn resolve_project_head(
-    project_path: &str,
+    project: &ryeos_state::project_identity::PushedProject,
+    expected_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<ResolvedRoot, HandlerError> {
-    let canonical = ryeos_executor::execution::project_source::canonical_project_ref(project_path)
-        .map_err(|error| HandlerError::BadRequest(format!("project_path: {error}")))?;
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)
-        .map_err(|_| not_in_scope("the caller has no project head namespace"))?
-        .to_owned();
-    let project_hash = lillux::sha256_hex(canonical.as_bytes());
+    ryeos_app::project_owner::require_expected_owner(state, &ctx.fingerprint, expected_owner)
+        .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+    // The caller's own head only: the owner is the authenticated principal.
+    let owner = ryeos_app::project_owner::owner_principal(state, &ctx.fingerprint)
+        .map_err(|_| not_in_scope("the caller has no project head namespace"))?;
+    let key = project.head_key(&owner);
     let head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+        .with_state_db(|db| db.read_project_head(&key))
         .map_err(internal)?;
     // An absent head is a project that was never pushed: the root exists and
     // reaches nothing. A push in progress asks `objects/has` here; everything
@@ -552,14 +564,25 @@ mod tests {
     #[test]
     fn root_serialises_with_its_kind_tag_and_rejects_unknown_fields() {
         let root: ReadRoot = serde_json::from_value(serde_json::json!({
-            "kind": "project_head", "project_path": "/p"
+            "kind": "project_head", "project": {"kind": "named", "name": "p"}
         }))
         .unwrap();
         assert_eq!(
             root,
             ReadRoot::ProjectHead {
-                project_path: "/p".into()
+                project: ryeos_state::project_identity::PushedProject::Named {
+                    name: ryeos_state::project_identity::ProjectName::new("p").unwrap()
+                },
+                expected_owner: None,
             }
+        );
+        assert!(
+            serde_json::from_value::<ReadRoot>(serde_json::json!({
+                "kind": "project_head",
+                "project": {"kind": "named", "name": "p"},
+                "owner": "fp:x"
+            }))
+            .is_err()
         );
         assert!(
             serde_json::from_value::<ReadRoot>(serde_json::json!({

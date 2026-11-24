@@ -28,14 +28,19 @@ pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
 }
 
 fn empty_engine() -> Arc<ryeos_engine::engine::Engine> {
-    Arc::new(ryeos_engine::engine::Engine::new(
-        KindRegistry::empty(),
-        ryeos_engine::parsers::ParserDispatcher::new(
-            ryeos_engine::parsers::ParserRegistry::empty(),
-            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-        ),
-        Vec::new(),
-    ))
+    Arc::new(
+        ryeos_engine::engine::Engine::new(
+            KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        )
+        // No signers, and a node registry with no recorded succession: every key
+        // owns its own solo principal.
+        .with_trust_store(ryeos_engine::trust::TrustStore::empty().with_succession_chain(&[])),
+    )
 }
 
 /// Reopen the complete state-store projection over an existing test root.

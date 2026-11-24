@@ -27,7 +27,7 @@
 //! Layout below `<state>/endorsements/`:
 //!
 //! ```text
-//! <sha256 of project path>/<endorsement digest>.json   node-signed, one per endorsement
+//! <sha256 of project identity>/<endorsement digest>.json   node-signed, one per endorsement
 //! revoked/<endorsement digest>.json                    node-signed tombstone
 //! ```
 
@@ -47,10 +47,10 @@ use super::{
 use crate::roots::RuntimeRoot;
 
 /// Schema tag of the signed endorsement body.
-pub const ENDORSEMENT_SCHEMA: &str = "ryeos.endorsement.v1";
+pub const ENDORSEMENT_SCHEMA: &str = "ryeos.endorsement.v2";
 /// Domain separator of the signed bytes.
-const SIGNING_DOMAIN: &str = "ryeos-endorsement-v1";
-const STORE_SCHEMA_VERSION: u32 = 1;
+const SIGNING_DOMAIN: &str = "ryeos-endorsement-v2";
+const STORE_SCHEMA_VERSION: u32 = 2;
 /// Name of the directory below the state directory.
 pub const ENDORSEMENTS_DIR: &str = "endorsements";
 /// Directory of tombstones inside it.
@@ -59,7 +59,7 @@ pub const REVOKED_DIR: &str = "revoked";
 pub const MAX_ENDORSED_ITEMS: usize = 256;
 /// Most kinds one standing endorsement names.
 pub const MAX_STANDING_KINDS: usize = 64;
-/// Longest item ref, kind or project path an endorsement carries, in bytes.
+/// Longest item ref or kind an endorsement carries, in bytes.
 pub const MAX_ENDORSEMENT_FIELD_BYTES: usize = 512;
 /// Longest revocation reason, in bytes.
 pub const MAX_REVOCATION_REASON_BYTES: usize = 1024;
@@ -75,8 +75,8 @@ pub fn endorsements_dir(app_root: &Path) -> PathBuf {
 }
 
 /// Directory name of one project's endorsements.
-pub fn project_directory_name(project: &str) -> String {
-    lillux::sha256_hex(format!("ryeos/endorsement-project/v1:{project}").as_bytes())
+pub fn project_directory_name(project: &ryeos_state::project_identity::ProjectIdentity) -> String {
+    lillux::sha256_hex(format!("ryeos/endorsement-project/v2:{project}").as_bytes())
 }
 
 /// Why an endorsement or a revocation was not accepted. Every refusal has a
@@ -118,6 +118,12 @@ pub enum EndorsementRefusal {
          with `ryeos endorse list`"
     )]
     Unknown { digest: String },
+    #[error(
+        "endorsement_project_not_endorsers: project {project} is not owned by the principal \
+         the endorser {endorser} speaks for on this node. An operator endorses only its own \
+         projects"
+    )]
+    ProjectNotEndorsers { project: String, endorser: String },
     #[error("endorsement_store_unavailable: {0}")]
     Store(String),
 }
@@ -127,6 +133,7 @@ impl EndorsementRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "endorsement_malformed",
+            Self::ProjectNotEndorsers { .. } => "endorsement_project_not_endorsers",
             Self::BadSignature { .. } => "endorsement_bad_signature",
             Self::EndorserNotOperator { .. } => "endorsement_endorser_not_operator",
             Self::DelegationUnsupported { .. } => "endorsement_delegation_unsupported",
@@ -169,9 +176,10 @@ pub enum EndorsementTarget {
 #[serde(deny_unknown_fields)]
 pub struct EndorsementBody {
     pub schema: String,
-    /// The project the endorsement is for: its absolute root path, as the
-    /// registry names projects.
-    pub project: String,
+    /// The project the endorsement is for, by owner+name identity. Its
+    /// owner must be the principal the endorser's key speaks for on the
+    /// judging node; the index leaves out any other.
+    pub project: ryeos_state::project_identity::ProjectIdentity,
     /// `fp:<fingerprint>` of the key that signs the endorsement.
     pub endorser: String,
     /// Digest of the delegation the endorser signs under, when it signs for an
@@ -212,7 +220,7 @@ fn bounded_text(label: &str, value: &str) -> Result<(), EndorsementRefusal> {
 impl EndorsementBody {
     /// A per-change endorsement of exact items.
     pub fn for_items(
-        project: &str,
+        project: &ryeos_state::project_identity::ProjectIdentity,
         endorser: &str,
         items: Vec<EndorsedItem>,
         endorsed_at: &str,
@@ -231,7 +239,7 @@ impl EndorsementBody {
 
     /// A standing endorsement of kinds within a project.
     pub fn standing(
-        project: &str,
+        project: &ryeos_state::project_identity::ProjectIdentity,
         endorser: &str,
         kinds: Vec<String>,
         not_after: Option<String>,
@@ -250,7 +258,7 @@ impl EndorsementBody {
     }
 
     fn new(
-        project: &str,
+        project: &ryeos_state::project_identity::ProjectIdentity,
         endorser: &str,
         target: EndorsementTarget,
         endorsed_at: &str,
@@ -276,7 +284,7 @@ impl EndorsementBody {
         };
         Self {
             schema: ENDORSEMENT_SCHEMA.to_owned(),
-            project: project.to_owned(),
+            project: project.clone(),
             endorser: endorser.to_owned(),
             via: None,
             target,
@@ -294,13 +302,6 @@ impl EndorsementBody {
             return malformed(format!(
                 "schema `{}` is not `{ENDORSEMENT_SCHEMA}`",
                 self.schema
-            ));
-        }
-        bounded_text("project", &self.project)?;
-        if !Path::new(&self.project).is_absolute() {
-            return malformed(format!(
-                "project `{}` is not an absolute path",
-                self.project
             ));
         }
         if fingerprint_of(&self.endorser).is_none() {
@@ -491,7 +492,7 @@ pub struct EndorsementTombstone {
     pub schema_version: u32,
     /// Digest of the revoked endorsement.
     pub endorsement_digest: String,
-    pub project: String,
+    pub project: ryeos_state::project_identity::ProjectIdentity,
     /// RFC 3339 UTC time of the revocation, inside the node-signed body.
     pub revoked_at: String,
     /// `fp:<fingerprint>` of the operator that revoked it.
@@ -666,9 +667,9 @@ struct IndexedEndorsement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndorsementSnapshot {
-    /// The launch's logical project identity: its canonical root path. The
-    /// runtime matches against this, never against its own checkout path.
-    pub project: String,
+    /// The launch's sealed owner+name project identity. The runtime matches
+    /// against this, never against a path.
+    pub project: ryeos_state::project_identity::ProjectIdentity,
     /// The stored endorsements, countersigned by the node, in digest order.
     pub endorsements: Vec<StoredEndorsement>,
 }
@@ -705,6 +706,17 @@ impl EndorsementIndex {
             if record.role != SignerRole::Operator || record.status == SignerStatus::Revoked {
                 continue;
             }
+            // An endorser endorses only its own principal's projects. The
+            // registry cannot change while the node runs (trust changes are
+            // offline operations on a stopped node), so judging this when
+            // the index is built is judging it at every use.
+            let owned = trust
+                .succession()
+                .and_then(|graph| graph.signing_principal_of(endorser).ok().flatten())
+                .is_some_and(|principal| &principal == body.project.owner());
+            if !owned {
+                continue;
+            }
             let key =
                 record
                     .verifying_key()
@@ -730,26 +742,35 @@ impl EndorsementIndex {
 
     /// Whether a live endorsement covers an item of `kind` with content
     /// `digest` in `project` at `now` (unix seconds).
-    pub fn covers(&self, project: &str, kind: &str, digest: &str, now: u64) -> bool {
+    pub fn covers(
+        &self,
+        project: &ryeos_state::project_identity::ProjectIdentity,
+        kind: &str,
+        digest: &str,
+        now: u64,
+    ) -> bool {
         self.entries
             .iter()
-            .any(|entry| entry.body.project == project && entry.body.covers(kind, digest, now))
+            .any(|entry| &entry.body.project == project && entry.body.covers(kind, digest, now))
     }
 
     /// The live endorsements of `project`, for a launch's signer list. `None`
     /// when none apply.
-    pub fn snapshot_for(&self, project: &str) -> Option<EndorsementSnapshot> {
+    pub fn snapshot_for(
+        &self,
+        project: &ryeos_state::project_identity::ProjectIdentity,
+    ) -> Option<EndorsementSnapshot> {
         let endorsements: Vec<StoredEndorsement> = self
             .entries
             .iter()
-            .filter(|entry| entry.body.project == project)
+            .filter(|entry| &entry.body.project == project)
             .map(|entry| entry.stored.clone())
             .collect();
         if endorsements.is_empty() {
             return None;
         }
         Some(EndorsementSnapshot {
-            project: project.to_owned(),
+            project: project.clone(),
             endorsements,
         })
     }
@@ -788,6 +809,16 @@ impl EndorsementIndex {
     }
 
     /// Digests of the live endorsements, in order.
+    /// The projects the endorsements in this index are for.
+    pub fn projects(
+        &self,
+    ) -> std::collections::BTreeSet<ryeos_state::project_identity::ProjectIdentity> {
+        self.entries
+            .iter()
+            .map(|entry| entry.body.project.clone())
+            .collect()
+    }
+
     pub fn digests(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|entry| entry.digest.as_str())
     }
@@ -795,11 +826,11 @@ impl EndorsementIndex {
     /// The endorsements in force for one project, in digest order.
     pub fn for_project<'a>(
         &'a self,
-        project: &'a str,
+        project: &'a ryeos_state::project_identity::ProjectIdentity,
     ) -> impl Iterator<Item = (&'a str, &'a EndorsementBody)> {
         self.entries
             .iter()
-            .filter(move |entry| entry.body.project == project)
+            .filter(move |entry| &entry.body.project == project)
             .map(|entry| (entry.digest.as_str(), &entry.body))
     }
 
@@ -965,6 +996,12 @@ pub fn record_endorsement(
     let record = trust.signer(&endorser).ok_or_else(not_operator)?;
     if record.role != SignerRole::Operator || record.status != SignerStatus::Active {
         return Err(not_operator());
+    }
+    if !trust.speaks_for(&endorser, body.project.owner()) {
+        return Err(EndorsementRefusal::ProjectNotEndorsers {
+            project: body.project.to_string(),
+            endorser: body.endorser.clone(),
+        });
     }
     let key = record.verifying_key().map_err(store_error)?;
     signed.verify(&key)?;

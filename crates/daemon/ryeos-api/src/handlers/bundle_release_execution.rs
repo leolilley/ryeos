@@ -474,10 +474,7 @@ pub(crate) async fn execute_pinned_graph(
     let effective_path = project_ctx.effective_path.clone();
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            resolved.provenance.logical_project_root(&site_id),
-            &resolved.provenance.subject_resolution_authority(),
-        ),
+        logical_project: resolved.provenance.signer_project(),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),
@@ -704,7 +701,6 @@ pub(crate) async fn execute_protected_qualification(
         "capture": signed_capture_recipe.as_deref(),
         "recipe_ref": recipe_ref,
     }))?;
-    let release_project_identity = source_generation.project_identity().to_path_buf();
     // The gate checks the SOURCE snapshot (the launcher's own head), while the
     // verifier qualifies the overlay snapshot materialized below: the source
     // plus signed recipe Config. That split is sound because the only files
@@ -713,8 +709,16 @@ pub(crate) async fn execute_protected_qualification(
     // authority for this release; below, before any verifier is launched, the
     // overlay's resolved recipe must equal the publisher-authorized raw digest
     // and verify as trusted. Every other byte of the overlay is the gated head.
+    // The same gate the qualification launch runs: the operator's own head
+    // for the name the source snapshot declares, at exactly that snapshot.
+    let release_signer_identity =
+        super::product_qualification_launch::state_pinned_qualification_logical_project(
+            &state,
+            &context,
+            source_generation.source_snapshot_hash(),
+        )
+        .map_err(|error| anyhow::anyhow!("release source identity: {error}"))?;
     let release_head_source = super::product_qualification_launch::ReleaseHeadSource {
-        project_path: release_project_identity.clone(),
         head_snapshot_hash: source_generation.source_snapshot_hash().to_owned(),
     };
     let workspace = tokio::task::spawn_blocking(move || {
@@ -751,7 +755,7 @@ pub(crate) async fn execute_protected_qualification(
         // The overlay copies the release source generation into a private
         // workspace; project-scoped signers are matched on the registered
         // project the generation stands for, never on that workspace.
-        logical_project: ryeos_engine::contracts::LogicalProject::Stated(release_project_identity),
+        logical_project: ryeos_engine::contracts::LogicalProject::Stated(release_signer_identity),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

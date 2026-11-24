@@ -86,6 +86,8 @@ pub mod principal;
 pub mod private_artifact_home;
 pub mod process;
 pub mod process_quarantine_report;
+pub mod project_owner;
+pub mod project_registry;
 pub mod project_root_guard;
 pub mod projection_health;
 pub mod projection_repair;

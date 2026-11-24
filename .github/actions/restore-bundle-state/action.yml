@@ -1,10 +1,11 @@
 name: Restore or refresh the bundle state
 description: >-
   Gives a test job populated bundles. A branch that changes bundle sources
-  refreshes them from the branch. Otherwise the bundle state of a recent next
-  CI run is restored, unless the branch differs from that next commit on a
-  path the state would write or delete (or on bundle sources), in which case
-  the bundles are refreshed from the branch instead (about 45 minutes).
+  refreshes them from the branch. Otherwise the bundle state of the newest
+  retained next CI run whose commit has no bundle-source difference from the
+  branch head is restored (newer next commits the branch differs from are
+  skipped); when none qualifies the bundles are refreshed from the branch
+  instead (about 45 minutes). The job summary says which was used.
 inputs:
   bundles-changed:
     description: "'true' when the branch changes bundle sources (the classifier's bundles_changed)."

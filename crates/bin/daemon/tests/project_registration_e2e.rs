@@ -20,6 +20,14 @@ use ryeos_node::project_registry::{LoadedRegistration, load_registrations, proje
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
+/// The principal a key owns when it has no succession.
+fn solo_principal(fingerprint: &str) -> ryeos_state::principal_id::PrincipalId {
+    ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(fingerprint)
+        .expect("a key owns a principal")
+        .principal
+}
+
 struct StoppedNode {
     root: tempfile::TempDir,
     identity: NodeIdentity,
@@ -54,8 +62,10 @@ impl StoppedNode {
         self.root.path()
     }
 
-    fn operator_principal(&self) -> String {
-        format!("fp:{}", compute_fingerprint(&self.operator.verifying_key()))
+    /// The principal the operator key owns: a key with no succession owns its
+    /// own solo principal.
+    fn operator_principal(&self) -> ryeos_state::principal_id::PrincipalId {
+        solo_principal(&compute_fingerprint(&self.operator.verifying_key()))
     }
 
     fn try_apply(&self, operation: &str, arguments: Value) -> anyhow::Result<Value> {
@@ -92,11 +102,7 @@ fn checkout(parent: &Path, directory: &str, declared: Option<&str>) -> PathBuf {
     let root = parent.join(directory);
     std::fs::create_dir_all(root.join(".ai")).unwrap();
     if let Some(name) = declared {
-        std::fs::write(
-            root.join(".ai/project.yaml"),
-            format!("schema: 1\nname: {name}\n"),
-        )
-        .unwrap();
+        std::fs::write(root.join(".ai/manifest.yaml"), format!("name: {name}\n")).unwrap();
     }
     root.canonicalize().unwrap()
 }
@@ -121,10 +127,12 @@ fn register_writes_a_node_signed_record_under_the_operator_and_declared_name() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].registration.identity.to_string(), identity);
     assert_eq!(loaded[0].registration.paths, vec![demo.clone()]);
-    let owner_hex = node.operator_principal()[3..].to_owned();
+    let owner_directory = node.operator_principal().storage_component();
     assert_eq!(
         loaded[0].file,
-        projects_dir(node.path()).join(owner_hex).join("demo.yaml")
+        projects_dir(node.path())
+            .join(owner_directory)
+            .join("demo.yaml")
     );
 
     // Registering the same checkout again rewrites nothing.
@@ -195,7 +203,7 @@ fn a_checkout_must_declare_the_registered_name() {
         .register(json!({ "path": text(&undeclared) }))
         .unwrap_err();
     assert!(
-        format!("{error:#}").contains("project_undeclared"),
+        format!("{error:#}").contains("project_manifest_missing"),
         "{error:#}"
     );
 
@@ -228,7 +236,7 @@ fn the_node_key_and_the_authoring_key_own_no_project() {
     let work = tempfile::tempdir().unwrap();
     let demo = checkout(work.path(), "demo", Some("demo"));
 
-    let node_owner = format!("fp:{}", node.identity.fingerprint());
+    let node_owner = solo_principal(node.identity.fingerprint()).to_string();
     let error = node
         .register(json!({ "path": text(&demo), "owner": node_owner }))
         .unwrap_err();
@@ -259,7 +267,8 @@ fn the_node_key_and_the_authoring_key_own_no_project() {
         },
     )
     .expect("pin the authoring key");
-    let authoring_owner = format!("fp:{}", compute_fingerprint(&authoring.verifying_key()));
+    let authoring_owner =
+        solo_principal(&compute_fingerprint(&authoring.verifying_key())).to_string();
     let error = node
         .register(json!({ "path": text(&demo), "owner": authoring_owner }))
         .unwrap_err();
@@ -269,7 +278,7 @@ fn the_node_key_and_the_authoring_key_own_no_project() {
     );
 
     // Another principal the operator names explicitly is accepted.
-    let other = format!("fp:{}", "c".repeat(64));
+    let other = format!("pid:v1:{}", "c".repeat(64));
     let result = node
         .register(json!({ "path": text(&demo), "owner": other }))
         .unwrap();

@@ -128,8 +128,7 @@ impl RemoteAuthority {
                 let value = client.execute_service_result(
                     "service:bundle-catalog/resolve", &BTreeMap::new(), None,
                     &serde_json::json!({"catalog_namespace":request.catalog_namespace,"set_name":set_name,"channel":channel}),
-                    &ryeos_app::execution_policy::ExecutionPolicy::projectless(ryeos_app::execution_policy::ExecutionResponse::Wait),
-                ).await?;
+                    &ryeos_app::execution_policy::ExecutionPolicy::projectless(ryeos_app::execution_policy::ExecutionResponse::Wait), None).await?;
                 value
                     .get("catalog_publication_attestation_hash")
                     .and_then(|v| v.as_str())
