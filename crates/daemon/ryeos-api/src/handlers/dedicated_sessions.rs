@@ -6230,6 +6230,7 @@ async fn approvals(
                         &state,
                         &approval.placement_thread_id,
                         &approval.operation_class,
+                        &approval.requested_authority,
                     ) {
                         public["accept_allowed"] = Value::Bool(false);
                     }
@@ -6899,6 +6900,27 @@ async fn resolve_approval(
                     "the admitted structured-session contract does not allow accepting this authority delta".into(),
                 )
             }
+            ryeos_app::dedicated_session_service::AcceptRefusal::UnnamedMethod => {
+                HandlerError::Structured {
+                    code: "approval_method_unnamed".to_owned(),
+                    status: 403,
+                    body: json!({
+                        "code": "approval_method_unnamed",
+                        "error": "the admitted profile names no rule for this request's method; decline it",
+                    }),
+                }
+            }
+            ryeos_app::dedicated_session_service::AcceptRefusal::ClassMismatch {
+                profile_class,
+            } => HandlerError::Structured {
+                code: "approval_class_mismatch".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_class_mismatch",
+                    "error": "the request's operation class is not the class of the admitted profile's rule for its method; decline it",
+                    "profile_class": profile_class,
+                }),
+            },
             ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByProfile {
                 operation_class,
             } => HandlerError::Structured {

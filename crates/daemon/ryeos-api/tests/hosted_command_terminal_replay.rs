@@ -2555,7 +2555,8 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
 /// deny-only class acceptable is refused; the worker's own report can only
 /// narrow what the profile allows.
 #[test]
-fn a_worker_claiming_accept_for_a_deny_only_class_is_refused_by_the_frozen_profile() {
+fn a_worker_claiming_accept_for_a_deny_only_method_or_the_wrong_class_is_refused_by_the_frozen_profile()
+ {
     use ryeos_app::dedicated_session_service::{AcceptRefusal, check_accept};
     let state = ryeos_app::state::AppState::new_for_test();
     let (capsule, _profile, _schemas) = store_capsule_with_contract(
@@ -2568,31 +2569,55 @@ fn a_worker_claiming_accept_for_a_deny_only_class_is_refused_by_the_frozen_profi
              "operation_class": "file_change"},
         ]}),
     );
-    let claims = |allowed: bool| json!({"request_id": "r", "accept_allowed": allowed});
+    let claims = |method: &str, allowed: bool| json!({"request_id": "r", "method": method, "accept_allowed": allowed});
+    let exec = "item/commandExecution/requestApproval";
+    let file = "item/fileChange/requestApproval";
 
-    // The worker says accept is fine for a deny-only class: refused.
+    // The worker says accept is fine for a deny-only method: refused.
     assert_eq!(
-        check_accept(&state, &capsule, "command_execution", &claims(true)).unwrap(),
+        check_accept(&state, &capsule, "command_execution", &claims(exec, true)).unwrap(),
         Some(AcceptRefusal::RefusedByProfile {
             operation_class: "command_execution".to_owned()
         })
     );
-    // A class the profile names without deny_only is accepted when the worker
+    // A method the profile names without deny_only is accepted when the worker
     // offered it, and not when the worker did not.
     assert_eq!(
-        check_accept(&state, &capsule, "file_change", &claims(true)).unwrap(),
+        check_accept(&state, &capsule, "file_change", &claims(file, true)).unwrap(),
         None
     );
     assert_eq!(
-        check_accept(&state, &capsule, "file_change", &claims(false)).unwrap(),
+        check_accept(&state, &capsule, "file_change", &claims(file, false)).unwrap(),
         Some(AcceptRefusal::NotOffered)
     );
-    // A class the profile does not name is refused, whatever the worker says.
+    // The class is the method's rule's: a worker cannot move a deny-only
+    // method into an acceptable class by reporting another class.
     assert_eq!(
-        check_accept(&state, &capsule, "invented_class", &claims(true)).unwrap(),
-        Some(AcceptRefusal::RefusedByProfile {
-            operation_class: "invented_class".to_owned()
+        check_accept(&state, &capsule, "file_change", &claims(exec, true)).unwrap(),
+        Some(AcceptRefusal::ClassMismatch {
+            profile_class: "command_execution".to_owned()
         })
+    );
+    // A method the profile does not name, or a request without one, is refused.
+    assert_eq!(
+        check_accept(
+            &state,
+            &capsule,
+            "file_change",
+            &claims("invented/method", true)
+        )
+        .unwrap(),
+        Some(AcceptRefusal::UnnamedMethod)
+    );
+    assert_eq!(
+        check_accept(
+            &state,
+            &capsule,
+            "file_change",
+            &json!({"request_id": "r", "accept_allowed": true})
+        )
+        .unwrap(),
+        Some(AcceptRefusal::UnnamedMethod)
     );
 }
 

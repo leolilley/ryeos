@@ -323,6 +323,7 @@ pub async fn handle_approval_history(
                         &state,
                         &entry.placement_thread_id,
                         &entry.operation_class,
+                        &entry.requested_authority,
                     ) {
                         public["accept_allowed"] = serde_json::Value::Bool(false);
                     }

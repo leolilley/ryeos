@@ -395,6 +395,7 @@ fn collect_raised(
                             state,
                             &entry.approval.placement_thread_id,
                             &entry.approval.operation_class,
+                            &entry.approval.requested_authority,
                         );
                     items.push(approval_item(source, &entry, profile_accept));
                 }
