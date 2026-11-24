@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-22T22:08:37Z:2078cb6f1db43ac5d05d3ce4909d945f45070347b3a1bff3595d0fbf2b7f4b99:rJQkc0Lk2cz3v0j3g3xxpeRwFStIwPvSnw8fQjEmMx3Z/+7kYRWbuNQDQniPh87PPxSgsKir0okB27fHY/QhDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: project.owner
+record_thread: false
+required_caps: ["ryeos.execute.service.project/owner"]
+schema: {}
+description: "Report the project owner (pid:v1:) this node resolves for the authenticated key"

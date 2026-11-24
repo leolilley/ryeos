@@ -453,12 +453,7 @@ fn preflight_dispatch_launch_core(
         ProjectContext::LocalPath { path: project_path }
     };
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            request
-                .provenance
-                .logical_project_root(request.state.threads.site_id()),
-            &subject_resolution_authority,
-        ),
+        logical_project: request.provenance.signer_project(),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: request.principal_id.to_string(),
             scopes: request.principal_scopes.to_vec(),

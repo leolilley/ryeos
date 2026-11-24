@@ -151,7 +151,7 @@ pub async fn record(
         journal_outcome(journal.record_endorsement_accepted(&EndorsementFacts {
             digest: &recorded.digest,
             actor: &body.endorser,
-            project: &body.project,
+            project: &body.project.to_string(),
             target,
             count,
             ledger_head: &recorded.ledger_head,
@@ -230,7 +230,7 @@ pub async fn revoke(
         journal_outcome(journal.record_endorsement_revoked(&EndorsementFacts {
             digest: &req.endorsement,
             actor: &revoked.tombstone.revoked_by,
-            project: &revoked.tombstone.project,
+            project: &revoked.tombstone.project.to_string(),
             target,
             count,
             ledger_head: &revoked.ledger_head,
@@ -291,7 +291,7 @@ pub async fn list(
         .filter(|stored| {
             req.project
                 .as_deref()
-                .is_none_or(|project| stored.endorsement.body.project == project)
+                .is_none_or(|project| stored.endorsement.body.project.to_string() == project)
         })
         .map(|stored| {
             let body = &stored.endorsement.body;
