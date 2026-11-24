@@ -49,12 +49,30 @@ pub enum HandlerError {
     /// This variant exists so handlers can return richer error
     /// payloads (e.g. per-field validation details) without
     /// flattening everything into a plain string.
-    #[error("structured error: {code}")]
+    #[error("{}", structured_text(.code, .body))]
     Structured {
         code: String,
         status: u16,
         body: serde_json::Value,
     },
+}
+
+/// The text a structured error reads as: its stable code, then the sentence the
+/// body carries (the operator\'s own words; a non-operator\'s body carries a
+/// fixed one), so a log line and a text check see what the client does.
+fn structured_text(code: &str, body: &serde_json::Value) -> String {
+    let sentence = body
+        .get("error")
+        .and_then(|error| match error {
+            serde_json::Value::String(text) => Some(text.as_str()),
+            serde_json::Value::Object(map) => map.get("message").and_then(|m| m.as_str()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty());
+    match sentence {
+        Some(text) => format!("structured error: {code}: {text}"),
+        None => format!("structured error: {code}"),
+    }
 }
 
 /// Convenience alias for handler return types.
