@@ -2454,6 +2454,39 @@ struct ApprovalRequestAuthority {
     requested_authority: Value,
 }
 
+/// Whether the owner may accept an approval request of `operation_class`,
+/// decided from the signed profile this session was frozen with, never from
+/// what the worker process reports. Every server-request rule of the class
+/// must be allowed (none `deny_only`), and a class the profile does not name is
+/// not acceptable. The worker's own `accept_allowed` can only narrow this.
+pub fn profile_allows_accept(
+    state: &AppState,
+    capsule_hash: &str,
+    operation_class: &str,
+) -> Result<bool> {
+    let profile = admitted_structured_protocol(state, capsule_hash)?;
+    Ok(contract_allows_accept(&profile.contract, operation_class))
+}
+
+fn contract_allows_accept(contract: &Value, operation_class: &str) -> bool {
+    let rules: Vec<&Value> = contract
+        .get("server_requests")
+        .and_then(Value::as_array)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter(|rule| {
+                    rule.get("operation_class").and_then(Value::as_str) == Some(operation_class)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    !rules.is_empty()
+        && rules
+            .iter()
+            .all(|rule| rule.get("deny_only").and_then(Value::as_bool) != Some(true))
+}
+
 /// Public, presentation-safe portion of a retained worker approval request.
 /// Upstream request/session/operation coordinates are delivery authority and
 /// must remain inside the dedicated-session owner.
@@ -7338,6 +7371,29 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_admitted_profile_not_the_worker_decides_whether_accept_is_allowed() {
+        let contract = json!({"server_requests": [
+            {"method": "m/a", "operation_class": "command_execution", "deny_only": true},
+            {"method": "m/b", "operation_class": "file_change"},
+            {"method": "m/c", "operation_class": "mixed", "deny_only": true},
+            {"method": "m/d", "operation_class": "mixed", "deny_only": false},
+        ]});
+        // A worker that reports accept_allowed for a deny-only class is not
+        // believed: the profile's own rule refuses it.
+        assert!(!contract_allows_accept(&contract, "command_execution"));
+        assert!(contract_allows_accept(&contract, "file_change"));
+        // One deny-only rule of the class is enough to refuse it.
+        assert!(!contract_allows_accept(&contract, "mixed"));
+        // A class the profile does not name is not acceptable.
+        assert!(!contract_allows_accept(&contract, "invented_class"));
+        assert!(!contract_allows_accept(&json!({}), "file_change"));
+        assert!(!contract_allows_accept(
+            &json!({"server_requests": []}),
+            "file_change"
+        ));
+    }
 
     #[test]
     fn the_worker_fence_moves_only_running_or_recoverable_sessions() {

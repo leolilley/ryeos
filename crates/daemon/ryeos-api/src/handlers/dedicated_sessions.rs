@@ -6223,7 +6223,20 @@ async fn approvals(
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
                 "operation_class":approval.operation_class,
-                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority),
+                "requested_authority":{
+                    let mut public = ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority);
+                    // Offer accept only where the admitted profile allows it too.
+                    if !ryeos_app::dedicated_session_service::profile_allows_accept(
+                        &state,
+                        &session.admitted_capsule_hash,
+                        &approval.operation_class,
+                    )
+                    .map_err(internal)?
+                    {
+                        public["accept_allowed"] = Value::Bool(false);
+                    }
+                    public
+                },
                 "state":approval.state,
                 "expires_at_ms":approval.expires_at_ms,
                 "created_at_ms":approval.created_at_ms,
@@ -6880,6 +6893,27 @@ async fn resolve_approval(
         return Err(HandlerError::BadRequest(
             "the admitted structured-session contract does not allow accepting this authority delta".into(),
         ));
+    }
+    // The worker's report is not the ceiling. Whether this class of request
+    // may be accepted at all is the admitted, frozen profile's rule.
+    if req.accept
+        && !ryeos_app::dedicated_session_service::profile_allows_accept(
+            &state,
+            &session.admitted_capsule_hash,
+            &approval.operation_class,
+        )
+        .map_err(internal)?
+    {
+        return Err(HandlerError::Structured {
+            code: "approval_accept_refused_by_profile".to_owned(),
+            status: 403,
+            body: json!({
+                "code": "approval_accept_refused_by_profile",
+                "error": "the admitted profile does not let this class of request be accepted \
+                          (its rule is deny-only, or the profile names no rule for it); decline it",
+                "operation_class": approval.operation_class,
+            }),
+        });
     }
     let request_id = approval
         .requested_authority
