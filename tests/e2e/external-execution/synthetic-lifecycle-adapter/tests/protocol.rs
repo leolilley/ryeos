@@ -1917,6 +1917,7 @@ async fn try_execute_recorded_service(
             scheduled_fire: None,
             validate_only: false,
         },
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
         requested_call: None,
     };
     let verified = ryeos_executor::executor::resolve_and_verify(
@@ -2031,6 +2032,7 @@ fn dispatch_pinned_public_worker(
                     caller_scopes: scopes.clone(),
                     engine: request_engine,
                     plan_ctx,
+                    disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
                     requested_call: None,
                 };
                 let handler_context =
@@ -4768,6 +4770,7 @@ async fn run_production_tls_candidate(
             caller_scopes: scopes,
             engine: state.engine.clone(),
             plan_ctx,
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         };
         let dispatch_state = state.clone();

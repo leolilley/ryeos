@@ -2581,6 +2581,9 @@ async fn run_release_graph(
             engine: Arc::clone(&state.engine),
             plan_ctx,
             requested_call: None,
+            disclosure_class: ryeos_app::operator_authority::disclosure_class_for(
+                state, &context,
+            ),
         };
         let parameters = serde_json::to_value(&request)?;
         let acting_principal = context.fingerprint.clone();

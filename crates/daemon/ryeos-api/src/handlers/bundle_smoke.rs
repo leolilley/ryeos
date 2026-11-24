@@ -244,6 +244,7 @@ async fn run_entry(
         engine: state.engine.clone(),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(&state, &ctx),
     };
     if let Err(error) =
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)

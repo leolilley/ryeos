@@ -106,6 +106,11 @@ pub struct ExecutionContext {
     /// validation reads the args here. `None`/empty → the kind's default
     /// method. Ignored for terminator/delegate paths.
     pub requested_call: Option<ryeos_engine::method_call::MethodCall>,
+    /// How much of a service's answer this caller may see. Classified by the
+    /// key that acts (the configured operator key, another admitted key, or no
+    /// key), never by what kind of client holds it. Every construction names
+    /// it; there is no default.
+    pub disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass,
 }
 
 impl ExecutionContext {
@@ -430,6 +435,64 @@ fn confirm_recorded_service_terminal(
 /// Build the exact daemon-owned terminal that the recorded service path will
 /// commit. The handler's live result remains untouched for its caller; only
 /// this durable terminal projection applies the frozen, kind-declared policy.
+/// What the caller of a service receives of its outcome. The operator gets
+/// the outcome whole. Any other caller gets the item's declared tier of an
+/// answer, or a refusal when the item declares none, and a failure shows only
+/// a stable code and a fixed sentence: the failure's own text can carry a
+/// path, probe output or a key.
+fn disclose_service_result(
+    class: ryeos_node_runtime::disclosure::DisclosureClass,
+    disclosure: Option<&ryeos_node_runtime::disclosure::ServiceDisclosure>,
+    result: Result<Value>,
+) -> Result<Value> {
+    use ryeos_app::handler_error::HandlerError;
+    if class.is_operator() {
+        return result;
+    }
+    match result {
+        Ok(value) => ryeos_node_runtime::disclosure::shape_result(
+            class,
+            disclosure,
+            value,
+            ryeos_node_runtime::disclosure::DisclosureBounds::default(),
+        )
+        .map_err(|refusal| anyhow::Error::new(HandlerError::Forbidden(refusal.to_string()))),
+        Err(error) => {
+            if error
+                .downcast_ref::<crate::dispatch_error::DispatchError>()
+                .is_some()
+            {
+                return Err(error);
+            }
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "service failure withheld from a non-operator caller"
+            );
+            Err(match ryeos_app::handler_error::extract_handler_error(&error) {
+                Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
+                Some(HandlerError::Forbidden(_)) => anyhow::Error::new(HandlerError::Forbidden(
+                    "the service refused the request".to_owned(),
+                )),
+                Some(HandlerError::BadRequest(_)) => anyhow::Error::new(HandlerError::BadRequest(
+                    "the request was not valid".to_owned(),
+                )),
+                Some(HandlerError::Conflict(_)) => anyhow::Error::new(HandlerError::Conflict(
+                    "the request conflicts with current state".to_owned(),
+                )),
+                _ => {
+                    let (code, sentence) =
+                        ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
+                    anyhow::Error::new(HandlerError::Structured {
+                        status: 500,
+                        body: serde_json::json!({"error": {"code": code, "message": sentence}}),
+                        code,
+                    })
+                }
+            })
+        }
+    }
+}
+
 fn recorded_service_terminal_projection(
     thread_id: &str,
     dispatch_result: &Result<Value>,
@@ -836,6 +899,22 @@ pub async fn execute_service_verified(
         Vec::new()
     };
 
+    // 5b. Disclosure: a caller other than the operator receives only the
+    // tiers the service item declares. Parsed here so a malformed block
+    // refuses the call before anything is recorded.
+    let disclosure_class = ctx.disclosure_class;
+    let disclosure = if disclosure_class.is_operator() {
+        None
+    } else {
+        verified
+            .resolved
+            .metadata
+            .extra
+            .get("disclosure")
+            .map(ryeos_node_runtime::disclosure::ServiceDisclosure::parse)
+            .transpose()?
+    };
+
     // 7a. Create audit record BEFORE dispatch.
     // Honor a caller-supplied thread id when provided so external
     // subscribers (route SSE sources) registered against the id see
@@ -1070,6 +1149,7 @@ pub async fn execute_service_verified(
         let task_current_site_id = ctx.plan_ctx.current_site_id.clone();
         let task_origin_site_id = ctx.plan_ctx.origin_site_id.clone();
         let task_metadata = verified.resolved.metadata.extra.clone();
+        let task_disclosure = disclosure.clone();
         let task_params = params.clone();
         let task = tokio::spawn(async move {
             let dispatch_result: Result<Value> = async {
@@ -1099,6 +1179,10 @@ pub async fn execute_service_verified(
                 result
             }
             .await;
+            // Shaped before it is recorded, so the durable result and the
+            // caller's answer are the same disclosed value.
+            let dispatch_result =
+                disclose_service_result(disclosure_class, task_disclosure.as_ref(), dispatch_result);
 
             let (terminal, result_retention_error) = recorded_service_terminal_projection(
                 &task_invocation_id,
@@ -1182,7 +1266,7 @@ pub async fn execute_service_verified(
             .clone();
         let result = handler(params, hctx, Arc::new(state.clone())).await;
         drop(handler);
-        result
+        disclose_service_result(disclosure_class, disclosure.as_ref(), result)
     };
 
     let value = dispatch_result.map_err(|e| {

@@ -106,6 +106,32 @@ pub fn require_local_configured_operator(
     Ok(operator.fingerprint().to_owned())
 }
 
+/// How much of a service's answer the acting key may see. The configured
+/// local operator key sees the whole answer; any other verified key sees the
+/// tiers a service declares for principals; no verified key sees the public
+/// tier. The class comes from the key and its grant only: never from the kind
+/// of client holding the key. A failure to read the operator identity is not
+/// the operator.
+pub fn disclosure_class_for(
+    state: &AppState,
+    context: &HandlerContext,
+) -> ryeos_node_runtime::disclosure::DisclosureClass {
+    use ryeos_node_runtime::disclosure::DisclosureClass;
+    if context.require_verified().is_err() {
+        return DisclosureClass::Public;
+    }
+    if context.authorized_key_class == Some(AuthorizedKeyPrincipalClass::LocalClient)
+        && context.authenticated_origin_site_id.is_none()
+        && ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+            &state.config.app_root,
+        )
+        .is_ok_and(|operator| context.fingerprint == operator.principal_id())
+    {
+        return DisclosureClass::Operator;
+    }
+    DisclosureClass::Principal
+}
+
 /// Require either the exact local operator or a verified, origin-bound
 /// `remote_principal`. Remote admission never reads the target-local private
 /// key.

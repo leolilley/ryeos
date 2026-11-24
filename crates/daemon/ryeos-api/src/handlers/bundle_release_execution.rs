@@ -570,6 +570,7 @@ pub(crate) async fn execute_pinned_graph(
         engine: Arc::clone(&project_ctx.request_engine),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(state, &context),
     };
     let acting_principal = context.fingerprint.clone();
     let dispatch_request = ryeos_executor::dispatch::DispatchRequest {

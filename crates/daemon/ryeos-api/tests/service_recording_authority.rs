@@ -93,6 +93,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
             scheduled_fire: None,
             validate_only: false,
         },
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
         requested_call: None,
     };
 

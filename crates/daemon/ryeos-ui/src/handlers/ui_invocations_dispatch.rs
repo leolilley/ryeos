@@ -1602,6 +1602,7 @@ pub(crate) fn prepare_item_ref(
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(state, ctx),
     };
 
     Ok(PreparedInvocation {

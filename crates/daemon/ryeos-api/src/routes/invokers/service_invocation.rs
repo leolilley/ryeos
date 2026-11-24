@@ -106,6 +106,10 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             engine: inv_ctx.state.engine.clone(),
             plan_ctx,
             requested_call: None,
+            disclosure_class: ryeos_app::operator_authority::disclosure_class_for(
+                &inv_ctx.state,
+                &route_handler_context(inv_ctx.principal.as_ref()),
+            ),
         };
         let handler_context = route_handler_context(inv_ctx.principal.as_ref());
         let verified = ryeos_executor::executor::resolve_and_verify(
