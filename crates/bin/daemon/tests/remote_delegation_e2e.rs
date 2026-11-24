@@ -565,11 +565,8 @@ async fn a_principal_without_a_delegation_is_refused_on_origin_and_capped_on_hos
         body.to_string().contains("remote_delegation_missing"),
         "{body}"
     );
-    assert!(
-        body.to_string()
-            .contains("ryeos remote delegate --remote hosted"),
-        "{body}"
-    );
+    // The cure sentence is for the operator; a principal without a delegation
+    // reads only the stable code above.
 
     // With a delegation that lends more than U2's grant on HOSTED holds, HOSTED
     // still refuses the capability outside the grant.

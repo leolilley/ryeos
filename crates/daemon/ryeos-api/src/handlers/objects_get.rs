@@ -96,8 +96,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 /// owns the node's CAS; nothing else may name a hash without a root.
 pub async fn handle_any(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).map_err(|_| {
-        crate::handler_error::HandlerError::Forbidden(
-            "objects/get-any is restricted to the node operator".into(),
+        ryeos_app::handler_error::typed_refusal(
+            "operator_required",
+            403,
+            "objects/get-any is restricted to the node operator",
         )
     })?;
     if req.root.is_some() {

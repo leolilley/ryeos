@@ -468,15 +468,27 @@ fn disclose_service_result(
             Err(
                 match ryeos_app::handler_error::extract_handler_error(&error) {
                     Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
-                    Some(HandlerError::Forbidden(_)) => anyhow::Error::new(
+                    // A message that begins with a stable `code:` keeps that
+                    // code and its status; the rest of the sentence is
+                    // withheld. A message with no code is replaced by a fixed
+                    // sentence of the same status.
+                    Some(HandlerError::Forbidden(message)) => coded_or_fixed(
+                        &message,
+                        403,
                         HandlerError::Forbidden("the service refused the request".to_owned()),
                     ),
-                    Some(HandlerError::BadRequest(_)) => anyhow::Error::new(
+                    Some(HandlerError::BadRequest(message)) => coded_or_fixed(
+                        &message,
+                        400,
                         HandlerError::BadRequest("the request was not valid".to_owned()),
                     ),
-                    Some(HandlerError::Conflict(_)) => anyhow::Error::new(HandlerError::Conflict(
-                        "the request conflicts with current state".to_owned(),
-                    )),
+                    Some(HandlerError::Conflict(message)) => coded_or_fixed(
+                        &message,
+                        409,
+                        HandlerError::Conflict(
+                            "the request conflicts with current state".to_owned(),
+                        ),
+                    ),
                     // A typed refusal keeps its code and status, which are
                     // part of the contract a client branches on. Its body
                     // can carry a path or a key, so only the stable code, the
@@ -500,6 +512,37 @@ fn disclose_service_result(
                 },
             )
         }
+    }
+}
+
+/// A refusal whose message begins with a stable `code:` keeps the code and its
+/// status, with a fixed sentence; any other message becomes the fixed form.
+fn coded_or_fixed(
+    message: &str,
+    status: u16,
+    fixed: ryeos_app::handler_error::HandlerError,
+) -> anyhow::Error {
+    let code = message
+        .split_once(':')
+        .map(|(prefix, _)| prefix.trim())
+        .filter(|prefix| {
+            !prefix.is_empty()
+                && prefix.len() <= 64
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    match code {
+        Some(code) => anyhow::Error::new(ryeos_app::handler_error::HandlerError::Structured {
+            code: code.to_owned(),
+            status,
+            body: serde_json::json!({
+                "code": code,
+                "error": "the service refused the request",
+                "retryable": false,
+            }),
+        }),
+        None => anyhow::Error::new(fixed),
     }
 }
 
@@ -1464,6 +1507,39 @@ mod tests {
             }
             other => panic!("typed refusal lost: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_message_with_a_stable_code_keeps_the_code_and_a_bare_one_the_status() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let refused = |error: ryeos_app::handler_error::HandlerError| {
+            disclose_service_result(
+                DisclosureClass::Principal,
+                None,
+                Err(anyhow::Error::new(error)),
+            )
+            .unwrap_err()
+        };
+        let coded = refused(ryeos_app::handler_error::HandlerError::Forbidden(
+            "records_unverified_requires_capability: ask with the capability /srv/x".to_owned(),
+        ));
+        match ryeos_app::handler_error::extract_handler_error(&coded) {
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
+                assert_eq!(
+                    (code.as_str(), status),
+                    ("records_unverified_requires_capability", 403)
+                );
+                assert!(!body.to_string().contains("/srv/x"), "{body}");
+            }
+            other => panic!("code lost: {other:?}"),
+        }
+        let bare = refused(ryeos_app::handler_error::HandlerError::Conflict(
+            "head moved on /srv/x".to_owned(),
+        ));
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&bare),
+            Some(ryeos_app::handler_error::HandlerError::Conflict(text)) if !text.contains("/srv/x")
+        ));
     }
 
     #[test]
