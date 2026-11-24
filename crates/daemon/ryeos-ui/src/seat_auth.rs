@@ -451,8 +451,7 @@ pub fn require_seat_caller(
 /// Require that the seat caller is this node's configured local operator.
 ///
 /// Registering a host folder in a seat registry widens what the seat can
-/// reach (threads whose root equals the folder, and files under it), so it is
-/// a local-operator act. A signed caller must be the app root's configured
+/// reach (files under the folder), so it is a local-operator act. A signed caller must be the app root's configured
 /// local operator; a browser seat must have been minted for that operator's
 /// principal. Any other principal is refused with a typed error.
 pub fn require_local_operator_seat(
