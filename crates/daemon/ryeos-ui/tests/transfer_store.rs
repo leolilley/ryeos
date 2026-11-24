@@ -63,10 +63,12 @@ fn history_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistory
     }
 }
 
-/// Who a fixture seat belongs to: the owner, root item and executor its
-/// thread record carries and its lease is keyed by.
+/// Who a fixture seat belongs to: the key that launched it (its thread
+/// record's `requested_by`), the session holding its lease, and the root item
+/// and executor both carry.
 struct Ownership {
-    owner: String,
+    launcher: String,
+    holder: String,
     item_ref: String,
     executor_ref: String,
 }
@@ -75,7 +77,8 @@ impl Ownership {
     /// A seat no browser session owns.
     fn detached() -> Self {
         Self {
-            owner: OWNER.to_string(),
+            launcher: OWNER.to_string(),
+            holder: "session:detached".to_string(),
             item_ref: SURFACE.to_string(),
             executor_ref: CLIENT.to_string(),
         }
@@ -90,7 +93,8 @@ impl Ownership {
             .unwrap();
         let root = &fixture.root;
         Self {
-            owner: format!("session:{}", fixture.session_id),
+            launcher: session.principal_id.clone(),
+            holder: format!("session:{}", fixture.session_id),
             item_ref: session.attachments[&session.root_attachment_id]
                 .root_ref
                 .clone(),
@@ -113,7 +117,7 @@ fn thread_record(id: &str, ownership: &Ownership) -> NewThreadRecord {
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,
-        requested_by: Some(ownership.owner.clone()),
+        requested_by: Some(ownership.launcher.clone()),
         project_root: None,
         project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
         base_project_snapshot_hash: None,
@@ -311,7 +315,8 @@ fn seat_with_initialization(
             .touch_seat_lease_if_anchors(
                 &ExactSeat {
                     root_id: id,
-                    owner: &ownership.owner,
+                    launcher: &ownership.launcher,
+                    holder: &ownership.holder,
                     item_ref: &ownership.item_ref,
                     executor_ref: &ownership.executor_ref,
                 },
@@ -811,13 +816,15 @@ fn orphan_inbound_with_obligation(
     };
     let first = ExactSeat {
         root_id: &destination.id,
-        owner: &ownership.owner,
+        launcher: &ownership.launcher,
+        holder: &ownership.holder,
         item_ref: &ownership.item_ref,
         executor_ref: &ownership.executor_ref,
     };
     let second = ExactSeat {
         root_id: &source.id,
-        owner: &ownership.owner,
+        launcher: &ownership.launcher,
+        holder: &ownership.holder,
         item_ref: &ownership.item_ref,
         executor_ref: &ownership.executor_ref,
     };

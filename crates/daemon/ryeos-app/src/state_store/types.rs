@@ -402,11 +402,16 @@ pub struct ThreadResultRecord {
 
 /// The exact seat a conditional lease or publication action targets. The seat
 /// is a chain root; its signed snapshot must be a running thread of a fenced
-/// chain kind carrying this owner, item and executor.
+/// chain kind launched by `launcher`, with this item and executor, and its
+/// lease, once taken, is held by `holder`.
 #[derive(Debug, Clone, Copy)]
 pub struct ExactSeat<'a> {
     pub root_id: &'a str,
-    pub owner: &'a str,
+    /// The key that launched the seat: the signed snapshot's `requested_by`.
+    pub launcher: &'a str,
+    /// The browser session holding the seat's lease, `session:<id>`. A lease
+    /// is taken by its first holder and never moves to another.
+    pub holder: &'a str,
     pub item_ref: &'a str,
     pub executor_ref: &'a str,
 }

@@ -2083,6 +2083,7 @@ mod abandoned_schema_source_tests {
 
     #[test]
     fn settled_live_metadata_releases_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
         let before = lillux::custody::abandoned_custody().count(METADATA);
         drop(metadata(None));
         assert_eq!(lillux::custody::abandoned_custody().count(METADATA), before);
@@ -2090,6 +2091,7 @@ mod abandoned_schema_source_tests {
 
     #[test]
     fn live_metadata_with_its_marker_is_retained_whole() {
+        let _serial = crate::test_support::abandoned_custody_serial();
         let marker = tempfile::tempfile().unwrap();
         let before = lillux::custody::abandoned_custody().count(METADATA);
         drop(metadata(Some(marker)));

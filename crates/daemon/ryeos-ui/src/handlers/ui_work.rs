@@ -85,6 +85,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: Some(caller.principal_id().to_string()),
         project_root: project_root.clone(),
+        // A seat is the UI's own session thread, not work.
+        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
         ..Default::default()
     };
     let threads = state.threads.list_thread_views_query(
@@ -288,6 +290,7 @@ pub async fn handle_approval_history(
                     &ryeos_app::thread_lifecycle::ThreadListFilter {
                         principal: Some(caller.principal_id().to_string()),
                         project_root,
+                        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
                         ..Default::default()
                     },
                     ryeos_app::thread_lifecycle::ThreadSort::Newest,
