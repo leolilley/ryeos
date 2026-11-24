@@ -63,24 +63,13 @@ fn echo(
     _state: Arc<ryeos_app::state::AppState>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
-        let seen = json!({"params": params, "root": context.recorded_service_root_id(),
+        Ok(
+            json!({"params": params, "root": context.recorded_service_root_id(),
         "principal": context.fingerprint, "origin": context.authenticated_origin_site_id,
-        "grant": context.authenticated_grant_authority});
-        // A caller that is not the operator receives only the service item's
-        // declared tier of the answer, so a test that must see the authority
-        // the handler was given reads it from here instead.
-        if let Some(root) = context.recorded_service_root_id() {
-            HANDLER_SAW
-                .lock()
-                .unwrap()
-                .insert(root.to_owned(), seen.clone());
-        }
-        Ok(seen)
+        "grant": context.authenticated_grant_authority}),
+        )
     })
 }
-
-static HANDLER_SAW: std::sync::Mutex<std::collections::BTreeMap<String, Value>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[tokio::test]
 async fn command_capability_does_not_grant_target_capability() {
@@ -296,18 +285,10 @@ async fn forwarded_operator_keeps_verified_authority_without_second_wire_asserti
     )
     .await
     .unwrap();
-    let _ = value;
-    let seen = HANDLER_SAW
-        .lock()
-        .unwrap()
-        .values()
-        .find(|seen| seen["origin"] == origin)
-        .cloned()
-        .expect("the handler ran");
-    assert_eq!(seen["origin"], origin);
-    assert_eq!(seen["principal"], expected_principal);
-    assert_eq!(seen["grant"], expected_grant);
-    assert_ne!(seen["root"], "T-forwarded-command");
+    assert_eq!(value["result"]["origin"], origin);
+    assert_eq!(value["result"]["principal"], expected_principal);
+    assert_eq!(value["result"]["grant"], expected_grant);
+    assert_ne!(value["result"]["root"], "T-forwarded-command");
 }
 
 #[tokio::test]

@@ -106,12 +106,13 @@ pub fn require_local_configured_operator(
     Ok(operator.fingerprint().to_owned())
 }
 
-/// How much of a service's answer the acting key may see. The configured
-/// local operator key sees the whole answer; any other verified key sees the
-/// tiers a service declares for principals; no verified key sees the public
-/// tier. The class comes from the key and its grant only: never from the kind
-/// of client holding the key. A failure to read the operator identity is not
-/// the operator.
+/// How much of a service's answer the acting key may see. A key the node
+/// admits as its operator (the configured local operator, or a verified,
+/// origin-bound remote principal forwarded as one) sees the whole answer; any
+/// other verified key sees the tiers a service declares for principals; no
+/// verified key sees the public tier. The class comes from the key and its
+/// grant only: never from the kind of client holding the key. A failure to
+/// establish the operator is not the operator.
 pub fn disclosure_class_for(
     state: &AppState,
     context: &HandlerContext,
@@ -127,13 +128,7 @@ pub fn disclosure_class_for(
             DisclosureClass::Public
         };
     }
-    if context.authorized_key_class == Some(AuthorizedKeyPrincipalClass::LocalClient)
-        && context.authenticated_origin_site_id.is_none()
-        && ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
-            &state.config.app_root,
-        )
-        .is_ok_and(|operator| context.fingerprint == operator.principal_id())
-    {
+    if require_admitted_operator(state, context).is_ok() {
         return DisclosureClass::Operator;
     }
     DisclosureClass::Principal
