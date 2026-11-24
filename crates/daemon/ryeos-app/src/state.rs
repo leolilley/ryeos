@@ -389,7 +389,9 @@ pub mod test_support {
             });
         }
         signers.extend(extra);
-        ryeos_engine::trust::TrustStore::from_signers(signers)
+        // Keys with no registry record speak for their solo principal, as on
+        // a node; the graph is empty because no signer here was rotated.
+        ryeos_engine::trust::TrustStore::from_signers(signers).with_succession_chain(&[])
     }
 
     pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {

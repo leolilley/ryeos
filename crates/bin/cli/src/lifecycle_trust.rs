@@ -24,7 +24,7 @@ const DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
 #[command(
     name = "ryeos trust pin",
     about = "Pin a signer key on a stopped node from a PUBLISHER_TRUST.toml",
-    long_about = "Writes a node-signed signer record and a key event. The node must be stopped. A publisher defaults to bundle space for every kind; a project author defaults to project space, limited to the --project roots given.",
+    long_about = "Writes a node-signed signer record and a key event. The node must be stopped. A publisher defaults to bundle space for every kind; a project author defaults to project space, limited to the --project identities given (pid:v1:<owner>/<name>, or own:<name> for the signer's own key).",
     no_binary_name = true
 )]
 struct PinArgs {
@@ -36,7 +36,8 @@ struct PinArgs {
     #[arg(long)]
     role: String,
 
-    /// Project root the signer may sign for (repeatable, absolute).
+    /// Project the signer may sign for (repeatable): pid:v1:<owner>/<name>, or
+    /// own:<name> for a project the signer's own key owns.
     #[arg(long = "project", action = clap::ArgAction::Append)]
     projects: Vec<String>,
 
@@ -59,7 +60,7 @@ struct PinArgs {
 #[command(
     name = "ryeos trust scope",
     about = "Narrow or widen the scope of a pinned signer",
-    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project to replace the project list, or --any-project to clear it so the signer may sign for every project. An authoring key's scope does not decide trust (endorsements do), so for it the verb takes no scope flags and restores the authoring scope: project space, no kinds.",
+    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project pid:v1:<owner>/<name> (or own:<name>) to replace the project list, or --any-project to clear it so the signer may sign for every project. A scope without project space carries no projects. An authoring key's scope does not decide trust (endorsements do), so for it the verb takes no scope flags and restores the authoring scope: project space, no kinds.",
     no_binary_name = true
 )]
 struct ScopeArgs {
@@ -270,7 +271,7 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
                 .map(|space| space.as_str().to_owned())
                 .collect(),
             kinds: default.kinds,
-            projects: default.projects,
+            projects: Vec::new(),
         };
         arguments.validate()?;
         let host = crate::offline_apply::CliHost::new();
@@ -298,7 +299,34 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     } else {
         args.kinds.clone()
     };
-    let projects = scope_projects(&args, &current.scope.projects);
+    let current_projects = current
+        .scope
+        .projects
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    // Projects mean nothing outside project space: a scope that leaves
+    // project space drops them rather than carrying them, and never becomes
+    // an all-projects scope.
+    let adds_project_space = spaces.iter().any(|space| space == "project")
+        && !current
+            .scope
+            .spaces
+            .contains(&ryeos_engine::trust::SignerSpace::Project);
+    if adds_project_space && args.projects.is_empty() && !args.any_project {
+        bail!(
+            "trust_scope_invalid: adding the project space needs --project pid:v1:<owner>/<name> \
+             (or own:<name>), or --any-project to sign for every project"
+        );
+    }
+    let projects = if spaces.iter().any(|space| space == "project") {
+        scope_projects(&args, &current_projects)
+    } else {
+        if !args.projects.is_empty() {
+            bail!("trust_scope_invalid: --project needs the project space");
+        }
+        Vec::new()
+    };
     let arguments = ryeos_node::offline_operation::handlers::TrustScopeArguments {
         fingerprint: args.fingerprint.clone(),
         spaces,
@@ -399,15 +427,15 @@ mod tests {
         let parse = |argv: &[&str]| {
             ScopeArgs::try_parse_from(argv.iter().map(|arg| arg.to_string())).unwrap()
         };
-        let current = vec!["/srv/alpha".to_owned()];
+        let current = vec!["own:alpha".to_owned()];
         assert_eq!(scope_projects(&parse(&["fp"]), &current), current);
         assert_eq!(
-            scope_projects(&parse(&["fp", "--project", "/srv/beta"]), &current),
-            vec!["/srv/beta".to_owned()]
+            scope_projects(&parse(&["fp", "--project", "own:beta"]), &current),
+            vec!["own:beta".to_owned()]
         );
         assert!(scope_projects(&parse(&["fp", "--any-project"]), &current).is_empty());
         assert!(
-            ScopeArgs::try_parse_from(["fp", "--any-project", "--project", "/srv/beta"]).is_err()
+            ScopeArgs::try_parse_from(["fp", "--any-project", "--project", "own:beta"]).is_err()
         );
     }
 

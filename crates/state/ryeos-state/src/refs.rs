@@ -797,7 +797,11 @@ fn validate_single_ref_component(label: &str, value: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-fn project_head_ref_path(principal_key: &str, project_hash: &str) -> anyhow::Result<String> {
+/// The only place a project head ref path is formatted.
+pub(crate) fn project_head_ref_path(
+    principal_key: &str,
+    project_hash: &str,
+) -> anyhow::Result<String> {
     validate_single_ref_component("project principal key", principal_key)?;
     validate_single_ref_component("project hash", project_hash)?;
     Ok(format!("projects/{principal_key}/{project_hash}/head"))
@@ -926,6 +930,7 @@ pub(crate) fn write_verified_project_head_ref_in_directory(
     principal_key: &str,
     project_hash: &str,
     project_snapshot_hash: &str,
+    advancer: &crate::head_advance::HeadAdvancer,
     signer: &dyn Signer,
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
@@ -957,6 +962,16 @@ pub(crate) fn write_verified_project_head_ref_in_directory(
         );
     }
     ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")?;
+    crate::head_advance::record_head_advance(
+        &head_directory,
+        &expected_ref_path,
+        None,
+        project_snapshot_hash,
+        None,
+        advancer,
+        signer,
+        trust_store,
+    )?;
     write_project_head_ref_unchecked_in_head_directory(
         &head_directory,
         principal_key,
@@ -1025,6 +1040,16 @@ pub struct VerifiedProjectHead {
     pub signed_ref: SignedRef,
 }
 
+impl VerifiedProjectHead {
+    /// The head key this ref was found under.
+    pub fn key(&self) -> anyhow::Result<crate::project_identity::ProjectHeadKey> {
+        crate::project_identity::ProjectHeadKey::from_sealed(
+            &self.principal_key,
+            &self.project_hash,
+        )
+    }
+}
+
 fn read_verified_closed_head_directory(
     directory: &lillux::PinnedDirectory,
     expected_ref_path: &str,
@@ -1052,6 +1077,9 @@ fn read_verified_closed_head_directory(
                 head = read_verified_ref_in_directory(directory, &name, trust_store)
                     .with_context(|| format!("failed to verify {label} {expected_ref_path}"))?;
             }
+            // Node-signed records of which key advanced the head; read only
+            // by exact (previous, new) lookup.
+            advance if advance.starts_with(crate::head_advance::HEAD_ADVANCE_PREFIX) => {}
             _ => anyhow::bail!(
                 "unexpected regular file in {label} namespace: {}",
                 directory.path().join(&name).display()
@@ -1566,6 +1594,9 @@ pub(crate) fn advance_verified_project_head_ref(
         .into());
     }
 
+    if new_snapshot_hash == expected_current_hash {
+        return Ok(());
+    }
     project_lock
         .ensure_protects(refs_root, principal_key, project_hash)
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
@@ -1586,6 +1617,7 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
     project_hash: &str,
     new_snapshot_hash: &str,
     expected_current_hash: &str,
+    advancer: &crate::head_advance::HeadAdvancer,
     signer: &dyn Signer,
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
@@ -1629,8 +1661,26 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
         }
         .into());
     }
+    // The head already names the target: nothing moves, so nothing is
+    // recorded or rewritten. A rewrite to the same target inside one second
+    // would be byte-identical to the head it replaces, and the advance
+    // records rely on every swap changing the target.
+    if new_snapshot_hash == expected_current_hash {
+        return Ok(());
+    }
     ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
+    crate::head_advance::record_head_advance(
+        &head_directory,
+        &expected_ref_path,
+        Some(expected_current_hash),
+        new_snapshot_hash,
+        Some(current.signature.as_str()),
+        advancer,
+        signer,
+        trust_store,
+    )
+    .map_err(ProjectHeadAdvanceRefusal::before_write)?;
     write_project_head_ref_unchecked_in_head_directory(
         &head_directory,
         principal_key,
@@ -3098,6 +3148,174 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn head_advance_records_are_per_occurrence_and_a_crash_retry_by_another_key_succeeds() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs_root = tempdir.path().join("refs");
+        fs::create_dir(&refs_root).unwrap();
+        let refs_directory = lillux::PinnedDirectory::open(&refs_root)
+            .unwrap()
+            .expect("refs root exists");
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        let key = |byte: &str| crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", byte.repeat(32)),
+            via_root: None,
+        };
+        let (one, two) = (key("01"), key("02"));
+        let owner = "pid-v1-".to_owned() + &"cc".repeat(32);
+        let lock = ProjectHeadLock::acquire_in_refs_directory(&refs_directory, &owner, "project-a")
+            .unwrap();
+        write_verified_project_head_ref_in_directory(
+            &refs_directory,
+            &owner,
+            "project-a",
+            &a,
+            &one,
+            &signer,
+            &trust,
+            &lock,
+        )
+        .unwrap();
+        let advance = |from: &str, to: &str, by: &crate::head_advance::HeadAdvancer| {
+            advance_verified_project_head_ref_in_directory(
+                &refs_directory,
+                &owner,
+                "project-a",
+                to,
+                from,
+                by,
+                &signer,
+                &trust,
+                &lock,
+            )
+        };
+        // A -> B by key one, back to A by key two, A -> B again by key two:
+        // both occurrences of (A, B) are recorded, each with its own key.
+        advance(&a, &b, &one).unwrap();
+        advance(&b, &a, &two).unwrap();
+        advance(&a, &b, &two).unwrap();
+        let head_directory = lock
+            .protected_directory_in_refs(&refs_directory, &owner, "project-a")
+            .unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&a), &b, &trust).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].record.advancer, one);
+        assert_eq!(records[1].record.advancer, two);
+        assert_eq!(records[1].record.occurrence, 2);
+        assert!(records.iter().all(|read| read.applied));
+
+        // A crashed attempt: a record written, the swap never done. A retry by
+        // the same key reuses it; another key writes the next occurrence.
+        let current = read_verified_project_head_ref_in_directory(
+            &refs_directory,
+            &owner,
+            "project-a",
+            &trust,
+        )
+        .unwrap()
+        .unwrap();
+        let c = "dd".repeat(32);
+        crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&b),
+            &c,
+            Some(current.signature.as_str()),
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&b),
+            &c,
+            Some(current.signature.as_str()),
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust)
+                .unwrap()
+                .len(),
+            1,
+            "a crash-retry by the same key reuses the record"
+        );
+        advance(&b, &c, &two).unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "another key after a crash writes its own record"
+        );
+        assert_eq!(records[1].record.advancer, two);
+        assert!(
+            !records[0].applied,
+            "the crashed attempt never moved the head"
+        );
+        assert!(records[1].applied);
+
+        // The same key moving the head away and back within one second sees
+        // a head ref byte-identical to one an earlier record observed (whole-
+        // second timestamps, deterministic signatures). Order, not the
+        // observed bytes, decides: it writes a new occurrence, and every
+        // swapped record reads applied.
+        advance(&c, &b, &two).unwrap();
+        advance(&b, &c, &two).unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].record.occurrence, 3);
+        assert!(!records[0].applied);
+        assert!(records[1].applied && records[2].applied);
+        let sequences: Vec<u64> = records.iter().map(|read| read.record.sequence).collect();
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // An advance to the head's current target moves nothing: no record,
+        // and the head file is left byte for byte.
+        let record_count = || {
+            head_directory
+                .entry_names()
+                .unwrap()
+                .iter()
+                .filter(|name| {
+                    name.to_str().is_some_and(|name| {
+                        name.starts_with(crate::head_advance::HEAD_ADVANCE_PREFIX)
+                    })
+                })
+                .count()
+        };
+        let head_file = head_directory.path().join("head");
+        let (records_before, head_before) = (record_count(), fs::read(&head_file).unwrap());
+        advance(&c, &c, &one).unwrap();
+        assert_eq!(record_count(), records_before);
+        assert_eq!(fs::read(&head_file).unwrap(), head_before);
+        // The recorder itself refuses an unchanged target.
+        let unchanged = crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&c),
+            &c,
+            None,
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{unchanged:#}").starts_with("head_advance_target_unchanged"),
+            "{unchanged:#}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn pinned_non_chain_locks_and_mutations_stay_on_displaced_refs_root() {
         let tempdir = tempfile::tempdir().unwrap();
         let refs_root = tempdir.path().join("refs");
@@ -3114,11 +3332,16 @@ mod tests {
         let project_lock =
             ProjectHeadLock::acquire_in_refs_directory(&refs_directory, "principal-a", "project-a")
                 .unwrap();
+        let advancer = crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", signer.fingerprint()),
+            via_root: None,
+        };
         write_verified_project_head_ref_in_directory(
             &refs_directory,
             "principal-a",
             "project-a",
             &first,
+            &advancer,
             &signer,
             &trust,
             &project_lock,
@@ -3184,6 +3407,7 @@ mod tests {
             "project-a",
             &second,
             &first,
+            &advancer,
             &signer,
             &trust,
             &project_lock,

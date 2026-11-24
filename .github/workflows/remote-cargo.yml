@@ -40,12 +40,13 @@ on:
         type: choice
         options:
           - test
+          - gate
           - clippy
           - check
           - build
           - fmt
       args:
-        description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings"
+        description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings. gate passes them to scripts/gate.sh (nextest, one process per test, the merge gate's composition features), e.g. -p ryeosd --test node_journal_e2e; plain test is cargo test, all tests as threads of one process, so suites sharing the in-process TestNativeHost lock need -- --test-threads 1 there"
         required: true
         type: string
       bundles:
@@ -70,11 +71,24 @@ on:
         required: false
         default: ""
         type: string
+      prebuild_static:
+        description: "Optional arguments for a statically linked `cargo build --target x86_64-unknown-linux-gnu` (crt-static) run before the command, for tests that run guests in an enclosure with no host libraries, e.g. -p ryeos-synthetic-external-lifecycle-adapter --bin ryeos-synthetic-mounted-candidate-supervisor"
+        required: false
+        default: ""
+        type: string
       label:
         description: "Optional short label shown in the run name"
         required: false
         default: ""
         type: string
+      sccache:
+        description: "auto uses sccache and falls back to plain rustc if its server does not start; off builds with plain rustc from the start"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - "auto"
+          - "off"
 
 run-name: "remote cargo ${{ inputs.command }} ${{ inputs.label }} (${{ github.ref_name }})"
 
@@ -87,6 +101,9 @@ env:
   RUST_BACKTRACE: 1
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: sccache
+  # A compile whose sccache server dies mid-job runs rustc directly instead
+  # of failing; .github/actions/sccache-or-plain covers a server that never starts.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
   CARGO_INCREMENTAL: "0"
   GATE_BUILD_JOBS: 0
   GATE_TEST_THREADS: 0
@@ -112,8 +129,14 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Install cargo-nextest
+        if: ${{ inputs.command == 'gate' }}
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ inputs.sccache == 'off' || vars.SCCACHE_OFF == 'true' }}
 
       # Read the CI workflow's crate cache but never save one: many branches
       # dispatch this, and per-run saves would evict the CI caches.
@@ -232,8 +255,18 @@ jobs:
           CARGO_ARGS: ${{ inputs.args }}
           CARGO_WORKSPACE: ${{ inputs.workspace }}
           CARGO_PREBUILD: ${{ inputs.prebuild }}
+          CARGO_PREBUILD_STATIC: ${{ inputs.prebuild_static }}
         run: |
           set -euo pipefail
+          echo "rustc wrapper: ${RUSTC_WRAPPER:-none (plain rustc)}"
+          if [[ -n "$CARGO_PREBUILD_STATIC" ]]; then
+            # The same build the CI archive jobs make: tests look for these guests under
+            # target/x86_64-unknown-linux-gnu/debug.
+            read -r -a prebuild_static <<<"$CARGO_PREBUILD_STATIC"
+            echo "cargo build --target x86_64-unknown-linux-gnu ${prebuild_static[*]} (crt-static)"
+            RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+              cargo build --target x86_64-unknown-linux-gnu "${prebuild_static[@]}"
+          fi
           if [[ -n "$CARGO_PREBUILD" ]]; then
             read -r -a prebuild <<<"$CARGO_PREBUILD"
             echo "cargo build ${prebuild[*]}"
@@ -243,6 +276,18 @@ jobs:
           manifest=()
           if [[ "$CARGO_WORKSPACE" == rune ]]; then
             manifest=(--manifest-path crates/clients/rune/Cargo.toml)
+          fi
+          if [[ "$CARGO_SUBCOMMAND" == gate ]]; then
+            # As the merge gate's changed-crates job runs it.
+            [[ "$CARGO_WORKSPACE" == root ]] || { echo "::error::gate runs the root workspace only"; exit 2; }
+            staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+            if [[ -d "$staged" ]]; then
+              export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+            fi
+            export RUST_MIN_STACK=8388608
+            echo "./scripts/gate.sh ${extra[*]}"
+            ./scripts/gate.sh "${extra[@]}"
+            exit 0
           fi
           echo "cargo $CARGO_SUBCOMMAND ${manifest[*]} ${extra[*]}"
           cargo "$CARGO_SUBCOMMAND" "${manifest[@]}" "${extra[@]}"

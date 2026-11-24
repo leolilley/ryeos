@@ -71,7 +71,7 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
     for id in ids {
         let item_ref = format!("config:ryeos-runtime/model-providers/{id}");
         let value = match crate::effective_metadata::resolve_effective_composed_value(
-            &engine, &item_ref, None,
+            app_root, &engine, &item_ref, None,
         ) {
             Ok(Some(value)) => value,
             Ok(None) => {

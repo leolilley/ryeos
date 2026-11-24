@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T21:33:09Z:3a979b6ade3e1f6c3b2accdda378d4ba3e6187b26711e78a78361dce62fe9567:WGO0lTACei2aZzgGJVAXUvxGZelIQb/FLM2mLbScOZd5lzMIM4JiiBc66dcn6PG6jePVp3583FgsB30dwVrPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T04:36:15Z:37c9a47e4c3a0b2c859007a45993ae2b317c73ce88c6203159201d40d5f5642d:C1qF9JZW7P5awms4He7zGEwiJMR3E71wk4UMgNEtX2uctUYorGPLzbHW47wQKF85e0zkRbHWOXgenuUPINEmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -291,9 +291,12 @@ registration under `.ai/node/projects/` and warns when one name lists more
 than one checkout (names are free text, so unrelated checkouts registered
 under one name would share its trust at the cut). It fails, naming the cure,
 for an unsigned, edited or stray entry. The `project_registration_declarations`
-row warns for each registered checkout that is gone or whose `.ai/project.yaml`
-no longer declares the registered name; the fix restores the declaration or
-unregisters the checkout.
+row warns for each registered checkout that is gone or whose `.ai/manifest.yaml`
+`name:` is no longer the registered name; the fix restores the name or
+unregisters the checkout. The `project_manifest_name_drift` row warns when a
+registered checkout's `.ai/manifest.source.yaml` names a different project
+than its `.ai/manifest.yaml`; re-populate the manifest (`ryeos manifest
+build`/`sign`) before registering.
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
@@ -345,6 +348,52 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the owner+name project identity cut, epoch 144.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 143 --schema-cut-to 144 --include-project-heads --confirm-project-heads` on its next upgrade. Project heads are reset too, because their keys change shape. The reset discards all thread history, so the head refs threads sealed for fold-back (pending head advances, keyed by the old shape) go with it and no resumed run meets a pre-cut ref; `--include-project-heads` removes the head directories, with their head-advance records.
+
+A node still on epoch 142 goes straight to 144 with one reset, in place of the 143 reset and this one: `ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 144 --include-project-heads --confirm-project-heads`. The reset accepts any earlier stored epoch named exactly as `--schema-cut-from`, and clears that store without reading it, so no 143 build is needed in between. Such a node still carries the 143 cut's own ordering, described in the epoch 143 note below:
+- Drain before stopping: settle or terminate every lease, qualification occurrence and termination in flight.
+- After starting, recompose each binding `ryeos node doctor` names as stranded.
+- Run the rig preflight before any live spend.
+
+Everything else below applies to both paths.
+
+What a project is now:
+- **project**: `pid:v1:<owner>/<name>`.
+  - The owner is a principal: the sha256 of the key's inception record, for example `fp:000…0` → `pid:v1:62089d38725f465fca99bab850bf34953900e105670ca36f65f09e264d3dd6e5`.
+  - The name is the top-level `name:` of the project's `.ai/manifest.yaml`, the same name its items are namespaced under.
+  - The manifest's signature plays no part in identity.
+  - The name must match `[a-z0-9][a-z0-9._-]{0,63}`, written as a plain value. Values YAML reads as other types (`true`, `1.0`, `null`) are refused as `project_manifest_name_invalid`.
+- **checkout**: a registered live folder.
+- **snapshot** / **head**: a pushed copy, and the ref that points at it, now `projects/pid-v1-<hex>/<sha256(name)>/head`.
+
+Rotation and keys:
+- A key rotated with `ryeos node operator rotate` keeps its projects on the node where the rotation was recorded. Remotes see it only once they record it.
+- Retired and revoked keys own nothing. Revocation is per key.
+- Per-key state (principal space, schedules, the UI project list) does not move on rotation.
+- A second key is a second owner until key pairing exists.
+
+Before installing, on the old binary: run `ryeos trust list` and re-scope every signer record that lists project paths (a v1 record with paths is refused by name). On the release authority, take the public dev key out of project space with `--space bundle --any-project`.
+
+After the reset:
+1. Register each checkout that needs live trust: `ryeos project register <checkout>`. The name comes from the manifest.
+2. On every remote node, add `ryeos.execute.service.project/owner` to each principal grant that pushes or executes there. A remote on a pre-cut build refuses the new `expected_owner` field, so upgrade remotes first.
+3. Re-bind remote projects. Pre-cut binding records fail to load, and bind records the owner the remote reports (`remote_owner`).
+4. Re-push heads.
+5. Re-make standing endorsements, which now name `pid:v1:<owner>/<name>`.
+
+ryeos-next's identity becomes `pid:v1:<operator>/ryeos`, its manifest name. Its registration, bindings and endorsements are re-created under `ryeos`, and the old ones fail closed.
+
+Doctor rows to check:
+- `signer_records_refused`, `owner_chains_corrupt` and `succession_from_public_key` should each be 0.
+- `project_owners` lists each owner with its root and current keys.
+- `signer_records_v1` counts records still at v1. The v1 reader goes at the next signer-record schema change.
+- `project_registrations_pre_cut` lists registrations to re-make.
+- `project_manifest_name_drift` flags a checkout whose two manifests disagree.
+
+Known issue: older code and text outside this cut still says "live project root" for what is now a **checkout**. These are renamed as they are touched.
 
 Operator note for the runtime schema cut to epoch 143: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 143`
@@ -955,8 +1004,8 @@ the operator key inside the CLI and submitted to the running node; see
 
 | Verb | Effect |
 |---|---|
-| `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes |
-| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in the project, until the lifetime passes when given |
+| `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `pid:v1:<owner>/<declared name>` with the operator's principal as owner (printed before signing) |
+| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes when given |
 | `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |
@@ -968,8 +1017,8 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 
 | Verb | Effect |
 |---|---|
-| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
-| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope. For an authoring key it takes no flags and restores the authoring scope; endorsements, not scope, trust what it signs |
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project pid:v1:<owner>/<name>\|own:<name>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope; project entries are owner+name identities, never paths |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project pid:v1:<owner>/<name>\|own:<name>]... [--any-project]` | Replace a signer's scope. Adding the project space needs `--project` or `--any-project`; leaving it drops the projects. For an authoring key it takes no flags and restores the authoring scope; endorsements, not scope, trust what it signs |
 | `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
 | `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
 | `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |
@@ -988,21 +1037,57 @@ Each change appends a node-signed, hash-chained key event under
 
 | Verb | Effect |
 |---|---|
-| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/project.yaml` (`schema: 1`, `name: <name>`) must declare the name, and `--name` defaults to it. The owner defaults to the node's operator and is never the node key or the authoring key |
-| `ryeos project unregister <path> [--name <name>] [--owner fp:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
+| `ryeos project register <path> [--name <name>] [--owner pid:v1:<hex>]` | Register a live checkout under `pid:v1:<owner>/<name>`. The checkout's `.ai/manifest.yaml` must carry the name (its top-level `name:`), and `--name` defaults to it and must equal it. The owner defaults to the node's operator and is never the node key or the authoring key |
+| `ryeos project unregister <path> [--name <name>] [--owner pid:v1:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
 
 Both are signed offline operations (`node.project.register`,
 `node.project.unregister`; local signer only) and refuse on a running node with
 `node_running_trust_change`. A path that is `/`, the node app root, an ancestor
 of it or inside it is refused. Each registration is a node-signed record at
-`<app_root>/.ai/node/projects/<owner-hex>/<name>.yaml` listing the canonical
-checkout paths. Refusal codes: `project_undeclared`, `project_name_mismatch`,
+`<app_root>/.ai/node/projects/pid-v1-<hex>/<name>.yaml` listing the canonical
+checkout paths. Refusal codes: `project_manifest_missing`, `project_manifest_name_missing`,
+`project_manifest_name_invalid`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
 
-Registrations are inert for now: only `ryeos node doctor` reads them. At the
-owner+name trust cut they become what lets a live checkout state its project
-identity, so registrations made before the cut become trust at the cut.
+A registration is what lets a live checkout state its project identity: a run
+launched from a registered checkout, by the registering owner holding
+`ryeos.write.project.live`, whose tree still declares the name, states
+`pid:v1:<owner>/<name>`. Registration matters only for signers scoped to specific
+projects; an unscoped signer is trusted in every checkout. See
+[Signing and Trust](../signing.md).
+
+#### Owner+name trust cut (epoch 143 operator note)
+
+The epoch 143 build keyed project trust and pushed heads by `fp:<owner>/<name>`;
+epoch 144 replaces the key owner with a principal (see the epoch 144 note above).
+
+Before installing it, on the old build, run `ryeos trust list` on every node
+and re-scope any signer record that lists project paths, for example
+`ryeos trust scope <fp> --space bundle --any-project` for a key that should
+sign bundles only. Such a record is otherwise refused by name after the
+install (only that signer; the node still starts).
+
+After installing, on a stopped node:
+
+1. `ryeos node reset execution-history --include-project-heads --confirm
+   --schema-cut-from <N-1> --schema-cut-to <N>`, then `ryeos node
+   allow-restart` and `ryeos start`. Heads keyed by path are retired; pushed
+   heads are keyed `projects/<owner>/<sha256(name)>/head`.
+2. Make sure each project that uses scoped signers, pushed heads or remote bindings
+   has a `.ai/manifest.yaml` whose `name:` is its project name.
+3. `ryeos project register <checkout>` for each checkout a scoped signer must
+   be trusted in.
+4. Re-bind remote projects (`ryeos remote bind-project ...`): a binding now
+   records the declared name, and every push, execute and sync re-reads the
+   checkout's declaration and refuses a mismatch (`project_name_mismatch`).
+5. Re-push heads, and re-make standing endorsements with `ryeos endorse
+   --standing ...` (endorsements made before the cut are refused by name).
+6. `ryeos node doctor`: `signer_records_refused` should list nothing; review
+   `unscoped_project_signers` and `endorsements_covering_nothing`.
+
+A stable project identity string (`{site}:{path}`) still appears in execution
+records; it is a locator, not authority.
 
 ### Key rotation
 

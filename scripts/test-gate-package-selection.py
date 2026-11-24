@@ -37,6 +37,10 @@ def shadow_gate(shadow):
 
 class GatePackageSelection(unittest.TestCase):
     def invoke(self, *args):
+        return self.invocations(*args)[-1]
+
+    def invocations(self, *args):
+        """Every Cargo argument list the gate ran, in order."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             gate = shadow_gate(root / "repo")
@@ -45,18 +49,21 @@ class GatePackageSelection(unittest.TestCase):
             cargo.write_text(
                 "#!/usr/bin/env python3\n"
                 "import json,os,sys\n"
-                "with open(os.environ['GATE_ARGV_LOG'],'w') as out:\n"
-                " json.dump(sys.argv[1:],out)\n"
+                "with open(os.environ['GATE_ARGV_LOG'],'a') as out:\n"
+                " out.write(json.dumps(sys.argv[1:])+'\\n')\n"
             )
             cargo.chmod(0o700)
+            target = root / "target"
+            (target / "debug").mkdir(parents=True)
             environment = dict(os.environ, CARGO=str(cargo), GATE_ARGV_LOG=str(log),
-                               GATE_BUILD_JOBS="1", GATE_TEST_THREADS="1")
+                               GATE_BUILD_JOBS="1", GATE_TEST_THREADS="1",
+                               CARGO_TARGET_DIR=str(target))
             result = subprocess.run(
-                ["bash", str(gate), *args],
+                ["bash", str(gate), *(a.replace("{tmp}", directory) for a in args)],
                 env=environment, capture_output=True, text=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            return json.loads(log.read_text())
+            return [json.loads(line) for line in log.read_text().splitlines()]
 
     def test_default_keeps_complete_workspace(self):
         args = self.invoke()
@@ -106,6 +113,24 @@ class GatePackageSelection(unittest.TestCase):
         args = self.invoke("--workspace", "-p", "lillux-sqlite")
         self.assertEqual(args.count("--workspace"), 1)
         self.assertIn("--features", args)
+
+    def test_archive_with_workspace_bins_builds_every_binary_first(self):
+        archive = "{tmp}/e2e.tar.zst"
+        build, archived = self.invocations(
+            "--nextest-archive", archive, "--with-workspace-bins", "-p", "ryeosd", "--test", "one_e2e")
+        self.assertEqual(build[:3], ["build", "--workspace", "--bins"])
+        features = build[build.index("--features") + 1]
+        for feature in ("ryeosd/scheduling", "ryeos-cli/scheduling", "ryeos-handler-bins/graph-handlers"):
+            self.assertIn(feature, features)
+        self.assertEqual(archived[0], "nextest")
+        self.assertNotIn("--workspace", archived)
+        self.assertEqual(archived[archived.index("--features") + 1],
+                         "ryeosd/model-provider-setup,ryeosd/scheduling")
+        self.assertIn("one_e2e", archived)
+
+    def test_workspace_bins_needs_an_archive(self):
+        with self.assertRaises(AssertionError):
+            self.invoke("--with-workspace-bins", "-p", "ryeosd")
 
 
 if __name__ == "__main__":

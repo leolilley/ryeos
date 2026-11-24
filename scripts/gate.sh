@@ -16,6 +16,10 @@
 # CI-only split of the gate into one build and many shards (see
 # .github/workflows/ci.yml). None of these change a plain local run:
 #     ./scripts/gate.sh --nextest-archive FILE        # build the workspace test archive, run nothing
+#     ./scripts/gate.sh --nextest-archive FILE --with-workspace-bins -p ryeosd --test NAME...
+#                                                     # archive chosen test binaries; build every
+#                                                     # workspace binary first so the extras carry
+#                                                     # the siblings the tests run beside them
 #     ./scripts/gate.sh --nextest-run-archive FILE --partition hash:1/8
 #                                                     # run one shard from that archive, no compiling
 #     ./scripts/gate.sh --crash-archive FILE          # build the crash-qualification archive + CLI
@@ -75,6 +79,7 @@ crash_archive=""
 crash_run_archive=""
 crash_phase=""
 crash_partition=""
+with_workspace_bins=0
 nextest_args=()
 selected_packages=()
 explicit_workspace=0
@@ -90,6 +95,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-crash-qualification)
             skip_crash_qualification=1
+            shift
+            ;;
+        --with-workspace-bins)
+            with_workspace_bins=1
             shift
             ;;
         --crash-qualification-only)
@@ -158,6 +167,10 @@ if (( archive_modes == 1 )); then
         gate_fail "archive modes take staged bundles from the checkout and conflict with --refresh-bundles, --no-tests and --crash-qualification-only"
         exit 2
     fi
+fi
+if [[ "$with_workspace_bins" == "1" && -z "$nextest_archive" ]]; then
+    gate_fail "--with-workspace-bins goes with --nextest-archive"
+    exit 2
 fi
 if [[ -n "$crash_run_archive" && -z "$crash_phase" ]] || [[ -z "$crash_run_archive" && ( -n "$crash_phase" || -n "$crash_partition" ) ]]; then
     gate_fail "--crash-phase and --crash-partition go with --crash-run-archive, which requires --crash-phase"
@@ -348,31 +361,16 @@ if [[ -n "$crash_run_archive" ]]; then
     exit 0
 fi
 
-if [[ "$crash_qualification_only" != "1" ]]; then
-    # The Core reporter revisions are stdlib-only Python with their own
-    # unit tests; no cargo target runs them.
-    if [[ "$skip_tests" != "1" && -z "$nextest_run_archive" ]]; then
-        gate_info "running Core reporter unit tests"
-        python3 -I -B "$ROOT/bundles/core/tests/reporter/test_reporter.py"
-    fi
-    if [[ -n "$nextest_run_archive" ]]; then
-        gate_unpack_extras "${nextest_run_archive}.extras.tar"
-        gate_info "cargo nextest run --archive-file (test_threads=${test_threads}) ${nextest_args[*]:-}"
-        "$CARGO" nextest run --archive-file "$nextest_run_archive" \
-            --extract-to "$archive_extract_dir" --extract-overwrite --workspace-remap "$ROOT" \
-            --no-fail-fast "${test_threads_args[@]}" "${nextest_args[@]}"
-        exit 0
-    fi
-    workspace_args=()
-    if [[ ${#selected_packages[@]} -eq 0 && "$explicit_workspace" == 0 ]]; then
-        workspace_args=(--workspace)
-    fi
+# Sets feature_args: the composition features of the selected packages, or of
+# every package when the argument is 1. Cargo --workspace widens even an
+# explicit -p selection, so package-scoped checks must also avoid features
+# belonging to unselected packages.
+gate_compute_features() {
+    local all="$1" package package_selected selection composition_feature adapter_selected adapter_package
     gate_features=""
-    # Cargo --workspace widens even an explicit -p selection. Package-scoped
-    # checks must also avoid features belonging to unselected packages.
     for package in ryeos-handler-bins ryeosd ryeos-cli ryeos-api; do
         package_selected=0
-        if [[ ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
+        if [[ "$all" == 1 || ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
             package_selected=1
         else
             for selection in "${selected_packages[@]}"; do
@@ -393,7 +391,7 @@ if [[ "$crash_qualification_only" != "1" ]]; then
     # The claude-code adapter's stub driver is opt-in and off in shipped
     # builds; the test build turns it on so the stub's own tests still run.
     adapter_selected=0
-    if [[ ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
+    if [[ "$all" == 1 || ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
         adapter_selected=1
     else
         adapter_package=ryeos-claude-code-adapter
@@ -407,7 +405,39 @@ if [[ "$crash_qualification_only" != "1" ]]; then
         || gate_features+="${gate_features:+,}ryeos-claude-code-adapter/stub-driver"
     feature_args=()
     [[ -z "$gate_features" ]] || feature_args=(--features "$gate_features")
+    return 0
+}
+
+if [[ "$crash_qualification_only" != "1" ]]; then
+    # The Core reporter revisions are stdlib-only Python with their own
+    # unit tests; no cargo target runs them.
+    if [[ "$skip_tests" != "1" && -z "$nextest_run_archive" ]]; then
+        gate_info "running Core reporter unit tests"
+        python3 -I -B "$ROOT/bundles/core/tests/reporter/test_reporter.py"
+    fi
+    if [[ -n "$nextest_run_archive" ]]; then
+        gate_unpack_extras "${nextest_run_archive}.extras.tar"
+        gate_info "cargo nextest run --archive-file (test_threads=${test_threads}) ${nextest_args[*]:-}"
+        "$CARGO" nextest run --archive-file "$nextest_run_archive" \
+            --extract-to "$archive_extract_dir" --extract-overwrite --workspace-remap "$ROOT" \
+            --no-fail-fast "${test_threads_args[@]}" "${nextest_args[@]}"
+        exit 0
+    fi
+    workspace_args=()
+    if [[ ${#selected_packages[@]} -eq 0 && "$explicit_workspace" == 0 ]]; then
+        workspace_args=(--workspace)
+    fi
+    gate_compute_features 0
     if [[ -n "$nextest_archive" ]]; then
+        if [[ "$with_workspace_bins" == "1" ]]; then
+            selected_feature_args=("${feature_args[@]}")
+            gate_compute_features 1
+            bin_jobs_args=()
+            [[ "$build_jobs" != "0" ]] && bin_jobs_args=(-j "$build_jobs")
+            gate_info "cargo build --workspace --bins (build_jobs=${build_jobs})"
+            "$CARGO" build --workspace --bins "${feature_args[@]}" "${bin_jobs_args[@]}"
+            feature_args=("${selected_feature_args[@]}")
+        fi
         gate_info "cargo nextest archive ${workspace_args[*]:-} (build_jobs=${build_jobs}) ${nextest_args[*]:-}"
         "$CARGO" nextest archive "${workspace_args[@]}" \
             "${feature_args[@]}" "${cargo_jobs_args[@]}" "${nextest_args[@]}" \

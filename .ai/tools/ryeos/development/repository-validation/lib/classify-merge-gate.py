@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-22T01:26:56Z:010e41f01d62c3f46660fda64bedae0e76c629245d0b5d7c137de7a5eb6b6675:JD3x7lcc3kRIwXKjushE5O5Vsk41klB8rCPW0Pa6xEcey7QKHaTvqXJVsc8+GXl23xM735bj71yX2TI4x783Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:29:51Z:d1933f6c24e255a1baddbf2e3afb4c0370c3cef3c22eaf9e9c91ee04ee4e2466:kuOKSGzmkIJHlqokDuXt4iz5G8iEUEvD3AmZTtuWZmtFb6gFJImqLdO4DyBRNvoJMyhVAidydAEFrusMbZd8BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -20,6 +20,18 @@ those, so a classification fault cannot fail the run or skip the full gate.
 It also prints `test_packages=<json>`: the cargo packages whose tests the
 merge gate must run for this branch (see `touched_packages`). A fault yields
 `test_packages=ERROR`, which the workflow treats as a failure, never as "none".
+
+It also prints `e2e_tests=<json>` and `e2e_shards=<json>`: the daemon
+end-to-end test binaries the merge gate must build and run, chosen from the
+coverage map `crates/bin/daemon/tests/e2e-coverage.toml` (see
+`select_e2e_tests`), and the shard indexes to split them across. A fault
+yields `e2e_tests=ERROR`. Changed packages that no map entry covers are
+listed in `e2e_uncovered=<json>`, which the workflow prints as warnings.
+
+  --check-e2e-coverage
+                   check the coverage map against the test files and the
+                   workspace instead of classifying; exits 1 on a fault and
+                   reports workspace packages no test covers
 
   --base-ref REF   the ref the branch will merge into (default origin/next)
   --root DIR       repository to classify (default: this checkout)
@@ -48,6 +60,18 @@ UI_PREFIXES = (
     ".ai/knowledge/ryeos/development/ui-",
 )
 BUNDLE_PREFIXES = ("bundles/",)
+
+# The bundle bins in the restored bundle state are built from next. A branch
+# that changes a crate any of them is built from must refresh the bundles from
+# its own sources, or its tests run next's binaries. The bin packages are the
+# `cargo_package` entries of the signed payload ownership; a change to a build
+# input every package shares (the lock file, the root manifest, the toolchain,
+# cargo configuration) counts as a change to all of them.
+PAYLOAD_OWNERSHIP = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+CARGO_PACKAGE_LINE = re.compile(r"^\s*(?:- )?cargo_package:\s*[\"']?([A-Za-z0-9_-]+)[\"']?\s*$", re.M)
+SHARED_BUILD_INPUTS = ("Cargo.lock", "Cargo.toml", "rust-toolchain", "rust-toolchain.toml")
+SHARED_BUILD_PREFIXES = (".cargo/",)
+DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
 
 
 def git(root: str, *args: str) -> bytes:
@@ -314,26 +338,286 @@ def touched_packages(root: str, base: str, paths: list[str], rule: str) -> list[
             entry["args"] = [a for t in sorted(e2e_targets.get(name, ())) for a in ("--test", t)] + LIB_AND_BIN_ARGS
     return [found[name] for name in sorted(found)]
 
+# The coverage map of the daemon's end-to-end test binaries. Each
+# `[tests.<binary>]` table names the packages (`covers`) whose changes select
+# that binary, and optionally path globs (`paths`) for finer grain inside
+# crates most binaries depend on.
+E2E_PACKAGE = "ryeosd"
+E2E_COVERAGE = "crates/bin/daemon/tests/e2e-coverage.toml"
+# Paths inside the daemon package that feed every test binary: its own
+# sources, its manifest and the shared test helpers and fixtures. A change
+# there selects all of them.
+E2E_EVERYTHING_PREFIXES = ("src/", "build.rs", "Cargo.toml")
+# Fewest binaries per shard before another shard is worth its setup.
+E2E_SHARD_STEPS = ((8, 1), (30, 2))
+E2E_MAX_SHARDS = 4
+DOC_SUFFIXES = (".md", ".txt")
 
-def classify(root: str, base_ref: str) -> tuple[str, list[str], str, bool]:
-    """Return (mode, changed paths, reason, bundles_changed)."""
+
+def glob_regex(pattern: str) -> re.Pattern:
+    """Compile a path glob: `**` crosses directories, `*` and `?` do not."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def e2e_test_names(root: Path) -> list[str]:
+    """The daemon's top-level test binaries: one per tests/<name>.rs."""
+    tests = root / E2E_COVERAGE
+    return sorted(p.stem for p in tests.parent.glob("*.rs"))
+
+
+def load_e2e_coverage(root: Path) -> dict[str, dict]:
+    """Read the coverage map as {binary: {"covers": [...], "paths": [...]}}.
+
+    Raises ValueError on any shape fault, so a broken map is an error, never
+    an empty selection.
+    """
+    doc = tomllib.loads((root / E2E_COVERAGE).read_text())
+    tests = doc.get("tests")
+    if not isinstance(tests, dict) or set(doc) != {"tests"}:
+        raise ValueError(f"{E2E_COVERAGE} must hold only [tests.<binary>] tables")
+    out: dict[str, dict] = {}
+    for name, entry in tests.items():
+        if not isinstance(entry, dict) or not set(entry) <= {"covers", "paths"} or "covers" not in entry:
+            raise ValueError(f"[tests.{name}] needs `covers` and may have `paths`, nothing else")
+        lists = {}
+        for key in ("covers", "paths"):
+            value = entry.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+                raise ValueError(f"[tests.{name}].{key} must be a list of non-empty strings")
+            lists[key] = value
+        out[name] = lists
+    return out
+
+
+def workspace_packages(root: Path) -> dict[str, str]:
+    """Root workspace members as {package name: package dir}."""
+    members = tomllib.loads((root / "Cargo.toml").read_text()).get("workspace", {}).get("members", [])
+    found = {}
+    for member in members:
+        for directory in sorted(root.glob(member)):
+            name, _ = read_package(directory / "Cargo.toml")
+            if name:
+                found[name] = directory.relative_to(root).as_posix()
+    return found
+
+
+def bundle_bin_packages(root: Path) -> list[str]:
+    """The Cargo packages the signed payload ownership builds bundle bins from."""
+    text = (root / PAYLOAD_OWNERSHIP).read_text()
+    packages = CARGO_PACKAGE_LINE.findall(text)
+    if not packages:
+        raise ValueError(f"{PAYLOAD_OWNERSHIP} names no cargo_package")
+    if len(packages) != text.count("cargo_package:"):
+        raise ValueError(f"{PAYLOAD_OWNERSHIP} has a cargo_package entry this cannot read")
+    return sorted(set(packages))
+
+
+def bundle_bin_closure(root: Path) -> dict[str, str]:
+    """Map every root-workspace package a bundle bin is built from to the bin package it feeds."""
+    members = workspace_packages(root)
+    by_dir = {directory: name for name, directory in members.items()}
+    workspace_deps = tomllib.loads((root / "Cargo.toml").read_text()).get("workspace", {}).get("dependencies", {})
+    edges = {}
+    for name, directory in members.items():
+        doc = tomllib.loads((root / directory / "Cargo.toml").read_text())
+        tables = [doc]
+        tables.extend(t for t in doc.get("target", {}).values() if isinstance(t, dict))
+        found = set()
+        for table in tables:
+            for kind in DEPENDENCY_TABLES:
+                for key, spec in table.get(kind, {}).items():
+                    if not isinstance(spec, dict):
+                        continue
+                    if spec.get("workspace") is True:
+                        shared = workspace_deps.get(key)
+                        if not isinstance(shared, dict) or "path" not in shared:
+                            continue
+                        target = (root / shared["path"])
+                    elif "path" in spec:
+                        target = root / directory / spec["path"]
+                    else:
+                        continue
+                    rel = target.resolve().relative_to(root.resolve()).as_posix()
+                    if rel in by_dir:
+                        found.add(by_dir[rel])
+        edges[name] = found
+    feeds: dict[str, str] = {}
+    for bin_package in bundle_bin_packages(root):
+        if bin_package not in members:
+            raise ValueError(f"bundle bin package {bin_package} is not a root workspace member")
+        stack = [bin_package]
+        while stack:
+            name = stack.pop()
+            if name in feeds:
+                continue
+            feeds[name] = bin_package
+            stack.extend(sorted(edges.get(name, ())))
+    return feeds
+
+
+def bundle_bin_change(root: str, paths: list[str]) -> str | None:
+    """Why the branch's changes reach a bundle bin, or None when they cannot.
+
+    Raises when the answer cannot be computed; the caller treats that as a
+    change, never as none.
+    """
+    for path in paths:
+        if path in SHARED_BUILD_INPUTS or path.startswith(SHARED_BUILD_PREFIXES):
+            return f"{path} is a build input of every bundle bin"
+    top = Path(root)
+    owners = []
+    for path in paths:
+        owner = owning_package(top, path)
+        if owner is not None and owner[2] is None:
+            owners.append((path, owner[0]))
+    if not owners:
+        return None
+    feeds = bundle_bin_closure(top)
+    for path, package in owners:
+        if package in feeds:
+            return f"{path} is in {package}, which bundle bin package {feeds[package]} is built from"
+    return None
+
+
+def e2e_shard_count(selected: int) -> int:
+    for limit, shards in E2E_SHARD_STEPS:
+        if selected <= limit:
+            return shards
+    return E2E_MAX_SHARDS
+
+
+def select_e2e_tests(root: str, paths: list[str]) -> tuple[list[str], list[str], str]:
+    """Return (selected binaries, uncovered packages, reason).
+
+    - A changed daemon source, manifest, or test file outside a top-level
+      tests/<name>.rs (shared helpers, fixtures) selects every binary.
+    - A changed tests/<name>.rs selects that binary, if it still exists.
+    - Any other non-documentation change in a root-workspace package selects
+      the binaries whose `covers` names the package or whose `paths` glob
+      matches the path. A package with such a change that selects nothing is
+      reported as uncovered.
+    """
+    top = Path(root).resolve()
+    names = e2e_test_names(top)
+    coverage = load_e2e_coverage(top)
+    patterns = {name: [glob_regex(g) for g in entry["paths"]] for name, entry in coverage.items()}
+    selected: set[str] = set()
+    uncovered: set[str] = set()
+    for path in paths:
+        if path.startswith("vendor/") or path.endswith(DOC_SUFFIXES):
+            continue
+        owner = owning_package(top, path)
+        if owner is None or owner[2] is not None:
+            continue  # not a root-workspace package: no daemon binary links it
+        package, package_dir, _ = owner
+        rel = path[len(package_dir) + 1 :] if package_dir != "." else path
+        if package == E2E_PACKAGE:
+            parts = rel.split("/")
+            if len(parts) == 2 and parts[0] == "tests" and parts[1].endswith(".rs"):
+                if parts[1][:-3] in names:
+                    selected.add(parts[1][:-3])
+                continue
+            if rel == E2E_COVERAGE[len(package_dir) + 1 :]:
+                continue  # the map itself; the lint checks it
+            if rel.startswith("tests/") or rel.startswith(E2E_EVERYTHING_PREFIXES):
+                return names, [], f"{path} feeds every daemon test binary"
+            continue  # benches, examples, docs inside the daemon package
+        hits = {
+            name
+            for name, entry in coverage.items()
+            if package in entry["covers"] or any(p.match(path) for p in patterns[name])
+        }
+        if hits:
+            selected |= hits
+        else:
+            uncovered.add(package)
+    selected &= set(names)
+    reason = f"{len(selected)} of {len(names)} daemon test binaries selected by the coverage map"
+    return sorted(selected), sorted(uncovered), reason
+
+
+def check_e2e_coverage(root: str) -> tuple[list[str], list[str]]:
+    """Return (faults, packages no test covers) for the coverage map."""
+    top = Path(root).resolve()
+    faults: list[str] = []
+    try:
+        coverage = load_e2e_coverage(top)
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+        return [f"{E2E_COVERAGE}: {error}"], []
+    names = set(e2e_test_names(top))
+    packages = workspace_packages(top)
+    for name in sorted(names - set(coverage)):
+        faults.append(f"tests/{name}.rs has no [tests.{name}] entry in {E2E_COVERAGE}")
+    for name in sorted(set(coverage) - names):
+        faults.append(f"[tests.{name}] names no test file (expected tests/{name}.rs)")
+    files = [f for f in git(root, "ls-files", "-z").decode().split("\0") if f]
+    by_path: set[str] = set()
+    for name, entry in sorted(coverage.items()):
+        for package in entry["covers"]:
+            if package == E2E_PACKAGE:
+                faults.append(f"[tests.{name}] covers {E2E_PACKAGE}, whose changes already select every binary")
+            elif package not in packages:
+                faults.append(f"[tests.{name}] covers unknown package {package!r}")
+        for pattern in entry["paths"]:
+            regex = glob_regex(pattern)
+            matched = [f for f in files if regex.match(f)]
+            if not matched:
+                faults.append(f"[tests.{name}] path glob {pattern!r} matches no tracked file")
+            by_path |= {p for p, d in packages.items() if any(f.startswith(d + "/") for f in matched)}
+    covered = {p for entry in coverage.values() for p in entry["covers"]} | by_path
+    gaps = sorted(set(packages) - covered - {E2E_PACKAGE})
+    return faults, gaps
+
+
+def bundles_reason(root: str, paths: list[str]) -> str | None:
+    """Why the branch needs its own bundle refresh, or None when next's state serves."""
+    sources = [p for p in paths if p.startswith(BUNDLE_PREFIXES)]
+    if sources:
+        return f"bundle sources changed, first: {sources[0]}"
+    try:
+        return bundle_bin_change(root, paths)
+    except Exception as error:  # a fault must not read as "next's bins serve"
+        return f"could not decide whether a bundle bin is affected ({error})"
+
+
+def classify(root: str, base_ref: str) -> tuple[str, list[str], str, bool, str]:
+    """Return (mode, changed paths, reason, bundles_changed, bundles reason)."""
     if not base_ref or base_ref.startswith("-"):
-        return "full", [], f"unusable base ref {base_ref!r}", True
+        return "full", [], f"unusable base ref {base_ref!r}", True, "no usable base ref"
     try:
         base = git(root, "merge-base", "HEAD", base_ref).decode().strip()
     except Exception as error:  # missing ref, no common ancestor, git failure
-        return "full", [], f"no merge base with {base_ref} ({error})", True
+        return "full", [], f"no merge base with {base_ref} ({error})", True, "no merge base"
     if not base:
-        return "full", [], f"no merge base with {base_ref}", True
+        return "full", [], f"no merge base with {base_ref}", True, "no merge base"
     out = git(root, "diff", "--name-only", "--no-renames", "-z", base, "HEAD")
     paths = sorted(name for name in out.decode().split("\0") if name)
-    bundles_changed = any(p.startswith(BUNDLE_PREFIXES) for p in paths)
     if not paths:
-        return "full", paths, "no changed paths", True
+        return "full", paths, "no changed paths", True, "no changed paths"
+    why = bundles_reason(root, paths)
+    bundles_changed = why is not None
+    why = why or "no changed path reaches a bundle source or bundle bin"
     outside = [p for p in paths if not p.startswith(UI_PREFIXES)]
     if outside:
-        return "full", paths, f"paths outside the UI set, first: {outside[0]}", bundles_changed
-    return "ui-only", paths, "every changed path is in the UI set", bundles_changed
+        return "full", paths, f"paths outside the UI set, first: {outside[0]}", bundles_changed, why
+    return "ui-only", paths, "every changed path is in the UI set", bundles_changed, why
 
 
 def main() -> None:
@@ -341,11 +625,21 @@ def main() -> None:
     parser.add_argument("--base-ref", default="origin/next")
     parser.add_argument("--root", default=".")
     parser.add_argument("--rule", choices=("wide", "narrow"), default="wide")
+    parser.add_argument("--check-e2e-coverage", action="store_true")
     args = parser.parse_args()
+    if args.check_e2e_coverage:
+        faults, gaps = check_e2e_coverage(args.root)
+        for fault in faults:
+            print(f"error: {fault}")
+        print(f"{len(gaps)} workspace package(s) no daemon e2e test covers (a report, not a failure):")
+        for gap in gaps:
+            print(f"  {gap}")
+        sys.exit(1 if faults else 0)
     try:
-        mode, paths, reason, bundles_changed = classify(args.root, args.base_ref)
+        mode, paths, reason, bundles_changed, bundles_why = classify(args.root, args.base_ref)
     except BaseException as error:  # any fault means the full gate
         mode, paths, reason, bundles_changed = "full", [], f"classifier error: {error}", True
+        bundles_why = "classifier error"
     try:
         if not paths and reason != "no changed paths":
             raise RuntimeError(reason)
@@ -357,10 +651,28 @@ def main() -> None:
     except BaseException as error:  # a fault must not read as "no tests to run"
         test_packages = "ERROR"
         reason += f"; test package detection failed: {error}"
+    try:
+        if not paths and reason != "no changed paths":
+            raise RuntimeError(reason)
+        e2e, uncovered, e2e_reason = select_e2e_tests(args.root, paths)
+        e2e_tests = json.dumps(e2e, separators=(",", ":"))
+        # Never empty: a matrix with no values is a workflow error even when the job is skipped.
+        e2e_shards = json.dumps(list(range(1, e2e_shard_count(len(e2e)) + 1)))
+        e2e_uncovered = json.dumps(uncovered, separators=(",", ":"))
+    except BaseException as error:  # a fault must not read as "no e2e tests"
+        e2e_tests, e2e_shards, e2e_uncovered = "ERROR", "[1]", "[]"
+        e2e_reason = f"e2e selection failed: {error}"
     print(f"test_packages={test_packages}")
+    print(f"e2e_tests={e2e_tests}")
+    print(f"e2e_shards={e2e_shards}")
+    print(f"e2e_uncovered={e2e_uncovered}")
     print(f"mode={mode}")
     print(f"bundles_changed={'true' if bundles_changed else 'false'}")
     print(f"# classification: {mode} ({reason})")
+    print(f"# bundles: {'refresh from the branch' if bundles_changed else 'restore next'} ({bundles_why})")
+    print(f"# daemon e2e: {e2e_reason}")
+    for package in json.loads(e2e_uncovered):
+        print(f"# daemon e2e: no coverage-map entry covers changed package {package}")
     print(f"# changed paths ({len(paths)}):")
     for path in paths:
         print(f"#   {path}")

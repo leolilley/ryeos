@@ -286,7 +286,7 @@ pub(crate) fn compile_session_binding(
         .engine
         .with_checked_bundle_generation(|generation| -> Result<_> {
             let request = EffectiveItemRequest {
-                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                logical_project: prepared.exec_ctx.plan_ctx.signer_project().clone(),
                 expected_kind: Some(root_ref.kind.clone()),
                 item_ref: root_ref,
                 project_root: project_authority.map(|_| project_path.clone()),
@@ -307,6 +307,7 @@ pub(crate) fn compile_session_binding(
                 BindingCompileContext {
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
                     principal_id: &ctx.fingerprint,
+                    signer_project: prepared.exec_ctx.plan_ctx.signer_project(),
                     caller_scopes: &ctx.scopes,
                     project_root: canonical_project_root.as_deref(),
                     node_policy_generation_digest: state.node_policy.generation_digest(),
@@ -546,7 +547,9 @@ pub fn revalidate_binding_authority(
     let project_root = resolution_root;
     let item_ref = CanonicalRef::parse(&compiled.binding.surface.canonical_ref)?;
     let request = EffectiveItemRequest {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        // The identity the binding was minted under; signer standing is
+        // re-checked against the current trust store by the resolution.
+        logical_project: compiled.binding.signer_project.clone(),
         expected_kind: Some(item_ref.kind.clone()),
         item_ref,
         project_root: project_root.map(std::path::Path::to_path_buf),

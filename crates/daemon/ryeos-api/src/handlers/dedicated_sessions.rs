@@ -282,6 +282,69 @@ async fn status(
     Ok(result)
 }
 
+/// The owner's head of a pinned source, keyed by the name its base generation
+/// declares. A pinned source's checkout is a session workspace that is gone
+/// by integration and publication, and the base is exactly what it held. The
+/// owner is the principal the node resolves the session owner's key to.
+fn owner_base_head_key(
+    state: &AppState,
+    owner_key: &str,
+    base_snapshot_hash: &str,
+) -> Result<ryeos_state::project_identity::ProjectHeadKey, HandlerError> {
+    let authority = state
+        .state_store
+        .pinned_state_authority()
+        .map_err(internal)?;
+    let _guard = authority.acquire_shared_guard().map_err(internal)?;
+    let cas = authority.cas_store().map_err(internal)?;
+    let snapshot = cas
+        .get_object(base_snapshot_hash)
+        .map_err(internal)?
+        .ok_or_else(|| internal(format!("base snapshot {base_snapshot_hash} is missing")))?;
+    let snapshot =
+        ryeos_state::objects::ProjectSnapshot::from_value(&snapshot).map_err(internal)?;
+    let tree = cas
+        .get_object(&snapshot.project_tree_hash)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            internal(format!(
+                "project tree {} is missing",
+                snapshot.project_tree_hash
+            ))
+        })?;
+    let tree = ryeos_state::objects::ProjectTree::from_value(&tree).map_err(internal)?;
+    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            HandlerError::BadRequest(format!(
+                "project_manifest_missing: base {base_snapshot_hash} has no {}; a project's name is the `name:` of its manifest",
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+            ))
+        })?;
+    let owner = ryeos_app::project_owner::owner_principal(state, owner_key).map_err(internal)?;
+    Ok(ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &owner, &name,
+    ))
+}
+
+/// A pinned generation that sealed an owner+name identity at admission must
+/// name exactly the head integration and publication target. `Absent` seals
+/// nothing and is allowed: the head comes from the base and the fresh owner.
+fn require_sealed_identity_matches(
+    signer_project: &ryeos_state::project_identity::LogicalProject,
+    head: &ryeos_state::project_identity::ProjectHeadKey,
+) -> Result<(), HandlerError> {
+    let Some(sealed) = signer_project.identity() else {
+        return Ok(());
+    };
+    if ryeos_state::project_identity::ProjectHeadKey::for_project(sealed) == *head {
+        return Ok(());
+    }
+    Err(HandlerError::Conflict(format!(
+        "candidate_project_identity_mismatch: the generation sealed project {sealed}, which is not the owner's head this candidate targets"
+    )))
+}
+
 /// Whether a hosted session's pinned terminal publication is consistent with
 /// its recorded disposition. A pin that carries a HEAD destination must name
 /// the owner, the target project and the base snapshot exactly, whichever
@@ -292,8 +355,7 @@ async fn status(
 fn candidate_publication_pairing_matches(
     disposition: &ryeos_app::runtime_db::DedicatedCandidateDisposition,
     terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
-    owner_principal: &str,
-    target_project_path: &str,
+    expected_head: &ryeos_state::project_identity::ProjectHeadKey,
     base_snapshot_hash: &str,
 ) -> anyhow::Result<bool> {
     use ryeos_app::runtime_db::DedicatedCandidateDisposition::{OwnerDecision, RetainedForReview};
@@ -302,13 +364,13 @@ fn candidate_publication_pairing_matches(
         (
             OwnerDecision | RetainedForReview,
             RetainCurrentHead {
-                principal_key,
+                owner_component: principal_key,
                 project_hash,
                 expected_hash,
             },
         ) => {
-            principal_key.as_str() == ryeos_state::refs::principal_storage_key(owner_principal)?
-                && project_hash == &lillux::sha256_hex(target_project_path.as_bytes())
+            *principal_key == expected_head.owner_component()
+                && project_hash.as_str() == expected_head.name_hash()
                 && expected_hash == base_snapshot_hash
         }
         (RetainedForReview, RetainResult) => true,
@@ -426,11 +488,23 @@ async fn candidate_result(
         state.threads.site_id(),
     )
     .map_err(internal)?;
+    // The owner's head of the target checkout on this node, by the name the
+    // target tree declares now; nothing from the source node names it.
+    let expected_head = ryeos_state::project_identity::ProjectDeclaration::declared_name(
+        std::path::Path::new(target_project_path),
+    )
+    .map_err(internal)?
+    .map(|name| {
+        ryeos_app::project_owner::owner_principal(&state, &session.owner_principal)
+            .map(|owner| ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name))
+    })
+    .transpose()
+    .map_err(internal)?
+    .ok_or_else(|| internal("hosted candidate target project declares no project name"))?;
     let publication_authority_matches = candidate_publication_pairing_matches(
         &session.candidate_disposition,
         terminal_publication,
-        &session.owner_principal,
-        target_project_path,
+        &expected_head,
         base_snapshot_hash,
     )
     .map_err(internal)?;
@@ -3077,6 +3151,7 @@ async fn handoff_preflight(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+            None,
         )
         .await
         .map_err(|error| {
@@ -3901,8 +3976,7 @@ async fn handoff(
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
-            )
+                WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT, None)
             .await
             .map_err(|error| {
                 crate::remote::client::map_remote_call_error(error, "target placement preparation")
@@ -4207,6 +4281,7 @@ async fn handoff(
                         ryeos_app::execution_policy::ExecutionResponse::Wait,
                     ),
                     WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                    None,
                 )
                 .await
                 .map_err(|error| {
@@ -4623,6 +4698,7 @@ async fn resume_committed_handoff_locked(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                None,
             )
             .await
             .map_err(|error| {
@@ -5499,6 +5575,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                             ryeos_app::execution_policy::ExecutionResponse::Wait,
                         ),
                         WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                        None,
                     )
                     .await
                     .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
@@ -5892,6 +5969,7 @@ async fn recover_pre_cut_source_handoff_abort(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
+                None,
             )
             .await
             .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
@@ -6532,9 +6610,13 @@ fn write_stale_publication_report(state: &AppState) -> anyhow::Result<()> {
                 continue;
             }
         };
-        let current = state.state_store.with_state_db(|db| {
-            db.read_project_head(&authority.principal_key, &authority.project_hash)
-        })?;
+        let head = ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+            &authority.principal_key,
+            &authority.project_hash,
+        )?;
+        let current = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(&head))?;
         if ryeos_app::stale_publication_report::base_has_moved(
             current.as_deref(),
             &authority.base_snapshot_hash,
@@ -6591,8 +6673,10 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         let source_candidate = authority.source_candidate_snapshot_hash.as_str();
         let candidate = authority.candidate_snapshot_hash.as_str();
         let base_snapshot_hash = authority.base_snapshot_hash.as_str();
-        let principal_key = authority.principal_key.as_str();
-        let project_hash = authority.project_hash.as_str();
+        let head_key = ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+            &authority.principal_key,
+            &authority.project_hash,
+        )?;
         let publication_root_id = session
             .candidate_disposition_root_id
             .as_deref()
@@ -6721,7 +6805,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 })?;
             let current = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(principal_key, project_hash))?;
+                .with_state_db(|db| db.read_project_head(&head_key))?;
             let recovery = classify_candidate_publication_recovery(
                 current.as_deref(),
                 base_snapshot_hash,
@@ -7671,16 +7755,13 @@ async fn start_candidate_operation(
         &req.purpose,
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
     ) {
-        let project_path = original_project_path
-            .to_str()
-            .ok_or_else(|| internal("candidate project path is not UTF-8"))?;
-        let principal_key = ryeos_state::refs::principal_storage_key(&session.owner_principal)
-            .map_err(internal)?
-            .to_owned();
-        let project_hash = ryeos_state::refs::deployed_project_key(project_path);
+        let head = owner_base_head_key(&state, &session.owner_principal, &base_snapshot_hash)?;
+        require_sealed_identity_matches(&source.project_authority.signer_project(), &head)?;
+        let principal_key = head.owner_component();
+        let project_hash = head.name_hash().to_owned();
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+            .with_state_db(|db| db.read_project_head(&head))
             .map_err(internal)?;
         if current.as_deref() != Some(base_snapshot_hash.as_str()) {
             return Err(HandlerError::BadRequest(format!(
@@ -7834,6 +7915,9 @@ async fn start_candidate_operation(
     .and_then(|authority| {
         authority.with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
     })
+    // A candidate operation of the session's project carries the identity the
+    // session sealed at admission; it is never re-derived.
+    .and_then(|authority| authority.with_signer_project(source.project_authority.signer_project()))
     .map_err(internal)?;
     let base_lifeline = base
         .temp_dir
@@ -7859,10 +7943,7 @@ async fn start_candidate_operation(
             scopes: effective_caps.clone(),
         });
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            base_provenance.logical_project_root(&current_site_id),
-            &base_provenance.subject_resolution_authority(),
-        ),
+        logical_project: base_provenance.signer_project(),
         requested_by: requested_by.clone(),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -7899,7 +7980,7 @@ async fn start_candidate_operation(
             ryeos_state::objects::PinnedProjectRealization::Cow {
                 terminal_publication:
                     ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                        principal_key: principal_key.clone(),
+                        owner_component: principal_key.clone(),
                         project_hash: project_hash.clone(),
                         expected_hash: base_snapshot_hash.clone(),
                     },
@@ -7924,6 +8005,9 @@ async fn start_candidate_operation(
     .and_then(|authority| {
         authority.with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
     })
+    // A candidate operation of the session's project carries the identity the
+    // session sealed at admission; it is never re-derived.
+    .and_then(|authority| authority.with_signer_project(source.project_authority.signer_project()))
     .map_err(internal)?;
     if matches!(
         &req.purpose,
@@ -8443,6 +8527,7 @@ fn verify_candidate_evaluation_testimony(
         _ => false,
     };
     if stable_project_identity != source_project_identity
+        || evaluator.project_authority.signer_project() != source.project_authority.signer_project()
         || evaluator_base != candidate_snapshot_hash
         || evaluator_snapshot != candidate_snapshot_hash
         || !binding_matches
@@ -8699,7 +8784,7 @@ fn candidate_publication_authority(
         let ryeos_state::objects::PinnedProjectRealization::Cow {
             terminal_publication:
                 ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key,
+                    owner_component: principal_key,
                     project_hash,
                     expected_hash,
                 },
@@ -8990,22 +9075,24 @@ fn verify_candidate_integration_terminal(
             ));
         }
     };
-    let project_path = source_display_path
-        .to_str()
-        .ok_or_else(|| internal("candidate project identity is not UTF-8"))?;
-    let expected_principal_key =
-        ryeos_state::refs::principal_storage_key(&session.owner_principal).map_err(internal)?;
-    let expected_project_hash = ryeos_state::refs::deployed_project_key(project_path);
+    let expected_head = owner_base_head_key(state, &session.owner_principal, base_snapshot_hash)?;
+    require_sealed_identity_matches(&source.project_authority.signer_project(), &expected_head)?;
+    require_sealed_identity_matches(
+        &integration.project_authority.signer_project(),
+        &expected_head,
+    )?;
+    let expected_principal_key = expected_head.owner_component();
+    let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(
         integration_realization,
         ryeos_state::objects::PinnedProjectRealization::Cow {
             terminal_publication:
                 ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key,
+                    owner_component: principal_key,
                     project_hash,
                     expected_hash,
                 },
-        } if principal_key == expected_principal_key
+        } if *principal_key == expected_principal_key
             && project_hash == &expected_project_hash
             && expected_hash == base_snapshot_hash
     );
@@ -9018,6 +9105,8 @@ fn verify_candidate_integration_terminal(
             && current_operational_generation == source_candidate
     );
     if integration_project_identity != source_project_identity
+        || integration.project_authority.signer_project()
+            != source.project_authority.signer_project()
         || integration_display_path != source_display_path
         || integration_base != base_snapshot_hash
         || integration_snapshot != source_candidate
@@ -10027,6 +10116,7 @@ async fn qualify_candidate(
         _ => false,
     };
     if stable_project_identity != source_project_identity
+        || evaluator.project_authority.signer_project() != source.project_authority.signer_project()
         || evaluator_base != &req.candidate_snapshot_hash
         || evaluator_snapshot != &req.candidate_snapshot_hash
         || !binding_matches
@@ -10711,8 +10801,11 @@ async fn publish(
     let candidate = publication_authority.candidate_snapshot_hash.as_str();
     let candidate_validation_hash = publication_authority.candidate_validation_hash.as_str();
     let base_snapshot_hash = publication_authority.base_snapshot_hash.as_str();
-    let principal_key = publication_authority.principal_key.as_str();
-    let project_hash = publication_authority.project_hash.as_str();
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+        publication_authority.principal_key.as_str(),
+        publication_authority.project_hash.as_str(),
+    )
+    .map_err(internal)?;
     let candidate_evaluation_hash = publication_authority.candidate_evaluation_hash.as_str();
     let published_result = format!("published:{candidate}");
     let already_published =
@@ -10728,7 +10821,7 @@ async fn publish(
     {
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, project_hash))
+            .with_state_db(|db| db.read_project_head(&head_key))
             .map_err(internal)?;
         return Err(base_superseded_refusal(
             &session,
@@ -10741,9 +10834,7 @@ async fn publish(
             "session has no publishable retained candidate".into(),
         ));
     }
-    if ryeos_state::refs::principal_storage_key(&ctx.fingerprint).map_err(internal)?
-        != principal_key
-    {
+    if !ryeos_app::project_owner::speaks_for(&state, &ctx.fingerprint, head_key.owner()) {
         return Err(HandlerError::Forbidden(
             "publication caller differs from the admitted principal HEAD authority".into(),
         ));
@@ -10794,7 +10885,7 @@ async fn publish(
             "idempotent":true,
         }));
     }
-    let project_lock = super::project_apply_snapshot::project_apply_lock(project_hash);
+    let project_lock = super::project_apply_snapshot::project_apply_lock(&head_key.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let pinned = state
         .state_store
@@ -10850,7 +10941,7 @@ async fn publish(
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, project_hash))
+        .with_state_db(|db| db.read_project_head(&head_key))
         .map_err(internal)?;
     if current.as_deref() != Some(candidate) && current.as_deref() != Some(base_snapshot_hash) {
         return Err(supersede_candidate_publication(
@@ -10865,11 +10956,14 @@ async fn publish(
     let publication = if current.as_deref() == Some(candidate) {
         Ok(())
     } else {
+        let advancer =
+            ryeos_app::project_owner::head_advancer(&state, &ctx.fingerprint, head_key.owner())
+                .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
         state.state_store.advance_project_head_ref(
-            principal_key,
-            project_hash,
+            &head_key,
             candidate,
             base_snapshot_hash,
+            &advancer,
             &signer,
             &cas_guard,
         )
@@ -11369,26 +11463,24 @@ mod tests {
         use ryeos_state::objects::PinnedTerminalPublication::{
             Discard, RetainCurrentHead, RetainResult,
         };
-        let owner = format!("fp:{}", "a".repeat(64));
-        let owner = owner.as_str();
-        let path = "/projects/demo";
+        let owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
+        let name = |value: &str| ryeos_state::project_identity::ProjectName::new(value).unwrap();
+        let expected =
+            ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name("demo"));
         let base = "b".repeat(64);
-        let pin = |principal_key: &str, project_path: &str, expected: &str| RetainCurrentHead {
-            principal_key: principal_key.to_owned(),
-            project_hash: lillux::sha256_hex(project_path.as_bytes()),
+        let pin = |principal_key: &str, project: &str, expected: &str| RetainCurrentHead {
+            owner_component: principal_key.to_owned(),
+            project_hash: lillux::sha256_hex(project.as_bytes()),
             expected_hash: expected.to_owned(),
         };
-        let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
+        let owner_key = owner.storage_component();
+        let owner_key = owner_key.as_str();
+        let path = "demo";
         let good = pin(owner_key, path, &base);
         let check = |disposition, publication: &_| {
-            super::candidate_publication_pairing_matches(
-                disposition,
-                publication,
-                owner,
-                path,
-                &base,
-            )
-            .unwrap()
+            super::candidate_publication_pairing_matches(disposition, publication, &expected, &base)
+                .unwrap()
         };
         // Interactive: the destination is required, exactly.
         assert!(check(&OwnerDecision, &good));
@@ -11399,16 +11491,44 @@ mod tests {
         // A carried destination that names another owner, project or base is
         // refused under either disposition.
         for disposition in [&OwnerDecision, &RetainedForReview] {
-            let other_owner = "d".repeat(64);
+            let other_owner = format!("pid-v1-{}", "d".repeat(64));
             assert!(!check(disposition, &pin(&other_owner, path, &base)));
-            assert!(!check(
-                disposition,
-                &pin(owner_key, "/projects/other", &base)
-            ));
+            assert!(!check(disposition, &pin(owner_key, "other", &base)));
             assert!(!check(disposition, &pin(owner_key, path, &"c".repeat(64))));
             assert!(!check(disposition, &Discard));
         }
     }
+    #[test]
+    fn a_sealed_identity_must_name_the_targeted_head() {
+        use ryeos_state::project_identity::{
+            LogicalProject, LogicalProjectAbsence, ProjectHeadKey, ProjectIdentity, ProjectName,
+        };
+        let owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
+        let other: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "c".repeat(64)).parse().unwrap();
+        let name = |value: &str| ProjectName::new(value).unwrap();
+        let head = ProjectHeadKey::owned_by(&owner, &name("demo"));
+        let sealed = |owner: &ryeos_state::principal_id::PrincipalId, project: &str| {
+            LogicalProject::Stated(ProjectIdentity::new(owner.clone(), name(project)))
+        };
+        super::require_sealed_identity_matches(&sealed(&owner, "demo"), &head).unwrap();
+        super::require_sealed_identity_matches(
+            &LogicalProject::Absent(LogicalProjectAbsence::ForeignHeadNotHeld),
+            &head,
+        )
+        .unwrap();
+        for mismatch in [sealed(&owner, "renamed"), sealed(&other, "demo")] {
+            match super::require_sealed_identity_matches(&mismatch, &head) {
+                Err(super::HandlerError::Conflict(message)) => assert!(
+                    message.starts_with("candidate_project_identity_mismatch:"),
+                    "{message}"
+                ),
+                other => panic!("a sealed mismatch must refuse by code: {other:?}"),
+            }
+        }
+    }
+
     use super::{discard_placement_admitted, qualification_placement_admitted};
 
     #[test]

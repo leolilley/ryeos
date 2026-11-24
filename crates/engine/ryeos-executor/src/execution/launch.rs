@@ -7390,7 +7390,7 @@ async fn run_claimed_thread_row_inner(
     // its proofs and cache keys, and the runtime all judge the same view.
     let trusted_signers = engine.node_trust_store.launch_signer_entries(
         root_admission.request_trust(),
-        engine_roots.signer_project_root(),
+        engine_roots.signer_project(),
     );
     let node_config_root = engine.node_config_root();
     let execution_controls = load_execution_control_snapshot_cached(

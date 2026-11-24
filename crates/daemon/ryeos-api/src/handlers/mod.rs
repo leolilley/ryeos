@@ -75,6 +75,7 @@ pub mod launch_status;
 pub mod maintenance_gc;
 #[cfg(feature = "model-provider-setup")]
 pub mod model_providers_validate;
+pub mod node_journal;
 pub mod node_locality;
 pub mod node_locality_groups;
 pub mod node_machine_declare;
@@ -90,6 +91,7 @@ pub mod objects_stage_chunk;
 pub mod offline_operations;
 pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
+pub mod project_owner;
 pub mod project_snapshot_status;
 pub mod project_status;
 pub mod push_head;
@@ -206,6 +208,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
+    project_owner::DESCRIPTOR,
     project_status::DESCRIPTOR,
     project_snapshot_status::DESCRIPTOR,
     launch_cancel::DESCRIPTOR,
@@ -311,6 +314,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     revisions::LIST_DESCRIPTOR,
     revisions::GET_DESCRIPTOR,
     trust_list::SHOW_DESCRIPTOR,
+    node_journal::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T05:55:52Z:3c06f202efc9d5ecd6732c0558834e862ea12032c6175c577a5177042e83874b:pVaQYY+kOCfVldJSP20hDscDjDWxBlb6cwmBw/lmu/UIk35YjiF+rCjQkAoavUhi8drnaXEzlGz5QaVqLnI9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T02:38:30Z:7fb9d76ef98ba2f4cd5e5b69c82afb104cb9c7c9ea53f3f6811ea8a08dc1918a:BMqEmAVVDxOBE9+GnMBHoWvE/nItPJEmDKPZ6NuYAoTNgsRAePMFcaVnuYy3GwJIGB5ZjkRPluw4j8Tnpt48Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -73,6 +73,10 @@ Instructions for the runtime.
   Each in-flight dispatch holds one dedicated daemon connection for the
   child's whole duration, so raise the bound with the node's connection
   budget and concurrent-directive count in mind.
+- `execution.observing_hooks_per_turn` (default 64, range 1..=1024): the most
+  dispatches the observing hook events (`before_tool`, `after_tool`,
+  `turn_incomplete`, `idle`) may make in one provider turn. Past it the rest
+  are skipped and warned about once; the run is not affected.
 
 - `provider_contact` (`once` default, or `repeatable`): your declaration that
   issuing this directive's model calls twice has no effect beyond the charge
