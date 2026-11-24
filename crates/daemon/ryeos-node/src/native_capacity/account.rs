@@ -697,7 +697,7 @@ impl OperatorLineage {
         chain: &[ryeos_engine::trust::TrustEvent],
         node_key: VerifyingKey,
     ) -> Result<Self> {
-        use ryeos_engine::trust::{SignerRole, SignerStatus, TrustEventKind};
+        use ryeos_engine::trust::{SignerRole, SignerStatus};
         let record = |fingerprint: &str| records.iter().find(|r| r.fingerprint == fingerprint);
         let issuer = record(issuing)
             .filter(|r| r.role == SignerRole::Operator)
@@ -722,12 +722,14 @@ impl OperatorLineage {
         let mut broken: Vec<(String, String)> = Vec::new();
         // Each entry is an operator to expand and the revoked link above it.
         let mut frontier: Vec<(String, Option<String>)> = vec![(issuing.to_owned(), None)];
+        // The succession graph is the one every consumer reads; the policy
+        // here is capacity's own: a revoked link cuts it and everything
+        // after it, because the question is whether signatures verify.
+        let graph = ryeos_engine::trust::SuccessionGraph::build(records, chain);
         while let Some((current, cut_by)) = frontier.pop() {
-            for event in chain.iter().filter(|e| {
-                e.kind == TrustEventKind::Succeeded && e.predecessor.as_deref() == Some(&current)
-            }) {
+            for node in graph.successors(&current) {
                 let Some(successor) =
-                    record(&event.signer).filter(|r| r.role == SignerRole::Operator)
+                    record(&node.fingerprint).filter(|r| r.role == SignerRole::Operator)
                 else {
                     continue;
                 };

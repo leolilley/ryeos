@@ -80,9 +80,11 @@ pub enum ProjectSource {
     /// Execute against the live filesystem project path.
     #[default]
     LiveFs,
-    /// Resolve the acting principal's HEAD ref for the project
-    /// and checkout from CAS.
-    PushedHead,
+    /// Resolve the acting principal's own HEAD for `project` and check it
+    /// out from CAS. The owner is always the acting principal.
+    PushedHead {
+        project: ryeos_state::project_identity::PushedProject,
+    },
     /// Execute from one explicitly selected immutable project snapshot.
     Snapshot { hash: String },
     /// Explicitly capture the complete live project at admission, then execute
@@ -162,8 +164,7 @@ pub struct ResolvedProjectContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCurrentHeadDestination {
-    pub principal_key: String,
-    pub project_hash: String,
+    pub head: ryeos_state::project_identity::ProjectHeadKey,
     pub expected_hash: String,
 }
 
@@ -186,7 +187,8 @@ impl ResolvedProjectContext {
         Ok(Self {
             effective_path: borrowed_dir,
             original_path,
-            source: ProjectSource::PushedHead,
+            // A borrowed callback context selects no head of its own.
+            source: ProjectSource::LiveFs,
             snapshot_hash: None,
             current_head_destination: None,
             pinned_materialization: None,
@@ -233,13 +235,13 @@ pub fn resolve_project_context(
             ));
         }
         (
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject,
             Some(realization),
         ) => Some(realization),
         (
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject,
             None,
@@ -270,30 +272,20 @@ pub fn resolve_project_context(
                 captured_generation: None,
             }
         }
-        ProjectSource::PushedHead => {
+        ProjectSource::PushedHead { project } => {
             let authority = crate::execution::pinned_state_authority(state)?;
             let cas_mutation_guard = authority.acquire_shared_guard()?;
             authority.ensure_guard(&cas_mutation_guard)?;
-            // HEAD lookup MUST use the same canonical ref string as
-            // push_head used when writing the ref. canonical_project_ref
-            // is the single source of truth — it canonicalizes via
-            // std::fs::canonicalize (matching push_head) and bypasses
-            // only for NO_PROJECT_SENTINEL.
-            let project_path = project_path.to_str().ok_or_else(|| {
-                ProjectSourceError::Other(
-                    "project_path is not valid UTF-8 and cannot be used as a project identity"
-                        .into(),
-                )
-            })?;
-            let project_str = canonical_project_ref(project_path)?;
-            let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
-            let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
-
+            // The acting principal's own head for the named project: the
+            // owner is never request input, and the path is only a label.
+            let owner = ryeos_app::project_owner::owner_principal(state, principal_id)
+                .map_err(|error| ProjectSourceError::Other(format!("{error:#}")))?;
+            let head = project.head_key(&owner);
             let snap_hash = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?
+                .with_state_db(|db| db.read_project_head(&head))?
                 .ok_or_else(|| ProjectSourceError::PushFirst {
-                    project_path: project_str.to_string(),
+                    project_path: project.to_string(),
                 })?;
 
             let mut context =
@@ -304,13 +296,12 @@ pub fn resolve_project_context(
                     snapshot_hash: &snap_hash,
                     original_path: Some(original_path),
                     checkout_id,
-                    source: ProjectSource::PushedHead,
+                    source: source.clone(),
                     captured_generation: None,
                     realization: pinned_realization.expect("validated pinned realization"),
                 })?;
             context.current_head_destination = Some(ResolvedCurrentHeadDestination {
-                principal_key: principal_key.to_owned(),
-                project_hash,
+                head,
                 expected_hash: snap_hash,
             });
             context
@@ -391,7 +382,11 @@ pub fn resolve_pinned_snapshot_context(
         snapshot_hash,
         original_path: Some(original_path),
         checkout_id,
-        source: ProjectSource::PushedHead,
+        // A resumed generation is exactly its pinned snapshot; the head it
+        // was selected from is not re-read.
+        source: ProjectSource::Snapshot {
+            hash: snapshot_hash.to_owned(),
+        },
         captured_generation: None,
         realization,
     })
@@ -522,12 +517,8 @@ pub fn prepare_pinned_project_external_consumer(
     // operator named is the logical project signer scopes are matched on, but
     // only for the snapshot that is that project's current head for this
     // principal, as for launches. Any other pairing is refused.
-    let logical_project_root = current_head_logical_project(
-        state,
-        &principal_fingerprint,
-        &project_path,
-        project_snapshot_hash,
-    )?;
+    let identity =
+        current_head_logical_project(state, &principal_fingerprint, project_snapshot_hash)?;
     let project_context = resolve_pinned_snapshot_context(
         state,
         project_snapshot_hash,
@@ -539,7 +530,7 @@ pub fn prepare_pinned_project_external_consumer(
         state,
         consumer_ref,
         Some(project_context),
-        Some(logical_project_root),
+        ryeos_engine::contracts::LogicalProject::Stated(identity),
         principal_fingerprint,
         principal_scopes,
         state.threads.site_id().to_owned(),
@@ -559,7 +550,9 @@ pub fn prepare_installed_bundle_external_consumer(
         state,
         consumer_ref,
         None,
-        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
         principal_fingerprint,
         principal_scopes,
         state.threads.site_id().to_owned(),
@@ -604,63 +597,93 @@ pub fn prepare_external_product_consumer(
         state,
         &request.consumer_ref,
         project,
-        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+        ),
         context.fingerprint.clone(),
         context.scopes.clone(),
         context.execution_origin(state.threads.site_id()),
     )
 }
 
-/// The logical project a pinned-project consumer may state: the canonical
-/// project path, only when `head` (the principal's head ref for it) is exactly
-/// `snapshot_hash`. A missing or different head refuses; there is no fallback
-/// to a projectless or checkout-judged resolution.
-fn bind_logical_project_root(
-    project_ref: &str,
+/// The project identity a pinned run may state for `principal_id`: the name
+/// the snapshot itself declares, owned by the principal the node resolves
+/// the key to, and only when that
+/// principal's own head for exactly that owner and name is `snapshot_hash`.
+/// The head is read by its exact key; nothing scans for a head equal to the
+/// snapshot, and no caller path participates. A missing declaration, a
+/// missing or different head, each refuse with a typed error.
+pub fn current_head_logical_project(
+    state: &AppState,
+    principal_id: &str,
+    snapshot_hash: &str,
+) -> Result<ryeos_state::project_identity::ProjectIdentity, ProjectSourceError> {
+    let other = |error: anyhow::Error| ProjectSourceError::Other(format!("{error:#}"));
+    let authority = crate::execution::pinned_state_authority(state)?;
+    let _guard = authority.acquire_shared_guard().map_err(other)?;
+    let cas = authority.cas_store().map_err(other)?;
+    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(
+        &cas.get_object(snapshot_hash)
+            .map_err(other)?
+            .ok_or_else(|| {
+                ProjectSourceError::Other(format!("snapshot {snapshot_hash} is absent"))
+            })?,
+    )
+    .map_err(other)?;
+    let tree = ryeos_state::objects::ProjectTree::from_value(
+        &cas.get_object(&snapshot.project_tree_hash)
+            .map_err(other)?
+            .ok_or_else(|| {
+                ProjectSourceError::Other(format!(
+                    "project tree {} is absent",
+                    snapshot.project_tree_hash
+                ))
+            })?,
+    )
+    .map_err(other)?;
+    let name =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)
+            .map_err(other)?
+            .ok_or_else(|| {
+                ProjectSourceError::Other(format!(
+                    "project_manifest_missing: snapshot {snapshot_hash} has no .ai/manifest.yaml; a project's name is the `name:` of its manifest"
+                ))
+            })?;
+    let owner = ryeos_app::project_owner::owner_principal(state, principal_id).map_err(other)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
+    let head = state
+        .state_store
+        .with_state_db(|db| {
+            db.read_project_head(&ryeos_state::project_identity::ProjectHeadKey::for_project(
+                &identity,
+            ))
+        })
+        .map_err(other)?;
+    bind_current_head_identity(identity, snapshot_hash, head.as_deref())
+}
+
+/// `identity`, only when `head` (its owner's head for it) is exactly
+/// `snapshot_hash`.
+fn bind_current_head_identity(
+    identity: ryeos_state::project_identity::ProjectIdentity,
     snapshot_hash: &str,
     head: Option<&str>,
-) -> Result<PathBuf, ProjectSourceError> {
+) -> Result<ryeos_state::project_identity::ProjectIdentity, ProjectSourceError> {
     match head {
-        Some(head) if head == snapshot_hash => Ok(PathBuf::from(project_ref)),
+        Some(head) if head == snapshot_hash => Ok(identity),
         other => Err(ProjectSourceError::SnapshotNotCurrentHead {
-            project_path: project_ref.to_owned(),
+            project_path: identity.to_string(),
             snapshot_hash: snapshot_hash.to_owned(),
             head: other.unwrap_or("none").to_owned(),
         }),
     }
 }
 
-/// The logical project a pinned qualification may state for `principal_id`:
-/// the canonical form of `project_path`, only when that principal's own pushed
-/// head for it is exactly `snapshot_hash`. A missing or different head is a
-/// typed `SnapshotNotCurrentHead`; an unresolvable path is `Other`. There is
-/// no fallback to a projectless or synthetic identity.
-pub fn current_head_logical_project(
-    state: &AppState,
-    principal_id: &str,
-    project_path: &Path,
-    snapshot_hash: &str,
-) -> Result<PathBuf, ProjectSourceError> {
-    let raw = project_path.to_str().ok_or_else(|| {
-        ProjectSourceError::Other(
-            "project_path is not valid UTF-8 and cannot be used as a project identity".into(),
-        )
-    })?;
-    // The same canonical ref and storage key the head was written under.
-    let project_ref = canonical_project_ref(raw)?;
-    let project_hash = lillux::cas::sha256_hex(project_ref.as_bytes());
-    let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
-    let head = state
-        .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
-    bind_logical_project_root(&project_ref, snapshot_hash, head.as_deref())
-}
-
 fn prepare_external_consumer_context(
     state: &AppState,
     consumer_ref: &str,
     project_context: Option<ResolvedProjectContext>,
-    logical_project_root: Option<PathBuf>,
+    logical_project: ryeos_engine::contracts::LogicalProject,
     principal_fingerprint: String,
     principal_scopes: Vec<String>,
     origin_site_id: String,
@@ -689,10 +712,7 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            logical_project_root,
-            &subject_resolution_authority,
-        ),
+        logical_project,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -743,7 +763,7 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let effective_logical_project = plan_context.effective_logical_project(project_root.as_deref());
+    let effective_logical_project = plan_context.signer_project().clone();
     let roots = engine.resolution_roots(project_root.clone(), effective_logical_project.clone());
     let project_authority = project_context
         .as_ref()
@@ -1352,7 +1372,7 @@ mod canonical_project_ref_tests {
 
         assert_eq!(ctx.effective_path, tmp.path());
         assert_eq!(ctx.original_path, PathBuf::from("/original"));
-        assert!(matches!(ctx.source, ProjectSource::PushedHead));
+        assert!(matches!(ctx.source, ProjectSource::LiveFs));
         assert!(ctx.snapshot_hash.is_none());
         assert!(ctx.temp_dir.is_none());
         assert!(prepared_product_subject(Some(&ctx)).is_err());
@@ -1433,20 +1453,24 @@ mod ai_only_base_tests {
 mod pinned_consumer_head_binding_tests {
     use super::*;
 
-    const PROJECT: &str = "/work/registered-project";
+    const PROJECT: &str = "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/registered-project";
+
+    fn identity() -> ryeos_state::project_identity::ProjectIdentity {
+        PROJECT.parse().unwrap()
+    }
 
     #[test]
-    fn the_current_head_states_the_canonical_project_as_the_logical_root() {
+    fn the_current_head_states_the_owner_and_name_identity() {
         let snapshot = "a".repeat(64);
-        let root = bind_logical_project_root(PROJECT, &snapshot, Some(&snapshot)).unwrap();
-        assert_eq!(root, PathBuf::from(PROJECT));
+        let stated = bind_current_head_identity(identity(), &snapshot, Some(&snapshot)).unwrap();
+        assert_eq!(stated, identity());
     }
 
     #[test]
     fn a_snapshot_that_is_not_the_head_of_the_stated_path_is_refused() {
         let snapshot = "a".repeat(64);
         let head = "b".repeat(64);
-        match bind_logical_project_root(PROJECT, &snapshot, Some(&head)) {
+        match bind_current_head_identity(identity(), &snapshot, Some(&head)) {
             Err(ProjectSourceError::SnapshotNotCurrentHead {
                 project_path,
                 snapshot_hash,
@@ -1463,7 +1487,7 @@ mod pinned_consumer_head_binding_tests {
     #[test]
     fn a_path_with_no_head_is_refused_not_resolved_projectless() {
         let snapshot = "a".repeat(64);
-        let error = bind_logical_project_root(PROJECT, &snapshot, None).unwrap_err();
+        let error = bind_current_head_identity(identity(), &snapshot, None).unwrap_err();
         assert!(
             matches!(
                 &error,

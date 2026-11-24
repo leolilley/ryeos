@@ -177,7 +177,11 @@ pub fn verify_and_parse_in_space(
         &header,
         &envelope,
         trust_store,
-        &ryeos_engine::trust::SignerContext::new(space, "node_config", None),
+        &ryeos_engine::trust::SignerContext::new(
+            space,
+            "node_config",
+            &ryeos_engine::trust::NO_PROJECT,
+        ),
     )?;
 
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {

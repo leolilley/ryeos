@@ -8189,7 +8189,11 @@ fn live_non_execution_root_context(
         capability_ceiling,
     )?;
     let plan_context = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        // This admission has no registry reader, so a live checkout states
+        // no project identity here.
+        logical_project: ryeos_engine::contracts::unestablished_project(
+            &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+        ),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
@@ -9018,7 +9022,9 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:bundle-subject-test".to_string(),
                 scopes: Vec::new(),
@@ -9178,9 +9184,7 @@ mod tests {
             current_operational_generation: generation_b,
         };
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                None, &subject_b,
-            ),
+            logical_project: ryeos_engine::contracts::unestablished_project(&subject_b),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -9230,7 +9234,7 @@ mod tests {
             current_operational_generation: active_base,
         };
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, &subject),
+            logical_project: ryeos_engine::contracts::unestablished_project(&subject),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
