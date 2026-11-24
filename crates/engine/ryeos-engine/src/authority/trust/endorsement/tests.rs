@@ -70,7 +70,9 @@ impl Node {
     }
 
     fn trust_with(&self, records: Vec<SignerRecord>) -> TrustStore {
-        TrustStore::from_registry(self.node.verifying_key(), records).unwrap()
+        TrustStore::from_registry(self.node.verifying_key(), records)
+            .unwrap()
+            .with_standing_kinds(["knowledge".to_owned(), "view".to_owned()])
     }
 
     fn ledger(&self) -> EndorsementLedger {
@@ -239,7 +241,7 @@ fn a_standing_endorsement_covers_its_kinds_in_its_project_only() {
     node.record(
         &trust,
         &node.operator,
-        node.standing_body(&node.operator, PROJECT, &["knowledge"], None),
+        node.standing_body(&node.operator, PROJECT, &["knowledge"], Some(NOW + 3600)),
     )
     .unwrap();
     let endorsed = node.indexed(&trust);
@@ -272,11 +274,12 @@ fn a_standing_endorsement_lapses_at_its_not_after() {
     .unwrap();
     let index = EndorsementIndex::build(&node.ledger(), &trust).unwrap();
     let digest = "a".repeat(64);
-    assert!(index.covers(PROJECT, "knowledge", &digest, NOW + 600));
-    assert!(!index.covers(PROJECT, "knowledge", &digest, NOW + 601));
+    let gate = StandingGate::of_kinds(["knowledge".to_owned()]);
+    assert!(index.covers(&gate, PROJECT, "knowledge", &digest, NOW + 600));
+    assert!(!index.covers(&gate, PROJECT, "knowledge", &digest, NOW + 601));
     assert_ne!(
-        index.identity(NOW),
-        index.identity(NOW + 601),
+        index.identity(&gate, NOW),
+        index.identity(&gate, NOW + 601),
         "the identity request caches key on retires when the endorsement lapses"
     );
 }
@@ -713,7 +716,7 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
     );
     assert_eq!(
         live.endorsement_index()
-            .identity(lillux::time::unix_secs_now()),
+            .identity(live.standing_gate(), lillux::time::unix_secs_now()),
         identity
     );
 
@@ -877,4 +880,159 @@ fn shape_rules_refuse_wildcards_empty_targets_and_relative_projects() {
         "endorsement_malformed",
         "not_after before endorsed_at"
     );
+}
+
+const DAY: u64 = 24 * 60 * 60;
+
+#[test]
+fn a_standing_endorsement_for_a_kind_that_does_not_allow_one_is_refused() {
+    let node = Node::new();
+    let trust = node.trust();
+    let refused = node
+        .record(
+            &trust,
+            &node.operator,
+            node.standing_body(&node.operator, PROJECT, &["directive"], Some(NOW + DAY)),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code(), "endorsement_kind_not_standing");
+    assert!(refused.to_string().contains("directive"), "{refused}");
+    // One refused kind refuses the whole endorsement; nothing is trimmed.
+    let mixed = node
+        .record(
+            &trust,
+            &node.operator,
+            node.standing_body(
+                &node.operator,
+                PROJECT,
+                &["directive", "knowledge"],
+                Some(NOW + DAY),
+            ),
+        )
+        .unwrap_err();
+    assert_eq!(mixed.code(), "endorsement_kind_not_standing");
+    assert!(node.ledger().endorsements.is_empty(), "nothing was stored");
+}
+
+#[test]
+fn a_standing_endorsement_must_end_within_thirty_days() {
+    let node = Node::new();
+    let trust = node.trust();
+    let record = |not_after: Option<u64>| {
+        node.record(
+            &trust,
+            &node.operator,
+            node.standing_body(&node.operator, PROJECT, &["knowledge"], not_after),
+        )
+    };
+    assert_eq!(
+        record(None).unwrap_err().code(),
+        "endorsement_standing_lifetime_required"
+    );
+    assert_eq!(
+        record(Some(NOW + 30 * DAY + 1)).unwrap_err().code(),
+        "endorsement_standing_lifetime_too_long"
+    );
+    record(Some(NOW + 30 * DAY)).expect("exactly thirty days is allowed");
+}
+
+#[test]
+fn a_node_that_was_never_told_which_kinds_allow_one_refuses_every_standing_endorsement() {
+    let node = Node::new();
+    let ungated = TrustStore::from_registry(
+        node.node.verifying_key(),
+        vec![record(
+            &node.operator,
+            SignerRole::Operator,
+            SignerStatus::Active,
+        )],
+    )
+    .unwrap();
+    let refused = node
+        .record(
+            &ungated,
+            &node.operator,
+            node.standing_body(&node.operator, PROJECT, &["knowledge"], Some(NOW + DAY)),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code(), "endorsement_kind_not_standing");
+}
+
+#[test]
+fn a_stored_standing_endorsement_covers_nothing_until_its_kinds_allow_it_and_never_after_they_stop()
+{
+    let node = Node::new();
+    let trust = live_store(&node).with_standing_kinds(["knowledge".to_owned()]);
+    node.record(
+        &trust,
+        &node.operator,
+        node.standing_body(&node.operator, PROJECT, &["knowledge"], Some(NOW + DAY)),
+    )
+    .unwrap();
+    let item = signed_item(&node.authoring, "text\n");
+
+    // A restart loads the store before any registry: the gate is unset, so the
+    // stored endorsement covers nothing.
+    let restarted = TrustStore::load_node_registry(node.path()).unwrap();
+    assert_eq!(
+        class(&restarted, &item, "knowledge", PROJECT),
+        TrustClass::Untrusted,
+        "the gate is unset across a reload"
+    );
+    let inert = restarted.endorsement_inert();
+    assert_eq!(inert.len(), 1);
+    assert_eq!(inert[0].1.code(), "standing_gate_unset");
+
+    // Paired with a registry that allows the kind, it covers it again.
+    let allowed = restarted
+        .clone()
+        .with_standing_kinds(["knowledge".to_owned()]);
+    assert_eq!(
+        class(&allowed, &item, "knowledge", PROJECT),
+        TrustClass::Trusted
+    );
+    assert!(allowed.endorsement_inert().is_empty());
+
+    // Paired with a registry that no longer allows it, it fails closed, and
+    // a launch carries nothing for it.
+    let stopped = restarted.with_standing_kinds(["view".to_owned()]);
+    assert_eq!(
+        class(&stopped, &item, "knowledge", PROJECT),
+        TrustClass::Untrusted
+    );
+    assert_eq!(stopped.endorsement_inert()[0].1.code(), "kind_not_standing");
+    assert!(
+        stopped
+            .launch_endorsements(Some(Path::new(PROJECT)))
+            .is_none()
+    );
+}
+
+#[test]
+fn a_stored_standing_endorsement_without_a_bounded_life_is_inert() {
+    let node = Node::new();
+    let operator = principal(&node.operator);
+    let at = lillux::time::iso8601_from_unix_secs(NOW);
+    let make = |not_after: Option<u64>| {
+        EndorsementBody::standing(
+            PROJECT,
+            &operator,
+            vec!["knowledge".to_owned()],
+            not_after.map(lillux::time::iso8601_from_unix_secs),
+            &at,
+            &nonce(),
+            &node.head(),
+        )
+    };
+    let gate = StandingGate::of_kinds(["knowledge".to_owned()]);
+    assert_eq!(
+        gate.inert_reason(&make(None)).map(InertReason::code),
+        Some("lifetime_unbounded")
+    );
+    assert_eq!(
+        gate.inert_reason(&make(Some(NOW + 31 * DAY)))
+            .map(InertReason::code),
+        Some("lifetime_too_long")
+    );
+    assert_eq!(gate.inert_reason(&make(Some(NOW + 30 * DAY))), None);
 }

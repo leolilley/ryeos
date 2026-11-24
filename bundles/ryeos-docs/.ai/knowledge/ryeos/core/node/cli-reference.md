@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T21:33:09Z:3a979b6ade3e1f6c3b2accdda378d4ba3e6187b26711e78a78361dce62fe9567:WGO0lTACei2aZzgGJVAXUvxGZelIQb/FLM2mLbScOZd5lzMIM4JiiBc66dcn6PG6jePVp3583FgsB30dwVrPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T01:26:35Z:ca490f87e1215cd6a30d4938a90f032aa9662b18856d8bfccf4991b1908e2367:13xio6nUlSk26C0nACb93o0da56KNV2oC5/fN7Utmojw3UQgOafVWk4QhkXmBu8/Dkayk9HRK3DCzAlT9qA5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -956,7 +956,7 @@ the operator key inside the CLI and submitted to the running node; see
 | Verb | Effect |
 |---|---|
 | `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes |
-| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in the project, until the lifetime passes when given |
+| `ryeos --project <dir> endorse --standing --kind <kind>... --lifetime-secs <n>` | Endorse every item of those kinds the authoring key signs in the project, until the lifetime passes (required, at most 30 days; the expiry is printed before signing). Only kinds whose schema allows a standing endorsement can be named; others are refused with `endorsement_kind_not_standing` |
 | `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |

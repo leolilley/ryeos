@@ -283,8 +283,10 @@ fn text_list(value: Option<&Value>, flag: &str) -> Result<Vec<String>, CliError>
 /// Sign an endorsement with the operator key, in this process, and hand it to
 /// the node. Per-change: `--item` names the exact items (refs, globs or `.ai`
 /// paths) in the project; their digests are read from the signed bytes on disk.
-/// Standing: `--standing --kind <kind>` covers a kind in the project, until
-/// `--lifetime-secs` pass when given. The node verifies the signature against
+/// Standing: `--standing --kind <kind> --lifetime-secs <n>` covers a kind in
+/// the project until `n` seconds pass (30 days at most); only kinds whose
+/// schema allows a standing grant can be named, and the expiry is printed
+/// before anything is signed. The node verifies the signature against
 /// its signer registry, countersigns and stores it; the key never leaves this
 /// process.
 pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
@@ -332,6 +334,12 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
     if !standing && (!kinds.is_empty() || lifetime_secs.is_some()) {
         return Err(local("--kind and --lifetime-secs belong to --standing"));
     }
+    if standing && lifetime_secs.is_none() {
+        return Err(local(
+            "a standing endorsement must end: give --lifetime-secs <n> (at most 30 days, \
+             2592000 seconds)",
+        ));
+    }
 
     let described = if standing {
         Vec::new()
@@ -364,18 +372,55 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .and_then(Value::as_str)
         .ok_or_else(|| local("the node did not return its endorsement ledger head"))?
         .to_owned();
+    if standing {
+        // Refuse before signing anything what the node would refuse after.
+        let allowed: Vec<&str> = facts
+            .get("standing_kinds")
+            .and_then(Value::as_array)
+            .map(|kinds| kinds.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if let Some(kind) = kinds.iter().find(|kind| !allowed.contains(&kind.as_str())) {
+            return Err(local(format!(
+                "endorsement_kind_not_standing: kind `{kind}` cannot be endorsed as a standing \
+                 grant (kinds that can: {}). A standing grant would trust everything the \
+                 authoring key signs of it from now on; endorse its items one change at a time \
+                 with `ryeos endorse --item <ref>`",
+                if allowed.is_empty() {
+                    "none".to_owned()
+                } else {
+                    allowed.join(", ")
+                }
+            )));
+        }
+        let max = facts
+            .get("max_standing_lifetime_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(ryeos_engine::trust::MAX_STANDING_LIFETIME_SECS);
+        if lifetime_secs.is_some_and(|secs| secs > max) {
+            return Err(local(format!(
+                "endorsement_standing_lifetime_too_long: --lifetime-secs is at most {max}"
+            )));
+        }
+    }
     let endorser = format!("fp:{}", signer.fingerprint);
     let nonce: [u8; 16] = rand::random();
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let now = lillux::time::unix_secs_now();
     let endorsed_at = lillux::time::iso8601_from_unix_secs(now);
     let body = if standing {
+        let not_after = lifetime_secs
+            .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs)));
+        if let Some(not_after) = &not_after {
+            eprintln!(
+                "standing endorsement of {} in {project_text}, ending {not_after}",
+                kinds.join(", ")
+            );
+        }
         EndorsementBody::standing(
             &project_text,
             &endorser,
             kinds,
-            lifetime_secs
-                .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs))),
+            not_after,
             &endorsed_at,
             &nonce,
             &ledger_head,
@@ -1059,6 +1104,8 @@ mod tests {
             json!({ "project_path": path, "item": ["view:a"], "kind": ["view"] }),
             json!({ "project_path": path, "item": ["view:a"], "lifetime_secs": 5 }),
             json!({ "project_path": path, "standing": true, "kind": ["view"], "lifetime_secs": 0 }),
+            // A standing endorsement must end.
+            json!({ "project_path": path, "standing": true, "kind": ["knowledge"] }),
         ] {
             let error = endorse_items(root.path(), &parameters).await.unwrap_err();
             assert!(

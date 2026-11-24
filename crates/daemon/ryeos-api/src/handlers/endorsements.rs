@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use ryeos_engine::trust::{
     EndorsementIndex, EndorsementLedger, EndorsementRefusal, EndorsementTarget,
-    MAX_ENDORSEMENT_CLOCK_SKEW_SECS, SignedEndorsement, record_endorsement, revoke_endorsement,
+    MAX_ENDORSEMENT_CLOCK_SKEW_SECS, MAX_STANDING_LIFETIME_SECS, SignedEndorsement,
+    record_endorsement, revoke_endorsement,
 };
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node::node_journal::{EndorsementFacts, NodeJournal};
@@ -126,6 +127,10 @@ pub async fn record(
             "ledger_head": ledger.head(&node_verifying_key(&state)),
             "now": lillux::time::iso8601_from_unix_secs(now),
             "max_clock_skew_secs": MAX_ENDORSEMENT_CLOCK_SKEW_SECS,
+            // What a standing endorsement may name and how long it may last, so
+            // the CLI can refuse before the operator signs anything.
+            "standing_kinds": state.engine.trust_store.standing_gate().kinds(),
+            "max_standing_lifetime_secs": MAX_STANDING_LIFETIME_SECS,
         }));
     };
 
@@ -284,7 +289,17 @@ pub async fn list(
     caller_fingerprint(&ctx)?;
     let ledger = load_ledger(&state)?;
     let index: Arc<EndorsementIndex> = state.engine.trust_store.endorsement_index();
-    let in_force: std::collections::BTreeSet<&str> = index.digests().collect();
+    let inert: std::collections::BTreeMap<String, &'static str> = state
+        .engine
+        .trust_store
+        .endorsement_inert()
+        .into_iter()
+        .map(|(digest, reason)| (digest, reason.code()))
+        .collect();
+    let in_force: std::collections::BTreeSet<&str> = index
+        .digests()
+        .filter(|digest| !inert.contains_key(*digest))
+        .collect();
     let entries: Vec<Value> = ledger
         .endorsements
         .iter()
@@ -308,6 +323,8 @@ pub async fn list(
                 "endorsed_at": body.endorsed_at,
                 "received_at": stored.received_at,
                 "in_force": in_force.contains(stored.digest.as_str()),
+                // A stored standing endorsement that covers nothing, and why.
+                "inert": inert.get(&stored.digest),
                 "revoked": tombstone.map(|tombstone| json!({
                     "revoked_at": tombstone.revoked_at,
                     "revoked_by": tombstone.revoked_by,
