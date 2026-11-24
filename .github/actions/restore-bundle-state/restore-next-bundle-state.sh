@@ -144,10 +144,13 @@ if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
     echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
 fi
 
+run_event="$(gh_retry "repos/$repo/actions/runs/$run_id" --jq .event 2>/dev/null || echo unknown)"
+echo "Produced by branch $branch, event $run_event"
+
 ./scripts/ci/unpack-bundle-state.sh "$state"
 {
     echo "### Bundle state"
-    echo "Restored from next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no bundles/ difference and no overlap with the branch."
+    echo "Restored from next \`$sha\`, produced by ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id) (branch \`$branch\`, event \`$run_event\`); $(wc -l < "$work/touched") paths; no bundles/ difference and no overlap with the branch."
     if [[ -n "$skipped" ]]; then
         echo "Newer next commits skipped because the branch differs from them:$skipped"
     fi
