@@ -270,6 +270,21 @@ async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
     let (_id, ctx, producer, coordinate) =
         live_presentation_with_surface(&state, NODE_SURFACE).await;
     let state = Arc::new(state);
+    // The handler omits `state` and `recent_events` when the node has neither
+    // sidecar nor log, so seed both: the answer then really holds the fields
+    // the tier withholds.
+    let gc_dir = state.config.runtime_state_dir();
+    std::fs::create_dir_all(gc_dir.join("logs")).expect("gc log directory");
+    std::fs::write(
+        gc_dir.join("gc.state.json"),
+        br#"{"phase":"idle","note":"/srv/private/gc"}"#,
+    )
+    .expect("gc state sidecar");
+    std::fs::write(
+        gc_dir.join("logs").join("gc.jsonl"),
+        b"{\"event\":\"swept\",\"path\":\"/srv/private/x\"}\n",
+    )
+    .expect("gc log");
     // Positive control: the configured operator's own call of the handler,
     // which no tier shapes, holds the fields the tier withholds from a seat.
     let operator = ryeos_ui::test_support::local_operator_context(&state, vec!["*".into()]);
@@ -296,6 +311,8 @@ async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
     // sidecar and log JSON that only the operator may read.
     assert!(shown.get("state").is_none(), "{shown}");
     assert!(shown.get("recent_events").is_none(), "{shown}");
+    let text = serde_json::to_string(shown).unwrap();
+    assert!(!text.contains("/srv/private"), "{text}");
 }
 
 #[tokio::test]
