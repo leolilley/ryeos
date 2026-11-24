@@ -1,6 +1,6 @@
 name: web
 version: "0.6.0"
-description: "Optional web access tools for agents"
+description: "Optional web access tools"
 requires_kinds:
   - tool
 uses_kinds: []
