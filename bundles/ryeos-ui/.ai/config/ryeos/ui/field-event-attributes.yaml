@@ -1,0 +1,40 @@
+# ryeos:signed:2026-11-24T02:18:30Z:9f077a3b396e4f85feb1d0b04ceedf8b9882aad98d7788a5e3b014afccfc304b:cvQsLBzeP1/NpqhC4GMokLo6/KHC9tkNmsEoE/77dOtAh/sg7FCt0IttZ8uxYt4KaY8bZv7YBcjJO/HuZbXQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: Which fields of a thread event's payload a field fact carries to views.
+
+# The payload keys copied, when present, into every event's field-fact
+# attributes. A key not listed never reaches a view. The reader adds
+# `event_type`, `timestamp` and `thread` itself and bounds the total size, so
+# those names cannot be listed here.
+attributes:
+  - graph_id
+  - graph_run_id
+  - definition_ref
+  - effective_definition_digest
+  - node
+  - node_ref
+  - step
+  - status
+  - target
+  - target_node_ref
+  - attempt
+  - attempts
+  - iteration
+  - delay_ms
+  - total
+  - parallel
+  - max_concurrency
+  - detach
+  - item_id
+  - child_thread_id
+  - successor_thread_id
+  - relation
+  - purpose
+  - kind
+
+# Event types whose whole `payload` object is also carried (bounded inline).
+inline_payload_events:
+  - milestone
+  - hook_observation_recorded
+  - hook_failed

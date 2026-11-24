@@ -300,6 +300,7 @@ impl IsolationRequestAwaitingAttachment {
                 stdout: String::new(),
                 stderr: "compiled held request already spent".into(),
                 exit_code: -1,
+                signal: None,
                 duration_ms: 0.0,
                 pid: 0,
                 timed_out: false,

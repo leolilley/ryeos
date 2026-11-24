@@ -1,6 +1,7 @@
 // A thread hint names a thread and its status, so a browser session receives
-// it only when its own authorization may observe that thread: the owner for a
-// projectless seat, the live project for a project-attached seat. An
+// it only when its own authorization may observe that thread, by the same
+// judgement as a seat read: a thread that states no project identity by the
+// key that launched it, whatever folder the seat is bound to. An
 // undecidable thread produces no hint, and an activity hint carries only the
 // threads, and the count of events, the session may observe.
 
@@ -20,6 +21,14 @@ use ryeos_state::objects::{
 use ryeos_ui::state::get_ui_state;
 use ryeos_ui::test_support::{build_test_state, launch_context, mint_launch};
 use ryeos_ui::{ThreadHintFanout, UiState};
+
+// Keys with no registry record: each acts for its own solo principal.
+const ALICE: &str = "fp:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+const BOB: &str = "fp:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+const CAROL: &str = "fp:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+const OPERATOR: &str = "fp:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e";
+const OTHER: &str = "fp:0707070707070707070707070707070707070707070707070707070707070707";
+const TEAMMATE: &str = "fp:7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
 
 fn captured_policy() -> CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
@@ -143,10 +152,10 @@ fn received(receiver: &mut Receiver<RouteStreamEnvelope>) -> Vec<Value> {
 async fn each_principal_receives_hints_for_its_own_threads_only() {
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
-    let (_a, mut a_rx) = session(&state, "fp:alice", None);
-    let (_b, mut b_rx) = session(&state, "fp:bob", None);
-    create_thread(&state, "T-alice", "fp:alice", None);
-    create_thread(&state, "T-bob", "fp:bob", None);
+    let (_a, mut a_rx) = session(&state, ALICE, None);
+    let (_b, mut b_rx) = session(&state, BOB, None);
+    create_thread(&state, "T-alice", ALICE, None);
+    create_thread(&state, "T-bob", BOB, None);
     let fanout = ThreadHintFanout::new();
 
     send_lifecycle(&fanout, &state, &ui, "T-alice", "T-alice").await;
@@ -172,41 +181,43 @@ async fn each_principal_receives_hints_for_its_own_threads_only() {
 }
 
 #[tokio::test]
-async fn a_local_operator_session_receives_what_its_principal_owns_and_no_live_project_threads() {
+async fn a_local_operator_session_receives_what_its_key_launched_and_nothing_else() {
     // A projectless seat of the node operator is admitted exactly as a seat
-    // read of that thread is: its own projectless threads, not another
-    // principal's, and not a live project's thread it is not attached to.
+    // read of that thread is: what its key launched, in a folder or not, and
+    // not another principal's thread.
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
     let project = tempfile::TempDir::new().unwrap();
-    let (_op, mut op_rx) = session(&state, "fp:operator", None);
-    create_thread(&state, "T-op", "fp:operator", None);
-    create_thread(&state, "T-other", "fp:other", None);
-    create_thread(&state, "T-op-live", "fp:operator", Some(project.path()));
+    let (_op, mut op_rx) = session(&state, OPERATOR, None);
+    create_thread(&state, "T-op", OPERATOR, None);
+    create_thread(&state, "T-other", OTHER, None);
+    create_thread(&state, "T-op-live", OPERATOR, Some(project.path()));
     let fanout = ThreadHintFanout::new();
     for id in ["T-op", "T-other", "T-op-live"] {
         send_lifecycle(&fanout, &state, &ui, id, id).await;
     }
-    let got = received(&mut op_rx);
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0]["thread_id"], "T-op");
+    let ids: Vec<String> = received(&mut op_rx)
+        .iter()
+        .map(|payload| payload["thread_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec!["T-op".to_owned(), "T-op-live".to_owned()]);
 }
 
 #[tokio::test]
-async fn a_project_attached_seat_receives_only_its_projects_threads() {
+async fn a_folder_bound_seat_receives_only_what_its_key_launched() {
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
     let project_a = tempfile::TempDir::new().unwrap();
     let project_b = tempfile::TempDir::new().unwrap();
-    let (_s, mut rx) = session(&state, "fp:alice", Some(project_a.path()));
-    create_thread(&state, "T-in-a", "fp:alice", Some(project_a.path()));
-    // A teammate's thread in the same project is the project's thread.
-    create_thread(&state, "T-in-a-team", "fp:teammate", Some(project_a.path()));
-    create_thread(&state, "T-in-b", "fp:alice", Some(project_b.path()));
-    // A projectless thread is judged by its owner, as a seat read judges it:
-    // the seat's own is observable, another principal's is not.
-    create_thread(&state, "T-free", "fp:alice", None);
-    create_thread(&state, "T-free-other", "fp:teammate", None);
+    let (_s, mut rx) = session(&state, ALICE, Some(project_a.path()));
+    create_thread(&state, "T-in-a", ALICE, Some(project_a.path()));
+    // A path is not authority: another key's thread in the same folder is
+    // not this seat's, and its own key's thread in another folder is.
+    create_thread(&state, "T-in-a-team", TEAMMATE, Some(project_a.path()));
+    create_thread(&state, "T-in-b", ALICE, Some(project_b.path()));
+    // A projectless thread is judged by the key that launched it.
+    create_thread(&state, "T-free", ALICE, None);
+    create_thread(&state, "T-free-other", TEAMMATE, None);
     let fanout = ThreadHintFanout::new();
     for id in ["T-in-a", "T-in-a-team", "T-in-b", "T-free", "T-free-other"] {
         send_lifecycle(&fanout, &state, &ui, id, id).await;
@@ -219,7 +230,7 @@ async fn a_project_attached_seat_receives_only_its_projects_threads() {
         ids,
         vec![
             "T-in-a".to_owned(),
-            "T-in-a-team".to_owned(),
+            "T-in-b".to_owned(),
             "T-free".to_owned()
         ]
     );
@@ -229,8 +240,8 @@ async fn a_project_attached_seat_receives_only_its_projects_threads() {
 async fn an_undecidable_thread_produces_no_hint_and_is_counted() {
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
-    let (_s, mut rx) = session(&state, "fp:alice", None);
-    create_thread(&state, "T-alice", "fp:alice", None);
+    let (_s, mut rx) = session(&state, ALICE, None);
+    create_thread(&state, "T-alice", ALICE, None);
     let fanout = ThreadHintFanout::new();
 
     // No signed subject for the thread.
@@ -257,12 +268,12 @@ async fn an_undecidable_thread_produces_no_hint_and_is_counted() {
 async fn activity_hints_carry_only_the_sessions_own_threads_and_count() {
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
-    let (_a, mut a_rx) = session(&state, "fp:alice", None);
-    let (_b, mut b_rx) = session(&state, "fp:bob", None);
-    let (_c, mut c_rx) = session(&state, "fp:carol", None);
-    create_thread(&state, "T-alice", "fp:alice", None);
-    create_thread(&state, "T-bob-1", "fp:bob", None);
-    create_thread(&state, "T-bob-2", "fp:bob", None);
+    let (_a, mut a_rx) = session(&state, ALICE, None);
+    let (_b, mut b_rx) = session(&state, BOB, None);
+    let (_c, mut c_rx) = session(&state, CAROL, None);
+    create_thread(&state, "T-alice", ALICE, None);
+    create_thread(&state, "T-bob-1", BOB, None);
+    create_thread(&state, "T-bob-2", BOB, None);
     let fanout = ThreadHintFanout::new();
     let counts = std::collections::HashMap::from([
         ("T-alice".to_owned(), ("T-alice".to_owned(), 2)),
@@ -289,8 +300,8 @@ async fn activity_hints_carry_only_the_sessions_own_threads_and_count() {
 async fn a_session_with_no_attachment_receives_nothing() {
     let (_tmp, _owner, state) = build_test_state();
     let ui = get_ui_state(&state).unwrap().clone();
-    let (session_id, mut rx) = session(&state, "fp:alice", None);
-    create_thread(&state, "T-alice", "fp:alice", None);
+    let (session_id, mut rx) = session(&state, ALICE, None);
+    create_thread(&state, "T-alice", ALICE, None);
     let current = ui.browser_sessions.get_session(&session_id).unwrap();
     let root = current.attachments[&current.root_attachment_id].coordinate();
     // Before revocation the hint arrives; after it, the seat has no

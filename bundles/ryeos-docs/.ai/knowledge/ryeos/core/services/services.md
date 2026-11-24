@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:51:10Z:3d0e385f54f0ef2c4c16a030bd332c08a2de3442aac54e845ef04363b435258f:Qgx4P4Ct1KB5A7SsI2dYK86TSIlp8ZXuI7NmxkWUShxWGnc8PCWgMg94jkS9lTI6OM+im8UXPEsTv7XCLd0yDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T08:39:15Z:ab249c0ff7f1bcb76b467f44500e335fb09b6ab9b80a4fc57f44b1c3a4c96de1:F7g4yIWXXsM0r2amCU/cy7jWZQwisIygOZVo+DMpRiDtC4zY875PZ8tGy0TCI6xB4epd1o63oWDMAsg29J1wDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -431,6 +431,18 @@ Worker candidate disposition uses four such exact-coordinate services:
   base-resolved evaluator against a frozen candidate view.
 - `service:worker-executions/qualify-candidate` adopts only its exact successful
   terminal testimony; closure validation alone grants no publication authority.
+  The caller names the evaluator thread and its item ref; the daemon derives the
+  evaluator's sealed capsule hash and its definition and parameters digests from
+  that thread, checks them against everything it sealed for this request, and
+  writes them into the qualification record and the response. The response also
+  carries the evaluator's own statement of what it checked (`evidence_scope`).
+  `ryeos worker session evaluate` and `ryeos worker session qualify` drive the
+  two steps. There is no default evaluator: a person names one. The shipped
+  `tool:ryeos/core/evaluate/unchecked` runs no checks, refuses ("no checks
+  configured") unless its parameters carry `accept_unchecked: true`, and says
+  "no checks run" in its evidence; those parameters are part of the sealed
+  testimony. A project's own signed evaluator replaces it by changing only the
+  ref.
 - `service:worker-executions/start-candidate-integration` launches a signed,
   namespace-bounded authoring wrapper in an isolated retained candidate CoW.
 - `service:worker-executions/publish` re-verifies the accepted evaluation and,

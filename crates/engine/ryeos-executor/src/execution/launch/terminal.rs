@@ -6,6 +6,15 @@ use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_runtime::envelope::{RuntimeResultStatus, decode_managed_runtime_terminal_envelope};
 use ryeos_state::objects::ThreadStatus;
 
+/// How the runtime process ended, as the daemon reaped it. A signal death has
+/// `exit_code` -1 and the signal in `signal`, so a crash, a kill and a plain
+/// non-zero exit stay distinguishable in the failure record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RuntimeExit {
+    pub exit_code: i32,
+    pub signal: Option<i32>,
+}
+
 pub(super) struct FallbackFinalization {
     pub params: ThreadFinalizeParams,
     pub managed_envelope: Value,
@@ -273,6 +282,17 @@ pub(super) fn fallback_finalization(
     runtime_result: &RuntimeResult,
     terminal_status: ThreadStatus,
 ) -> FallbackFinalization {
+    fallback_finalization_with_exit(thread_id, runtime_result, terminal_status, None)
+}
+
+/// `fallback_finalization` that also records how the runtime process ended in
+/// the failure object (`exit_code`, and `signal` when a signal ended it).
+pub(super) fn fallback_finalization_with_exit(
+    thread_id: &str,
+    runtime_result: &RuntimeResult,
+    terminal_status: ThreadStatus,
+    exit: Option<RuntimeExit>,
+) -> FallbackFinalization {
     let subprocess_status = runtime_result.status;
     let subprocess_result = runtime_result.result.clone();
     let mut runtime_result = runtime_result.clone();
@@ -281,11 +301,18 @@ pub(super) fn fallback_finalization(
     let terminal_error = if terminal_status == ThreadStatus::Completed {
         None
     } else {
-        Some(json!({
+        let mut error = json!({
             "reason": "runtime_exited_without_callback_finalization",
             "runtime_status": subprocess_status,
             "result": subprocess_result.clone(),
-        }))
+        });
+        if let Some(exit) = exit {
+            error["exit_code"] = json!(exit.exit_code);
+            if let Some(signal) = exit.signal {
+                error["signal"] = json!(signal);
+            }
+        }
+        Some(error)
     };
     // The managed envelope uses result-first, then terminal error. Return that
     // same canonical payload to the caller even when stdout supplied no result.
@@ -332,6 +359,53 @@ pub(super) fn fallback_finalization(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_silent_runtime_death_records_its_exit_code_and_signal() {
+        let runtime = RuntimeResult {
+            success: false,
+            status: RuntimeResultStatus::Failed,
+            thread_id: String::new(),
+            result: Some(json!("")),
+            outputs: Value::Null,
+            cost: None,
+            warnings: Vec::new(),
+        };
+        let signalled = fallback_finalization_with_exit(
+            "T-died",
+            &runtime,
+            ThreadStatus::Failed,
+            Some(RuntimeExit {
+                exit_code: -1,
+                signal: Some(9),
+            }),
+        );
+        let error = signalled.params.error.expect("failure object");
+        assert_eq!(
+            error["reason"],
+            "runtime_exited_without_callback_finalization"
+        );
+        assert_eq!(error["exit_code"], -1);
+        assert_eq!(error["signal"], 9);
+        assert_eq!(error["result"], json!(""), "the result shape is unchanged");
+
+        let exited = fallback_finalization_with_exit(
+            "T-died",
+            &runtime,
+            ThreadStatus::Failed,
+            Some(RuntimeExit {
+                exit_code: 3,
+                signal: None,
+            }),
+        );
+        let error = exited.params.error.expect("failure object");
+        assert_eq!(error["exit_code"], 3);
+        assert!(error.get("signal").is_none(), "{error}");
+
+        let unknown = fallback_finalization("T-died", &runtime, ThreadStatus::Failed);
+        let error = unknown.params.error.expect("failure object");
+        assert!(error.get("exit_code").is_none(), "{error}");
+    }
+
     use super::super::{BuildAndLaunchError, retained_launch_failure};
     use super::*;
 

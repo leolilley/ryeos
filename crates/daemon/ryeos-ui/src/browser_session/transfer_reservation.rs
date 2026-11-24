@@ -1725,7 +1725,7 @@ mod tests {
                     presentation: context.presentation,
                     project_authority: None,
                 },
-                "fp:test",
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32),
             )
             .unwrap(),

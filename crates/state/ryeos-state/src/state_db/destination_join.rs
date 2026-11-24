@@ -1308,6 +1308,7 @@ mod drop_tests {
 
     #[test]
     fn transferred_join_drops_without_abandoning() {
+        let _serial = crate::test_support::abandoned_custody_serial();
         // The shape a closed census leaves after its live parent body moved
         // to the outside frame: no parent, no live parent, no leaf alias.
         let before = lillux::custody::abandoned_custody().count(KIND);
@@ -1317,6 +1318,7 @@ mod drop_tests {
 
     #[test]
     fn join_with_untransferred_parent_is_abandoned_whole() {
+        let _serial = crate::test_support::abandoned_custody_serial();
         let lease: std::sync::Weak<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
             std::sync::Weak::<NoLease>::new();
         let owner = Arc::new(OriginalPreparedProjectionAuthority {

@@ -299,7 +299,10 @@ async fn the_chain_stream_is_refused_without_an_entry_for_its_route() {
 #[tokio::test]
 async fn a_hosted_seat_needs_an_entry_that_admits_its_class() {
     let body = policy(vec![chain_entry(json!({"classes": ["local_operator"]}))]);
-    let (_tmp, _owner, state, session_id, principal) = seated(&body, Some("fp:hosted"));
+    let (_tmp, _owner, state, session_id, principal) = seated(
+        &body,
+        Some("fp:4040404040404040404040404040404040404040404040404040404040404040"),
+    );
     create_thread(&state, "T-own", "T-own", None, &principal);
     let error = open(&state, &session_id, "chain.yaml", "T-own")
         .await
@@ -312,7 +315,13 @@ async fn a_hosted_seat_needs_an_entry_that_admits_its_class() {
 async fn an_unauthorized_chain_is_not_found_exactly_like_an_absent_one() {
     let (_tmp, _owner, state, session_id, principal) =
         seated(&policy(vec![chain_entry(json!({}))]), None);
-    create_thread(&state, "T-other", "T-other", None, "fp:somebody-else");
+    create_thread(
+        &state,
+        "T-other",
+        "T-other",
+        None,
+        "fp:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    );
     create_thread(&state, "T-own", "T-own", None, &principal);
     create_thread(&state, "T-child", "T-own", Some("T-own"), &principal);
     for id in ["T-other", "T-absent", "T-child"] {
@@ -410,7 +419,13 @@ async fn open_pin_cannot_widen_the_seats_chains() {
         None,
     );
     create_thread(&state, "T-own", "T-own", None, &principal);
-    create_thread(&state, "T-other", "T-other", None, "fp:somebody-else");
+    create_thread(
+        &state,
+        "T-other",
+        "T-other",
+        None,
+        "fp:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    );
     let error = open(&state, &session_id, "chain.yaml", "T-own")
         .await
         .err()

@@ -46,14 +46,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
 
     let bundle_metadata = std::fs::symlink_metadata(&bundle_path).map_err(|error| {
         HandlerError::Internal(format!(
-            "read bundle path metadata {}: {error}",
-            bundle_path.display()
+            "read installed bundle `{}`: {error}",
+            req.bundle_name
         ))
     })?;
     if bundle_metadata.file_type().is_symlink() || !bundle_metadata.file_type().is_dir() {
         return Err(HandlerError::Internal(format!(
-            "bundle path {} is not a real directory",
-            bundle_path.display()
+            "installed bundle `{}` is not a real directory",
+            req.bundle_name
         )));
     }
 
@@ -87,13 +87,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         &mut tree_entries,
         0,
     )
-    .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    .map_err(|error| {
+        // The walk's errors name host paths; they stay in the daemon log.
+        tracing::error!(bundle = %req.bundle_name, error = %format!("{error:#}"), "bundle export failed");
+        HandlerError::Internal(format!("export of installed bundle `{}` failed", req.bundle_name))
+    })?;
 
     remember_exported_blobs(&state, &req.bundle_name, &entries);
 
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
-        "bundle_path": bundle_path.display().to_string(),
         "file_count": entries.len(),
         "total_bytes": total_bytes,
         "entries": entries,
