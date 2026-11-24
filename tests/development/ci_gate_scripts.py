@@ -62,7 +62,7 @@ class Classifier(unittest.TestCase):
         return str(root)
 
     def run_classify(self, root: str) -> tuple[str, bool]:
-        mode, _, _, bundles = classify_mod.classify(root, "origin/next")
+        mode, _, _, bundles, _ = classify_mod.classify(root, "origin/next")
         return mode, bundles
 
     def test_ui_only(self):
@@ -329,6 +329,77 @@ class E2ESelection(unittest.TestCase):
             self.assertIn(needle, joined)
         done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root, "--check-e2e-coverage"], capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)
+
+
+class BundleBins(unittest.TestCase):
+    """A change that reaches a bundle bin needs the branch's own refresh."""
+
+    OWNERSHIP = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+
+    def decide(self, changed: dict[str, str], ownership: str | None = "cargo_package: bin-a") -> tuple[bool, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        names = ("bin-a", "shared", "leaf", "built", "targeted", "devonly", "apart")
+        members = ", ".join(f'"crates/{n}"' for n in names)
+        write(
+            root,
+            "Cargo.toml",
+            f'[workspace]\nmembers = [{members}]\n[workspace.dependencies]\nalias = {{ path = "crates/shared", package = "shared" }}\n',
+        )
+        tables = {
+            "bin-a": '[dependencies]\nserde = "1"\nalias = { workspace = true }\n'
+            '[build-dependencies]\nbuilt = { path = "../built" }\n'
+            '[target."cfg(unix)".dependencies]\ntargeted = { path = "../targeted" }\n'
+            '[dev-dependencies]\ndevonly = { path = "../devonly" }\n',
+            "shared": '[dependencies]\nleaf = { path = "../leaf" }\n',
+        }
+        for name in names:
+            write(root, f"crates/{name}/Cargo.toml", f'[package]\nname = "{name}"\n' + tables.get(name, ""))
+            write(root, f"crates/{name}/src/lib.rs", "a")
+        write(root, "Cargo.lock", "a")
+        if ownership is not None:
+            write(root, self.OWNERSHIP, f"payloads:\n  - {ownership}\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "change")
+        _, _, _, changed_flag, why = classify_mod.classify(str(root), "origin/next")
+        return changed_flag, why
+
+    def test_crates_a_bin_is_built_from_refresh(self):
+        for name in ("bin-a", "shared", "leaf", "built", "targeted"):
+            with self.subTest(name):
+                flag, why = self.decide({f"crates/{name}/src/lib.rs": "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"is in {name}, which bundle bin package bin-a is built from", why)
+
+    def test_other_crates_restore(self):
+        for name in ("devonly", "apart"):
+            with self.subTest(name):
+                self.assertFalse(self.decide({f"crates/{name}/src/lib.rs": "b"})[0])
+
+    def test_shared_build_inputs_refresh(self):
+        for path in ("Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml"):
+            with self.subTest(path):
+                flag, why = self.decide({path: "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"{path} is a build input", why)
+
+    def test_non_crate_path_restores(self):
+        self.assertFalse(self.decide({"docs/x.md": "b"})[0])
+
+    def test_faults_refresh(self):
+        for ownership in (None, "nothing: here", "cargo_package: missing"):
+            with self.subTest(ownership):
+                flag, why = self.decide({"crates/apart/src/lib.rs": "b"}, ownership)
+                self.assertTrue(flag)
+                self.assertIn("could not decide", why)
 
 
 class Digest(unittest.TestCase):

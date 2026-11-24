@@ -33,9 +33,9 @@ mod store;
 pub mod table;
 
 pub use apply::{
-    ApplyOptions, ApplyReport, LocalApplied, LocalDraft, StopReason, apply_local,
+    ApplyOptions, ApplyReport, LocalApplied, LocalDraft, ReceiptsRead, StopReason, apply_local,
     apply_pending_offline_operations, apply_with_options, read_facts, read_ledger,
-    read_node_fingerprint,
+    read_node_fingerprint, read_receipts,
 };
 pub use envelope::{WildcardGrant, authorized_keys_dir, local_operator};
 pub use host::{BareHost, BundleReplace, ImageSeed, OfflineHost, RemotePin, TypedReport};
