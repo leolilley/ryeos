@@ -879,7 +879,8 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
     let mut roots = Vec::new();
     let mut decoy_session = None;
     for project in [&plain, &decoy] {
-        let principal = test_state::register_fixture_project(&state, project).await;
+        let operator = test_state::operator_launch_context(&state);
+        let principal = operator.fingerprint.clone();
         let minted = ryeos_ui::handlers::ui_launch_mint::handle(
             ryeos_ui::handlers::ui_launch_mint::Request {
                 ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
@@ -888,7 +889,7 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
                 user_principal_id: Some(principal.clone()),
                 scopes: None,
             },
-            HandlerContext::new(principal, vec!["*".into()], true),
+            operator,
             Arc::new(state.clone()),
         )
         .await
@@ -966,7 +967,8 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
         ".ai/surfaces/ryeos/ui/project.yaml",
         "name: decoy-surface\nversion: \"1.0.0\"\n",
     );
-    let principal = test_state::register_fixture_project(&state, &project).await;
+    let operator = test_state::operator_launch_context(&state);
+    let principal = operator.fingerprint.clone();
 
     let refused = ryeos_ui::handlers::ui_launch_mint::handle(
         ryeos_ui::handlers::ui_launch_mint::Request {
@@ -976,7 +978,7 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await;
