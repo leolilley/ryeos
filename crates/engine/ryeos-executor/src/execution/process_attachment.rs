@@ -1118,6 +1118,7 @@ mod release_failure_controls {
                 stdout: String::new(),
                 stderr: "target absent; wrapper/scope disposition unresolved".into(),
                 exit_code: -1,
+                signal: None,
                 duration_ms: 0.0,
                 pid: 0,
                 timed_out: false,
