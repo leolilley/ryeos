@@ -952,7 +952,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        let shown = get_shown("get", &shaping, get_answer("name: a\n")).unwrap();
+        let shown = shown("get", &get_shaping, get_answer("name: a\n")).unwrap();
         let body = &shown["record"]["body"];
         assert!(body.get("provenance").is_none());
         assert!(body.get("schema").is_none());
