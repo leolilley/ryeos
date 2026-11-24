@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T02:10:57Z:dc4e61ee84d325c5682f2a85b8c75c9d087d2597e46f803772baf5db53b44ff6:8jF3Vhdz/WFPwWQfBGVlZmROJDbqjgYr3979CnF8Cax8y1SIx92ZIr4GwY4b0FgCOeYKp3t2d1dCBBu9jyDUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T21:15:54Z:a30e129846e606683cc5fdc25c62aada80bb10c01ea74e6956beb9f7b0119bfa:wyEhVxwWIpcEJnSzB6WMol1ti8X1AG76B7O5qmw+g1/XUAaF4f1m6CSVD3gZguA7uzX/y7WXN9Morx2kKqG3Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -192,7 +192,7 @@ assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 for forbidden in codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode claude-code local-inference bundle-source bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode claude-code local-inference bundle-source bundle-release demo" ]]
 [[ "${release_authority[*]}" == "core graph environment-qualification bundle-release" ]]
 for forbidden in central-auth scheduling knowledge directive ryeos-docs web browser ryeos-ui codex opencode render-sandbox; do
   assert_rejected contains "$forbidden" "${release_authority[@]}"

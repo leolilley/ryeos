@@ -403,6 +403,7 @@
    "bundle-release",
    "bundle-source",
    "central-auth",
+   "demo",
    "environment-qualification",
    "local-inference",
    "opencode",

@@ -1,0 +1,58 @@
+# ryeos:signed:2026-11-24T21:13:13Z:05633ea4b41f2ac6893fac67f02fcd3328b8f50e89e58df629afab5f4eac2bab:cSS57s1gBsHfEi0pOhi/2U422LF2+PPiEr92CK01i6HwuY3vT5oGDj2IU6x49iqOPO3doIDx4T6aWkuBNAw5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: demo
+description: Read a bundled knowledge item, check its signature, and check this graph's own signature. Needs no model provider key.
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/knowledge/compose
+      - ryeos.execute.tool.ryeos/core/fetch
+config:
+  start: read_welcome
+  max_steps: 4
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  state: {}
+  nodes:
+    read_welcome:
+      action:
+        item_id: tool:ryeos/knowledge/compose
+        ref_bindings: {}
+        params:
+          ref: knowledge:demo/welcome
+          token_budget: 1000
+        thread: inline
+      assign:
+        welcome: "${result}"
+      next: {type: unconditional, to: check_knowledge}
+    check_knowledge:
+      action:
+        item_id: tool:ryeos/core/fetch
+        ref_bindings: {}
+        params:
+          item_ref: knowledge:demo/welcome
+          verify: true
+        thread: inline
+      assign:
+        knowledge_trust: "${result}"
+      next: {type: unconditional, to: check_graph}
+    check_graph:
+      action:
+        item_id: tool:ryeos/core/fetch
+        ref_bindings: {}
+        params:
+          item_ref: graph:demo/hello
+          verify: true
+        thread: inline
+      assign:
+        graph_trust: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        welcome: "${state.welcome}"
+        knowledge_trust: "${state.knowledge_trust}"
+        graph_trust: "${state.graph_trust}"

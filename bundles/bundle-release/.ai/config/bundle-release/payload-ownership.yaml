@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:38:06Z:fbbc33b27e87fb7c18d8a854f1e0bdc9b60e32191c98b6d8e4393fc1fdde376c:1eW23fYun4mkT6YHB4K38rD223CrZC1LsktZWgjG2SV6cK/JNQWkwOqZWKzG097UpMUquaLsHln7+FlwEIF3AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T21:15:19Z:185179fadf76581a7f4240151a202834f481b3125b87a0671ee3683f2d7006ae:hbfO2io7xe1cO1jHZu9PIA68YdIlmupYWEcNOrX6Kmts2M6RQ3H/EPEPYd714dMQTLemKQuX/6aNCT6X5NxgAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -17,7 +17,7 @@ payload_ownership:
       directive-handlers: [core-handlers, extends-composer]
       graph-handlers: [core-handlers, extends-composer]
   # Bundles that own no native payload and contribute no host feature.
-  data_only_bundles: [bundle-release, bundle-source, central-auth, environment-qualification, local-inference, opencode, ryeos-docs]
+  data_only_bundles: [bundle-release, bundle-source, central-auth, demo, environment-qualification, local-inference, opencode, ryeos-docs]
   # Payload-free bundles that contribute daemon-linked host features.
   host_only_bundles:
     - bundle_name: scheduling

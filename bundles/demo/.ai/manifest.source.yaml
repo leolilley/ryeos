@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-24T21:13:13Z:588d0e4dc92729cb211d9e5a855ab6dca2c1bd05b2153abfa9058b8103f229ee:IYdFod6hF57B3Is+W0Ch8rtsLC7+cC2yBud5EPZarC/bb6cTy7xfMTAH5rgzlImysbOgo9jwp9Vc1loZ2N+zCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: demo
+version: "0.1.0"
+description: "First-contact demo: a keyless graph over bundled knowledge and core tools"
+requires_kinds:
+  - graph
+  - knowledge
+  - tool
+uses_kinds: []
