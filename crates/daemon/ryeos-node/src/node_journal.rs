@@ -70,6 +70,12 @@ pub enum JournalType {
     EndorsementAccepted,
     #[serde(rename = "endorsement.revoked")]
     EndorsementRevoked,
+    /// A bundle installed on the running node, outside any offline receipt.
+    #[serde(rename = "bundle.installed")]
+    BundleInstalled,
+    /// The node's state was initialized from a profile.
+    #[serde(rename = "node.initialized")]
+    NodeInitialized,
 }
 
 impl JournalType {
@@ -81,6 +87,8 @@ impl JournalType {
             Self::NodeExitUnknown => "node.exit_unknown",
             Self::EndorsementAccepted => "endorsement.accepted",
             Self::EndorsementRevoked => "endorsement.revoked",
+            Self::BundleInstalled => "bundle.installed",
+            Self::NodeInitialized => "node.initialized",
         }
     }
 }
@@ -485,10 +493,46 @@ impl NodeJournal {
         self.append(endorsement_draft(JournalType::EndorsementRevoked, facts))
     }
 
+    /// Record a bundle installed on the running node. `subject_ref` is the
+    /// bundle name, `after_ref` the digest of its signed registration, and
+    /// `actor` the key that authenticated the request, as the daemon attests.
+    pub fn record_bundle_installed(
+        &self,
+        facts: &BundleInstalledFacts<'_>,
+    ) -> Result<SignedJournalRecord, JournalError> {
+        let mut draft = JournalDraft::new(JournalType::BundleInstalled)
+            .with("source", bounded(facts.source))
+            .with("files", facts.files)
+            .with("bytes", facts.bytes);
+        draft.subject_ref = Some(bounded(facts.bundle));
+        draft.after_ref = Some(facts.registration_digest.to_owned());
+        draft.actor = Some(facts.actor.to_owned());
+        self.append(draft)
+    }
+
+    /// Record that the node's state was initialized. Written once, at init;
+    /// `detail.profile` names the profile it started from.
+    pub fn record_initialized(&self, profile: &str) -> Result<SignedJournalRecord, JournalError> {
+        self.append(
+            JournalDraft::new(JournalType::NodeInitialized).with("profile", bounded(profile)),
+        )
+    }
+
     /// Record a handled exit.
     pub fn record_exit(&self, exit: &ExitFacts<'_>) -> Result<(), JournalError> {
         self.append(exited_draft(exit)).map(|_| ())
     }
+}
+
+/// What a bundle install on the running node knows about itself.
+pub struct BundleInstalledFacts<'a> {
+    pub bundle: &'a str,
+    /// Where it came from, for example the remote it was fetched from.
+    pub source: &'a str,
+    pub registration_digest: &'a str,
+    pub actor: &'a str,
+    pub files: u64,
+    pub bytes: u64,
 }
 
 /// What a start knows about itself.

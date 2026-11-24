@@ -468,6 +468,9 @@ pub struct ThreadView {
     pub pending: usize,
 }
 
+/// The facet key under which a thread's title is stored.
+pub const TITLE_FACET_KEY: &str = "title";
+
 /// A `ThreadListItem` projection decorated with daemon-authored
 /// [`ExecutionFacts`], follow lineage, and staged-input depth — the list-row
 /// analogue of [`ThreadView`].
@@ -487,6 +490,11 @@ pub struct ThreadListView {
     /// (e.g. `facets.game`, `facets.fleet`). Empty for untagged threads.
     #[serde(skip_serializing_if = "is_empty_str_map")]
     pub facets: std::collections::BTreeMap<String, String>,
+    /// The thread's `title` facet, lifted out for list views; null until a
+    /// title is set, and null when this view did not load facets. Never
+    /// derived here: `threads.input` stamps it at launch and
+    /// `threads.set_facet` edits it.
+    pub title: Option<String>,
     /// Live execution head for a graph thread: `{node, step}` from its latest
     /// `graph_step_started`. `None` for a non-graph or not-yet-started thread.
     /// Lets a fleet overview show "where is each thread now" without a trace
@@ -6244,6 +6252,7 @@ impl ThreadLifecycleService {
                 project: None,
                 pending: 0,
                 facets: Default::default(),
+                title: None,
                 current_node: None,
                 error: None,
             })
@@ -6297,11 +6306,12 @@ impl ThreadLifecycleService {
                     .map(Path::new)
                     .map(project_summary);
                 let pending = self.pending_input(&item.thread_id);
-                let facets = facets
+                let facets: std::collections::BTreeMap<String, String> = facets
                     .remove(&item.thread_id)
                     .unwrap_or_default()
                     .into_iter()
                     .collect();
+                let title = facets.get(TITLE_FACET_KEY).cloned();
                 let current_node = current_graph_nodes
                     .remove(&item.thread_id)
                     .map(|(node, step)| CurrentNode { node, step });
@@ -6315,6 +6325,7 @@ impl ThreadLifecycleService {
                     project,
                     pending,
                     facets,
+                    title,
                     current_node,
                     error,
                 }
@@ -9851,11 +9862,14 @@ mod tests {
             project: None,
             pending: 0,
             facets: std::collections::BTreeMap::new(),
+            title: None,
             current_node: None,
             error: None,
         };
         let v = serde_json::to_value(&view).unwrap();
         assert!(v.get("follow").is_none(), "absent follow omitted");
+        // A thread with no title says so: the field is present and null.
+        assert_eq!(v.get("title"), Some(&Value::Null));
         assert!(v.get("pending").is_none(), "zero pending omitted");
         // Execution facts still flatten as before.
         assert_eq!(v["execution"]["supports_continuation"], json!(true));
@@ -9896,6 +9910,7 @@ mod tests {
             project: None,
             pending: 2,
             facets: BTreeMap::from([("game".to_string(), "fixture".to_string())]),
+            title: None,
             current_node: Some(CurrentNode {
                 node: "done".to_string(),
                 step: 11,

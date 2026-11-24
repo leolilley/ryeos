@@ -26,7 +26,17 @@ fn mint_session(
     HandlerContext,
     Arc<ryeos_ui::browser_session::AdmittedBindingAttachment>,
 ) {
-    let (session_id, token) = test_state::mint_launch(state, session_launch_context(project_path));
+    mint_launch_session(state, session_launch_context(project_path))
+}
+
+fn mint_launch_session(
+    state: &ryeos_app::state::AppState,
+    launch: ryeos_ui::browser_session::LaunchContext,
+) -> (
+    HandlerContext,
+    Arc<ryeos_ui::browser_session::AdmittedBindingAttachment>,
+) {
+    let (session_id, token) = test_state::mint_launch(state, launch);
     assert_eq!(
         get_ui_state(state)
             .unwrap()
@@ -393,7 +403,16 @@ async fn usage_observes_only_signed_subjects_owned_by_projectless_caller() {
         ThreadHistoryRetention,
     };
     let (_tmp, _state_owner, state) = test_state::build_test_state();
-    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+    for (thread_id, principal) in [
+        (
+            "T-visible",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+        ),
+        (
+            "T-private",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        ),
+    ] {
         state
             .state_store
             .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
@@ -455,7 +474,16 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
         ThreadHistoryRetention,
     };
     let (_tmp, _state_owner, state) = test_state::build_test_state();
-    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+    for (thread_id, principal) in [
+        (
+            "T-visible",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+        ),
+        (
+            "T-private",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        ),
+    ] {
         state
             .state_store
             .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
@@ -524,7 +552,9 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
     assert!(events.iter().all(|event| event["thread_id"] == "T-visible"));
     let encoded = serde_json::to_string(&result).unwrap();
     assert!(!encoded.contains("T-private"));
-    assert!(!encoded.contains("fp:foreign"));
+    assert!(
+        !encoded.contains("fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0")
+    );
     assert_eq!(result["usage_coverage"]["state"], "unavailable");
     assert_eq!(
         result["pulse"].as_array().unwrap().len(),
@@ -534,7 +564,7 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
 }
 
 #[tokio::test]
-async fn activity_bound_project_excludes_foreign_project_and_projectless_subjects() {
+async fn activity_of_a_project_seat_excludes_collaborator_and_other_project_threads() {
     use ryeos_state::objects::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
         CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
@@ -545,12 +575,30 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
     let foreign = tempfile::tempdir().unwrap();
     let admitted_root = admitted.path().canonicalize().unwrap();
     let foreign_root = foreign.path().canonicalize().unwrap();
-    // Live-project visibility follows the admitted project, not only creator
-    // identity. Own work elsewhere must not leak into this project's activity.
-    for (thread_id, principal, root) in [
-        ("T-visible", "fp:collaborator", Some(admitted_root.clone())),
-        ("T-private", "fp:test", Some(foreign_root)),
-        ("T-projectless", "fp:test", None),
+    // A seat of a stated project reads that project's threads. A path is no
+    // authority: a collaborator's thread on the same checkout is not this
+    // key's, and this key's thread in another project is not this project's.
+    let admitted_project = test_state::fixture_project_identity(&admitted_root);
+    let foreign_project = test_state::fixture_project_identity(&foreign_root);
+    for (thread_id, principal, root, sealed) in [
+        (
+            "T-visible",
+            test_state::FIXTURE_KEY,
+            Some(admitted_root.clone()),
+            Some(admitted_project.clone()),
+        ),
+        (
+            "T-collaborator",
+            "fp:c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            Some(admitted_root.clone()),
+            None,
+        ),
+        (
+            "T-private",
+            test_state::FIXTURE_KEY,
+            Some(foreign_root.clone()),
+            Some(foreign_project),
+        ),
     ] {
         let authority = match &root {
             // These are signed live execution subjects on an unconfined test
@@ -569,6 +617,12 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
                 environment: EnvironmentAuthority::None,
             },
         };
+        let mut authority = authority;
+        if let (ExecutionProjectAuthority::LiveProject { signer_project, .. }, Some(project)) =
+            (&mut authority, sealed)
+        {
+            *signer_project = ryeos_state::project_identity::LogicalProject::Stated(project);
+        }
         state
             .state_store
             .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
@@ -601,8 +655,11 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
             })
             .unwrap();
     }
-    let (context, attachment) =
-        mint_session(&state, Some(admitted_root.to_string_lossy().into_owned()));
+    let mut launch = session_launch_context(Some(admitted_root.to_string_lossy().into_owned()));
+    Arc::make_mut(&mut launch.compiled_binding)
+        .binding
+        .signer_project = ryeos_state::project_identity::LogicalProject::Stated(admitted_project);
+    let (context, attachment) = mint_launch_session(&state, launch);
     let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment,
         (ryeos_ui::handlers::ui_node::ACTIVITY_DESCRIPTOR.handler)(
@@ -624,8 +681,10 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
     assert!(events.iter().all(|event| event["thread_id"] == "T-visible"));
     let encoded = serde_json::to_string(&result).unwrap();
     assert!(!encoded.contains("T-private"));
-    assert!(!encoded.contains("T-projectless"));
-    assert!(!encoded.contains("fp:test"));
+    assert!(!encoded.contains("T-collaborator"));
+    assert!(
+        !encoded.contains("fp:c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0")
+    );
     assert_eq!(result["usage_coverage"]["state"], "unavailable");
     assert_eq!(
         result["pulse"].as_array().unwrap().len(),
@@ -653,9 +712,21 @@ async fn activity_reports_windowed_usage_for_seat_attributed_launches() {
     // (thread, owner, attributed subject)
     let attributed = ryeos_ui::handlers::ui_usage::ui_usage_subject(None);
     for (thread_id, principal, subject) in [
-        ("T-seat", "fp:test", Some(attributed.clone())),
-        ("T-unattributed", "fp:test", None),
-        ("T-foreign", "fp:foreign", Some(attributed.clone())),
+        (
+            "T-seat",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            Some(attributed.clone()),
+        ),
+        (
+            "T-unattributed",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            None,
+        ),
+        (
+            "T-foreign",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+            Some(attributed.clone()),
+        ),
     ] {
         state
             .state_store

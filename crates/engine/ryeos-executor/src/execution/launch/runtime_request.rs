@@ -106,6 +106,9 @@ pub(super) struct SpawnedRuntimeWaitResult {
     /// exact process group absent and compare-cleared its workspace binding.
     /// An immediate spawn failure has no such attached-wait proof.
     pub settled_attached_wait: bool,
+    /// How the reaped runtime process ended; `None` when no process was waited
+    /// (immediate spawn failure, settlement error).
+    pub exit: Option<super::terminal::RuntimeExit>,
 }
 
 fn abort_unattached_runtime_resource_scope(
@@ -126,6 +129,7 @@ impl SpawnedRuntime {
             return SpawnedRuntimeWaitResult {
                 result: Ok(RuntimeProcessOutcome::Terminal(result)),
                 settled_attached_wait: false,
+                exit: None,
             };
         }
         let Some(process) = self.process.take() else {
@@ -134,6 +138,7 @@ impl SpawnedRuntime {
                     "spawned runtime has no process or immediate result"
                 )),
                 settled_attached_wait: false,
+                exit: None,
             };
         };
         let limit = self.resource_occupancy_limit.take();
@@ -161,12 +166,17 @@ impl SpawnedRuntime {
             return SpawnedRuntimeWaitResult {
                 result: Err(error),
                 settled_attached_wait: false,
+                exit: None,
             };
         }
         drop(self.attached_process.take());
         drop(self.workspace_lifeline.take());
         drop(self.external_realizations.take());
         drop(self.source_closure.take());
+        let exit = super::terminal::RuntimeExit {
+            exit_code: result.exit_code,
+            signal: result.signal,
+        };
         let outcome = if !result.success {
             Ok(RuntimeProcessOutcome::Terminal(runtime_failure_result(
                 &result.stderr,
@@ -179,6 +189,7 @@ impl SpawnedRuntime {
         SpawnedRuntimeWaitResult {
             result: outcome,
             settled_attached_wait: true,
+            exit: Some(exit),
         }
     }
 }

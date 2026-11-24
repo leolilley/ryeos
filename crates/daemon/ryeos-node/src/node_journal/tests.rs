@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -299,7 +300,7 @@ fn the_type_vocabulary_is_closed() {
     let record = fx.journal().append(draft(1)).unwrap();
     let mut body = serde_json::to_value(&record.body).unwrap();
     serde_json::from_value::<JournalBody>(body.clone()).unwrap();
-    body["type"] = "bundle.installed".into();
+    body["type"] = "node.unheard_of".into();
     assert!(serde_json::from_value::<JournalBody>(body).is_err());
     assert_eq!(JournalType::NodeStarted.as_str(), "node.started");
     assert_eq!(
@@ -549,4 +550,44 @@ fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
         serde_json::to_value(JournalType::EndorsementRevoked).unwrap(),
         "endorsement.revoked"
     );
+}
+
+#[test]
+fn a_bundle_install_is_recorded_with_its_registration_and_actor() {
+    let fixture = Fixture::new();
+    let journal = fixture.journal();
+    let record = journal
+        .record_bundle_installed(&BundleInstalledFacts {
+            bundle: "demo",
+            source: "remote:origin",
+            registration_digest: "sha256:abc",
+            actor: &"a".repeat(64),
+            files: 3,
+            bytes: 42,
+        })
+        .unwrap();
+    assert_eq!(record.body.record_type, JournalType::BundleInstalled);
+    assert_eq!(record.body.subject_ref.as_deref(), Some("demo"));
+    assert_eq!(record.body.after_ref.as_deref(), Some("sha256:abc"));
+    assert_eq!(record.body.before_ref, None);
+    assert_eq!(record.body.actor, Some("a".repeat(64)));
+    assert_eq!(record.body.detail["source"], json!("remote:origin"));
+    assert_eq!(record.body.detail["files"], json!(3));
+    assert_eq!(
+        serde_json::to_value(JournalType::BundleInstalled).unwrap(),
+        json!("bundle.installed")
+    );
+    journal.load().unwrap();
+}
+
+#[test]
+fn an_initialization_is_recorded_with_its_profile() {
+    let fixture = Fixture::new();
+    let journal = fixture.journal();
+    let record = journal.record_initialized("hosted-node").unwrap();
+    assert_eq!(record.body.record_type, JournalType::NodeInitialized);
+    assert_eq!(record.body.detail["profile"], json!("hosted-node"));
+    assert_eq!(record.body.actor, None);
+    assert_eq!(JournalType::NodeInitialized.as_str(), "node.initialized");
+    assert_eq!(journal.read().unwrap().records.len(), 1);
 }

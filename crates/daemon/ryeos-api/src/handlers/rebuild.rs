@@ -107,7 +107,7 @@ pub const VERIFY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.projection/verify"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let _: Request = serde_json::from_value(params)?;
+            let _: Request = crate::handler_error::parse_request(params)?;
             handle(Operation::Verify, state).await
         })
     },
@@ -120,7 +120,7 @@ pub const REBUILD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.projection/rebuild"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let _: Request = serde_json::from_value(params)?;
+            let _: Request = crate::handler_error::parse_request(params)?;
             handle(Operation::Rebuild, state).await
         })
     },

@@ -62,7 +62,7 @@ class Classifier(unittest.TestCase):
         return str(root)
 
     def run_classify(self, root: str) -> tuple[str, bool]:
-        mode, _, _, bundles = classify_mod.classify(root, "origin/next")
+        mode, _, _, bundles, _ = classify_mod.classify(root, "origin/next")
         return mode, bundles
 
     def test_ui_only(self):
@@ -329,6 +329,117 @@ class E2ESelection(unittest.TestCase):
             self.assertIn(needle, joined)
         done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root, "--check-e2e-coverage"], capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)
+
+
+class BundleBins(unittest.TestCase):
+    """A change that reaches a bundle bin needs the branch's own refresh."""
+
+    OWNERSHIP = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+
+    def decide(self, changed: dict[str, str], ownership: str | None = "cargo_package: bin-a") -> tuple[bool, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        names = ("bin-a", "shared", "leaf", "built", "targeted", "devonly", "apart")
+        members = ", ".join(f'"crates/{n}"' for n in names)
+        write(
+            root,
+            "Cargo.toml",
+            f'[workspace]\nmembers = [{members}]\n[workspace.dependencies]\nalias = {{ path = "crates/shared", package = "shared" }}\n',
+        )
+        tables = {
+            "bin-a": '[dependencies]\nserde = "1"\nalias = { workspace = true }\n'
+            '[build-dependencies]\nbuilt = { path = "../built" }\n'
+            '[target."cfg(unix)".dependencies]\ntargeted = { path = "../targeted" }\n'
+            '[dev-dependencies]\ndevonly = { path = "../devonly" }\n',
+            "shared": '[dependencies]\nleaf = { path = "../leaf" }\n',
+        }
+        for name in names:
+            write(root, f"crates/{name}/Cargo.toml", f'[package]\nname = "{name}"\n' + tables.get(name, ""))
+            write(root, f"crates/{name}/src/lib.rs", "a")
+        write(root, "Cargo.lock", "a")
+        if ownership is not None:
+            write(root, self.OWNERSHIP, f"payloads:\n  - {ownership}\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "change")
+        _, _, _, changed_flag, why = classify_mod.classify(str(root), "origin/next")
+        return changed_flag, why
+
+    def test_crates_a_bin_is_built_from_refresh(self):
+        for name in ("bin-a", "shared", "leaf", "built", "targeted"):
+            with self.subTest(name):
+                flag, why = self.decide({f"crates/{name}/src/lib.rs": "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"is in {name}, which bundle bin package bin-a is built from", why)
+
+    def test_other_crates_restore(self):
+        for name in ("devonly", "apart"):
+            with self.subTest(name):
+                self.assertFalse(self.decide({f"crates/{name}/src/lib.rs": "b"})[0])
+
+    def test_shared_build_inputs_refresh(self):
+        for path in ("Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml"):
+            with self.subTest(path):
+                flag, why = self.decide({path: "b"})
+                self.assertTrue(flag)
+                self.assertIn(f"{path} is a build input", why)
+
+    def test_non_crate_path_restores(self):
+        self.assertFalse(self.decide({"docs/x.md": "b"})[0])
+
+    def test_faults_refresh(self):
+        for ownership in (None, "nothing: here", "cargo_package: missing"):
+            with self.subTest(ownership):
+                flag, why = self.decide({"crates/apart/src/lib.rs": "b"}, ownership)
+                self.assertTrue(flag)
+                self.assertIn("could not decide", why)
+
+
+class SourceGuards(unittest.TestCase):
+    """Workspace source guards run on any Rust change under crates/."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        write(self.root, "Cargo.toml", '[workspace]\nmembers = ["crates/state/ryeos-state", "crates/other"]\n')
+        write(self.root, "crates/state/ryeos-state/Cargo.toml", '[package]\nname = "ryeos-state"\n')
+        write(self.root, "crates/other/Cargo.toml", '[package]\nname = "other"\n')
+        for _, binary in classify_mod.SOURCE_GUARD_TESTS:
+            write(self.root, f"crates/state/ryeos-state/tests/{binary}.rs", "a")
+
+    def guards(self) -> list[str]:
+        return [a for _, b in classify_mod.SOURCE_GUARD_TESTS for a in ("--test", b)]
+
+    def test_another_crates_rust_change_adds_the_guards(self):
+        packages = [{"package": "other", "manifest": None, "args": []}]
+        out = classify_mod.add_source_guards(str(self.root), ["crates/other/src/lib.rs"], packages)
+        self.assertEqual(out, [packages[0], {"package": "ryeos-state", "manifest": None, "args": self.guards()}])
+
+    def test_a_whole_package_run_already_covers_them(self):
+        packages = [{"package": "ryeos-state", "manifest": None, "args": []}]
+        out = classify_mod.add_source_guards(str(self.root), ["crates/state/ryeos-state/src/lib.rs"], packages)
+        self.assertEqual(out, [{"package": "ryeos-state", "manifest": None, "args": []}])
+
+    def test_non_rust_changes_add_nothing(self):
+        out = classify_mod.add_source_guards(str(self.root), ["crates/other/Cargo.toml", "docs/a.rs"], [])
+        self.assertEqual(out, [])
+
+    def test_a_missing_guard_is_an_error(self):
+        (self.root / f"crates/state/ryeos-state/tests/{classify_mod.SOURCE_GUARD_TESTS[0][1]}.rs").unlink()
+        with self.assertRaises(RuntimeError):
+            classify_mod.add_source_guards(str(self.root), ["crates/other/src/lib.rs"], [])
+
+    def test_the_listed_guards_exist_in_this_repository(self):
+        repo = Path(__file__).resolve().parents[2]
+        classify_mod.add_source_guards(str(repo), ["crates/x/src/lib.rs"], [])
 
 
 class Digest(unittest.TestCase):

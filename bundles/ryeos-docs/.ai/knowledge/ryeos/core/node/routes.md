@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:b7d8accfb6e10bfa9a9480a95e7829f3238bd1c5868b182dc7021fbb187ce817:H1p72lDxMFUsCqlHBCuM+i63CCWzH3d2167yZW3u/HLS/MAKpnn4RG1yR4L9ChFawLG4nR4K35F+BXCfKJlEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:3b83e4f5dc51a70b445985e1026ffc7b406097815efff705a11aa0e04b18edab:lFLqLUeaKAa+L2QV/nzxqCGM6pNT7I8BfP1B2xExWG3HfJXMiW4KFcj8HRp6Hrua/i/ONVxakZxrhLaCxvyxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -364,8 +364,8 @@ Tracking pixel response example:
 
 ## Route authority
 
-A request authenticated as `auth: none` or `auth: hmac` has no human caller,
-yet a `launch` or `dispatch_launch` route can birth a thread. A thread never
+A request authenticated as `auth: none` or `auth: hmac` carries no signing key of
+its own, yet a `launch` or `dispatch_launch` route can birth a thread. A thread never
 holds authority its caller did not lend, so the route is the caller and states
 the authority it lends in its signed data:
 

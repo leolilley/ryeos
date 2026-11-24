@@ -2092,7 +2092,8 @@ mod tests {
             expires_at: now + Duration::from_secs(60),
             absolute_expires_at: now + Duration::from_secs(60),
             idle_timeout: Duration::from_secs(60),
-            principal_id: "fp:test".to_string(),
+            principal_id: "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57"
+                .to_string(),
             granted_caps: vec!["ui.read".to_string()],
             user_principal_id,
             root_attachment_id: "attachment-1".to_string(),
@@ -2210,7 +2211,10 @@ mod tests {
             "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         )));
 
-        assert_eq!(invocation_ctx.fingerprint, "fp:test");
+        assert_eq!(
+            invocation_ctx.fingerprint,
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57"
+        );
         assert!(invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
@@ -2219,7 +2223,10 @@ mod tests {
     fn invocation_context_never_uses_cookie_transport_as_authority() {
         let invocation_ctx = invocation_context_for_session(&session(None));
 
-        assert_eq!(invocation_ctx.fingerprint, "fp:test");
+        assert_eq!(
+            invocation_ctx.fingerprint,
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57"
+        );
         assert!(invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }

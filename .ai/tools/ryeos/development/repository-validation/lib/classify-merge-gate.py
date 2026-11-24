@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-23T19:49:40Z:30ac4decb7d02cf45616e87a72ef2cf9f54cbe2a430bd86abe9844ee05421d2f:gf8FlfaBUJQWM0dhXPZ4d2dtTW/JR6iv2POfnGxpwKJEg2uZHIpi4jBNbEB62iQ9PDNODbYg49oEbBuV9LCbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:41:53Z:46b5df4243485730896c11a34de0b5c04006e48e2a2d1e468fcf53716d4dd0a7:SlrXiK76LbeSCB6Ay1hgR2fwTInvjq4y6mDYaRK4NvDOKb41059i0x4oL18F0njZk+bdnunqtfAIP/x4Z1HjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -18,7 +18,9 @@ a git failure, an unexpected exception. The script never exits non-zero for
 those, so a classification fault cannot fail the run or skip the full gate.
 
 It also prints `test_packages=<json>`: the cargo packages whose tests the
-merge gate must run for this branch (see `touched_packages`). A fault yields
+merge gate must run for this branch (see `touched_packages`), plus the
+workspace source guards whenever any Rust file under crates/ changed (see
+`add_source_guards`). A fault yields
 `test_packages=ERROR`, which the workflow treats as a failure, never as "none".
 
 It also prints `e2e_tests=<json>` and `e2e_shards=<json>`: the daemon
@@ -60,6 +62,28 @@ UI_PREFIXES = (
     ".ai/knowledge/ryeos/development/ui-",
 )
 BUNDLE_PREFIXES = ("bundles/",)
+
+# The bundle bins in the restored bundle state are built from next. A branch
+# that changes a crate any of them is built from must refresh the bundles from
+# its own sources, or its tests run next's binaries. The bin packages are the
+# `cargo_package` entries of the signed payload ownership; a change to a build
+# input every package shares (the lock file, the root manifest, the toolchain,
+# cargo configuration) counts as a change to all of them.
+PAYLOAD_OWNERSHIP = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+CARGO_PACKAGE_LINE = re.compile(r"^\s*(?:- )?cargo_package:\s*[\"']?([A-Za-z0-9_-]+)[\"']?\s*$", re.M)
+SHARED_BUILD_INPUTS = ("Cargo.lock", "Cargo.toml", "rust-toolchain", "rust-toolchain.toml")
+SHARED_BUILD_PREFIXES = (".cargo/",)
+DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
+
+# Test binaries that read other crates' source files (workspace-wide guards).
+# Any changed Rust file under crates/ can break them, whichever package owns
+# it, so they run whenever one changes, not only when their own package does.
+# Each entry is (package, test binary); the package must be a root-workspace
+# member and the binary its tests/<binary>.rs.
+SOURCE_GUARD_TESTS = (
+    ("ryeos-state", "principal_owner_guard"),
+    ("ryeos-state", "project_head_key_guard"),
+)
 
 
 def git(root: str, *args: str) -> bytes:
@@ -326,6 +350,31 @@ def touched_packages(root: str, base: str, paths: list[str], rule: str) -> list[
             entry["args"] = [a for t in sorted(e2e_targets.get(name, ())) for a in ("--test", t)] + LIB_AND_BIN_ARGS
     return [found[name] for name in sorted(found)]
 
+def add_source_guards(root: str, paths: list[str], packages: list[dict]) -> list[dict]:
+    """Add the workspace source guards when any Rust file under crates/ changed.
+
+    A package already selected whole (no narrowing args) runs its guards
+    anyway. A listed guard whose test file is missing raises, so a renamed
+    guard is a classifier error, never a silently skipped check.
+    """
+    if not any(p.startswith("crates/") and p.endswith(".rs") for p in paths):
+        return packages
+    top = Path(root).resolve()
+    members = workspace_packages(top)
+    by_name = {p["package"]: p for p in packages}
+    for package, binary in SOURCE_GUARD_TESTS:
+        if package not in members or not (top / members[package] / "tests" / f"{binary}.rs").is_file():
+            raise RuntimeError(f"source guard {package}/tests/{binary}.rs not found")
+        entry = by_name.get(package)
+        if entry is None:
+            entry = by_name[package] = {"package": package, "manifest": None, "args": []}
+            packages.append(entry)
+            entry["args"] = ["--test", binary]
+        elif entry["args"] and binary not in entry["args"]:
+            entry["args"] = entry["args"] + ["--test", binary]
+    return sorted(packages, key=lambda p: p["package"])
+
+
 # The coverage map of the daemon's end-to-end test binaries. Each
 # `[tests.<binary>]` table names the packages (`covers`) whose changes select
 # that binary, and optionally path globs (`paths`) for finer grain inside
@@ -404,6 +453,84 @@ def workspace_packages(root: Path) -> dict[str, str]:
             if name:
                 found[name] = directory.relative_to(root).as_posix()
     return found
+
+
+def bundle_bin_packages(root: Path) -> list[str]:
+    """The Cargo packages the signed payload ownership builds bundle bins from."""
+    text = (root / PAYLOAD_OWNERSHIP).read_text()
+    packages = CARGO_PACKAGE_LINE.findall(text)
+    if not packages:
+        raise ValueError(f"{PAYLOAD_OWNERSHIP} names no cargo_package")
+    if len(packages) != text.count("cargo_package:"):
+        raise ValueError(f"{PAYLOAD_OWNERSHIP} has a cargo_package entry this cannot read")
+    return sorted(set(packages))
+
+
+def bundle_bin_closure(root: Path) -> dict[str, str]:
+    """Map every root-workspace package a bundle bin is built from to the bin package it feeds."""
+    members = workspace_packages(root)
+    by_dir = {directory: name for name, directory in members.items()}
+    workspace_deps = tomllib.loads((root / "Cargo.toml").read_text()).get("workspace", {}).get("dependencies", {})
+    edges = {}
+    for name, directory in members.items():
+        doc = tomllib.loads((root / directory / "Cargo.toml").read_text())
+        tables = [doc]
+        tables.extend(t for t in doc.get("target", {}).values() if isinstance(t, dict))
+        found = set()
+        for table in tables:
+            for kind in DEPENDENCY_TABLES:
+                for key, spec in table.get(kind, {}).items():
+                    if not isinstance(spec, dict):
+                        continue
+                    if spec.get("workspace") is True:
+                        shared = workspace_deps.get(key)
+                        if not isinstance(shared, dict) or "path" not in shared:
+                            continue
+                        target = (root / shared["path"])
+                    elif "path" in spec:
+                        target = root / directory / spec["path"]
+                    else:
+                        continue
+                    rel = target.resolve().relative_to(root.resolve()).as_posix()
+                    if rel in by_dir:
+                        found.add(by_dir[rel])
+        edges[name] = found
+    feeds: dict[str, str] = {}
+    for bin_package in bundle_bin_packages(root):
+        if bin_package not in members:
+            raise ValueError(f"bundle bin package {bin_package} is not a root workspace member")
+        stack = [bin_package]
+        while stack:
+            name = stack.pop()
+            if name in feeds:
+                continue
+            feeds[name] = bin_package
+            stack.extend(sorted(edges.get(name, ())))
+    return feeds
+
+
+def bundle_bin_change(root: str, paths: list[str]) -> str | None:
+    """Why the branch's changes reach a bundle bin, or None when they cannot.
+
+    Raises when the answer cannot be computed; the caller treats that as a
+    change, never as none.
+    """
+    for path in paths:
+        if path in SHARED_BUILD_INPUTS or path.startswith(SHARED_BUILD_PREFIXES):
+            return f"{path} is a build input of every bundle bin"
+    top = Path(root)
+    owners = []
+    for path in paths:
+        owner = owning_package(top, path)
+        if owner is not None and owner[2] is None:
+            owners.append((path, owner[0]))
+    if not owners:
+        return None
+    feeds = bundle_bin_closure(top)
+    for path, package in owners:
+        if package in feeds:
+            return f"{path} is in {package}, which bundle bin package {feeds[package]} is built from"
+    return None
 
 
 def e2e_shard_count(selected: int) -> int:
@@ -496,25 +623,38 @@ def check_e2e_coverage(root: str) -> tuple[list[str], list[str]]:
     return faults, gaps
 
 
-def classify(root: str, base_ref: str) -> tuple[str, list[str], str, bool]:
-    """Return (mode, changed paths, reason, bundles_changed)."""
+def bundles_reason(root: str, paths: list[str]) -> str | None:
+    """Why the branch needs its own bundle refresh, or None when next's state serves."""
+    sources = [p for p in paths if p.startswith(BUNDLE_PREFIXES)]
+    if sources:
+        return f"bundle sources changed, first: {sources[0]}"
+    try:
+        return bundle_bin_change(root, paths)
+    except Exception as error:  # a fault must not read as "next's bins serve"
+        return f"could not decide whether a bundle bin is affected ({error})"
+
+
+def classify(root: str, base_ref: str) -> tuple[str, list[str], str, bool, str]:
+    """Return (mode, changed paths, reason, bundles_changed, bundles reason)."""
     if not base_ref or base_ref.startswith("-"):
-        return "full", [], f"unusable base ref {base_ref!r}", True
+        return "full", [], f"unusable base ref {base_ref!r}", True, "no usable base ref"
     try:
         base = git(root, "merge-base", "HEAD", base_ref).decode().strip()
     except Exception as error:  # missing ref, no common ancestor, git failure
-        return "full", [], f"no merge base with {base_ref} ({error})", True
+        return "full", [], f"no merge base with {base_ref} ({error})", True, "no merge base"
     if not base:
-        return "full", [], f"no merge base with {base_ref}", True
+        return "full", [], f"no merge base with {base_ref}", True, "no merge base"
     out = git(root, "diff", "--name-only", "--no-renames", "-z", base, "HEAD")
     paths = sorted(name for name in out.decode().split("\0") if name)
-    bundles_changed = any(p.startswith(BUNDLE_PREFIXES) for p in paths)
     if not paths:
-        return "full", paths, "no changed paths", True
+        return "full", paths, "no changed paths", True, "no changed paths"
+    why = bundles_reason(root, paths)
+    bundles_changed = why is not None
+    why = why or "no changed path reaches a bundle source or bundle bin"
     outside = [p for p in paths if not p.startswith(UI_PREFIXES)]
     if outside:
-        return "full", paths, f"paths outside the UI set, first: {outside[0]}", bundles_changed
-    return "ui-only", paths, "every changed path is in the UI set", bundles_changed
+        return "full", paths, f"paths outside the UI set, first: {outside[0]}", bundles_changed, why
+    return "ui-only", paths, "every changed path is in the UI set", bundles_changed, why
 
 
 def main() -> None:
@@ -533,9 +673,10 @@ def main() -> None:
             print(f"  {gap}")
         sys.exit(1 if faults else 0)
     try:
-        mode, paths, reason, bundles_changed = classify(args.root, args.base_ref)
+        mode, paths, reason, bundles_changed, bundles_why = classify(args.root, args.base_ref)
     except BaseException as error:  # any fault means the full gate
         mode, paths, reason, bundles_changed = "full", [], f"classifier error: {error}", True
+        bundles_why = "classifier error"
     try:
         if not paths and reason != "no changed paths":
             raise RuntimeError(reason)
@@ -543,6 +684,7 @@ def main() -> None:
         packages = touched_packages(args.root, base, paths, args.rule)
         if mode == "ui-only":
             packages = [p for p in packages if p["package"] not in UI_GATE_PACKAGES]
+        packages = add_source_guards(args.root, paths, packages)
         test_packages = json.dumps(packages, separators=(",", ":"))
     except BaseException as error:  # a fault must not read as "no tests to run"
         test_packages = "ERROR"
@@ -565,6 +707,7 @@ def main() -> None:
     print(f"mode={mode}")
     print(f"bundles_changed={'true' if bundles_changed else 'false'}")
     print(f"# classification: {mode} ({reason})")
+    print(f"# bundles: {'refresh from the branch' if bundles_changed else 'restore next'} ({bundles_why})")
     print(f"# daemon e2e: {e2e_reason}")
     for package in json.loads(e2e_uncovered):
         print(f"# daemon e2e: no coverage-map entry covers changed package {package}")

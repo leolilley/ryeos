@@ -5,8 +5,9 @@
 //!   "the owner is the authenticating key" as a convention;
 //! - compares a project owner with a key fingerprint string;
 //! - asks whether a key speaks for a principal outside the files allowed to
-//!   decide project ownership (a link carries ownership, never authority:
-//!   grant, scope, session and thread-read code must never call it).
+//!   decide project ownership (a link carries ownership, never authority). A
+//!   stated project's thread reads are an ownership site; grant, scope,
+//!   session and unstated thread-read code still never ask it.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,9 @@ const SOLO_PRINCIPAL_PRODUCERS: &[&str] = &[
 
 /// Files that may ask whether a key speaks for a principal: the resolver,
 /// the trust store and its endorsement ledger, and the project-ownership
-/// sites (head advances, checkout registration, resume re-checks).
+/// sites (head advances, checkout registration, resume re-checks, and the
+/// thread read rule, where a stated project's threads are read by the keys
+/// of its owner).
 const SPEAKS_FOR_CALLERS: &[&str] = &[
     "crates/engine/ryeos-engine/src/authority/trust.rs",
     "crates/engine/ryeos-engine/src/authority/trust/ownership.rs",
@@ -32,7 +35,27 @@ const SPEAKS_FOR_CALLERS: &[&str] = &[
     "crates/daemon/ryeos-api/src/routes/response_modes/execute_mode.rs",
     "crates/engine/ryeos-executor/src/execution/runner.rs",
     "crates/daemon/ryeos-app/src/worker_handoff.rs",
+    "crates/daemon/ryeos-app/src/seat_authority.rs",
 ];
+
+/// The thread read rule asks speaks_for in exactly these arms of
+/// `ThreadReader::admits`, all behind its active-key gate: the
+/// project-authored source, the stated seat and the projectless seat reading
+/// a stated project's thread. A new call is a new authority question and
+/// must be reviewed, not added silently.
+const SEAT_AUTHORITY_SPEAKS_FOR_CALLS: usize = 3;
+
+#[test]
+fn the_thread_read_rule_asks_speaks_for_only_in_its_stated_project_arms() {
+    let path = workspace_root().join("crates/daemon/ryeos-app/src/seat_authority.rs");
+    let text = std::fs::read_to_string(&path).expect("read seat_authority.rs");
+    let production = production_text(&text);
+    assert_eq!(
+        production.matches(concat!("speaks_", "for(")).count(),
+        SEAT_AUTHORITY_SPEAKS_FOR_CALLS,
+        "seat_authority.rs changed how often it asks speaks_for"
+    );
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
