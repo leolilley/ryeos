@@ -100,13 +100,10 @@ impl Request {
         if self.namespace == Namespace::Blob && self.total_size > super::objects_put::MAX_BLOB_BYTES
         {
             return Err(anyhow::Error::new(
-                ryeos_app::handler_error::HandlerError::BadRequest(
-                    format!(
-                        "blob exceeds the {} byte per-blob limit",
-                        super::objects_put::MAX_BLOB_BYTES
-                    )
-                    .into(),
-                ),
+                ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                    "blob exceeds the {} byte per-blob limit",
+                    super::objects_put::MAX_BLOB_BYTES
+                )),
             ));
         }
         if self.data.len() > MAX_STAGE_CHUNK_BYTES.saturating_mul(2) {
@@ -128,9 +125,9 @@ impl Request {
         }
         if bytes.len() > MAX_STAGE_CHUNK_BYTES {
             return Err(anyhow::Error::new(
-                ryeos_app::handler_error::HandlerError::BadRequest(
-                    format!("stage chunk exceeds {MAX_STAGE_CHUNK_BYTES} bytes").into(),
-                ),
+                ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                    "stage chunk exceeds {MAX_STAGE_CHUNK_BYTES} bytes"
+                )),
             ));
         }
         Ok(bytes)
@@ -179,7 +176,11 @@ fn stage_chunk_blocking(
     // principal is refused by the reopen itself.
     let mut stage = recovery.open_durable_cas_upload_admitted(&guard, &req.staging_id, owner)?;
     if let Some(target) = stage.admitted_target_hash() {
-        return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::Conflict(format!("durable upload stage is already admitted for publication target {target}; it accepts no further chunks").into())));
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "durable upload stage is already admitted for publication target {target}; it accepts no further chunks"
+            )),
+        ));
     }
     let length = u64::try_from(bytes.len())?;
     let (staged_bytes, complete) = match req.namespace {
@@ -292,16 +293,17 @@ fn expectation_for(
         })?;
     let (Some(size), Some(chunk_size)) = (entry.size, entry.chunk_size) else {
         return Err(anyhow::Error::new(
-            ryeos_app::handler_error::HandlerError::BadRequest(
-                format!(
-                    "the manifest entry for {file_sha256} carries no size or sidecar chunk size"
-                )
-                .into(),
-            ),
+            ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                "the manifest entry for {file_sha256} carries no size or sidecar chunk size"
+            )),
         ));
     };
     if size != total_size {
-        return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest(format!("stage chunk total_size {total_size} contradicts the manifest size {size} for {file_sha256}").into())));
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                "stage chunk total_size {total_size} contradicts the manifest size {size} for {file_sha256}"
+            )),
+        ));
     }
     Ok(LargeObjectExpectation {
         size,
@@ -326,15 +328,23 @@ fn require_store_room(
         .checked_add(incoming_bytes)
         .context("large-store budget overflow")?;
     if after > store_budget_bytes {
-        return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::Conflict(format!("large object of {incoming_bytes} bytes would take the store to {after} bytes, over the {store_budget_bytes} byte budget").into())));
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "large object of {incoming_bytes} bytes would take the store to {after} bytes, over the {store_budget_bytes} byte budget"
+            )),
+        ));
     }
     let capacity = store.filesystem_capacity()?;
     let required = minimum_free_bytes
         .checked_add(incoming_bytes)
         .context("large-store free-space requirement overflow")?;
     if capacity.available_bytes < required {
-        return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::Conflict(format!("large object of {incoming_bytes} bytes needs {required} available bytes including the reserve, observed {}",
-            capacity.available_bytes).into())));
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "large object of {incoming_bytes} bytes needs {required} available bytes including the reserve, observed {}",
+                capacity.available_bytes
+            )),
+        ));
     }
     Ok(())
 }

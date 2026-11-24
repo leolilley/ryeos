@@ -654,7 +654,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             if current.as_deref() != expected_deployed_hash {
                 return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::Conflict(format!("deployed project changed during apply: expected {:?}, got {:?}",
                     expected_deployed_hash,
-                    current).into())));
+                    current))));
             }
             match expected_deployed_hash {
                 Some(expected) => db.advance_deployed_project_ref(

@@ -204,12 +204,12 @@ fn select_admission_head<'a>(
                 matches.len(),
                 policy,
             );
-            return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
                 "admission_head_ambiguous",
                 409,
                 message.clone(),
             ))
-            .context(message));
+            .context(message))
         }
     }
 }
