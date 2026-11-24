@@ -7458,10 +7458,11 @@ pub struct QualifyCandidateRequest {
     candidate_validation_hash: String,
     evaluator_chain_root_id: String,
     evaluator_terminal_thread_id: String,
-    evaluator_capsule_hash: String,
+    /// The evaluator is the person's choice, so it stays a request field and
+    /// must equal the ref the daemon sealed for that thread. The capsule hash
+    /// and the definition and parameters digests are not: the daemon holds
+    /// them for the sealed evaluator thread and records what it derives.
     evaluator_item_ref: String,
-    evaluator_definition_digest: String,
-    evaluator_parameters_digest: String,
     #[serde(default)]
     integration: Option<CandidateIntegrationCoordinate>,
     /// One pre-minted launch coordinate reserved by accepted source-candidate
@@ -9794,21 +9795,9 @@ fn candidate_qualification_request_matches(
             .and_then(Value::as_str)
             == Some(req.evaluator_terminal_thread_id.as_str())
         && evaluation
-            .pointer("/evaluator/capsule_hash")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_capsule_hash.as_str())
-        && evaluation
             .pointer("/evaluator/item_ref")
             .and_then(Value::as_str)
             == Some(req.evaluator_item_ref.as_str())
-        && evaluation
-            .pointer("/evaluator/effective_definition_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_definition_digest.as_str())
-        && evaluation
-            .pointer("/evaluator/parameters_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_parameters_digest.as_str())
         && (!compare_reserved_launch
             || evaluation
                 .pointer("/qualification/reserved_integration_launch_id")
@@ -10018,17 +10007,12 @@ async fn qualify_candidate(
         .admitted_launch_capsule_hash
         .as_deref()
         .ok_or_else(|| HandlerError::BadRequest("evaluator has no admitted capsule".into()))?;
-    if evaluator_capsule_hash != req.evaluator_capsule_hash {
-        return Err(HandlerError::BadRequest(
-            "evaluator capsule differs from the requested qualification coordinate".into(),
-        ));
-    }
     let evaluator_capsule = state
         .state_store
         .admitted_launch_capsule(&req.evaluator_terminal_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("evaluator admitted capsule disappeared"))?;
-    if evaluator_capsule.content_hash().map_err(internal)? != req.evaluator_capsule_hash
+    if evaluator_capsule.content_hash().map_err(internal)? != evaluator_capsule_hash
         || evaluator_capsule.project_authority != evaluator.project_authority
     {
         return Err(internal(
@@ -10062,15 +10046,17 @@ async fn qualify_candidate(
             "evaluator capsule is sealed to another retained candidate operation".into(),
         ));
     }
-    if sealed.item_ref() != req.evaluator_item_ref
-        || evaluator.item_ref != req.evaluator_item_ref
-        || sealed.effective_definition_digest().as_str() != req.evaluator_definition_digest
-        || sealed.admitted_parameters_digest().map_err(internal)? != req.evaluator_parameters_digest
-    {
+    if sealed.item_ref() != req.evaluator_item_ref || evaluator.item_ref != req.evaluator_item_ref {
         return Err(HandlerError::BadRequest(
-            "evaluator invocation differs from the exact requested definition or parameters".into(),
+            "evaluator invocation differs from the requested evaluator item".into(),
         ));
     }
+    // What the sealed evaluator thread was admitted with. The daemon derives
+    // these; a caller never carries them. They are written into the
+    // qualification record and returned, so the testimony names exactly which
+    // definition and parameters were evaluated.
+    let evaluator_definition_digest = sealed.effective_definition_digest().as_str().to_owned();
+    let evaluator_parameters_digest = sealed.admitted_parameters_digest().map_err(internal)?;
 
     let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
         stable_project_identity,
@@ -10161,6 +10147,22 @@ async fn qualify_candidate(
     let reserved_integration_thread_id = reserved_integration_launch_id
         .as_ref()
         .map(|_| ryeos_app::thread_lifecycle::new_thread_id());
+    // What the evaluator says it checked, kept short and printable so the
+    // person deciding sees it (an evaluator that ran nothing says so).
+    let evidence_scope = evaluator_result
+        .evidence
+        .get("scope")
+        .and_then(Value::as_str)
+        .filter(|scope| scope.len() <= 200 && !scope.chars().any(char::is_control))
+        .map(str::to_owned);
+    let evaluator_coordinate = json!({
+        "chain_root_id":req.evaluator_chain_root_id,
+        "terminal_thread_id":req.evaluator_terminal_thread_id,
+        "capsule_hash":evaluator_capsule_hash,
+        "item_ref":req.evaluator_item_ref,
+        "effective_definition_digest":evaluator_definition_digest,
+        "parameters_digest":evaluator_parameters_digest,
+    });
     let evaluation_evidence = json!({
         "schema":"ryeos.hosted_candidate_evaluation.v1",
         "candidate":closure_evidence,
@@ -10169,10 +10171,10 @@ async fn qualify_candidate(
         "evaluator":{
             "chain_root_id":req.evaluator_chain_root_id,
             "terminal_thread_id":req.evaluator_terminal_thread_id,
-            "capsule_hash":req.evaluator_capsule_hash,
+            "capsule_hash":evaluator_capsule_hash,
             "item_ref":req.evaluator_item_ref,
-            "effective_definition_digest":req.evaluator_definition_digest,
-            "parameters_digest":req.evaluator_parameters_digest,
+            "effective_definition_digest":evaluator_definition_digest,
+            "parameters_digest":evaluator_parameters_digest,
             "immutable_definition_authority":immutable_evaluator,
             "project_authority_digest":evaluator_project_authority_digest,
             "candidate_realization":realization_kind,
@@ -10184,6 +10186,7 @@ async fn qualify_candidate(
             "accepted":evaluator_result.accepted,
             "result_digest":evaluator_result_digest,
             "claim_evidence_digest":evaluator_claim_evidence_digest,
+            "evidence_scope":evidence_scope,
         },
         "qualification":{
             "root_thread_id":qualification_root_id,
@@ -10201,6 +10204,8 @@ async fn qualify_candidate(
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
             "candidate_validation_hash":req.candidate_validation_hash,
             "candidate_evaluation_hash":candidate_evaluation_hash,
+            "evaluator":evaluator_coordinate,
+            "evidence_scope":evidence_scope,
             "accepted":false,
         }));
     }
@@ -10279,6 +10284,8 @@ async fn qualify_candidate(
         "candidate_evaluation_hash":candidate_evaluation_hash,
         "qualification_root_id":qualification_root_id,
         "qualification_operation_id":qualification_operation_id,
+        "evaluator":evaluator_coordinate,
+        "evidence_scope":evidence_scope,
         "accepted":true,
         "idempotent":false,
     }))
@@ -12551,10 +12558,7 @@ mod tests {
                 "candidate_validation_hash":hash(),
                 "evaluator_chain_root_id":"T-evaluator",
                 "evaluator_terminal_thread_id":"T-evaluator",
-                "evaluator_capsule_hash":hash(),
                 "evaluator_item_ref":"tool:project/evaluate",
-                "evaluator_definition_digest":hash(),
-                "evaluator_parameters_digest":hash(),
                 "integration":{
                     "chain_root_id":"T-integration",
                     "terminal_thread_id":"T-integration"

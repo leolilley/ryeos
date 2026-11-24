@@ -1,0 +1,23 @@
+# ryeos:signed:2026-11-24T08:38:45Z:2d243655a9569d07d152a450e2133eeddee44d7a9302535e26763a9aec2e7012:WXonw+YmPeL6pdnFHwLC/qCHqtIGyaMcPSn9ZU2ughKHgVtbibYXiJMa5w+Pj9uFNkN4tCXJ0m3Keq+B4dQ8CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, qualify]
+description: "Adopt a finished evaluation as the testimony that makes a candidate publish-ready; the daemon derives the evaluator's sealed capsule and digests from the evaluator thread"
+help:
+  usage: "ryeos worker session qualify <chain-root-id> <candidate-snapshot-hash> <candidate-validation-hash> <evaluator-chain-root-id> <evaluator-thread-id> <evaluator-item-ref> ['<json object with integration_launch_id when the candidate is to be integrated>']"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: candidate_snapshot_hash
+      - field: candidate_validation_hash
+      - field: evaluator_chain_root_id
+      - field: evaluator_terminal_thread_id
+      - field: evaluator_item_ref
+        matcher: canonical_ref
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/qualify-candidate
+  availability: daemon
