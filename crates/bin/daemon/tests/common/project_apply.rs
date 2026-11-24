@@ -13,8 +13,15 @@ pub fn apply_request(
     snapshot_hash: &str,
     expected_deployed: Option<&str>,
 ) -> Value {
+    let project_name = ryeos_state::project_identity::ProjectDeclaration::declared_name(
+        std::path::Path::new(live_project),
+    )
+    .ok()
+    .flatten()
+    .map(|name| name.to_string());
     json!({
         "project_path": live_project,
+        "project_name": project_name,
         "snapshot_hash": snapshot_hash,
         "expected_deployed_hash": expected_deployed,
     })

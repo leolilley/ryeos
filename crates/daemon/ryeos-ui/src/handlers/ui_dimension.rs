@@ -153,9 +153,16 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;
 
+    let signer_project = super::signed_item_topology::seat_live_project(
+        &state,
+        &attachment.compiled_binding.binding.principal_id,
+        &ctx.scopes,
+        project_access.as_ref().map(|access| access.path()),
+    );
     let schedules = load_schedule_summary(&state).await;
     let projection = build_dimension_projection(
         &state,
+        &signer_project,
         schedules,
         &session,
         &attachment,
@@ -168,6 +175,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
 fn build_dimension_projection(
     state: &AppState,
+    signer_project: &ryeos_engine::contracts::LogicalProject,
     schedules: (usize, usize),
     session: &crate::browser_session::BrowserSession,
     attachment: &crate::browser_session::AdmittedBindingAttachment,
@@ -196,7 +204,7 @@ fn build_dimension_projection(
     // ── Spaces (from resolution roots) ──
     let roots = state.engine.resolution_roots(
         project_access.map(|access| access.path().to_path_buf()),
-        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        signer_project.clone(),
     );
     let spaces: Vec<SpaceSummary> = roots
         .ordered

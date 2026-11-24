@@ -412,7 +412,9 @@ fn compose_project_view_set(
         .engine
         .with_checked_bundle_generation(|generation| {
             generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+                ),
                 item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item)?,
                 expected_kind: Some("view_set".into()),
                 project_root: Some(project.to_path_buf()),

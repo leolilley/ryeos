@@ -726,7 +726,8 @@ struct StagedCasRootsRecord {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DurableCasPublicationKey {
     ProjectHead {
-        principal_key: String,
+        /// The owner principal's storage component, `pid-v1-<64 hex>`.
+        owner_component: String,
         project_hash: String,
     },
     ExternalContentImport {
@@ -771,10 +772,10 @@ pub enum DurableCasPublicationKey {
 }
 
 impl DurableCasPublicationKey {
-    pub fn project_head(principal_key: &str, project_hash: &str) -> Result<Self> {
+    pub fn project_head(head: &crate::project_identity::ProjectHeadKey) -> Result<Self> {
         let key = Self::ProjectHead {
-            principal_key: principal_key.to_string(),
-            project_hash: project_hash.to_string(),
+            owner_component: head.owner_component(),
+            project_hash: head.name_hash().to_string(),
         };
         key.validate()?;
         Ok(key)
@@ -857,10 +858,11 @@ impl DurableCasPublicationKey {
     fn validate(&self) -> Result<()> {
         match self {
             Self::ProjectHead {
-                principal_key,
+                owner_component,
                 project_hash,
             } => {
-                validate_hash("durable upload project principal key", principal_key)?;
+                crate::principal_id::PrincipalId::from_storage_component(owner_component)
+                    .context("durable upload project owner")?;
                 validate_hash("durable upload project hash", project_hash)
             }
             Self::ExternalContentImport { request_digest } => {
@@ -4052,7 +4054,7 @@ mod tests {
             "purpose": "project-push",
             "publication_key": {
                 "kind": "project_head",
-                "principal_key": hash("a"),
+                "owner_component": format!("pid-v1-{}", hash("a")),
                 "project_hash": hash("b"),
             },
             "expected_previous_hash": null,

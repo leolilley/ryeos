@@ -821,7 +821,7 @@ fn trust_pin_body(fx: &Fixture, key: &SigningKey) -> (RequestBody, Vec<u8>) {
     .into_bytes();
     let mut body = fx.body(
         "node.trust.pin",
-        json!({ "role": "project_author", "spaces": [], "kinds": [], "projects": ["/srv/p"] }),
+        json!({ "role": "project_author", "spaces": [], "kinds": [], "projects": ["own:p"] }),
     );
     body.inputs
         .insert("signer".into(), lillux::sha256_hex(&document));
