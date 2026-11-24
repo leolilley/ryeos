@@ -4074,7 +4074,7 @@ mod tests {
                 RecoveryFamily::Current,
             )
             .unwrap(),
-            receipt_fixture(&operation)
+            receipt
         );
         let mut forged = payload;
         forged["receipt"]["target_admission"]["exact_program_hash"] =

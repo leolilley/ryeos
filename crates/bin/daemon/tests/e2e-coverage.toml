@@ -211,8 +211,9 @@ covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime"]
 paths = ["crates/engine/ryeos-engine/src/launch/**"]
 
 [tests.install_boundary_guard]
-# static source-tree guard; mostly independent of runtime crates
+# static source-tree guard: it reads every crate's source, so any Rust change selects it
 covers = ["ryeos-engine"]
+paths = ["crates/**/*.rs"]
 
 [tests.issued_attempt_kill_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]

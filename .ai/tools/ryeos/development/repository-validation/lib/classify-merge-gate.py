@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-24T03:29:51Z:d1933f6c24e255a1baddbf2e3afb4c0370c3cef3c22eaf9e9c91ee04ee4e2466:kuOKSGzmkIJHlqokDuXt4iz5G8iEUEvD3AmZTtuWZmtFb6gFJImqLdO4DyBRNvoJMyhVAidydAEFrusMbZd8BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:41:53Z:46b5df4243485730896c11a34de0b5c04006e48e2a2d1e468fcf53716d4dd0a7:SlrXiK76LbeSCB6Ay1hgR2fwTInvjq4y6mDYaRK4NvDOKb41059i0x4oL18F0njZk+bdnunqtfAIP/x4Z1HjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -18,7 +18,9 @@ a git failure, an unexpected exception. The script never exits non-zero for
 those, so a classification fault cannot fail the run or skip the full gate.
 
 It also prints `test_packages=<json>`: the cargo packages whose tests the
-merge gate must run for this branch (see `touched_packages`). A fault yields
+merge gate must run for this branch (see `touched_packages`), plus the
+workspace source guards whenever any Rust file under crates/ changed (see
+`add_source_guards`). A fault yields
 `test_packages=ERROR`, which the workflow treats as a failure, never as "none".
 
 It also prints `e2e_tests=<json>` and `e2e_shards=<json>`: the daemon
@@ -72,6 +74,16 @@ CARGO_PACKAGE_LINE = re.compile(r"^\s*(?:- )?cargo_package:\s*[\"']?([A-Za-z0-9_
 SHARED_BUILD_INPUTS = ("Cargo.lock", "Cargo.toml", "rust-toolchain", "rust-toolchain.toml")
 SHARED_BUILD_PREFIXES = (".cargo/",)
 DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
+
+# Test binaries that read other crates' source files (workspace-wide guards).
+# Any changed Rust file under crates/ can break them, whichever package owns
+# it, so they run whenever one changes, not only when their own package does.
+# Each entry is (package, test binary); the package must be a root-workspace
+# member and the binary its tests/<binary>.rs.
+SOURCE_GUARD_TESTS = (
+    ("ryeos-state", "principal_owner_guard"),
+    ("ryeos-state", "project_head_key_guard"),
+)
 
 
 def git(root: str, *args: str) -> bytes:
@@ -337,6 +349,31 @@ def touched_packages(root: str, base: str, paths: list[str], rule: str) -> list[
         elif name not in e2e_whole:
             entry["args"] = [a for t in sorted(e2e_targets.get(name, ())) for a in ("--test", t)] + LIB_AND_BIN_ARGS
     return [found[name] for name in sorted(found)]
+
+def add_source_guards(root: str, paths: list[str], packages: list[dict]) -> list[dict]:
+    """Add the workspace source guards when any Rust file under crates/ changed.
+
+    A package already selected whole (no narrowing args) runs its guards
+    anyway. A listed guard whose test file is missing raises, so a renamed
+    guard is a classifier error, never a silently skipped check.
+    """
+    if not any(p.startswith("crates/") and p.endswith(".rs") for p in paths):
+        return packages
+    top = Path(root).resolve()
+    members = workspace_packages(top)
+    by_name = {p["package"]: p for p in packages}
+    for package, binary in SOURCE_GUARD_TESTS:
+        if package not in members or not (top / members[package] / "tests" / f"{binary}.rs").is_file():
+            raise RuntimeError(f"source guard {package}/tests/{binary}.rs not found")
+        entry = by_name.get(package)
+        if entry is None:
+            entry = by_name[package] = {"package": package, "manifest": None, "args": []}
+            packages.append(entry)
+            entry["args"] = ["--test", binary]
+        elif entry["args"] and binary not in entry["args"]:
+            entry["args"] = entry["args"] + ["--test", binary]
+    return sorted(packages, key=lambda p: p["package"])
+
 
 # The coverage map of the daemon's end-to-end test binaries. Each
 # `[tests.<binary>]` table names the packages (`covers`) whose changes select
@@ -647,6 +684,7 @@ def main() -> None:
         packages = touched_packages(args.root, base, paths, args.rule)
         if mode == "ui-only":
             packages = [p for p in packages if p["package"] not in UI_GATE_PACKAGES]
+        packages = add_source_guards(args.root, paths, packages)
         test_packages = json.dumps(packages, separators=(",", ":"))
     except BaseException as error:  # a fault must not read as "no tests to run"
         test_packages = "ERROR"
