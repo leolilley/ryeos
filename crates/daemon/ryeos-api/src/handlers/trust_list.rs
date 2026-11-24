@@ -43,8 +43,19 @@ fn signer_json(
     record: &impl serde::Serialize,
 ) -> Result<Value> {
     let mut value = serde_json::to_value(record)?;
+    let graph = ryeos_engine::trust::SuccessionGraph::build(&view.records, &view.chain);
     if let Value::Object(map) = &mut value {
         map.insert("pinned_at".to_string(), json!(view.pinned_at(fingerprint)));
+        // The project owner this key's signatures speak for, and whether it
+        // may still act for it (retired and revoked keys do not).
+        map.insert(
+            "owner".to_string(),
+            json!(graph.signing_principal_of(fingerprint).ok().flatten()),
+        );
+        map.insert(
+            "acts_for_owner".to_string(),
+            json!(graph.ownership_of(fingerprint).is_ok()),
+        );
     }
     Ok(value)
 }
@@ -82,6 +93,8 @@ pub async fn handle_list(_req: ListRequest, state: Arc<AppState>) -> Result<Valu
     Ok(json!({
         "node_fingerprint": node_fingerprint,
         "signers": signers_json(&view)?,
+        "owners": ryeos_engine::trust::SuccessionGraph::build(&view.records, &view.chain)
+            .principals(),
         "registry_digest": view.registry_digest,
         "event_head": head(&view.chain),
     }))

@@ -116,6 +116,9 @@ fn pinned_generation_authority() -> ExecutionProjectAuthority {
         environment: EnvironmentAuthority::None,
         capability_ceiling: Vec::new(),
         child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+        signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+            ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+        ),
     }
 }
 

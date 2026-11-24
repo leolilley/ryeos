@@ -608,7 +608,7 @@ mod tests {
         SignerScope {
             spaces: vec![ryeos_engine::trust::SignerSpace::Project],
             kinds: vec!["*".into()],
-            projects: vec![p.into()],
+            projects: vec![p.parse().unwrap()],
         }
     }
 
@@ -621,7 +621,7 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r1"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         assert_eq!(out.events_written, 1);
@@ -703,14 +703,14 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r1"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         let again = apply_change(
             root.path(),
             &l,
             &actor(&node, "r2"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         assert_eq!(again.events_written, 0);
@@ -725,14 +725,14 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r1"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         let err = apply_change(
             root.path(),
             &l,
             &actor(&node, "r2"),
-            &pin(vk, project_scope("/q")),
+            &pin(vk, project_scope("own:q")),
         )
         .unwrap_err();
         assert!(
@@ -752,7 +752,7 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r1"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         apply_change(
@@ -768,7 +768,7 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r3"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap_err();
         assert!(err.to_string().contains("ryeos trust show"));
@@ -801,7 +801,7 @@ mod tests {
             root.path(),
             &l,
             &actor(&node, "r1"),
-            &pin(vk, project_scope("/p")),
+            &pin(vk, project_scope("own:p")),
         )
         .unwrap();
         // Simulate a crash after the retire event but before its record.
@@ -857,7 +857,7 @@ mod tests {
                 root.path(),
                 &l,
                 &actor(&node, &format!("r{i}")),
-                &pin(vk, project_scope("/p")),
+                &pin(vk, project_scope("own:p")),
             )
             .unwrap();
         }

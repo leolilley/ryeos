@@ -1412,16 +1412,6 @@ impl CallbackClient {
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
-    /// Maps to `thread_failed`.
-    pub async fn emit_error(&self, error: &str) -> Result<()> {
-        self.append_runtime_event(
-            RuntimeEventType::ThreadFailed,
-            serde_json::json!({"message": error}),
-        )
-        .await
-    }
-
-    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn emit_thread_continued(&self, previous_id: &str) -> Result<()> {
         self.append_runtime_event(
             RuntimeEventType::ThreadContinued,
@@ -2411,7 +2401,6 @@ mod tests {
             RuntimeEventType::CognitionOut,
             RuntimeEventType::ToolCallStart,
             RuntimeEventType::ToolCallResult,
-            RuntimeEventType::ThreadFailed,
             RuntimeEventType::ThreadContinued,
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamOpened,

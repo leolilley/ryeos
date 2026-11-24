@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:21Z:8dd586df1ee27244d97bc33bda1b8aa991fb05ff98cb043473895623605abbf9:i3T8nb1A3KZdEyb1uU3KBTL91F56x6rO7QfYWQcfr913Cdp6Wsnza0G9HbTC1XtCAeLZsFa6rZq35MTdIe/QDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:367a9a32eb7c37d9cd3a4325ffc58dfe168ef5447c12766ed15f210a84ece153:2fHJSu2bBYmJOaTObJDDvu991D5l25ftMsvWyBM+/nuUjRiK1l5VvGU+Omw8kqfnegXySPWL4WBejjtGZSPdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -26,6 +26,27 @@ trees live outside `.ai/`. Executable items refer to those bytes through
 manifest digest. This keeps kind coverage meaningful, keeps source intuitive
 to author, and prevents arbitrary dependency files from being mistaken for
 RyeOS items.
+
+## The project's name: `.ai/manifest.yaml`
+
+A project's name is the top-level `name:` of its `.ai/manifest.yaml`, the same
+name its items are namespaced under:
+
+```yaml
+name: my-project
+```
+
+A name is 1 to 64 characters of `[a-z0-9._-]`, starting with a letter or digit.
+The node identifies a project as `pid:v1:<owner>/<name>`: the name comes from
+the manifest, the owner never does. The owner is the principal the launcher's
+key acts for on the node for a checkout it registered
+(`ryeos project register`), or the principal whose pushed head the node found.
+The manifest's signature plays no part in identity: the name is read as one
+plain `name:` line, and trust comes only from a registration or a held head
+(see [Signing and Trust](signing.md)). Renaming a project means changing that
+name (and its item namespace) and registering the checkout again. Pushed
+heads, remote bindings, signer project scopes and endorsements all key on this
+name; AI-only sync carries the manifest.
 
 ## Bundle Layout (Core)
 

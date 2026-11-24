@@ -510,6 +510,9 @@ mod tests {
                     view_sets: Default::default(),
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
                     principal_id: "fp:test".into(),
+                    signer_project: ryeos_engine::contracts::LogicalProject::Absent(
+                        ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+                    ),
                     project_root: None,
                     request_engine_generation_identity: "generation:test".into(),
                     node_policy_generation_digest: "22".repeat(32),

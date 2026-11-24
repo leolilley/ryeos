@@ -102,6 +102,12 @@ pub struct ExecuteRequest {
     /// and refuses an unsigned result.
     #[serde(default)]
     pub attest_result: bool,
+    /// The project owner the caller recorded when it bound a remote project.
+    /// It is compared with the owner this node resolves for the caller's key
+    /// before any current-head admission resolves anything, and refused as
+    /// `remote_owner_changed` on a difference; it is never used as the owner.
+    #[serde(default)]
+    pub expected_owner: Option<ryeos_state::principal_id::PrincipalId>,
 }
 
 impl ExecuteRequest {
@@ -174,9 +180,11 @@ pub fn project_source_from_execution_policy(policy: &ProjectExecutionPolicy) -> 
             ProjectSource::LiveFs
         }
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { project },
             ..
-        } => ProjectSource::PushedHead,
+        } => ProjectSource::PushedHead {
+            project: project.clone(),
+        },
         ProjectExecutionPolicy::Pinned {
             source: PinnedSource::Snapshot { hash },
             ..
@@ -217,7 +225,7 @@ pub(crate) fn project_execution_dimension_classes(
         ProjectExecutionPolicy::Projectless => (Source::Projectless, Realization::Isolated),
         ProjectExecutionPolicy::LiveDirect { .. } => (Source::LiveFs, Realization::Live),
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead { .. },
             realization,
             ..
         } => (
@@ -508,8 +516,8 @@ pub fn resolve_execution_project_authority(
                                 );
                             }
                             PinnedTerminalPublication::RetainCurrentHead {
-                                principal_key: destination.principal_key.clone(),
-                                project_hash: destination.project_hash.clone(),
+                                owner_component: destination.head.owner_component(),
+                                project_hash: destination.head.name_hash().to_owned(),
                                 expected_hash: destination.expected_hash.clone(),
                             }
                         }
@@ -620,13 +628,6 @@ pub fn resolve_execution_contract_with_posture(
         | (ProjectExecutionPolicy::LiveDirect { .. }, ProjectSource::LiveFs)
         | (
             ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
-                ..
-            },
-            ProjectSource::PushedHead,
-        )
-        | (
-            ProjectExecutionPolicy::Pinned {
                 source: PinnedSource::CaptureLive { .. },
                 ..
             },
@@ -639,6 +640,18 @@ pub fn resolve_execution_contract_with_posture(
             },
             ProjectSource::Snapshot { hash: source_hash },
         ) => policy_hash == source_hash,
+        (
+            ProjectExecutionPolicy::Pinned {
+                source:
+                    PinnedSource::CurrentHead {
+                        project: policy_project,
+                    },
+                ..
+            },
+            ProjectSource::PushedHead {
+                project: source_project,
+            },
+        ) => policy_project == source_project,
         _ => false,
     };
     if !source_matches_policy {
@@ -672,6 +685,14 @@ pub fn resolve_execution_contract_with_posture(
             principal: acting_principal,
         },
     )?;
+    let authority = authority.with_signer_project(admission_signer_project(
+        state,
+        policy,
+        (!no_project_requested).then_some(project_ctx.original_path.as_path()),
+        project_ctx.current_head_destination.as_ref(),
+        acting_principal,
+        caller_scopes,
+    )?)?;
     let authority = if posture.is_host_direct() {
         authority.into_unconfined_host()?
     } else {
@@ -679,7 +700,7 @@ pub fn resolve_execution_contract_with_posture(
     };
     authorize_terminal_publication(
         policy,
-        &project_ctx.original_path,
+        project_ctx.current_head_destination.as_ref(),
         acting_principal,
         caller_scopes,
         project_ctx.snapshot_hash.as_deref(),
@@ -708,7 +729,7 @@ pub fn resolve_execution_contract_with_posture(
                 .with_workspace_lifeline(project_ctx.temp_dir.clone().or(workspace_lifeline))
                 .with_state_root(state_root)
             }
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject => {
                 ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
@@ -783,10 +804,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                provenance.logical_project_root(state.threads.site_id()),
-                &provenance.subject_resolution_authority(),
-            ),
+            logical_project: provenance.signer_project(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -876,7 +894,7 @@ pub fn project_root_normalization_from_execution_policy(
             ..
         } => ProjectRootNormalization::CanonicalizeLive,
         ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead | PinnedSource::Snapshot { .. },
+            source: PinnedSource::CurrentHead { .. } | PinnedSource::Snapshot { .. },
             ..
         } => ProjectRootNormalization::Preserve,
     }
@@ -955,9 +973,72 @@ pub(crate) fn map_project_source_error(
     }
 }
 
+/// The project identity an execution states, established once at admission
+/// and sealed into its authority; nothing re-derives it on resume.
+///
+/// - A live run states the identity the acting principal registered for the
+///   checkout (and only when it holds live write).
+/// - A current-head run states the acting principal's own identity for the
+///   head it was admitted from: the lookup read exactly that owner and name,
+///   and the snapshot is that head.
+/// - A run of a named snapshot, a no-project head, or a projectless run
+///   states none.
+pub fn admission_signer_project(
+    state: &ryeos_app::state::AppState,
+    policy: &ExecutionPolicy,
+    live_root: Option<&Path>,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
+    acting_principal: &str,
+    caller_scopes: &[String],
+) -> anyhow::Result<ryeos_engine::contracts::LogicalProject> {
+    use ryeos_engine::contracts::{LogicalProject, LogicalProjectAbsence};
+    Ok(match &policy.project {
+        ProjectExecutionPolicy::Projectless => {
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless)
+        }
+        ProjectExecutionPolicy::LiveDirect { .. }
+        | ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            ..
+        } => match live_root {
+            Some(root) => ryeos_app::project_registry::live_logical_project(
+                state,
+                acting_principal,
+                caller_scopes,
+                root,
+            ),
+            None => LogicalProject::Absent(LogicalProjectAbsence::NotRegistered),
+        },
+        ProjectExecutionPolicy::Pinned {
+            source:
+                PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::Named { name },
+                },
+            ..
+        } => {
+            let destination = current_head_destination.ok_or_else(|| {
+                anyhow::anyhow!("a current-head run was admitted without its head lookup")
+            })?;
+            let owner = ryeos_app::project_owner::owner_principal(state, acting_principal)?;
+            let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name.clone());
+            if ryeos_state::project_identity::ProjectHeadKey::for_project(&identity)
+                != destination.head
+            {
+                anyhow::bail!(
+                    "the admitted head is not the acting principal's head for {identity}"
+                );
+            }
+            LogicalProject::Stated(identity)
+        }
+        ProjectExecutionPolicy::Pinned { .. } => {
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated)
+        }
+    })
+}
+
 pub fn authorize_terminal_publication(
     policy: &ExecutionPolicy,
-    original_project_path: &Path,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
     acting_principal: &str,
     caller_scopes: &[String],
     resolved_snapshot_hash: Option<&str>,
@@ -978,14 +1059,15 @@ pub fn authorize_terminal_publication(
         return Ok(());
     };
 
-    let project_path = original_project_path.to_str().ok_or_else(|| {
-        anyhow::anyhow!("project path is not valid UTF-8 and cannot identify a project HEAD")
+    // The only head an advance may name is the acting principal's own head
+    // the current-head lookup admitted; nothing is rebuilt from a path.
+    let destination = current_head_destination.ok_or_else(|| {
+        anyhow::anyhow!("advance-head publication requires a current-head project source")
     })?;
-    let canonical_project = project_source::canonical_project_ref(project_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let project_hash = lillux::sha256_hex(canonical_project.as_bytes());
-    let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)?;
-    let admitted_head_ref = format!("projects/{principal_key}/{project_hash}/head");
+    if !ryeos_app::project_owner::speaks_for(state, acting_principal, destination.head.owner()) {
+        anyhow::bail!("advance-head destination is not the acting principal's own head");
+    }
+    let admitted_head_ref = destination.head.ref_path();
     if head_ref != &admitted_head_ref {
         anyhow::bail!(
             "advance-head ref does not identify the acting principal's admitted project HEAD: expected {admitted_head_ref:?}, got {head_ref:?}"
@@ -1000,7 +1082,7 @@ pub fn authorize_terminal_publication(
     }
     let current_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&destination.head))?;
     if current_head.as_deref() != Some(expected_hash.as_str()) {
         anyhow::bail!(
             "advance-head expected hash is stale: expected {}, current HEAD {:?}",
@@ -1325,6 +1407,12 @@ async fn admit_execution_with_publication(
         )
         .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
     let caller_principal_id = principal.fingerprint.clone();
+    ryeos_app::project_owner::require_expected_owner(
+        &state,
+        &caller_principal_id,
+        request.expected_owner.as_ref(),
+    )
+    .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
     let caller_scopes = principal.scopes.clone();
     request
         .execution_policy
@@ -1588,7 +1676,7 @@ async fn admit_execution_with_publication(
         Some(p) => {
             let path = std::path::PathBuf::from(p);
             if p == NO_PROJECT_SENTINEL {
-                if matches!(&project_source, ProjectSource::PushedHead) {
+                if matches!(&project_source, ProjectSource::PushedHead { .. }) {
                     path
                 } else {
                     return Ok((
@@ -1869,10 +1957,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            provenance.logical_project_root(site_id),
-            &provenance.subject_resolution_authority(),
-        ),
+        logical_project: provenance.signer_project(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -2342,6 +2427,8 @@ async fn admit_execution_with_publication(
                 local_project_path: plan.local_project_path.as_deref(),
                 source_snapshot_hash: project_ctx.snapshot_hash.as_deref(),
                 remote_project_path: &plan.remote_project_path,
+                project_name: plan.project_name.as_ref(),
+                remote_owner: plan.remote_owner.as_ref(),
                 parameters: request.parameters.clone(),
                 execution_policy: &destination_policy,
                 acting_principal: &caller_principal_id,
@@ -2591,6 +2678,11 @@ struct TargetSiteForwardPlan {
     remote: ResolvedRemote,
     local_project_path: Option<PathBuf>,
     remote_project_path: String,
+    /// The bound project name; `None` only for a projectless forward.
+    project_name: Option<ryeos_state::project_identity::ProjectName>,
+    /// The owner the binding recorded at bind; asserted to the remote as
+    /// `expected_owner`. `None` only for a projectless forward.
+    remote_owner: Option<ryeos_state::principal_id::PrincipalId>,
 }
 
 fn plan_target_site_forward(
@@ -2652,45 +2744,50 @@ fn plan_target_site_forward(
         config_key: loaded_remote.config.name.clone(),
     };
 
-    let (local_project_path, remote_project_path) = if no_project_requested {
-        (None, NO_PROJECT_SENTINEL.to_string())
-    } else {
-        let binding = crate::remote::config::resolve_loaded_project_binding(
-            &loaded_remote,
-            effective_project_path,
-        )
-        .map_err(|e| {
-            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
-                target_site_id: target_site_id.to_string(),
-                detail: format!(
-                    "project binding for '{}' is required for target-site forwarding: {e:#}",
-                    effective_project_path.display()
-                ),
+    let (local_project_path, remote_project_path, project_name, remote_owner) =
+        if no_project_requested {
+            (None, NO_PROJECT_SENTINEL.to_string(), None, None)
+        } else {
+            let binding = crate::remote::config::resolve_loaded_project_binding(
+                &loaded_remote,
+                effective_project_path,
+            )
+            .map_err(|e| {
+                ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+                    target_site_id: target_site_id.to_string(),
+                    detail: format!(
+                        "project binding for '{}' is required for target-site forwarding: {e:#}",
+                        effective_project_path.display()
+                    ),
+                }
+            })?;
+
+            if binding.sync_scope != ProjectSyncScope::FullProject {
+                return Err(target_site_unsupported(
+                    target_site_id,
+                    format!(
+                        "binding for '{}' has sync_scope {:?}; target-site forwarding requires full_project",
+                        binding.local_project_path.display(),
+                        binding.sync_scope
+                    ),
+                ));
             }
-        })?;
 
-        if binding.sync_scope != ProjectSyncScope::FullProject {
-            return Err(target_site_unsupported(
-                target_site_id,
-                format!(
-                    "binding for '{}' has sync_scope {:?}; target-site forwarding requires full_project",
-                    binding.local_project_path.display(),
-                    binding.sync_scope
-                ),
-            ));
-        }
-
-        (
-            Some(binding.local_project_path),
-            binding.remote_project_path,
-        )
-    };
+            (
+                Some(binding.local_project_path),
+                binding.remote_project_path,
+                Some(binding.project_name),
+                Some(binding.remote_owner),
+            )
+        };
 
     Ok(TargetSitePlan::Remote(Box::new(TargetSiteForwardPlan {
         target_site_id: target_site_id.to_string(),
         remote,
         local_project_path,
         remote_project_path,
+        project_name,
+        remote_owner,
     })))
 }
 
@@ -3425,13 +3522,15 @@ mod tests {
         ));
 
         let current_head = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };
         assert!(matches!(
             project_source_from_execution_policy(&current_head),
-            ProjectSource::PushedHead
+            ProjectSource::PushedHead { .. }
         ));
 
         let snapshot = ProjectExecutionPolicy::Pinned {
@@ -3554,8 +3653,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let snapshot_hash = "a".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
-            principal_key: "d".repeat(64),
-            project_hash: "b".repeat(64),
+            head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                &format!("pid-v1-{}", "d".repeat(64)),
+                &"b".repeat(64),
+            )
+            .unwrap(),
             expected_hash: snapshot_hash.clone(),
         };
         let policy = ExecutionPolicy {
@@ -3566,7 +3668,9 @@ mod tests {
             target: ryeos_app::execution_policy::ExecutionTarget::Here,
             environment: ExecutionEnvironmentPolicy::None,
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+                },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3600,8 +3704,8 @@ mod tests {
             authority.terminal_publication(),
             Some(
                 &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: destination.principal_key.clone(),
-                    project_hash: destination.project_hash.clone(),
+                    owner_component: destination.head.owner_component(),
+                    project_hash: destination.head.name_hash().to_owned(),
                     expected_hash: snapshot_hash.clone(),
                 }
             )
@@ -3644,8 +3748,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let snapshot_hash = "d".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
-            principal_key: "e".repeat(64),
-            project_hash: "f".repeat(64),
+            head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                &format!("pid-v1-{}", "e".repeat(64)),
+                &"f".repeat(64),
+            )
+            .unwrap(),
             expected_hash: snapshot_hash.clone(),
         };
         let policy = ExecutionPolicy {
@@ -3660,7 +3767,9 @@ mod tests {
                     ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
             },
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead {
+                    project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+                },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -3709,7 +3818,9 @@ mod tests {
     #[test]
     fn pinned_realization_and_metric_classes_follow_policy() {
         let read_only = ProjectExecutionPolicy::Pinned {
-            source: PinnedSource::CurrentHead,
+            source: PinnedSource::CurrentHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             realization: PinnedRealization::ReadOnly,
             child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
         };
@@ -3926,6 +4037,7 @@ mod tests {
             debug_raw: false,
             state_root: None,
             attest_result: false,
+            expected_owner: None,
         }
     }
 
@@ -4188,6 +4300,8 @@ mod tests {
     #[test]
     fn target_site_plan_rejects_ai_only_binding() {
         let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
+        std::fs::write(tmpdir.path().join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()
@@ -4199,6 +4313,8 @@ mod tests {
         remote.project_bindings.insert(
             local_key,
             crate::remote::config::RemoteProjectBinding {
+                project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::AiOnly,
             },
@@ -4224,6 +4340,8 @@ mod tests {
     #[test]
     fn target_site_plan_uses_full_project_binding_for_pinned_source() {
         let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join(".ai")).unwrap();
+        std::fs::write(tmpdir.path().join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let local_key = tmpdir
             .path()
             .canonicalize()
@@ -4235,6 +4353,8 @@ mod tests {
         remote.project_bindings.insert(
             local_key,
             crate::remote::config::RemoteProjectBinding {
+                project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 remote_project_path: "/remote/project".into(),
                 sync_scope: ProjectSyncScope::FullProject,
             },
@@ -4243,7 +4363,9 @@ mod tests {
         remotes.insert("remote".into(), loaded(remote));
         let plan = plan_target_site_forward(
             &req,
-            &ProjectSource::PushedHead,
+            &ProjectSource::PushedHead {
+                project: ryeos_state::project_identity::PushedProject::test_named("demo"),
+            },
             false,
             "site:local",
             tmpdir.path(),
