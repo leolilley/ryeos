@@ -75,6 +75,7 @@ pub mod launch_status;
 pub mod maintenance_gc;
 #[cfg(feature = "model-provider-setup")]
 pub mod model_providers_validate;
+pub mod node_journal;
 pub mod node_locality;
 pub mod node_locality_groups;
 pub mod node_machine_declare;
@@ -313,6 +314,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     revisions::LIST_DESCRIPTOR,
     revisions::GET_DESCRIPTOR,
     trust_list::SHOW_DESCRIPTOR,
+    node_journal::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,

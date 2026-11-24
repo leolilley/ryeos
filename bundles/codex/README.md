@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T09:15:43Z:0b351c26fe16ea8b77496746e8a005242f153549f44f62a9b8c3a9777cce55b3:yEx4/8Ynnmx+Eaot2K2aoGpSjVJBUlNKvklWIPS7/L9GiiS5ZfxFh9RjsaKqKPwQZMGY8tCBvX5xcfAYRSnyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:19867d94470365f8928fda67ae8ab77a105945851d5c5d3153608a0bc9d7e5c4:/fB6Pacx+tM3xF5nKalpOkO2ApkSgHpKhlcuKxwWN/0LqKMYV8jWq/WfGky7aMQzJQBZlzwWuylFsJLpA/MdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -49,8 +49,9 @@ There is no custom credential bridge, token injection, local-LLM route, worker
 pool, or cross-session process reuse.
 
 `worker:codex/hosted-authoring` and
-`worker:codex/trusted-hosted-authoring` share one exact unattended authoring
-profile with ordinary Codex shell/edit tools and `approval_policy=never`.
+`worker:codex/trusted-hosted-authoring` share one exact authoring profile with
+ordinary Codex shell/edit tools and `approval_policy=never` (a signed approval
+setting: the worker never pauses for an approval).
 The former requires a qualified local process scope. The latter can run only
 when signed node policy explicitly enables trusted process-group sessions. It
 is intended for a single-tenant disposable placement and makes no filesystem,
@@ -394,7 +395,7 @@ Approval decisions require the exact pending request digest. The minimal
 hosted profile retains immutable `on-request` plus a deny-only RyeOS approval
 contract: RyeOS may display a bounded request and send decline/cancel, but
 cannot accept it. Authoring profiles instead use immutable `never`, so a
-bounded unattended turn cannot pause for or obtain an approval. Termination is
+bounded turn under that profile cannot pause for or obtain an approval. Termination is
 explicit and publication is a separate terminal CAS.
 Use the same projectless remote service envelope with the signed generic
 services `worker-executions/resolve-approval`, `terminate`,
@@ -443,6 +444,6 @@ subscription tier.
 The Codex worker profiles do not author a `spend_usd` limit. Their runtime has
 no provider financial authority, and Codex does not expose authoritative
 ChatGPT-subscription charges to this contract, so a numeric allowance here
-would not be enforceable spend. Unattended roots can instead bound the exact
+would not be enforceable spend. A root can instead bound the exact
 resources RyeOS can prove before contact: whole-tree duration, logical worker
 executions, and bounded hosted-turn contacts.

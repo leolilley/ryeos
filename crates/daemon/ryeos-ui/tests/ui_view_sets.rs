@@ -383,7 +383,8 @@ async fn a_project_surface_with_an_inline_view_set_is_refused() {
             "name: acme-inline\ntitle: Inline\nview_sets:\n  - schema: 2\n    id: inline\n    title: Inline\n",
         ),
     );
-    let principal = test_state::register_fixture_project(&state, &project).await;
+    let operator = test_state::operator_launch_context(&state);
+    let principal = operator.fingerprint.clone();
     let refused = ryeos_ui::handlers::ui_launch_mint::handle(
         ryeos_ui::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
@@ -392,7 +393,7 @@ async fn a_project_surface_with_an_inline_view_set_is_refused() {
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await;
