@@ -3082,12 +3082,11 @@ async fn a_seat_is_launched_by_its_sessions_key_and_held_by_that_session_alone()
         vec![thread.clone()],
         "the holder session holds the lease"
     );
-    let tip = state
+    let before = state
         .state_store
         .capture_thread_event_read_anchor(&detail.chain_root_id, &thread)
         .unwrap()
-        .unwrap()
-        .tip();
+        .unwrap();
 
     let foreign = append_request(
         &opened,
@@ -3105,7 +3104,7 @@ async fn a_seat_is_launched_by_its_sessions_key_and_held_by_that_session_alone()
             .unwrap()
             .unwrap()
             .tip(),
-        tip,
+        before.tip(),
         "the refused append wrote nothing"
     );
     assert!(
