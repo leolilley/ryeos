@@ -369,7 +369,7 @@ fn collect_raised(
                         principal: Some(owner.to_owned()),
                         project_root: Some(root.to_path_buf()),
                         // A seat is the UI's own session thread, not attention.
-                        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
+                        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(state)?],
                         ..Default::default()
                     },
                     ryeos_app::thread_lifecycle::ThreadSort::Newest,
