@@ -801,7 +801,7 @@ mod revisions {
 
     /// The service item's own tier for a principal, then the policy entry's
     /// narrowing: the answer a seat receives. A refusal is its stable code.
-    fn shown(
+    fn seat_view(
         name: &str,
         shaping: &ryeos_ui::seat_read_policy::DetachedShaping,
         answer: Value,
@@ -836,7 +836,7 @@ mod revisions {
         assert_eq!(params["item_ref"], "view:a");
         assert_eq!(params["limit"], 50);
 
-        let shown = shown("list", &shaping, list_answer(2)).expect("within bounds");
+        let shown = seat_view("list", &shaping, list_answer(2)).expect("within bounds");
         assert_eq!(shown["item_ref"], "view:a");
         assert_eq!(shown["total"], 2);
         assert_eq!(shown["sound"], true);
@@ -871,7 +871,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        let shown = shown("get", &shaping, get_answer("name: a\n")).unwrap();
+        let shown = seat_view("get", &shaping, get_answer("name: a\n")).unwrap();
         assert_eq!(shown["record"]["body"]["content"], "name: a\n");
         assert_eq!(shown["record"]["body"]["previous"], "genesis:view:a");
         assert_eq!(shown["record"]["seq"], 1);
@@ -930,7 +930,7 @@ mod revisions {
         let mut answer = list_answer(1);
         answer["a_later_field"] = json!("x");
         answer["records"][0]["a_later_field"] = json!("x");
-        let shown = shown("list", &list_shaping, answer).unwrap();
+        let shown = seat_view("list", &list_shaping, answer).unwrap();
         let text = shown.to_string();
         for forbidden in [
             "/home/operator",
@@ -952,7 +952,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        let shown = shown("get", &get_shaping, get_answer("name: a\n")).unwrap();
+        let shown = seat_view("get", &get_shaping, get_answer("name: a\n")).unwrap();
         let body = &shown["record"]["body"];
         assert!(body.get("provenance").is_none());
         assert!(body.get("schema").is_none());
@@ -971,10 +971,11 @@ mod revisions {
         .unwrap();
         // A page over the service's own largest page holds more rows than
         // the entry allows.
-        let refusal =
-            shown("list", &list_shaping, list_answer(201)).expect_err("more rows than max_items");
+        let refusal = seat_view("list", &list_shaping, list_answer(201))
+            .expect_err("more rows than max_items");
         assert_eq!(refusal, "read_too_many_items");
-        shown("list", &list_shaping, list_answer(200)).expect("the service's largest page fits");
+        seat_view("list", &list_shaping, list_answer(200))
+            .expect("the service's largest page fits");
 
         let (_, get_shaping) = call(
             &policy,
@@ -983,7 +984,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        shown("get", &get_shaping, get_answer(&"x".repeat(512 * 1024)))
+        seat_view("get", &get_shaping, get_answer(&"x".repeat(512 * 1024)))
             .expect("a large authored item fits");
         let refusal = shown(
             "get",
