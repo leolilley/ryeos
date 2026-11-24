@@ -8,7 +8,7 @@ description: >-
   instead (about 45 minutes). The job summary says which was used.
 inputs:
   bundles-changed:
-    description: "'true' when the branch changes bundle sources (the classifier's bundles_changed)."
+    description: "'true' when the branch changes bundle sources or a crate a bundle bin is built from (the classifier's bundles_changed)."
     required: true
   github-token:
     description: Token that can read this repository's Actions runs and artifacts.
