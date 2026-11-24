@@ -546,6 +546,27 @@ enum ModelView<'a> {
     Failed(String),
 }
 
+/// The message a tool reported itself when it exited 0 with a failure result
+/// (`{"ok": false, "error": "..."}` or `{"error": {"message": "..."}}`). The
+/// completion record stays failed, so the loop guards still count it; only the
+/// model's reading changes, from the record's escaped stdout to the tool's own
+/// sentence.
+fn soft_failure_message(
+    record: &serde_json::Map<String, Value>,
+    error: Option<&Value>,
+) -> Option<String> {
+    if error?.get("soft_failure") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let reported = record.get("result")?.get("error")?;
+    let text = match reported {
+        Value::String(text) => text.as_str(),
+        Value::Object(fields) => fields.get("message")?.as_str()?,
+        _ => return None,
+    };
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 /// Reads a dispatch answer as the model should. A subprocess tool is answered
 /// with its completion record `{outcome_code, result, error, artifacts}`; the
 /// model reads the tool's result on success and the standard error body on
@@ -562,6 +583,9 @@ fn model_view(response_result: &Value) -> ModelView<'_> {
     let outcome = record.get("outcome_code").filter(|code| !code.is_null());
     if !(crate::tool_images::completion_succeeded(record) || (outcome.is_none() && error.is_none()))
     {
+        if let Some(message) = soft_failure_message(record, error) {
+            return ModelView::Failed(tool_error_body("tool_reported_error", &message));
+        }
         let code = outcome.and_then(Value::as_str).unwrap_or("tool_failed");
         let message = match error {
             Some(Value::String(text)) => text.clone(),
@@ -8257,6 +8281,37 @@ mod tests {
             ModelView::Failed(body) => serde_json::from_str(&body).expect("error body is JSON"),
             other => panic!("expected a failed view, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_tool_that_exits_zero_with_a_failure_result_shows_its_own_message() {
+        let soft = json!({"exit_code": 0, "soft_failure": true, "stdout": "{\"ok\": false}", "stderr": ""});
+        for (result, want) in [
+            (
+                json!({"ok": false, "error": "no such file: a.txt"}),
+                "no such file: a.txt",
+            ),
+            (
+                json!({"ok": false, "error": {"message": "bad path"}}),
+                "bad path",
+            ),
+        ] {
+            let body = failed_body(json!({
+                "outcome_code": "exit:0", "result": result, "error": soft, "artifacts": []
+            }));
+            assert_eq!(body["error"]["code"], "tool_reported_error", "{body}");
+            assert_eq!(body["error"]["message"], want, "{body}");
+        }
+        // No string to surface: the record's own reading is kept.
+        let body = failed_body(json!({
+            "outcome_code": "exit:0", "result": {"ok": false}, "error": soft, "artifacts": []
+        }));
+        assert_eq!(body["error"]["code"], "exit:0", "{body}");
+        // A non-soft failure never takes the tool's own text.
+        let body = failed_body(json!({
+            "outcome_code": "exit:2", "result": {"error": "x"}, "error": {"exit_code": 2}, "artifacts": []
+        }));
+        assert_eq!(body["error"]["code"], "exit:2", "{body}");
     }
 
     #[test]

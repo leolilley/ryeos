@@ -2191,7 +2191,7 @@ mod tests {
     fn worker_terminal_publication_admission_pairs_with_the_worker_mode() {
         use ryeos_state::objects::PinnedTerminalPublication as Pinned;
         let head = || Pinned::RetainCurrentHead {
-            principal_key: "principal".to_owned(),
+            owner_component: format!("pid-v1-{}", "a".repeat(64)),
             project_hash: "p".repeat(64),
             expected_hash: "e".repeat(64),
         };

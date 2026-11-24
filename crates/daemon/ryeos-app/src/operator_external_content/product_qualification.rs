@@ -289,10 +289,7 @@ pub fn finalize_pinned_qualification_launch(
     // bundle trust), so an absent root is not refused here.
     let roots = request_engine.resolution_roots(
         Some(project_root.to_path_buf()),
-        LogicalProject::from_optional(
-            project_authority.logical_project_root(&plan_context.current_site_id),
-            &plan_context.subject_resolution_authority,
-        ),
+        project_authority.signer_project(),
     );
     let selectors = prepared
         .product_selections
@@ -4898,10 +4895,8 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     // admission carries one. A bundle verifier's own trust does not depend on
     // it, and a pinned verifier may legitimately state none, so there is no
     // refusal here.
-    let roots = request_engine.resolution_roots(
-        project_root.clone(),
-        plan_context.effective_logical_project(project_root.as_deref()),
-    );
+    let roots = request_engine
+        .resolution_roots(project_root.clone(), plan_context.signer_project().clone());
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(

@@ -135,12 +135,13 @@ pub async fn push_snapshot(
     live_project: &str,
     captured: &CapturedSnapshot,
 ) -> Result<PushedHead> {
+    let project = pushed_project(live_project)?;
     let session = post_ok(
         h,
         "/objects/put",
         json!({
             "staging_id": null,
-            "project_path": live_project,
+            "project": project,
             "blobs": [],
             "blob_chunks": [],
             "objects": [],
@@ -177,7 +178,7 @@ pub async fn push_snapshot(
         "/objects/put",
         json!({
             "staging_id": staging_id,
-            "project_path": live_project,
+            "project": project,
             "blobs": blobs,
             "blob_chunks": [],
             "objects": objects,
@@ -189,7 +190,7 @@ pub async fn push_snapshot(
         "/push-head",
         json!({
             "staging_id": staging_id,
-            "project_path": live_project,
+            "project": project,
             "snapshot_hash": captured.snapshot_hash,
             "expected_previous_hash": expected_previous,
         }),
@@ -198,4 +199,14 @@ pub async fn push_snapshot(
     Ok(PushedHead {
         snapshot_hash: captured.snapshot_hash.clone(),
     })
+}
+
+/// The push target for the checkout at `live_project`: the project its
+/// `.ai/manifest.yaml` names.
+pub fn pushed_project(live_project: &str) -> Result<Value> {
+    let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(
+        std::path::Path::new(live_project),
+    )?
+    .with_context(|| format!("fixture checkout {live_project} has no .ai/manifest.yaml name"))?;
+    Ok(json!({"kind": "named", "name": name}))
 }

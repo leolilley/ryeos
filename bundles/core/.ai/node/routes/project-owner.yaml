@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-22T22:08:37Z:d79802096a82d204b07033f2b557c173e6f43966a37a3ad80667ef95b31b8a21:E9Eocz2vKhMR1ko4Vbec7PO5ce8i1roXoixPXQgyT6zRqhvN0lbwl0df824MFcnYgzzCae4QSbyP+1a2w+3jAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: project/owner
+path: /project/owner
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:project/owner

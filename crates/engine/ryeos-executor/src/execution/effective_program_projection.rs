@@ -91,7 +91,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         validate_projection_authority(plan_context, project_root)?;
         let roots = engine.resolution_roots(
             project_root.map(PathBuf::from),
-            plan_context.effective_logical_project(project_root),
+            plan_context.signer_project().clone(),
         );
         let request_snapshot = match (project_root, project_content) {
             (Some(root), Some(content)) => engine

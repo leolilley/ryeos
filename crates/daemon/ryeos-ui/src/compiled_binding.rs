@@ -135,6 +135,10 @@ pub struct CompiledUiArt {
 pub struct CompiledUiBinding {
     pub contract_revision: String,
     pub principal_id: String,
+    /// The project identity the binding's items were judged against at
+    /// mint. Revalidation judges against the same identity, re-checking
+    /// signer standing against the current trust store.
+    pub signer_project: ryeos_engine::contracts::LogicalProject,
     pub project_root: Option<String>,
     pub request_engine_generation_identity: String,
     pub node_policy_generation_digest: String,
@@ -219,6 +223,7 @@ pub struct SessionCompiledUiBinding {
 pub struct BindingCompileContext<'a> {
     pub contract_revision: &'a str,
     pub principal_id: &'a str,
+    pub signer_project: &'a ryeos_engine::contracts::LogicalProject,
     pub caller_scopes: &'a [String],
     pub project_root: Option<&'a str>,
     pub node_policy_generation_digest: &'a str,
@@ -654,6 +659,7 @@ impl SessionCompiledUiBinding {
             project_source_ceiling_digest,
             contract_revision: context.contract_revision.to_string(),
             principal_id: context.principal_id.to_string(),
+            signer_project: context.signer_project.clone(),
             project_root: context.project_root.map(str::to_string),
             request_engine_generation_identity: context
                 .identities
@@ -1491,6 +1497,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
@@ -1577,6 +1584,7 @@ mod tests {
         let context = || BindingCompileContext {
             contract_revision: "test.v1",
             principal_id: "principal:test",
+            signer_project: &ryeos_engine::trust::NO_PROJECT,
             caller_scopes: &scopes,
             project_root: Some("/project"),
             node_policy_generation_digest: "policy:test",
@@ -1691,6 +1699,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &["cap.read".into()],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
@@ -1772,6 +1781,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
@@ -1924,6 +1934,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &caller_scopes,
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
@@ -2548,6 +2559,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &[],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
@@ -2779,6 +2791,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
@@ -3072,6 +3085,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &[],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
@@ -3186,6 +3200,7 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
+                signer_project: &ryeos_engine::trust::NO_PROJECT,
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
