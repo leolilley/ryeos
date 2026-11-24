@@ -231,19 +231,19 @@ impl StateStore {
 
     pub fn write_project_head_ref(
         &self,
-        principal_key: &str,
-        project_hash: &str,
+        key: &ryeos_state::project_identity::ProjectHeadKey,
         project_snapshot_hash: &str,
+        advancer: &ryeos_state::head_advance::HeadAdvancer,
         signer: &dyn Signer,
         cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+            .require_project_head_mutation_unfenced(&key.owner_component(), key.name_hash())?;
         g.state_db.write_project_head_ref(
-            principal_key,
-            project_hash,
+            key,
             project_snapshot_hash,
+            advancer,
             signer,
             cas_mutation_guard,
         )
@@ -251,24 +251,24 @@ impl StateStore {
 
     pub fn advance_project_head_ref(
         &self,
-        principal_key: &str,
-        project_hash: &str,
+        key: &ryeos_state::project_identity::ProjectHeadKey,
         new_snapshot_hash: &str,
         expected_current_hash: &str,
+        advancer: &ryeos_state::head_advance::HeadAdvancer,
         signer: &dyn Signer,
         cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .require_project_head_mutation_unfenced(&key.owner_component(), key.name_hash())
             .map_err(|error| {
                 ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
             })?;
         g.state_db.advance_project_head_ref(
-            principal_key,
-            project_hash,
+            key,
             new_snapshot_hash,
             expected_current_hash,
+            advancer,
             signer,
             cas_mutation_guard,
         )
@@ -278,10 +278,10 @@ impl StateStore {
         &self,
         thread_id: &str,
         launch_owner: &str,
-        principal_key: &str,
-        project_hash: &str,
+        key: &ryeos_state::project_identity::ProjectHeadKey,
         new_snapshot_hash: &str,
         expected_current_hash: &str,
+        advancer: &ryeos_state::head_advance::HeadAdvancer,
         signer: &dyn Signer,
         cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
     ) -> Result<()> {
@@ -294,15 +294,15 @@ impl StateStore {
             bail!("stale launch owner cannot publish state for thread {thread_id}");
         }
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .require_project_head_mutation_unfenced(&key.owner_component(), key.name_hash())
             .map_err(|error| {
                 ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
             })?;
         g.state_db.advance_project_head_ref(
-            principal_key,
-            project_hash,
+            key,
             new_snapshot_hash,
             expected_current_hash,
+            advancer,
             signer,
             cas_mutation_guard,
         )

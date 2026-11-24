@@ -958,7 +958,8 @@ mod tests {
                 ),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .with_succession_chain(&[]);
         let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
             .config()
             .join("example-runtime");
@@ -976,13 +977,24 @@ mod tests {
         .unwrap()
         .content_hash;
 
+        // The operator's project: an endorser endorses only projects it owns.
+        let operator_fingerprint =
+            lillux::signature::compute_fingerprint(&operator.verifying_key());
+        let operator_owner = ryeos_engine::trust::SuccessionGraph::default()
+            .ownership_of(&operator_fingerprint)
+            .unwrap()
+            .principal;
+        let identity: ryeos_state::project_identity::ProjectIdentity =
+            format!("{operator_owner}/demo").parse().unwrap();
+        let logical = ryeos_state::project_identity::LogicalProject::Stated(identity.clone());
+
         // The signer list a launch of this project carries right now.
         let launch_entries = || {
             let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
             let frozen = trust
                 .clone()
                 .with_endorsement_index(EndorsementIndex::build(&ledger, &trust).unwrap());
-            trust.launch_signer_entries(&frozen, Some(&project))
+            trust.launch_signer_entries(&frozen, &logical)
         };
         let loads = |entries: &[ryeos_engine::trust::TrustedSignerEntry]| {
             let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
@@ -1003,7 +1015,7 @@ mod tests {
 
         let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
         let body = EndorsementBody::for_items(
-            project.canonicalize().unwrap().to_str().unwrap(),
+            &identity,
             &format!(
                 "fp:{}",
                 lillux::signature::compute_fingerprint(&operator.verifying_key())

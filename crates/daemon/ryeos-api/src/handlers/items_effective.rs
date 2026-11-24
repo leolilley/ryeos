@@ -89,7 +89,7 @@ pub struct Request {
     pub thread_id: Option<String>,
 }
 
-pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let item_ref = CanonicalRef::parse(&req.canonical_ref).map_err(|e| {
         HandlerError::BadRequest(format!(
             "invalid canonical ref '{}': {e}",
@@ -107,12 +107,23 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
         .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
     }
 
+    let signer_project = match project_root.as_deref() {
+        Some(root) => ryeos_app::project_registry::live_logical_project(
+            &state,
+            &ctx.fingerprint,
+            &ctx.scopes,
+            root,
+        ),
+        None => ryeos_engine::contracts::unestablished_project(
+            &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        ),
+    };
     let (effective, resolution) = state
         .engine
         .with_checked_bundle_generation(|generation| {
             let (mut effective, resolution) =
                 generation.effective_item_with_resolution(EffectiveItemRequest {
-                    logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                    logical_project: signer_project.clone(),
                     item_ref,
                     expected_kind: req.expected_kind,
                     project_root: project_root.clone(),

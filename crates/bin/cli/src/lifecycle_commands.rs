@@ -3093,8 +3093,15 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // report what the cut will trust.
     if initialized {
         checks.extend(project_registration_checks(&config.app_root));
+        checks.extend(trust_identity_checks(&config.app_root));
     } else {
-        for name in ["project_registrations", "project_registration_declarations"] {
+        for name in [
+            "project_registrations",
+            "project_registration_declarations",
+            "signer_records_refused",
+            "unscoped_project_signers",
+            "endorsements_covering_nothing",
+        ] {
             checks.push(check(
                 name,
                 NA,
@@ -5097,15 +5104,235 @@ fn host_services_check(
 /// one name would share its trust at the cut. `project_registration_declarations`
 /// warns for each registered checkout that is gone or no longer declares the
 /// registered name.
+/// Owner+name trust rows: signer records this node refuses (path project
+/// entries from before the cut), unscoped project-space signers other than the
+/// operator and the authoring key, and endorsements whose project this node
+/// neither has a registration for nor holds a head of.
+/// Fingerprints of keys whose private half is published (the repository's
+/// development publisher key). A succession from one of them could have been
+/// signed by anyone.
+const KNOWN_PUBLIC_KEYS: &[&str] =
+    &["741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"];
+
+fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doctor::CheckResult> {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let node_key = match ryeos_engine::trust::load_node_verifying_key(app_root) {
+        Ok(key) => key,
+        Err(error) => {
+            return vec![check(
+                "signer_records_refused",
+                FAIL,
+                serde_json::json!({ "error": error.to_string() }),
+            )];
+        }
+    };
+    let mut rows = Vec::new();
+    let loaded = ryeos_engine::trust::load_signer_records_reporting(
+        &ryeos_engine::trust::signers_dir(app_root),
+        &node_key,
+    );
+    let records = match loaded {
+        Ok((records, refused)) => {
+            rows.push(if refused.is_empty() {
+                check("signer_records_refused", OK, serde_json::json!({ "refused": 0 }))
+            } else {
+                check(
+                    "signer_records_refused",
+                    WARN,
+                    serde_json::json!({
+                        "refused": refused.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        "fix": "these signers are unusable: their records name project paths. Re-scope each with `ryeos trust scope <fingerprint> --project pid:v1:<owner>/<name>` (or --any-project, or leave project space) on a build from before the owner+name cut, or re-pin it",
+                    }),
+                )
+            });
+            records
+        }
+        Err(error) => {
+            rows.push(check(
+                "signer_records_refused",
+                FAIL,
+                serde_json::json!({ "error": error.to_string() }),
+            ));
+            return rows;
+        }
+    };
+    let unscoped: Vec<serde_json::Value> = records
+        .iter()
+        .filter(|record| {
+            record.status != ryeos_engine::trust::SignerStatus::Revoked
+                && !matches!(
+                    record.role,
+                    ryeos_engine::trust::SignerRole::Operator
+                        | ryeos_engine::trust::SignerRole::Authoring
+                )
+                && record
+                    .scope
+                    .spaces
+                    .contains(&ryeos_engine::trust::SignerSpace::Project)
+                && record.scope.projects.is_empty()
+        })
+        .map(|record| {
+            serde_json::json!({
+                "fingerprint": record.fingerprint,
+                "label": record.label,
+                "role": record.role.as_str(),
+            })
+        })
+        .collect();
+    rows.push(if unscoped.is_empty() {
+        check("unscoped_project_signers", OK, serde_json::json!({ "signers": 0 }))
+    } else {
+        check(
+            "unscoped_project_signers",
+            WARN,
+            serde_json::json!({
+                "signers": unscoped,
+                "note": "trusted in every checkout, registered or not",
+                "fix": "narrow with `ryeos trust scope <fingerprint> --project pid:v1:<owner>/<name>` unless every project should trust it",
+            }),
+        )
+    });
+    let chain = match ryeos_engine::trust::load_event_chain(
+        &ryeos_engine::trust::events_dir(app_root),
+        &node_key,
+    ) {
+        Ok(chain) => chain,
+        Err(error) => {
+            rows.push(check(
+                "project_owners",
+                FAIL,
+                serde_json::json!({ "error": error.to_string() }),
+            ));
+            return rows;
+        }
+    };
+    let graph = ryeos_engine::trust::SuccessionGraph::build(&records, &chain);
+    rows.push(check(
+        "project_owners",
+        OK,
+        serde_json::json!({
+            "owners": graph.principals().iter().map(|summary| serde_json::json!({
+                "owner": summary.principal,
+                "root_key": summary.root_key,
+                "current_keys": summary.current_keys,
+            })).collect::<Vec<_>>(),
+            "note": "each project owner (pid:v1:) with the key its principal is named after and the active keys that act for it",
+        }),
+    ));
+    let corrupt: Vec<String> = graph
+        .corrupt_chains()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    rows.push(if corrupt.is_empty() {
+        check("owner_chains_corrupt", OK, serde_json::json!({ "corrupt": 0 }))
+    } else {
+        check(
+            "owner_chains_corrupt",
+            FAIL,
+            serde_json::json!({
+                "corrupt": corrupt,
+                "fix": "the signer registry's succession events loop; restore .ai/node/trust from a backup of the node state",
+            }),
+        )
+    });
+    let public_successions: Vec<serde_json::Value> = chain
+        .iter()
+        .filter(|event| {
+            event.kind == ryeos_engine::trust::TrustEventKind::Succeeded
+                && event
+                    .predecessor
+                    .as_deref()
+                    .is_some_and(|predecessor| KNOWN_PUBLIC_KEYS.contains(&predecessor))
+        })
+        .map(|event| {
+            serde_json::json!({
+                "successor": event.signer,
+                "predecessor": event.predecessor,
+                "seq": event.seq,
+            })
+        })
+        .collect();
+    rows.push(if public_successions.is_empty() {
+        check("succession_from_public_key", OK, serde_json::json!({ "successions": 0 }))
+    } else {
+        check(
+            "succession_from_public_key",
+            FAIL,
+            serde_json::json!({
+                "successions": public_successions,
+                "note": "the predecessor's private key is public, so anyone could have signed this succession statement; the successor inherits that key's principal",
+                "fix": "revoke the successor with `ryeos trust revoke <fingerprint>` and pin the intended key directly",
+            }),
+        )
+    });
+    let v1_records: Vec<&str> = records
+        .iter()
+        .filter(|record| record.schema == ryeos_engine::trust::SIGNER_RECORD_SCHEMA_V1)
+        .map(|record| record.fingerprint.as_str())
+        .collect();
+    rows.push(check(
+        "signer_records_v1",
+        if v1_records.is_empty() { OK } else { WARN },
+        serde_json::json!({
+            "records": v1_records,
+            "note": "pre-cut records with no project entries read unchanged; each is rewritten as v2 the next time it changes, and the v1 reader goes at the next signer-record schema change",
+        }),
+    ));
+    let registrations =
+        ryeos_node::project_registry::load_registrations(app_root, &node_key).unwrap_or_default();
+    let refs_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+        .state()
+        .join("refs");
+    let endorsed = ryeos_engine::trust::EndorsementLedger::load(app_root, &node_key)
+        .ok()
+        .and_then(|ledger| {
+            let store = ryeos_engine::trust::TrustStore::from_registry(node_key, records)
+                .ok()?
+                .with_succession_chain(&chain);
+            ryeos_engine::trust::EndorsementIndex::build(&ledger, &store).ok()
+        })
+        .map(|index| index.projects())
+        .unwrap_or_default();
+    let idle: Vec<String> = endorsed
+        .into_iter()
+        .filter(|identity| {
+            let registered = registrations
+                .iter()
+                .any(|loaded| &loaded.registration.identity == identity);
+            let head = refs_root
+                .join(
+                    ryeos_state::project_identity::ProjectHeadKey::for_project(identity).ref_path(),
+                )
+                .is_file();
+            !registered && !head
+        })
+        .map(|identity| identity.to_string())
+        .collect();
+    rows.push(if idle.is_empty() {
+        check("endorsements_covering_nothing", OK, serde_json::json!({ "projects": 0 }))
+    } else {
+        check(
+            "endorsements_covering_nothing",
+            WARN,
+            serde_json::json!({
+                "projects": idle,
+                "note": "covers nothing here: no registration and no head of these projects on this node",
+            }),
+        )
+    });
+    rows
+}
+
 fn project_registration_checks(
     app_root: &Path,
 ) -> Vec<ryeos_core_tools::actions::doctor::CheckResult> {
     use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
     let loaded = ryeos_engine::trust::load_node_verifying_key(app_root)
         .map_err(anyhow::Error::new)
-        .and_then(|key| ryeos_node::project_registry::load_registrations(app_root, &key));
-    let registrations = match loaded {
-        Ok(registrations) => registrations,
+        .and_then(|key| ryeos_node::project_registry::load_registrations_reporting(app_root, &key));
+    let (registrations, pre_cut) = match loaded {
+        Ok(loaded) => loaded,
         Err(error) => {
             return vec![
                 check(
@@ -5150,14 +5377,38 @@ fn project_registration_checks(
         )
     };
     let mut stale = Vec::new();
+    let mut drifted = Vec::new();
     for loaded in &registrations {
         let identity = &loaded.registration.identity;
         for path in &loaded.registration.paths {
+            // The source manifest is read only to compare its name with the
+            // manifest's; it never decides identity.
+            let source = std::fs::read(path.join(".ai/manifest.source.yaml"))
+                .ok()
+                .and_then(|bytes| {
+                    ryeos_state::project_identity::ProjectDeclaration::parse(&bytes).ok()
+                });
+            let manifest =
+                std::fs::read(path.join(ryeos_state::project_identity::PROJECT_DECLARATION_PATH))
+                    .ok()
+                    .and_then(|bytes| {
+                        ryeos_state::project_identity::ProjectDeclaration::parse(&bytes).ok()
+                    });
+            if let (Some(source), Some(manifest)) = (source, manifest)
+                && source.name != manifest.name
+            {
+                drifted.push(serde_json::json!({
+                    "checkout": path,
+                    "manifest_source_name": source.name.as_str(),
+                    "manifest_name": manifest.name.as_str(),
+                    "fix": "regenerate .ai/manifest.yaml from .ai/manifest.source.yaml with `ryeos bundle manifest-sign <checkout>` before registering",
+                }));
+            }
             let declared = ryeos_node::project_registry::inspect_checkout(app_root, path);
             let problem = match declared {
                 Ok((_, Some(name))) if &name == identity.name() => None,
                 Ok((_, Some(name))) => Some(format!("declares `{name}`")),
-                Ok((_, None)) => Some("declares no name".to_owned()),
+                Ok((_, None)) => Some("has no manifest name".to_owned()),
                 Err(error) => Some(format!("{error:#}")),
             };
             if let Some(problem) = problem {
@@ -5165,7 +5416,7 @@ fn project_registration_checks(
                     "identity": identity,
                     "path": path,
                     "problem": problem,
-                    "fix": format!("restore the checkout's .ai/project.yaml (name: {}) or `ryeos project unregister {} --name {}`", identity.name(), path.display(), identity.name()),
+                    "fix": format!("restore the checkout's .ai/manifest.yaml (name: {}) or `ryeos project unregister {} --name {}`", identity.name(), path.display(), identity.name()),
                 }));
             }
         }
@@ -5183,7 +5434,24 @@ fn project_registration_checks(
             serde_json::json!({ "stale_checkouts": stale }),
         )
     };
-    vec![registrations_row, declarations_row]
+    let pre_cut_row = check(
+        "project_registrations_pre_cut",
+        if pre_cut.is_empty() { OK } else { WARN },
+        serde_json::json!({
+            "owner_directories": pre_cut,
+            "note": "registrations written before the owner+name cut name the owner by key fingerprint and are never read as trust",
+            "fix": "register each checkout again with `ryeos project register <checkout>`, then remove the old directory",
+        }),
+    );
+    let mut rows = vec![registrations_row, declarations_row, pre_cut_row];
+    if !drifted.is_empty() {
+        rows.push(check(
+            "project_manifest_name_drift",
+            WARN,
+            serde_json::json!({ "checkouts": drifted }),
+        ));
+    }
+    rows
 }
 
 fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {
