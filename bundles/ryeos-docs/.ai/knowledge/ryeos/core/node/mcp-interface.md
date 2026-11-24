@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T02:54:16Z:5f6700c314179d1aa9af3a2d683f4f030ed85e42a1078bc5f484d817d0368e68:MAxJ2jZgI7eiV1Teez9r2F6D2oqoCCJmhLBpTj+eZJUS/5rdv/8j83xaoq7JSs+nwbR/MEDjfPg8VW4X3gp0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T08:30:56Z:d1a8e10d552836c4da6b8756af1840b1666b1b83aeb2b53143d4e3e67e1482d3:xgO0x89zTzRK2A4dEAdaUDIszEMxtYfDxEB9qe7xqQVFoPTVzWfyRHOPPQsVq7hpzrekw+AD7XtNZ7jHgw51Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -92,6 +92,16 @@ separate OS user or inside the enclosure.
 
 Do not expose the server over a network without a separate auth-terminating
 proxy: the key it holds is the only gate.
+
+## Protocol revisions
+
+The server uses the Python MCP SDK 2.x (`mcp>=2.3,<3`) and serves both MCP
+revisions from one process: the stateless revision (2026-07-28: `server/discover`,
+protocol version and client capabilities on every request) and the earlier
+`initialize` handshake. A client picks its own era with its first request. What a
+client reports about itself (`clientInfo`) is display only; nothing here decides
+anything by it, and the server's credential is only ever `RYEOS_CLIENT_KEY` from
+its own environment (the MCP stdio rule), never anything a request carries.
 
 ## The `cli` Tool
 

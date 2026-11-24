@@ -39,11 +39,16 @@ import logging
 import os
 import shutil
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.server.models import InitializationOptions
-from mcp.server.lowlevel import NotificationOptions
-from mcp.types import Tool, TextContent
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
 from ryeosd_mcp import __version__
 
@@ -99,7 +104,14 @@ INPUT_SCHEMA = {
 }
 
 
-def _error_result(message: str, error_type: str) -> list[TextContent]:
+def _text_result(payload: dict) -> CallToolResult:
+    """A complete tool result carrying one JSON text block."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, default=str))],
+    )
+
+
+def _error_result(message: str, error_type: str) -> CallToolResult:
     """Build a typed JSON error result for user-visible failures.
 
     Used for input-validation failures and wrapper-originated timeouts.
@@ -107,10 +119,7 @@ def _error_result(message: str, error_type: str) -> list[TextContent]:
     as MCP-level errors so they cannot masquerade as successful tool
     results.
     """
-    return [TextContent(
-        type="text",
-        text=json.dumps({"error": message, "type": error_type}),
-    )]
+    return _text_result({"error": message, "type": error_type})
 
 
 def _resolve_client_key() -> str:
@@ -196,107 +205,110 @@ async def _run_rye(
 
 
 class RYEServer:
-    """MCP server that shells to the `ryeos` CLI."""
+    """MCP server that shells to the `ryeos` CLI.
+
+    The server holds one key of its own (`RYEOS_CLIENT_KEY`, read once at
+    start) and gives it to every `ryeos` it spawns. It serves both MCP
+    revisions the SDK serves: the legacy `initialize` handshake and the
+    stateless per-request era with `server/discover`. What a client says about
+    itself (`clientInfo`) is display only and decides nothing here.
+    """
 
     def __init__(self) -> None:
         self._bin = _resolve_bin()
         self._client_key = _resolve_client_key()
-        self.server = Server("ryeos")
-        self._setup()
+        self.server = Server(
+            "ryeos",
+            version=__version__,
+            on_list_tools=self._list_tools,
+            on_call_tool=self._call_tool,
+        )
 
-    def _setup(self) -> None:
-        @self.server.list_tools()
-        async def list_tools() -> list[Tool]:
-            return [
+    async def _list_tools(
+        self,
+        ctx: ServerRequestContext,
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        return ListToolsResult(
+            tools=[
                 Tool(
                     name=TOOL_NAME,
                     description=TOOL_DESCRIPTION,
-                    inputSchema=INPUT_SCHEMA,
+                    input_schema=INPUT_SCHEMA,
                 ),
-            ]
+            ],
+        )
 
-        @self.server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-            if name != TOOL_NAME:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"unknown tool: {name}"}),
-                )]
-            # Validation errors (bad input shape) and subprocess
-            # timeouts are user-visible failures we surface as JSON
-            # tool results. We do NOT catch unexpected exceptions
-            # (programmer bugs, OS errors): those must propagate so
-            # they show up as MCP-level errors and don't silently
-            # masquerade as a "successful" tool result.
-            try:
-                args = arguments["args"]
-            except KeyError:
-                return _error_result("missing required field `args`", "ValueError")
-            if not isinstance(args, list) or not all(
-                isinstance(a, str) for a in args
-            ):
+    async def _call_tool(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
+        if name != TOOL_NAME:
+            return _text_result({"error": f"unknown tool: {name}"})
+        # Validation errors (bad input shape) and subprocess timeouts are
+        # user-visible failures we surface as JSON tool results. We do NOT
+        # catch unexpected exceptions (programmer bugs, OS errors): those
+        # must propagate so they show up as MCP-level errors and don't
+        # silently masquerade as a "successful" tool result.
+        # The v2 SDK does not check arguments against the tool's schema, so
+        # the schema's `additionalProperties: false` is enforced here.
+        unknown = sorted(set(arguments) - set(INPUT_SCHEMA["properties"]))
+        if unknown:
+            return _error_result(
+                f"unknown field(s) {', '.join(unknown)}; allowed: "
+                f"{', '.join(sorted(INPUT_SCHEMA['properties']))}",
+                "ValueError",
+            )
+        try:
+            args = arguments["args"]
+        except KeyError:
+            return _error_result("missing required field `args`", "ValueError")
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            return _error_result("`args` must be an array of strings", "ValueError")
+
+        project_path = arguments.get("project_path")
+        if project_path is not None:
+            if not isinstance(project_path, str):
+                return _error_result("`project_path` must be a string", "ValueError")
+            if project_path == "":
                 return _error_result(
-                    "`args` must be an array of strings", "ValueError"
+                    "`project_path` must not be empty when supplied; "
+                    "omit the field to use the server cwd",
+                    "ValueError",
                 )
 
-            project_path = arguments.get("project_path")
-            if project_path is not None:
-                if not isinstance(project_path, str):
-                    return _error_result(
-                        "`project_path` must be a string", "ValueError"
-                    )
-                if project_path == "":
-                    return _error_result(
-                        "`project_path` must not be empty when supplied; "
-                        "omit the field to use the server cwd",
-                        "ValueError",
-                    )
+        raw_timeout = arguments.get("timeout_s", DEFAULT_TIMEOUT_S)
+        if not isinstance(raw_timeout, (int, float)) or isinstance(raw_timeout, bool):
+            return _error_result("`timeout_s` must be a number", "ValueError")
+        timeout_s = float(raw_timeout)
+        if timeout_s < 1:
+            return _error_result("`timeout_s` must be >= 1", "ValueError")
 
-            raw_timeout = arguments.get("timeout_s", DEFAULT_TIMEOUT_S)
-            if not isinstance(raw_timeout, (int, float)) or isinstance(
-                raw_timeout, bool
-            ):
-                return _error_result(
-                    "`timeout_s` must be a number", "ValueError"
-                )
-            timeout_s = float(raw_timeout)
-            if timeout_s < 1:
-                return _error_result(
-                    "`timeout_s` must be >= 1", "ValueError"
-                )
+        try:
+            result = await _run_rye(
+                self._bin, self._client_key, args, project_path, timeout_s,
+            )
+        except asyncio.TimeoutError as e:
+            # _run_rye raises RuntimeError on its own timeout, but if the
+            # underlying wait_for surfaces TimeoutError to the caller, treat
+            # it as a wrapper-originated failure (no CLI exit code to
+            # preserve).
+            return _error_result(str(e) or "timeout", "TimeoutError")
+        except RuntimeError as e:
+            # Includes _run_rye's "exceeded timeout" RuntimeError.
+            return _error_result(str(e), "RuntimeError")
 
-            try:
-                result = await _run_rye(
-                    self._bin, self._client_key, args, project_path, timeout_s,
-                )
-            except asyncio.TimeoutError as e:
-                # _run_rye raises RuntimeError on its own timeout, but
-                # if the underlying wait_for surfaces TimeoutError to
-                # the caller, treat it as a wrapper-originated failure
-                # (no CLI exit code to preserve).
-                return _error_result(str(e) or "timeout", "TimeoutError")
-            except RuntimeError as e:
-                # Includes _run_rye's "exceeded timeout" RuntimeError.
-                return _error_result(str(e), "RuntimeError")
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, default=str),
-            )]
+        return _text_result(result)
 
     async def start(self) -> None:
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name="ryeos",
-                    server_version=__version__,
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
+                self.server.create_initialization_options(),
             )
 
 
