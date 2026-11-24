@@ -1065,6 +1065,16 @@ impl SealedRootExecutionRequest {
         self.verified_subject.exact_subject()
     }
 
+    /// Whether the admitted root, resolved from a project, took the ref of an
+    /// item an installed bundle supplies: a project file standing in for a
+    /// bundle's item under that bundle's own ref.
+    pub fn admitted_subject_shadows_bundle_item(&self) -> bool {
+        self.verified_subject
+            .shadowed
+            .iter()
+            .any(|candidate| candidate.space == ItemSpace::Bundle)
+    }
+
     pub fn effective_definition_digest(
         &self,
     ) -> &ryeos_engine::resolution::EffectiveDefinitionDigest {
@@ -2450,6 +2460,20 @@ mod authority_tests {
             ),
             Vec::new(),
         ))
+    }
+
+    #[test]
+    fn a_subject_that_took_a_bundle_items_ref_says_so() {
+        let plain = SealedRootExecutionRequest::storage_test_fixture();
+        assert!(!plain.admitted_subject_shadows_bundle_item());
+        let mut value = serde_json::to_value(&plain).unwrap();
+        value["verified_subject"]["shadowed"] = json!([{
+            "label": "bundle:core",
+            "space": serde_json::to_value(ItemSpace::Bundle).unwrap(),
+            "path": "/bundles/core/.ai/tools/ryeos/core/evaluate/unchecked.py",
+        }]);
+        let shadowing: SealedRootExecutionRequest = serde_json::from_value(value).unwrap();
+        assert!(shadowing.admitted_subject_shadows_bundle_item());
     }
 
     #[test]
