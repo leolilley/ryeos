@@ -30234,7 +30234,8 @@ mod tests {
         value["follow_parent_context"] = serde_json::json!({
             "parent_thread_id": "T-parent",
             "hard_limits": nested,
-            "depth": 1
+            "depth": 1,
+            "thread_ceiling": {"ceiling": "unbounded"}
         });
         let raw = lillux::canonical_json(&value).unwrap();
 
