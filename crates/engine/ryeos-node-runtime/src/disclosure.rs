@@ -45,6 +45,7 @@ pub struct ServiceDisclosure {
     principal: Vec<KeepPath>,
     public: Vec<KeepPath>,
     free_text: Vec<KeepPath>,
+    interim: Vec<KeepPath>,
 }
 
 impl ServiceDisclosure {
@@ -55,10 +56,12 @@ impl ServiceDisclosure {
         let Value::Object(map) = value else {
             bail!("`disclosure` must be a mapping");
         };
-        if let Some(unknown) = map
-            .keys()
-            .find(|key| !matches!(key.as_str(), "principal" | "public" | "free_text"))
-        {
+        if let Some(unknown) = map.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "principal" | "public" | "free_text" | "interim_free_text"
+            )
+        }) {
             bail!("`disclosure` has an unknown key `{unknown}`");
         }
         let list = |name: &str| -> Result<Vec<KeepPath>> {
@@ -76,11 +79,47 @@ impl ServiceDisclosure {
                 Some(_) => bail!("`disclosure.{name}` must be a list of pointers"),
             }
         };
-        let parsed = Self {
+        let mut parsed = Self {
             principal: list("principal")?,
             public: list("public")?,
             free_text: list("free_text")?,
+            interim: list("interim_free_text")?,
         };
+        // An interim entry is free text the principal tier carries for now,
+        // because the seat that owns the answer reads it today. It is the
+        // only way a free-text leaf reaches a principal, it is named apart so
+        // it can be reviewed and removed, and it may not also be withheld.
+        for interim in &parsed.interim {
+            for withheld in &parsed.free_text {
+                if overlaps(interim.segments(), withheld.segments()) {
+                    bail!(
+                        "interim free-text pointer `{}` overlaps withheld pointer `{}`",
+                        interim.text(),
+                        withheld.text()
+                    );
+                }
+            }
+        }
+        for interim in &parsed.interim {
+            if interim.segments().last() == Some(&KeepSegment::Any) {
+                bail!(
+                    "interim free-text pointer `{}` must name one leaf, not every child",
+                    interim.text()
+                );
+            }
+            if let Some(shown) = parsed
+                .public
+                .iter()
+                .find(|shown| overlaps(interim.segments(), shown.segments()))
+            {
+                bail!(
+                    "interim free-text pointer `{}` overlaps public pointer `{}`; it is for a principal alone",
+                    interim.text(),
+                    shown.text()
+                );
+            }
+        }
+        parsed.principal.extend(parsed.interim.iter().cloned());
         for free in &parsed.free_text {
             for shown in parsed.principal.iter().chain(&parsed.public) {
                 if overlaps(free.segments(), shown.segments()) {
@@ -107,6 +146,11 @@ impl ServiceDisclosure {
             }
         }
         Ok(parsed)
+    }
+
+    /// The free-text leaves this item lets a principal see for now.
+    pub fn interim_free_text(&self) -> impl Iterator<Item = &str> {
+        self.interim.iter().map(KeepPath::text)
     }
 
     fn tier(&self, class: DisclosureClass) -> Option<&[KeepPath]> {
@@ -333,6 +377,48 @@ mod tests {
                 {"id": 2, "name": "b", "detail": "probe: /proc/self", "new_field": "leak"}
             ]
         })
+    }
+
+    #[test]
+    fn an_interim_free_text_leaf_reaches_a_principal_and_never_the_public() {
+        let disclosure = declared(json!({
+            "principal": ["/node_id"],
+            "free_text": ["/uds_path"],
+            "interim_free_text": ["/rows/*/detail"],
+        }));
+        let shown = shape_result(
+            DisclosureClass::Principal,
+            Some(&disclosure),
+            answer(),
+            DisclosureBounds::default(),
+        )
+        .unwrap();
+        assert!(shown.pointer("/rows/0/detail").is_some());
+        assert!(shown.get("uds_path").is_none());
+        assert_eq!(
+            disclosure.interim_free_text().collect::<Vec<_>>(),
+            vec!["/rows/*/detail"]
+        );
+        assert_eq!(
+            shape_result(
+                DisclosureClass::Public,
+                Some(&disclosure),
+                answer(),
+                DisclosureBounds::default()
+            ),
+            Ok(Value::Null)
+        );
+    }
+
+    #[test]
+    fn an_interim_leaf_may_not_be_withheld_public_or_a_whole_child_set() {
+        for bad in [
+            json!({"free_text": ["/rows"], "interim_free_text": ["/rows/*/detail"]}),
+            json!({"principal": ["/rows/*/detail"], "public": ["/rows/*/detail"], "interim_free_text": ["/rows/*/detail"]}),
+            json!({"interim_free_text": ["/rows/*"]}),
+        ] {
+            assert!(ServiceDisclosure::parse(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

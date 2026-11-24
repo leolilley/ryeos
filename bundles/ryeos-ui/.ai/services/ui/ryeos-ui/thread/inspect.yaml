@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:bbf55f2cd7319832e9404cb96a2301355a5099a1adda12312ded2fdc43e48364:Uu57j8l8viwtL+55uUsHVVBBgR7XivMtLm/zi99eANjC0u5i1MfKAs11Zm5yzSX96G/v9PgO2Z20JFpic4ARAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:bcfc0d694517bbd0f3a630dcb2779fe11ee4e6a70e66906a5cfaa56882e41193:YcnZV4BxZd+m5Tg4OgT579/atrov6QNZWcbbvye8phcf2UiTmWqV12mOkVf3ZCqu+4X6Crpi7941bCn6OqcCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/inspect
 version: "1.0.0"
@@ -40,16 +40,22 @@ disclosure:
     - /evidence_coverage
   free_text:
     - /thread/requested_by
-    - /thread/project_root
     - /thread/project_authority
     - /thread/admitted_launch_capsule_hash
     - /thread/result_project_snapshot_hash
     - /thread/result_workspace_output_capture_hash
-    - /result
-    - /artifacts
     - /children
     - /facets
     - /events
-    - /launch_facts/*/properties
     - /follow
     - /thread_meta
+  interim_free_text:
+    - /thread/project_root  # removed by: m4
+    - /result/outcome_code  # removed by: per-chain publication
+    - /result/error  # removed by: per-chain publication
+    - /artifacts/*/artifact_id  # removed by: per-chain publication
+    - /artifacts/*/artifact_type  # removed by: per-chain publication
+    - /artifacts/*/metadata  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_enforced  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_policy_digest  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_backend_inspection_digest  # removed by: per-chain publication

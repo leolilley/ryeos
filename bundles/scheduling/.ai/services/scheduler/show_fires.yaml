@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:4fc2901b22f3db95a8eba5d7aa705d433660d0f0cdc3141b89a2662be51720fa:+QZDcUdNEZm1x3Nbam5Bad6/dtfRFPUeTgbdvY+rPsEAQDhEObcXkpemMl/n4vgxveEAQFO9aQSpaFcAQNNxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:06e4c0c7008d0c25fb9b2837d5e394f0a47585ee119c62bff3edc4eef9d3914f:TU9+E+ZwKIFCkAkwL3StXoZfSID+K1qIMsHbnNchMo/+WPeE8a0gE/eRaYhRJX6VS/jMMO9mL8rRRgggLqL4CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "show_fires"
 kind: service
@@ -11,7 +11,17 @@ disclosure:
     - /total
     - /returned
     - /fires/*/schedule_id
-    - /fires/*/fire_id scheduled_at reserved_at dispatched_at completed_at thread_id status trigger_reason outcome schedule_spec_hash admitted_capsule_hash
+    - /fires/*/fire_id
+    - /fires/*/scheduled_at
+    - /fires/*/reserved_at
+    - /fires/*/dispatched_at
+    - /fires/*/completed_at
+    - /fires/*/thread_id
+    - /fires/*/status
+    - /fires/*/trigger_reason
+    - /fires/*/outcome
+    - /fires/*/schedule_spec_hash
+    - /fires/*/admitted_capsule_hash
   free_text:
     - /fires/*/signer_fingerprint
     - /fires/*/project_authority

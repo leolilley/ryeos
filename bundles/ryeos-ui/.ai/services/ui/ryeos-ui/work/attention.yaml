@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:5b72ebbaf2f66cd9fd5677b7132c1809e9f19d49c45cd64f6353f6e8613e06c5:BP/JEfyBawTwjseXSBD2FfceWVDE16SzPvpIhrtC2eubm9awvU45Y2Jmh/UMbXLbXlTtEJX031xIsbmdPLVNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:1e3380b9092ecab1c08c760b6b9ead9e80c339fa511a39fead1ec84529ab869a:hG3XY8rH92fcQonpyF1T6CE3n3h6HbeK35WxKDyhxi6b/iUkWLh3xjY505+qUJe98KosHbYYPFTMPJtC/letCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/attention
 version: "1.0.0"
@@ -46,12 +46,12 @@ disclosure:
     - /running/items/*/subject
     - /running/items/*/state
     - /running/items/*/since_ms
-  free_text:
-    - /attention/*/project_root
-    - /attention/*/detail/summary
-    - /attention/*/detail/requested_authority
-    - /attention/*/detail/publication_result
-    - /attention/*/detail/project_root
-    - /counts/by_project
-    - /running/by_project
-    - /running/items/*/project_root
+  interim_free_text:
+    - /attention/*/project_root  # removed by: m4
+    - /attention/*/detail/summary  # removed by: per-chain publication
+    - /attention/*/detail/requested_authority  # removed by: per-chain publication
+    - /attention/*/detail/publication_result  # removed by: per-chain publication
+    - /attention/*/detail/project_root  # removed by: m4
+    - /counts/by_project  # removed by: m4
+    - /running/by_project  # removed by: m4
+    - /running/items/*/project_root  # removed by: m4

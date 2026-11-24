@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:e6e71d248deafbb55bf8f7f39861af44cef2a8e208fae464e483412790d9cb03:J2wVLrfVM3fRjLOz/afoHRc97z/lVU0N0jGgtgj37bi8D1y4bvimJoOxWJijaJYVd1f7uB5ZuhMUZR2JIyqmAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:736d90651fabcb7929cb95ab8897a69e3af04948ac9f5341f73cad158bcc1d8c:hG24M4T6mQMAw2X8xTKp84r/vsUpCMpYFi8RwMus7xkDbVqho49/pv0BdgBu1x9nPomHGTohTHGYG8I/+LuzDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/field/comparison
 version: "1.0.0"
@@ -37,9 +37,9 @@ disclosure:
     - "/relations/*/status"
     - "/relations/*/directed"
     - "/relations/*/provenance"
-  free_text:
-    - "/entities/*/attributes"
-    - "/relations/*/attributes"
-    - "/previews"
-    - "/metrics"
-    - "/warnings"
+  interim_free_text:
+    - "/entities/*/attributes"  # removed by: per-chain publication
+    - "/relations/*/attributes"  # removed by: per-chain publication
+    - "/previews"  # removed by: per-chain publication
+    - "/metrics"  # removed by: per-chain publication
+    - "/warnings"  # removed by: per-chain publication

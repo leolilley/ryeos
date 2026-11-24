@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:03205fd9f07a2b0f941aa551a5ed8fd7baa41434fae4a769220289d154fc6180:ERPNxzAqHl1Wzj621wtVBoQ2mO/KYH3c8cxPkSGicK3CQSnBGugisD/T36Keyn4gS8aZ4Rm0se07EZDXFB9iDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:0b829f736d4271789935f496809fd0586766bdce5bdbe9ae5d46d448fb25fa92:qO+gqxi8ld1c8+vHpmlt33puwqc6RlIurPWnNC8g7DMOLuZEEgTQM5hSYryEOIQ/snXeF4rbEk1uwO/CL4sLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/item/inspect
 version: "1.0.0"
@@ -20,9 +20,10 @@ disclosure:
     - /item/trust/class
   free_text:
     - /item/source_path
-    - /item/title
-    - /item/trust/signer
-    - /item/trust/reason
-    - /item/shadowed
     - /raw
-    - /effective
+  interim_free_text:
+    - /item/title  # removed by: m4
+    - /item/trust/signer  # removed by: m4
+    - /item/trust/reason  # removed by: m4
+    - /item/shadowed  # removed by: m4
+    - /effective  # removed by: m4

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:1c5816870418f5213b7af0ca73ac4f518aa46441fb4b8d9af0881fdf5003c5b2:DAeuvWnU6LgclSI00Vrlzr1UJx1daU/6AWSKUHw25dsvePHCqjpjiwytq1Poeo+I1H2FX49nfcR1Gljj0eUWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:4d55bc7666ae7fe5f759eed54f7540ca115c886e05a97d34aed3bbf6b1e21bce:eDSAQI9e/iSf1CX6Gm6+rgd+exGmOZ0bV1HCXCdP2+6ZmqqHgun22QYKDoGVrDeBjPDxFfeuT3L+JZZlrbG4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/tree
 version: "1.0.0"
@@ -12,7 +12,18 @@ disclosure:
   principal:
     - /root_thread_id
     - /truncated
-    - /threads/*/thread_id chain_root_id kind status item_ref launch_mode current_site_id origin_site_id upstream_thread_id successor_thread_id created_at updated_at
+    - /threads/*/thread_id
+    - /threads/*/chain_root_id
+    - /threads/*/kind
+    - /threads/*/status
+    - /threads/*/item_ref
+    - /threads/*/launch_mode
+    - /threads/*/current_site_id
+    - /threads/*/origin_site_id
+    - /threads/*/upstream_thread_id
+    - /threads/*/successor_thread_id
+    - /threads/*/created_at
+    - /threads/*/updated_at
     - /threads/*/execution
     - /threads/*/pending
     - /threads/*/current_node
@@ -29,9 +40,20 @@ disclosure:
     - /threads/*/title
     - /threads/*/facets
     - /threads/*/error
-    - /threads/*/requested_by
     - /threads/*/project_root
-    - /threads/*/project
     - /threads/*/project_authority
     - /threads/*/admitted_launch_capsule_hash
-    - /threads/*/follow
+  interim_free_text:
+    - /threads/*/project/name  # removed by: m4
+    - /threads/*/project/path  # removed by: m4
+    - /threads/*/requested_by  # removed by: m4
+    - /threads/*/follow/role  # removed by: per-chain publication
+    - /threads/*/follow/display_state  # removed by: per-chain publication
+    - /threads/*/follow/phase  # removed by: per-chain publication
+    - /threads/*/follow/follow_node  # removed by: per-chain publication
+    - /threads/*/follow/child_thread_id  # removed by: per-chain publication
+    - /threads/*/follow/child_chain_root_id  # removed by: per-chain publication
+    - /threads/*/follow/child_terminal_status  # removed by: per-chain publication
+    - /threads/*/follow/parent_successor_thread_id  # removed by: per-chain publication
+    - /threads/*/follow/cohort/done  # removed by: per-chain publication
+    - /threads/*/follow/cohort/expected  # removed by: per-chain publication

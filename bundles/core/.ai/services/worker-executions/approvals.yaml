@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:1d515bb891110f4a3971f715d060114cef939c34c5022247879b04a59d91e919:qp/AGVqOJyRPwb6l3rH51eLPgtQ80dQSBMkf0HZTvtCn4/ujET0vmq+0YQe1OGBsHx0FCEvzR/UPibkzgzbaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:fa9c0226ec00a3d632591b3868750ead67954d09496bea3a8d7532e7291648c7:iwegZBwcm8iwwmHqwR2jJhVlclEHop5C2XYMyz2ibU5L5RdJJsgx+IC78tbXfev0AqgXzQsB8Bz8FHjodVqIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: approvals
 kind: service
@@ -18,5 +18,5 @@ disclosure:
     - "/approvals/*/state"
     - "/approvals/*/expires_at_ms"
     - "/approvals/*/created_at_ms"
-  free_text:
-    - "/approvals/*/requested_authority/display"
+  interim_free_text:
+    - "/approvals/*/requested_authority/display"  # removed by: per-chain publication

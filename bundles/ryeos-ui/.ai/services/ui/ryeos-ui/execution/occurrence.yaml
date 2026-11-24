@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:22d09b1584c543e831d1d7d5624b1ec6bf23e6c625a426b0b6f53df0bb8b8ab2:TJcTtrUOKdNw2sJhZhOwNcQECRjPSy2nhHHTIlkumVrow8x0cgh+KbMzeyieukeWzYkm7gxHbAg0h2fAsBY7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:738d705466e36163a494683c30e95ae9d1ea57f6264ed1e5b06d907e83f7f6f5:WnsP9lFl66QUr/AOvJ5+Xhip7Fy38M/kvFShaiDoWQAOtJgNYvnvG8nJV4aAHjakjrqj8bhGzzH7hF1nZ0rJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/execution/occurrence
 version: "1.0.0"
@@ -49,6 +49,7 @@ disclosure:
     - "/coverage/*/warning_count"
   free_text:
     - "/occurrence/*/attributes"
-    - "/evidence/*/attributes"
     - "/relations/*/attributes"
-    - "/coverage/*/warnings"
+  interim_free_text:
+    - "/evidence/*/attributes"  # removed by: per-chain publication
+    - "/coverage/*/warnings"  # removed by: per-chain publication

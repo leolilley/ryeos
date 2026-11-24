@@ -157,3 +157,486 @@ fn every_declared_block_parses() {
         }
     }
 }
+
+/// Free-text leaves a principal still receives, because the seat that owns the
+/// answer reads them today: service, pointer, and the milestone that removes
+/// it. Each is an exception to the rule that free text never sits in a tier.
+/// The list is pinned: it can only change by a reviewed edit here.
+const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
+    (
+        "worker-executions/approvals",
+        "/approvals/*/requested_authority/display",
+        "per-chain publication",
+    ),
+    ("projects/list", "/projects/*/root", "m4"),
+    ("projects/open", "/ui_transition/surface/title", "m4"),
+    (
+        "projects/open",
+        "/ui_transition/surface/saved_surface",
+        "m4",
+    ),
+    (
+        "projects/open",
+        "/ui_transition/attachment/project_path",
+        "m4",
+    ),
+    (
+        "projects/open",
+        "/ui_transition/attachment/presentation",
+        "m4",
+    ),
+    (
+        "ui/invocations/dispatch",
+        "/result",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/config/get", "/saved_view_sets", "m4"),
+    ("ui/ryeos-ui/config/get", "/particular_view_sets", "m4"),
+    ("ui/ryeos-ui/config/get", "/reusable_surfaces", "m4"),
+    ("ui/ryeos-ui/config/get", "/particular_surfaces", "m4"),
+    ("ui/ryeos-ui/config/get", "/view_set_save_context", "m4"),
+    (
+        "ui/ryeos-ui/config/get",
+        "/particular_view_set_save_context",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/config/get",
+        "/reusable_surface_save_context",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/config/get",
+        "/particular_surface_save_context",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/execution/occurrence",
+        "/evidence/*/attributes",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/execution/occurrence",
+        "/coverage/*/warnings",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/comparison",
+        "/entities/*/attributes",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/comparison",
+        "/relations/*/attributes",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/comparison",
+        "/previews",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/comparison",
+        "/metrics",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/comparison",
+        "/warnings",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/execution",
+        "/entities/*/attributes",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/execution",
+        "/relations/*/attributes",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/execution",
+        "/previews",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/execution",
+        "/metrics",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/field/execution",
+        "/warnings",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/item/inspect", "/item/title", "m4"),
+    ("ui/ryeos-ui/item/inspect", "/item/trust/signer", "m4"),
+    ("ui/ryeos-ui/item/inspect", "/item/trust/reason", "m4"),
+    ("ui/ryeos-ui/item/inspect", "/item/shadowed", "m4"),
+    ("ui/ryeos-ui/item/inspect", "/effective", "m4"),
+    ("ui/ryeos-ui/items/list", "/items/*/title", "m4"),
+    (
+        "ui/ryeos-ui/node/activity",
+        "/events/*/event_hash",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/node/activity",
+        "/events/*/event_type",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/node/activity",
+        "/events/*/thread_id",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/node/machines", "/rows/*/name", "m4"),
+    ("ui/ryeos-ui/node/machines", "/rows/*/label", "m4"),
+    ("ui/ryeos-ui/node/machines", "/rows/*/relations_text", "m4"),
+    (
+        "ui/ryeos-ui/node/machines",
+        "/rows/*/disagreeing_text",
+        "m4",
+    ),
+    ("ui/ryeos-ui/node/machines", "/rows/*/missing_text", "m4"),
+    ("ui/ryeos-ui/node/machines", "/rows/*/facts_text", "m4"),
+    ("ui/ryeos-ui/node/machines", "/rows/*/facts/*/text", "m4"),
+    ("ui/ryeos-ui/projects/list", "/projects/*/name", "m4"),
+    ("ui/ryeos-ui/projects/list", "/projects/*/root", "m4"),
+    ("ui/ryeos-ui/surfaces/resume", "/particular_surface", "m4"),
+    ("ui/ryeos-ui/surfaces/resume", "/particular_selection", "m4"),
+    (
+        "ui/ryeos-ui/surfaces/resume",
+        "/ui_transition/surface",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/surfaces/resume",
+        "/ui_transition/attachment",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/surfaces/resume",
+        "/ui_transition/tab_attachments",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/surfaces/resume",
+        "/ui_transition/opening",
+        "m4",
+    ),
+    ("ui/ryeos-ui/thread/inspect", "/thread/project_root", "m4"),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/result/outcome_code",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/result/error",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/artifacts/*/artifact_id",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/artifacts/*/artifact_type",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/artifacts/*/metadata",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/launch_facts/*/properties/isolation_enforced",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/launch_facts/*/properties/isolation_policy_digest",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/inspect",
+        "/launch_facts/*/properties/isolation_backend_inspection_digest",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/thread/tree", "/threads/*/project/name", "m4"),
+    ("ui/ryeos-ui/thread/tree", "/threads/*/project/path", "m4"),
+    ("ui/ryeos-ui/thread/tree", "/threads/*/requested_by", "m4"),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/role",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/display_state",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/phase",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/follow_node",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/child_thread_id",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/child_chain_root_id",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/child_terminal_status",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/parent_successor_thread_id",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/cohort/done",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/thread/tree",
+        "/threads/*/follow/cohort/expected",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/threads/list", "/threads/*/project/name", "m4"),
+    ("ui/ryeos-ui/threads/list", "/threads/*/project/path", "m4"),
+    ("ui/ryeos-ui/threads/list", "/threads/*/requested_by", "m4"),
+    (
+        "ui/ryeos-ui/timeline/raw",
+        "/events/*/payload",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/timeline/raw",
+        "/events/*/prev_chain_event_hash",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/timeline/raw",
+        "/events/*/prev_thread_event_hash",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/timeline/thread",
+        "/items",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/timeline/thread",
+        "/order",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/timeline/thread",
+        "/undeclared",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/view-sets/resume", "/particular_view_set", "m4"),
+    (
+        "ui/ryeos-ui/view-sets/resume",
+        "/particular_selection",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/view-sets/resume",
+        "/ui_transition/surface",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/view-sets/resume",
+        "/ui_transition/attachment",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/view-sets/resume",
+        "/ui_transition/tab_attachments",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/view-sets/resume",
+        "/ui_transition/opening",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/work/approval-history",
+        "/history/*/requested_authority",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/approval-history",
+        "/history/*/decision_principal",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/attention/*/project_root",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/attention/*/detail/summary",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/attention/*/detail/requested_authority",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/attention/*/detail/publication_result",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/attention/*/detail/project_root",
+        "m4",
+    ),
+    ("ui/ryeos-ui/work/attention", "/counts/by_project", "m4"),
+    ("ui/ryeos-ui/work/attention", "/running/by_project", "m4"),
+    (
+        "ui/ryeos-ui/work/attention",
+        "/running/items/*/project_root",
+        "m4",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/candidates/*/publication_result",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/candidates/*/terminal_reason",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/changes/*/path",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/changes/*/change",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/changes/*/base_file_hash",
+        "per-chain publication",
+    ),
+    (
+        "ui/ryeos-ui/work/candidate",
+        "/changes/*/candidate_file_hash",
+        "per-chain publication",
+    ),
+    ("ui/ryeos-ui/work/list", "/work/*/owner_principal_id", "m4"),
+    ("ui/ryeos-ui/work/list", "/work/*/project/name", "m4"),
+    ("ui/ryeos-ui/work/list", "/work/*/project/path", "m4"),
+    ("ui/session/surfaces/open", "/ui_transition/surface", "m4"),
+    (
+        "ui/session/surfaces/open",
+        "/ui_transition/attachment",
+        "m4",
+    ),
+    (
+        "ui/session/surfaces/open",
+        "/ui_transition/tab_attachments",
+        "m4",
+    ),
+    ("ui/session/surfaces/open", "/ui_transition/opening", "m4"),
+];
+
+/// The `interim_free_text` entries of every service item, read from the item's
+/// own text so each entry's `# removed by:` milestone is visible.
+fn declared_interim() -> Vec<(String, String, String)> {
+    let mut found = Vec::new();
+    let bundles = repo().join("bundles");
+    for bundle in std::fs::read_dir(&bundles).unwrap().flatten() {
+        let root = bundle.path().join(".ai/services");
+        let mut files = Vec::new();
+        collect(&root, &mut files);
+        for file in files {
+            let name = file
+                .strip_prefix(&root)
+                .unwrap()
+                .with_extension("")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&file).unwrap();
+            let mut inside = false;
+            for line in text.lines() {
+                if line.starts_with("  interim_free_text:") {
+                    inside = true;
+                    continue;
+                }
+                let Some(entry) = line.strip_prefix("    - ").filter(|_| inside) else {
+                    inside = false;
+                    continue;
+                };
+                let (pointer, tag) = entry
+                    .split_once('#')
+                    .unwrap_or_else(|| panic!("{name}: interim entry `{entry}` has no milestone"));
+                let milestone = tag
+                    .trim()
+                    .strip_prefix("removed by:")
+                    .unwrap_or_else(|| panic!("{name}: interim entry `{entry}` has no milestone"))
+                    .trim();
+                found.push((
+                    name.clone(),
+                    pointer.trim().trim_matches('"').to_owned(),
+                    milestone.to_owned(),
+                ));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn interim_free_text_is_exactly_the_reviewed_list_and_each_names_its_milestone() {
+    let mut pinned: Vec<(String, String, String)> = INTERIM_FREE_TEXT
+        .iter()
+        .map(|(service, pointer, milestone)| {
+            (
+                (*service).to_owned(),
+                (*pointer).to_owned(),
+                (*milestone).to_owned(),
+            )
+        })
+        .collect();
+    pinned.sort();
+    let declared = declared_interim();
+    assert_eq!(
+        declared, pinned,
+        "the interim free-text list changed: each entry is an exception to review"
+    );
+    for (service, pointer, milestone) in &declared {
+        assert!(
+            matches!(milestone.as_str(), "m4" | "per-chain publication"),
+            "{service} {pointer}: unknown removal milestone `{milestone}`"
+        );
+    }
+}

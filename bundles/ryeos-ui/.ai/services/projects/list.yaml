@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:f6c4e3397ad514dae798dca85404cc35220abbe43e29255f63894a14b933e2a4:cu41tCyO8taG2+JdJoolf8SpumhKBU7bSiJOxoNO6SpxJ0+4jUwbK05MeK+yNW+SJJHMm4B0nBWfoiBJrga+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:2a69c2446ef78b6362294ed30534bf5577681368a105de34e4409f41968de028:oYdmb5C6BhRruh56kN9ACIWVlkzEUIq8iGoH8K7d56J0UEkaZMf8HRlWXlzYm7lGql/wmZjeTbGkw5vty9gCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/list
 version: "1.0.0"
@@ -18,5 +18,5 @@ disclosure:
     - "/projects/*/exists"
     - "/projects/*/current"
     - "/projects/*/registered"
-  free_text:
-    - "/projects/*/root"
+  interim_free_text:
+    - "/projects/*/root"  # removed by: m4

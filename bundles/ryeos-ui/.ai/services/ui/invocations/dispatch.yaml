@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:a228b82a11a2a95058a1ac18cae0be04271ee027361e00c9b0a52aa0d9a2a322:Dn/sA4bOhaLfWV31VMps/yEkSEtu4Xwfg+2qyIFd0mUK15/QRJV0clPTm6Um7JzsOr7udZ+tTLWlKV9FiiMBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:66e78841b0276f2f74684665bbb35681a2363d30cf09a9bd15496693fb3e086a:agP8lyGlmGHvIk85qC0wIXHQl16X5Xpx3LWqwncOF/USMWj11YQdekkJEpsLZwVs0pJ9NlMlRXyvv7aFvpgoBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: invocations/dispatch
 version: "1.0.0"
@@ -16,5 +16,5 @@ disclosure:
     - "/binding_attachment_id"
     - "/binding_generation"
     - "/binding_digest"
-  free_text:
-    - "/result"
+  interim_free_text:
+    - "/result"  # removed by: per-chain publication

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:d64b61889da53913975db2859f8add39b314952346924257cbf1fe322982889b:DcycCVU1y7yUjfK/b5paut8R6VD2+zR4peF/UuVEB1kc0GZJs0akpILaOBOgjqW+5fCb3VKQWDeVd/0QuCpqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:8de9d8c945af1649badf763dfeb1d9d38e9a874124903b0f3f5c0ba5b1c88844:wTefA+Deor2EAq1RF+kLLg68Pf/Gp0Kgo4ss3x2JuEy4Nexnia0WHzQoYl0CYK4MCr1dtz/QExVkO7R6uKnQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/approval-history
 version: "1.0.0"
@@ -24,6 +24,6 @@ disclosure:
     - /history/*/created_at_ms
     - /history/*/resolved_at_ms
     - /history/*/delivery_settled_at_ms
-  free_text:
-    - /history/*/requested_authority
-    - /history/*/decision_principal
+  interim_free_text:
+    - /history/*/requested_authority  # removed by: per-chain publication
+    - /history/*/decision_principal  # removed by: per-chain publication

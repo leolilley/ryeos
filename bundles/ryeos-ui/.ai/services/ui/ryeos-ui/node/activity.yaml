@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:20f37d5f8f4da72e4367445cfa908f1bbd5175420641c32be275f4240f7fa25d:Nc0OwceowvgpTdNXm1JJtNYuz7PZRGYhlL4Px8VKpnuPDfHKHZmct0hFW84rnpTHL4Dl9oLK2MuXQ+sKsVwKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:16bee3006e032d51cdccbcbaf341fe782588041a2d3351a38b0bafbf751a88ae:xsrhN5SLPG7OD8vRK+5hPtpkohnhSUSXjtFI0OcDYN4hpFCyaiz2tusWgAlFXM7a7kxWBrG95++6g2xHNQYcBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
@@ -28,5 +28,7 @@ disclosure:
     - /usage/*/value
     - /usage_coverage/state
     - /usage_coverage/reason
-  free_text:
-    - /events
+  interim_free_text:
+    - /events/*/event_hash  # removed by: per-chain publication
+    - /events/*/event_type  # removed by: per-chain publication
+    - /events/*/thread_id  # removed by: per-chain publication

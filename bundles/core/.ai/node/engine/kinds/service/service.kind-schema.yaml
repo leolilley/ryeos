@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T02:41:45Z:84ee8aca667c287d46b24c5568d3767bed64dc9d1d8271aa4d972950a37bc0fc:jlVxMNzFLkL3ZyRMnCZXfqTNeq+kEHIeUQiIWWQF+KfIR4DBzbpD9Sq6xirAKYLNX+/bvUyqvTbygGo6bF+CAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:3886e41c8aa972a1d94ab77e16b1385bf15b52934ef8fb14515f481799e92d7d:r6VvUk5t0X7HDhZH9Kx3QngAJxRdfVEMfZYrNDJZKOwN0DaidCDs+9x1tjqh+cLK+tkTx+zWAMmkDnBjW7NaCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -87,7 +87,10 @@ composed_value_contract:
     # What each caller class may see of this service's answer. The operator sees
     # it whole; a field in no tier is the operator's alone. `free_text` lists
     # leaves that can carry a path, probe output or a key and may not appear in
-    # a wider tier. A service with no block discloses nothing to another class.
+    # a wider tier. `interim_free_text` names free-text leaves a principal still
+    # receives because the seat that owns the answer reads them today; each is a
+    # reviewed exception that a later milestone removes. A service with no block
+    # discloses nothing to another class.
     disclosure:
       type: single
       prim: mapping
@@ -103,6 +106,10 @@ composed_value_contract:
             prim: sequence
             elements: { type: single, prim: string }
           free_text:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          interim_free_text:
             type: single
             prim: sequence
             elements: { type: single, prim: string }

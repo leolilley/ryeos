@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:9a0b54a9d15d28b150ac2b5710558d3f3012ba7458591a4ccb020f2e707dfcf1:kneCVk5a3gG7mbXRzLtycalJLydaXjUtss1x5v6skwZSQyXnQMkf9NB5EA4VXynjfwyCg29FsMSwYx/rYaWNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:bbdec1a2fe89b0e059025af9372368775755b5d6ba02fb624f0ce2595cdf13c8:zpeK1/k59O6STszlE7Uglr2KD/rbQUOWMhzSy/g5FvAysOthQvfQEN6x3ZnAsfUfdAykxgbF8jsQmIbbhsaYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "explain"
 kind: service
@@ -36,7 +36,17 @@ disclosure:
     - /authority/refusal
     - /authority/outcome
     - /authority/expires_at
-    - /last_fire/fire_id scheduled_at reserved_at dispatched_at completed_at thread_id status trigger_reason outcome schedule_spec_hash admitted_capsule_hash
+    - /last_fire/fire_id
+    - /last_fire/scheduled_at
+    - /last_fire/reserved_at
+    - /last_fire/dispatched_at
+    - /last_fire/completed_at
+    - /last_fire/thread_id
+    - /last_fire/status
+    - /last_fire/trigger_reason
+    - /last_fire/outcome
+    - /last_fire/schedule_spec_hash
+    - /last_fire/admitted_capsule_hash
   free_text:
     - /ref_bindings
     - /signer_fingerprint

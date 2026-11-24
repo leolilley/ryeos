@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:2d5bbb1efe6b9d5c4898be2936f102a51baac9f6777a7cc9f32a703c9b63a4c2:hYWXsRgGYbZR+a7Be5dVOeLp2S3HWNOy5vlHEO1dJGDDA35IYCHoKTP1rGUO9UZqI571dhaclT97CdCZ/hOQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:c3156fbe2c342fe08686f07e4dd60942634981ec410eaf8ae4bf6a0051d77289:mlAgkV4+zYjkLaILAmI6lhf+/ya5IEYMl5RbXVyMVZFqiN3nU1273br2gc61mfc3I7WSKiDvVoBd3W8DDvLyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/timeline/thread
 version: "1.0.0"
@@ -20,7 +20,7 @@ disclosure:
     - /summary
     - /notice_noun
     - /lane
-  free_text:
-    - /items
-    - /order
-    - /undeclared
+  interim_free_text:
+    - /items  # removed by: per-chain publication
+    - /order  # removed by: per-chain publication
+    - /undeclared  # removed by: per-chain publication

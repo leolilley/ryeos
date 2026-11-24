@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:b5f310a2f8009270f1c9fdf1576a5a9e29ff00289cdf4acbd553d8e54bcb90b8:4ehQRlSWzeJ60Gn/u20oFv17N6pr7Szke66noqzRcoEOhFn7ikne8Q62vl+t1BybyhCvGSs0OkwU8enbmhy9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:2bafa852c4a3f1562e41961e412097b814d769fbeeaddd1b1026c281e02c7e1a:cfLS8zYUygjO1dGpHJE4g6Hm+XKNQhMM79PW0IIyPbJsBd9nmjo3/qkT/7x+ZBkCQ86CZ853LpjHFI1beGK1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/machines
 version: "1.0.0"
@@ -36,14 +36,15 @@ disclosure:
     - /rows/*/facts/*/grade
     - /rows/*/facts/*/reason
   free_text:
-    - /rows/*/name
-    - /rows/*/label
     - /rows/*/disagreeing
     - /rows/*/declared_missing
-    - /rows/*/relations_text
-    - /rows/*/disagreeing_text
-    - /rows/*/missing_text
-    - /rows/*/facts_text
-    - /rows/*/facts/*/text
     - /rows/*/facts/*/shared_with
     - /rows/*/facts/*/shared_with_names
+  interim_free_text:
+    - /rows/*/name  # removed by: m4
+    - /rows/*/label  # removed by: m4
+    - /rows/*/relations_text  # removed by: m4
+    - /rows/*/disagreeing_text  # removed by: m4
+    - /rows/*/missing_text  # removed by: m4
+    - /rows/*/facts_text  # removed by: m4
+    - /rows/*/facts/*/text  # removed by: m4

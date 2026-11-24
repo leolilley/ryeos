@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:d06a5cf27fba4e6b27c2bc1a5569e553df1b4b230b048f7937a068f475023aec:ez/mSYpQxV6WPjpnVqGNOLTS659nXc8QJtqxwPB3cQIt66W9HVNc0YeuZTfCcw0z6agTdv9T75RFwoaGGEpbCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:64fa1922c2e5b43a0b5236bce4e8d2c4be3f25ea3d93e265946576d8d4df8689:VPOeYSprfzZmt6WOfE4HYQpQ5RZ+TFiwtOwoP7+v7nowSNAkVE1XUnMVi/JMhTSZtwJPnQLQp81R4Dn3iWWfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
@@ -42,7 +42,8 @@ disclosure:
     - "/project/name"
     - "/project/root"
     - "/project/tags"
-    - "/ui_transition/surface/title"
-    - "/ui_transition/surface/saved_surface"
-    - "/ui_transition/attachment/project_path"
-    - "/ui_transition/attachment/presentation"
+  interim_free_text:
+    - "/ui_transition/surface/title"  # removed by: m4
+    - "/ui_transition/surface/saved_surface"  # removed by: m4
+    - "/ui_transition/attachment/project_path"  # removed by: m4
+    - "/ui_transition/attachment/presentation"  # removed by: m4
