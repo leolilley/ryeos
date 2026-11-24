@@ -477,6 +477,24 @@ fn disclose_service_result(
                     Some(HandlerError::Conflict(_)) => anyhow::Error::new(HandlerError::Conflict(
                         "the request conflicts with current state".to_owned(),
                     )),
+                    // A typed refusal keeps its code and status, which are
+                    // part of the contract a client branches on. Its body
+                    // can carry a path or a key, so only the stable code, the
+                    // retry flag and a fixed sentence reach a non-operator.
+                    Some(HandlerError::Structured { code, status, body }) => {
+                        anyhow::Error::new(HandlerError::Structured {
+                            body: serde_json::json!({
+                                "code": code,
+                                "error": "the service refused the request",
+                                "retryable": body
+                                    .get("retryable")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                            }),
+                            code,
+                            status,
+                        })
+                    }
                     _ => {
                         let (code, sentence) =
                             ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
@@ -1380,6 +1398,35 @@ mod tests {
             disclose_service_result(DisclosureClass::Operator, None, Ok(answer.clone())).unwrap(),
             answer
         );
+    }
+
+    #[test]
+    fn a_typed_refusal_keeps_its_code_and_status_for_a_principal_without_its_body() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let refused = disclose_service_result(
+            DisclosureClass::Principal,
+            None,
+            Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::Structured {
+                    code: "ui_binding_stale".to_owned(),
+                    status: 409,
+                    body: serde_json::json!({
+                        "code": "ui_binding_stale",
+                        "error": "item /home/someone/x changed",
+                        "retryable": false,
+                    }),
+                },
+            )),
+        )
+        .unwrap_err();
+        match ryeos_app::handler_error::extract_handler_error(&refused) {
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
+                assert_eq!((code.as_str(), status), ("ui_binding_stale", 409));
+                assert!(!body.to_string().contains("/home/someone"), "{body}");
+                assert_eq!(body["retryable"], false);
+            }
+            other => panic!("typed refusal lost: {other:?}"),
+        }
     }
 
     #[test]
