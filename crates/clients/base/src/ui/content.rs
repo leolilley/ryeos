@@ -2836,8 +2836,8 @@ mod tests {
             "sources": { "default": { "ref": "service:x" } },
         }))
         .unwrap();
-        let (rows, cut) =
-            source_collection_limited(&binding, &envelope_response("complete"), Some(1));
+        let response = envelope_response("complete");
+        let (rows, cut) = source_collection_limited(&binding, &response, Some(1));
         assert_eq!(rows.len(), 1);
         assert_eq!(cut, Some(RowCut { limit: 1, total: 2 }));
     }
