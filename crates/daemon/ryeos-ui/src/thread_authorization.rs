@@ -21,7 +21,7 @@ use crate::seat_auth::SeatCaller;
 /// The reader a seat reads threads as: its key, the project its binding
 /// sealed at mint, and whether the read comes from a project-authored source.
 /// A seat whose project authority no longer validates reads nothing.
-fn thread_reader(caller: &SeatCaller) -> Result<ThreadReader, HandlerError> {
+fn thread_reader(state: &AppState, caller: &SeatCaller) -> Result<ThreadReader, HandlerError> {
     Ok(match caller {
         SeatCaller::Attachment(attachment) => {
             let bound_to_checkout = crate::seat_auth::attachment_project_query_identity(attachment)
@@ -35,14 +35,30 @@ fn thread_reader(caller: &SeatCaller) -> Result<ThreadReader, HandlerError> {
                     &binding.signer_project,
                 ),
                 project_authored_source: crate::seat_auth::compiled_ui_source_is_project_authored(),
+                own_session: live_own_session(
+                    state,
+                    crate::seat_auth::compiled_ui_browser_session_id().as_deref(),
+                    &binding.principal_id,
+                ),
             }
         }
         SeatCaller::Operator { principal_id } => ThreadReader {
             key: principal_id.clone(),
             seat_project: SeatProjectState::Projectless,
             project_authored_source: false,
+            own_session: None,
         },
     })
+}
+
+/// `session_id` when it names a live browser session minted for `key`. The
+/// id comes only from the authenticated session association of this read;
+/// an ended, revoked or expired session, or one minted for another key, is
+/// none.
+fn live_own_session(state: &AppState, session_id: Option<&str>, key: &str) -> Option<String> {
+    let session_id = session_id?;
+    let ui = crate::state::get_ui_state(state)?;
+    (ui.browser_sessions.live_session_principal(session_id)? == key).then(|| session_id.to_owned())
 }
 
 /// Authorize one or two exact thread subjects as one indistinguishable read.
@@ -68,7 +84,7 @@ pub(crate) fn authorize_exact_thread_subjects_for(
     caller: &SeatCaller,
     thread_ids: &[&str],
 ) -> Result<Vec<AuthoritativeThreadSubject>, HandlerError> {
-    let reader = thread_reader(caller)?;
+    let reader = thread_reader(state, caller)?;
     ryeos_app::seat_authority::authorize_thread_subjects(state, &reader, thread_ids)
 }
 
@@ -97,14 +113,23 @@ pub(crate) struct SessionObserver {
 }
 
 impl SessionObserver {
+    /// The observer for the live browser session `session_id` and its
+    /// attachments. Each attachment reads as its key through this session,
+    /// so the session's own seat threads are observed while it is live and
+    /// minted for that key.
     pub(crate) fn new(
+        state: &AppState,
+        session_id: &str,
         attachments: &[std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>],
     ) -> Self {
         Self {
             readers: attachments
                 .iter()
                 .filter_map(|attachment| {
-                    thread_reader(&SeatCaller::Attachment(attachment.clone())).ok()
+                    let mut reader =
+                        thread_reader(state, &SeatCaller::Attachment(attachment.clone())).ok()?;
+                    reader.own_session = live_own_session(state, Some(session_id), &reader.key);
+                    Some(reader)
                 })
                 .collect(),
         }

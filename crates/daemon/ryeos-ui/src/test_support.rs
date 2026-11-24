@@ -989,3 +989,17 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
         ),
     ]
 }
+
+/// Run `future` as a compiled UI dispatch the dispatch owner associated with
+/// the authenticated browser `session`, as `ui.invocations.dispatch` does.
+pub async fn with_session_dispatch<F>(
+    session: &crate::browser_session::BrowserSession,
+    attachment: Arc<crate::browser_session::AdmittedBindingAttachment>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    crate::seat_auth::with_compiled_ui_source_session(session, attachment, None, false, future)
+        .await
+}

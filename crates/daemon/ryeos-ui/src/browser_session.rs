@@ -945,6 +945,18 @@ impl BrowserSessionStore {
             .collect()
     }
 
+    /// The key a live session `session_id` was minted for. Unlike
+    /// [`Self::get_session`] this does not move the idle deadline: a read
+    /// authorization or hint fan-out must not keep a session alive. An
+    /// expired, ended or revoked session has none.
+    pub fn live_session_principal(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.lock().expect("sessions mutex poisoned");
+        sessions
+            .get(session_id)
+            .filter(|session| session.expires_at >= Instant::now())
+            .map(|session| session.principal_id.clone())
+    }
+
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let mut sessions = self.sessions.lock().unwrap();
         let now = Instant::now();

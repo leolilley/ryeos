@@ -2922,7 +2922,8 @@ async fn thread_inspection_facets_cross_a_fixed_anchor_page_boundary() {
         .get_session(&session_id)
         .unwrap();
     let attachment = session.attachments[&session.root_attachment_id].clone();
-    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let inspected = test_state::with_session_dispatch(
+        &session,
         attachment,
         (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
             json!({"thread_id": producer.thread_id, "event_limit": 1}),
@@ -3003,7 +3004,8 @@ async fn thread_inspection_does_not_publish_a_partial_facet_map_at_page_budget()
         .get_session(&session_id)
         .unwrap();
     let attachment = session.attachments[&session.root_attachment_id].clone();
-    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let inspected = test_state::with_session_dispatch(
+        &session,
         attachment,
         (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
             json!({"thread_id": producer.thread_id, "event_limit": 1}),
