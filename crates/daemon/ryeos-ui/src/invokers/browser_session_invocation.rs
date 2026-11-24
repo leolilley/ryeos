@@ -68,22 +68,43 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
             None => return Err(RouteDispatchError::Unauthorized),
         };
 
-        Ok(RouteInvocationResult::Principal(RoutePrincipal {
-            id: format!("session:{}", session.session_id),
-            scopes: Vec::new(),
-            verifier_key: "browser_session",
-            verified: false,
-            authorized_key_class: None,
-            authenticated_origin_site_id: None,
-            authenticated_grant_authority: None,
-            metadata: {
-                let mut m = BTreeMap::new();
-                if let Some(ref principal_id) = session.user_principal_id {
-                    m.insert("user_principal_id".into(), principal_id.clone());
-                }
-                m
-            },
-        }))
+        Ok(RouteInvocationResult::Principal(session_route_principal(
+            &session.session_id,
+            session.user_principal_id.as_deref(),
+            &session.granted_caps,
+        )))
+    }
+}
+
+/// The principal a live browser session is admitted as. It holds no signed
+/// key and no scopes of its own; it carries the grant the node minted for the
+/// session so the class of what it may read comes from that grant. Shared by
+/// the verifier and by test fixtures, so a fixture holds exactly the context
+/// production does.
+pub fn session_route_principal(
+    session_id: &str,
+    user_principal_id: Option<&str>,
+    granted_caps: &[String],
+) -> RoutePrincipal {
+    RoutePrincipal {
+        id: format!("session:{session_id}"),
+        scopes: Vec::new(),
+        verifier_key: "browser_session",
+        verified: false,
+        authorized_key_class: None,
+        authenticated_origin_site_id: None,
+        authenticated_grant_authority: None,
+        minted_session_grant: Some(ryeos_app::handler_context::MintedSessionGrant {
+            session_id: session_id.to_owned(),
+            granted_caps: granted_caps.to_vec(),
+        }),
+        metadata: {
+            let mut m = BTreeMap::new();
+            if let Some(principal_id) = user_principal_id {
+                m.insert("user_principal_id".into(), principal_id.to_owned());
+            }
+            m
+        },
     }
 }
 

@@ -238,11 +238,12 @@ fn session_context_and_root(
         .get_session(id)
         .unwrap();
     let root = session.attachments[&session.root_attachment_id].coordinate();
-    let ctx = ryeos_app::handler_context::HandlerContext::new(
-        format!("session:{id}"),
-        session.granted_caps.clone(),
-        false,
-    );
+    let ctx = crate::invokers::browser_session_invocation::session_route_principal(
+        id,
+        session.user_principal_id.as_deref(),
+        &session.granted_caps,
+    )
+    .handler_context();
     (ctx, root)
 }
 

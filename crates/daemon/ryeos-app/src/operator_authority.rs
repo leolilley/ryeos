@@ -118,13 +118,13 @@ pub fn disclosure_class_for(
 ) -> ryeos_node_runtime::disclosure::DisclosureClass {
     use ryeos_node_runtime::disclosure::DisclosureClass;
     if context.require_verified().is_err() {
-        // No verified key. A bearer of a minted grant (a browser session holds
-        // the capabilities it was minted with) is still a principal; a caller
-        // holding no grant at all is the public.
-        return if context.fingerprint.is_empty() || context.scopes.is_empty() {
-            DisclosureClass::Public
-        } else {
+        // No verified key. A live browser session holds the grant the node
+        // minted for it, carried in its own field; that makes it a principal.
+        // Any other caller with no verified key is the public.
+        return if context.minted_session_grant().is_some() {
             DisclosureClass::Principal
+        } else {
+            DisclosureClass::Public
         };
     }
     if context.authorized_key_class == Some(AuthorizedKeyPrincipalClass::LocalClient)
