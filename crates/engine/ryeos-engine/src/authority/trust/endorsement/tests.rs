@@ -8,9 +8,10 @@ use crate::authority::trust::{
     trusted_signers_digest, verify_item_signature,
 };
 use crate::contracts::{SignatureEnvelope, SignatureHeader, TrustClass};
+use ryeos_state::project_identity::{LogicalProject, ProjectIdentity, ProjectName};
 
-const PROJECT: &str = "/srv/projects/alpha";
-const OTHER_PROJECT: &str = "/srv/projects/beta";
+const PROJECT: &str = "alpha";
+const OTHER_PROJECT: &str = "beta";
 const NOW: u64 = 1_800_000_000;
 
 fn key(seed: u8) -> SigningKey {
@@ -23,6 +24,20 @@ fn fp(key: &SigningKey) -> String {
 
 fn principal(key: &SigningKey) -> String {
     format!("fp:{}", fp(key))
+}
+
+/// The principal `key` speaks for when it has no succession: its solo one,
+/// as the node's resolver computes it.
+fn owner(key: &SigningKey) -> ryeos_state::principal_id::PrincipalId {
+    crate::authority::trust::SuccessionGraph::default()
+        .ownership_of(&fp(key))
+        .unwrap()
+        .principal
+}
+
+/// The project `name` owned by `key`'s principal.
+fn identity(key: &SigningKey, name: &str) -> ProjectIdentity {
+    ProjectIdentity::new(owner(key), ProjectName::new(name).unwrap())
 }
 
 fn record(key: &SigningKey, role: SignerRole, status: SignerStatus) -> SignerRecord {
@@ -58,6 +73,16 @@ impl Node {
         }
     }
 
+    /// The operator's project named `PROJECT`.
+    fn project(&self) -> ProjectIdentity {
+        identity(&self.operator, PROJECT)
+    }
+
+    /// The operator's project named `OTHER_PROJECT`.
+    fn other_project(&self) -> ProjectIdentity {
+        identity(&self.operator, OTHER_PROJECT)
+    }
+
     fn path(&self) -> &Path {
         self.root.path()
     }
@@ -73,6 +98,7 @@ impl Node {
         TrustStore::from_registry(self.node.verifying_key(), records)
             .unwrap()
             .with_standing_kinds(["knowledge".to_owned(), "view".to_owned()])
+            .with_succession_chain(&[])
     }
 
     fn ledger(&self) -> EndorsementLedger {
@@ -92,11 +118,11 @@ impl Node {
     fn items_body(
         &self,
         endorser: &SigningKey,
-        project: &str,
+        project_name: &str,
         items: Vec<EndorsedItem>,
     ) -> EndorsementBody {
         EndorsementBody::for_items(
-            project,
+            &identity(endorser, project_name),
             &principal(endorser),
             items,
             &lillux::time::iso8601_from_unix_secs(NOW),
@@ -108,12 +134,12 @@ impl Node {
     fn standing_body(
         &self,
         endorser: &SigningKey,
-        project: &str,
+        project_name: &str,
         kinds: &[&str],
         not_after: Option<u64>,
     ) -> EndorsementBody {
         EndorsementBody::standing(
-            project,
+            &identity(endorser, project_name),
             &principal(endorser),
             kinds.iter().map(|kind| (*kind).to_owned()).collect(),
             not_after.map(lillux::time::iso8601_from_unix_secs),
@@ -161,14 +187,14 @@ fn class(
     trust: &TrustStore,
     item: &(String, SignatureHeader, String),
     kind: &str,
-    project: &str,
+    project: &ProjectIdentity,
 ) -> TrustClass {
     verify_item_signature(
         &item.0,
         &item.1,
         &envelope(),
         trust,
-        &SignerContext::project(kind, Some(Path::new(project))),
+        &SignerContext::project(kind, &LogicalProject::Stated(project.clone())),
     )
     .map(|(class, _)| class)
     .unwrap()
@@ -187,7 +213,10 @@ fn a_per_change_endorsement_flips_the_item_from_untrusted_to_trusted() {
     let node = Node::new();
     let trust = node.trust();
     let item = signed_item(&node.authoring, "name: view\n");
-    assert_eq!(class(&trust, &item, "view", PROJECT), TrustClass::Untrusted);
+    assert_eq!(
+        class(&trust, &item, "view", &node.project()),
+        TrustClass::Untrusted
+    );
 
     node.record(
         &trust,
@@ -197,7 +226,7 @@ fn a_per_change_endorsement_flips_the_item_from_untrusted_to_trusted() {
     .unwrap();
     let endorsed = node.indexed(&trust);
     assert_eq!(
-        class(&endorsed, &item, "view", PROJECT),
+        class(&endorsed, &item, "view", &node.project()),
         TrustClass::Trusted
     );
 }
@@ -218,17 +247,17 @@ fn a_changed_byte_or_another_kind_or_project_stays_untrusted() {
     let changed = signed_item(&node.authoring, "name: view2\n");
     assert_ne!(changed.2, item.2);
     assert_eq!(
-        class(&endorsed, &changed, "view", PROJECT),
+        class(&endorsed, &changed, "view", &node.project()),
         TrustClass::Untrusted,
         "per-change digest mismatch"
     );
     assert_eq!(
-        class(&endorsed, &item, "surface", PROJECT),
+        class(&endorsed, &item, "surface", &node.project()),
         TrustClass::Untrusted,
         "another kind"
     );
     assert_eq!(
-        class(&endorsed, &item, "view", OTHER_PROJECT),
+        class(&endorsed, &item, "view", &node.other_project()),
         TrustClass::Untrusted,
         "another project"
     );
@@ -247,16 +276,16 @@ fn a_standing_endorsement_covers_its_kinds_in_its_project_only() {
     let endorsed = node.indexed(&trust);
     let item = signed_item(&node.authoring, "text\n");
     assert_eq!(
-        class(&endorsed, &item, "knowledge", PROJECT),
+        class(&endorsed, &item, "knowledge", &node.project()),
         TrustClass::Trusted
     );
     assert_eq!(
-        class(&endorsed, &item, "directive", PROJECT),
+        class(&endorsed, &item, "directive", &node.project()),
         TrustClass::Untrusted,
         "a kind the standing endorsement does not name"
     );
     assert_eq!(
-        class(&endorsed, &item, "knowledge", OTHER_PROJECT),
+        class(&endorsed, &item, "knowledge", &node.other_project()),
         TrustClass::Untrusted,
         "another project"
     );
@@ -275,8 +304,8 @@ fn a_standing_endorsement_lapses_at_its_not_after() {
     let index = EndorsementIndex::build(&node.ledger(), &trust).unwrap();
     let digest = "a".repeat(64);
     let gate = StandingGate::of_kinds(["knowledge".to_owned()]);
-    assert!(index.covers(&gate, PROJECT, "knowledge", &digest, NOW + 600));
-    assert!(!index.covers(&gate, PROJECT, "knowledge", &digest, NOW + 601));
+    assert!(index.covers(&gate, &node.project(), "knowledge", &digest, NOW + 600));
+    assert!(!index.covers(&gate, &node.project(), "knowledge", &digest, NOW + 601));
     assert_ne!(
         index.identity(&gate, NOW),
         index.identity(&gate, NOW + 601),
@@ -297,7 +326,7 @@ fn revoking_an_endorsement_flips_the_item_back_and_a_restored_file_stays_dead() 
         )
         .unwrap();
     assert_eq!(
-        class(&node.indexed(&trust), &item, "view", PROJECT),
+        class(&node.indexed(&trust), &item, "view", &node.project()),
         TrustClass::Trusted
     );
 
@@ -314,7 +343,7 @@ fn revoking_an_endorsement_flips_the_item_back_and_a_restored_file_stays_dead() 
     assert!(revoked.newly_revoked);
     assert_eq!(revoked.tombstone.revoked_by, principal(&node.operator));
     assert_eq!(
-        class(&node.indexed(&trust), &item, "view", PROJECT),
+        class(&node.indexed(&trust), &item, "view", &node.project()),
         TrustClass::Untrusted
     );
 
@@ -335,13 +364,13 @@ fn revoking_an_endorsement_flips_the_item_back_and_a_restored_file_stays_dead() 
     // Removing the endorsement file and putting it back leaves it dead: the
     // tombstone, not the file, decides.
     let path = endorsements_dir(node.path())
-        .join(project_directory_name(PROJECT))
+        .join(project_directory_name(&node.project()))
         .join(format!("{}.json", recorded.digest));
     let bytes = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, bytes).unwrap();
     assert_eq!(
-        class(&node.indexed(&trust), &item, "view", PROJECT),
+        class(&node.indexed(&trust), &item, "view", &node.project()),
         TrustClass::Untrusted
     );
 
@@ -353,7 +382,7 @@ fn revoking_an_endorsement_flips_the_item_back_and_a_restored_file_stays_dead() 
     )
     .unwrap();
     assert_eq!(
-        class(&node.indexed(&trust), &item, "view", PROJECT),
+        class(&node.indexed(&trust), &item, "view", &node.project()),
         TrustClass::Trusted
     );
 }
@@ -427,7 +456,12 @@ fn an_endorsement_whose_operator_is_revoked_later_stops_applying() {
         record(&node.authoring, SignerRole::Authoring, SignerStatus::Active),
     ]);
     assert_eq!(
-        class(&node.indexed(&revoked_trust), &item, "view", PROJECT),
+        class(
+            &node.indexed(&revoked_trust),
+            &item,
+            "view",
+            &node.project()
+        ),
         TrustClass::Untrusted
     );
 }
@@ -450,7 +484,7 @@ fn a_bad_signature_a_delegation_and_a_stale_time_are_refused() {
 
     // Altered after signing.
     let mut altered = SignedEndorsement::sign(body.clone(), &node.operator).unwrap();
-    altered.body.project = OTHER_PROJECT.to_owned();
+    altered.body.project = node.other_project();
     assert_eq!(
         record_endorsement(node.path(), &node.node, &trust, altered, NOW)
             .unwrap_err()
@@ -543,12 +577,12 @@ fn a_non_authoring_key_is_unaffected_by_endorsements() {
     ]);
     let authored = signed_item(&project_author, "x\n");
     assert_eq!(
-        class(&trust, &authored, "knowledge", PROJECT),
+        class(&trust, &authored, "knowledge", &node.project()),
         TrustClass::Trusted,
         "its registry scope still decides"
     );
     assert_eq!(
-        class(&trust, &authored, "view", PROJECT),
+        class(&trust, &authored, "view", &node.project()),
         TrustClass::Untrusted,
         "outside its scope"
     );
@@ -562,11 +596,11 @@ fn a_non_authoring_key_is_unaffected_by_endorsements() {
     .unwrap();
     let endorsed = node.indexed(&trust);
     assert_eq!(
-        class(&endorsed, &authored, "view", PROJECT),
+        class(&endorsed, &authored, "view", &node.project()),
         TrustClass::Untrusted
     );
     assert_eq!(
-        class(&endorsed, &authored, "knowledge", PROJECT),
+        class(&endorsed, &authored, "knowledge", &node.project()),
         TrustClass::Trusted
     );
 }
@@ -584,7 +618,7 @@ fn an_endorsement_cannot_trust_an_unpinned_or_revoked_authoring_key() {
     )
     .unwrap();
     assert_eq!(
-        class(&node.indexed(&trust), &item, "view", PROJECT),
+        class(&node.indexed(&trust), &item, "view", &node.project()),
         TrustClass::Untrusted,
         "an unpinned key"
     );
@@ -610,7 +644,7 @@ fn an_endorsement_cannot_trust_an_unpinned_or_revoked_authoring_key() {
         &authored.1,
         &envelope(),
         &endorsed,
-        &SignerContext::project("view", Some(Path::new(PROJECT))),
+        &SignerContext::project("view", &LogicalProject::Stated(node.project())),
     )
     .unwrap_err();
     assert!(
@@ -698,7 +732,10 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
     let node = Node::new();
     let live = live_store(&node);
     let item = signed_item(&node.authoring, "x\n");
-    assert_eq!(class(&live, &item, "view", PROJECT), TrustClass::Untrusted);
+    assert_eq!(
+        class(&live, &item, "view", &node.project()),
+        TrustClass::Untrusted
+    );
     let frozen = live.snapshot();
 
     node.record(
@@ -708,9 +745,12 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
     )
     .unwrap();
     let identity = live.refresh_endorsements(node.path()).unwrap();
-    assert_eq!(class(&live, &item, "view", PROJECT), TrustClass::Trusted);
     assert_eq!(
-        class(&frozen, &item, "view", PROJECT),
+        class(&live, &item, "view", &node.project()),
+        TrustClass::Trusted
+    );
+    assert_eq!(
+        class(&frozen, &item, "view", &node.project()),
         TrustClass::Untrusted,
         "a request's snapshot sees one index for its whole life"
     );
@@ -723,7 +763,7 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
     // A restart sees the same endorsements.
     let restarted = TrustStore::load_node_registry(node.path()).unwrap();
     assert_eq!(
-        class(&restarted, &item, "view", PROJECT),
+        class(&restarted, &item, "view", &node.project()),
         TrustClass::Trusted
     );
 }
@@ -745,8 +785,8 @@ fn a_request_that_froze_its_trust_builds_one_signer_list_whatever_is_revoked_mea
     // The request freezes its view at admission; its method-config load and
     // its limits load each build a signer list from that one view.
     let frozen = live.snapshot();
-    let project = Some(Path::new(PROJECT));
-    let at_method_config_load = live.launch_signer_entries(&frozen, project);
+    let project = LogicalProject::Stated(node.project());
+    let at_method_config_load = live.launch_signer_entries(&frozen, &project);
 
     revoke_endorsement(
         node.path(),
@@ -760,7 +800,7 @@ fn a_request_that_froze_its_trust_builds_one_signer_list_whatever_is_revoked_mea
     .unwrap();
     live.refresh_endorsements(node.path()).unwrap();
 
-    let at_limits_load = live.launch_signer_entries(&frozen, project);
+    let at_limits_load = live.launch_signer_entries(&frozen, &project);
     assert_eq!(
         trusted_signers_digest(&at_method_config_load),
         trusted_signers_digest(&at_limits_load),
@@ -773,7 +813,7 @@ fn a_request_that_froze_its_trust_builds_one_signer_list_whatever_is_revoked_mea
     );
 
     // The next request freezes the revoked state.
-    let next = live.launch_signer_entries(&live.snapshot(), project);
+    let next = live.launch_signer_entries(&live.snapshot(), &project);
     assert_ne!(
         trusted_signers_digest(&at_limits_load),
         trusted_signers_digest(&next)
@@ -794,7 +834,7 @@ fn a_tampered_or_misfiled_document_refuses_the_load() {
         )
         .unwrap();
     let path = endorsements_dir(node.path())
-        .join(project_directory_name(PROJECT))
+        .join(project_directory_name(&node.project()))
         .join(format!("{}.json", recorded.digest));
     let original = std::fs::read_to_string(&path).unwrap();
 
@@ -807,7 +847,8 @@ fn a_tampered_or_misfiled_document_refuses_the_load() {
     assert_eq!(error.code(), "trust_record_tampered");
 
     std::fs::write(&path, &original).unwrap();
-    let misfiled = endorsements_dir(node.path()).join(project_directory_name(OTHER_PROJECT));
+    let misfiled =
+        endorsements_dir(node.path()).join(project_directory_name(&node.other_project()));
     std::fs::create_dir_all(&misfiled).unwrap();
     std::fs::rename(&path, misfiled.join(format!("{}.json", recorded.digest))).unwrap();
     let error = EndorsementLedger::load(node.path(), &node.node.verifying_key()).unwrap_err();
@@ -815,14 +856,15 @@ fn a_tampered_or_misfiled_document_refuses_the_load() {
 }
 
 #[test]
-fn shape_rules_refuse_wildcards_empty_targets_and_relative_projects() {
+fn shape_rules_refuse_wildcards_and_empty_targets() {
     let node = Node::new();
     let operator = principal(&node.operator);
     let at = lillux::time::iso8601_from_unix_secs(NOW);
     let head = node.head();
+    let project = node.project();
     let check = |body: EndorsementBody| body.validate_shape().unwrap_err().code();
     let standing = |kinds: Vec<String>| {
-        EndorsementBody::standing(PROJECT, &operator, kinds, None, &at, &nonce(), &head)
+        EndorsementBody::standing(&project, &operator, kinds, None, &at, &nonce(), &head)
     };
     assert_eq!(
         check(standing(vec!["*".to_owned()])),
@@ -831,7 +873,7 @@ fn shape_rules_refuse_wildcards_empty_targets_and_relative_projects() {
     assert_eq!(check(standing(Vec::new())), "endorsement_malformed");
     assert_eq!(
         check(EndorsementBody::for_items(
-            PROJECT,
+            &project,
             &operator,
             Vec::new(),
             &at,
@@ -841,20 +883,8 @@ fn shape_rules_refuse_wildcards_empty_targets_and_relative_projects() {
         "endorsement_malformed"
     );
     assert_eq!(
-        check(EndorsementBody::standing(
-            "relative/project",
-            &operator,
-            vec!["view".to_owned()],
-            None,
-            &at,
-            &nonce(),
-            &head
-        )),
-        "endorsement_malformed"
-    );
-    assert_eq!(
         check(EndorsementBody::for_items(
-            PROJECT,
+            &project,
             &operator,
             vec![EndorsedItem {
                 item_ref: "view:a".to_owned(),
@@ -869,7 +899,7 @@ fn shape_rules_refuse_wildcards_empty_targets_and_relative_projects() {
     );
     assert_eq!(
         check(EndorsementBody::standing(
-            PROJECT,
+            &project,
             &operator,
             vec!["view".to_owned()],
             Some(lillux::time::iso8601_from_unix_secs(NOW - 5)),
@@ -947,7 +977,8 @@ fn a_node_that_was_never_told_which_kinds_allow_one_refuses_every_standing_endor
             SignerStatus::Active,
         )],
     )
-    .unwrap();
+    .unwrap()
+    .with_succession_chain(&[]);
     let refused = node
         .record(
             &ungated,
@@ -975,7 +1006,7 @@ fn a_stored_standing_endorsement_covers_nothing_until_its_kinds_allow_it_and_nev
     // stored endorsement covers nothing.
     let restarted = TrustStore::load_node_registry(node.path()).unwrap();
     assert_eq!(
-        class(&restarted, &item, "knowledge", PROJECT),
+        class(&restarted, &item, "knowledge", &node.project()),
         TrustClass::Untrusted,
         "the gate is unset across a reload"
     );
@@ -988,7 +1019,7 @@ fn a_stored_standing_endorsement_covers_nothing_until_its_kinds_allow_it_and_nev
         .clone()
         .with_standing_kinds(["knowledge".to_owned()]);
     assert_eq!(
-        class(&allowed, &item, "knowledge", PROJECT),
+        class(&allowed, &item, "knowledge", &node.project()),
         TrustClass::Trusted
     );
     assert!(allowed.endorsement_inert().is_empty());
@@ -997,13 +1028,13 @@ fn a_stored_standing_endorsement_covers_nothing_until_its_kinds_allow_it_and_nev
     // a launch carries nothing for it.
     let stopped = restarted.with_standing_kinds(["view".to_owned()]);
     assert_eq!(
-        class(&stopped, &item, "knowledge", PROJECT),
+        class(&stopped, &item, "knowledge", &node.project()),
         TrustClass::Untrusted
     );
     assert_eq!(stopped.endorsement_inert()[0].1.code(), "kind_not_standing");
     assert!(
         stopped
-            .launch_endorsements(Some(Path::new(PROJECT)))
+            .launch_endorsements(&LogicalProject::Stated(node.project()))
             .is_none()
     );
 }
@@ -1015,7 +1046,7 @@ fn a_stored_standing_endorsement_without_a_bounded_life_is_inert() {
     let at = lillux::time::iso8601_from_unix_secs(NOW);
     let make = |not_after: Option<u64>| {
         EndorsementBody::standing(
-            PROJECT,
+            &node.project(),
             &operator,
             vec!["knowledge".to_owned()],
             not_after.map(lillux::time::iso8601_from_unix_secs),
@@ -1035,4 +1066,86 @@ fn a_stored_standing_endorsement_without_a_bounded_life_is_inert() {
         Some("lifetime_too_long")
     );
     assert_eq!(gate.inert_reason(&make(Some(NOW + 30 * DAY))), None);
+}
+
+#[test]
+fn an_endorsement_for_another_principals_project_is_refused_and_never_indexed() {
+    let node = Node::new();
+    let trust = node.trust();
+    let item = signed_item(&node.authoring, "x\n");
+    let foreign = identity(&key(9), PROJECT);
+    let body = EndorsementBody::for_items(
+        &foreign,
+        &principal(&node.operator),
+        vec![item_for("view", &item.2)],
+        &lillux::time::iso8601_from_unix_secs(NOW),
+        &nonce(),
+        &node.head(),
+    );
+    assert!(body.validate_shape().is_ok());
+    let refused = node.record(&trust, &node.operator, body).unwrap_err();
+    assert_eq!(refused.code(), "endorsement_project_not_endorsers");
+}
+
+#[test]
+fn a_rotated_operator_endorses_the_root_principals_project_and_the_retired_root_still_stands() {
+    let node = Node::new();
+    let successor = key(4);
+    let records = vec![
+        record(&node.operator, SignerRole::Operator, SignerStatus::Active),
+        record(&node.authoring, SignerRole::Authoring, SignerStatus::Active),
+    ];
+    let before = node.trust_with(records);
+    let item = signed_item(&node.authoring, "x\n");
+    node.record(
+        &before,
+        &node.operator,
+        node.items_body(&node.operator, PROJECT, vec![item_for("view", &item.2)]),
+    )
+    .unwrap();
+    // Rotate: the old operator is retired and the successor's record names
+    // it as predecessor.
+    let succeeded = crate::authority::trust::TrustEvent {
+        schema: "x".into(),
+        seq: 1,
+        previous: None,
+        kind: crate::authority::trust::TrustEventKind::Succeeded,
+        signer: fp(&successor),
+        record_digest: String::new(),
+        request_digest: String::new(),
+        operator: String::new(),
+        predecessor: Some(fp(&node.operator)),
+    };
+    let after = TrustStore::from_registry(
+        node.node.verifying_key(),
+        vec![
+            record(&node.operator, SignerRole::Operator, SignerStatus::Retired),
+            record(&successor, SignerRole::Operator, SignerStatus::Active),
+            record(&node.authoring, SignerRole::Authoring, SignerStatus::Active),
+        ],
+    )
+    .unwrap()
+    .with_succession_chain(&[succeeded]);
+    // The successor speaks for the root principal, so the project keeps its
+    // identity, and the retired root's endorsement still applies.
+    assert!(after.speaks_for(&fp(&successor), &owner(&node.operator)));
+    assert_eq!(
+        class(&node.indexed(&after), &item, "view", &node.project()),
+        TrustClass::Trusted
+    );
+    // The successor may endorse the same project.
+    let second = signed_item(&node.authoring, "y\n");
+    let body = EndorsementBody::for_items(
+        &node.project(),
+        &principal(&successor),
+        vec![item_for("view", &second.2)],
+        &lillux::time::iso8601_from_unix_secs(NOW),
+        &nonce(),
+        &node.head(),
+    );
+    node.record(&after, &successor, body).unwrap();
+    assert_eq!(
+        class(&node.indexed(&after), &second, "view", &node.project()),
+        TrustClass::Trusted
+    );
 }

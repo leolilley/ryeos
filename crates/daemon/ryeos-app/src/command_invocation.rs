@@ -37,9 +37,7 @@ pub fn normalize_selected_parameters(
     }
     let effective = engine
         .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                None, &authority,
-            ),
+            logical_project: ryeos_engine::contracts::unestablished_project(&authority),
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
                 .map_err(|e| e.to_string())?,
             expected_kind: None,
@@ -347,7 +345,28 @@ pub fn compile_command_invocation(
             *root = base.join(path).to_string_lossy().into_owned();
         }
     }
-    let policy = command_execution_policy(project_path.is_some(), &controls).map_err(Invalid)?;
+    // A current-head run names the caller's own head by the name the
+    // checkout declares now.
+    let current_head_name = match (&project_path, controls.pin_current_head_at_admission) {
+        (Some(root), true) => Some(
+            ryeos_state::project_identity::ProjectDeclaration::declared_name(root)
+                .map_err(|error| Invalid(format!("{error:#}")))?
+                .ok_or_else(|| {
+                    Invalid(format!(
+                        "project_manifest_missing: --current-head needs {} to have a {} whose `name:` is the project's name",
+                        root.display(),
+                        ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+                    ))
+                })?,
+        ),
+        _ => None,
+    };
+    let policy = command_execution_policy(
+        project_path.is_some(),
+        current_head_name.as_ref(),
+        &controls,
+    )
+    .map_err(Invalid)?;
     // Keep structured payload values intact; effective schema normalization is
     // performed against the selected callee by execution admission.
     Ok(CompiledCommandInvocation {
@@ -363,6 +382,7 @@ pub fn compile_command_invocation(
 
 pub fn command_execution_policy(
     project_backed: bool,
+    current_head_name: Option<&ryeos_state::project_identity::ProjectName>,
     controls: &CommandInvocationControls,
 ) -> Result<crate::execution_policy::ExecutionPolicy, String> {
     use crate::execution_policy::{ExecutionPolicy, ExecutionResponse};
@@ -374,7 +394,14 @@ pub fn command_execution_policy(
     let mut policy = if let Some(hash) = &controls.project_snapshot {
         ExecutionPolicy::local_pinned_snapshot_read_only(response, hash.clone())
     } else if controls.pin_current_head_at_admission {
-        ExecutionPolicy::local_pinned_current_head(response)
+        ExecutionPolicy::local_pinned_current_head(
+            response,
+            ryeos_state::project_identity::PushedProject::Named {
+                name: current_head_name
+                    .ok_or("--current-head needs the project's declared name")?
+                    .clone(),
+            },
+        )
     } else if controls.pin_project_at_admission {
         ExecutionPolicy::local_pinned_capture(response)
     } else if project_backed {

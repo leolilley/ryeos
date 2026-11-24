@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:30:21Z:6cad414b5769ca16d7ea628f121ee4b8ff7f9282bc56018b7e883d1cad38cc14:wUJooaUcSwIBr48KJbMY9kLO6AzXL2x5ZYrswQ2N/xoOb2z8mg/YpBIoBmZq78zo73JkKJz7pVOwmBHL1vjjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-23T00:05:35Z:0751040d7a8e033bde17c40f48a83fe955a06712fb1b979f5c4ba818f1cc4b5a:EMSotmHuQz5ziZ7/Nt5zY7+tN0A51NJsICBYXKGxLwXoNDmknjuKaLNc2YWkxqEOLhrJJmZxrVR0aGg85aaLAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -469,8 +469,11 @@ daemon therefore causes a mechanical refusal.
 Remote request authorization does not itself make project content trusted. If
 a pushed project contains executable project-authored items, the target
 operator must have pinned the author's key on the target node with
-`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role project_author --project <root>`
-(a node-signed signer record scoped to that project). A trust document carried
+`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role project_author --project fp:<pusher>/<name>`
+(a node-signed signer record scoped to that project). On the target the owner
+is the principal that pushed the head, the origin operator for a delegated
+push, so the scope names that pusher explicitly; `own:` and operator defaults
+do not cover another node's key. A trust document carried
 inside the pushed snapshot grants nothing. Never copy the source private key,
 and never infer content trust from a `remote_principal` grant.
 
@@ -484,7 +487,11 @@ ryeos remote push --remote prod --project /absolute/path/to/project
 
 The push pipeline ingests local project content, uploads missing CAS
 objects, and writes a principal-scoped remote pushed HEAD via
-`/push-head`. Before local CAS ingestion, it unions the source node's current
+`/push-head`. The head is keyed by the pushing principal and the project name
+the checkout's `.ai/manifest.yaml` names in its `name:` (a binding records that
+name and every push re-reads the manifest, refusing `project_name_mismatch`); the
+target refuses a snapshot that does not declare the name it is pushed under.
+A checkout with no `.ai/manifest.yaml` cannot be pushed (`project_manifest_missing`). Before local CAS ingestion, it unions the source node's current
 signed exclusions with the target's cached ingest-ignore rules. If the target
 cache is missing, the handler fetches `/ingest-ignore` inline and aborts if
 that fetch fails. The receiving node independently rechecks every transferred
@@ -505,6 +512,7 @@ That creates/advances the distinct node principal-scoped HEAD.
 Failure modes:
 
 - project path must be absolute and canonicalizable
+- the checkout must declare its project name, equal to the binding's
 - a full-project binding's destination must already be an accessible,
   canonicalizable project root on the target node
 - missing remote ignore rules fail closed if they cannot be fetched

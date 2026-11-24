@@ -3879,10 +3879,7 @@ pub fn spawn_item(
         };
         let isolation_resolution_roots = engine.resolution_roots(
             isolation_project_root,
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &resolved.plan_context.subject_resolution_authority,
-            ),
+            resolved.plan_context.logical_project.clone(),
         );
         let isolation_bundle_roots = isolation_resolution_roots
             .ordered

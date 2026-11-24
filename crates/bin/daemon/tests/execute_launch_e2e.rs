@@ -537,7 +537,14 @@ async fn execute_launch_from_published_snapshot_keeps_thread_state_out_of_the_ma
 
     let source = tempfile::tempdir().expect("source tempdir");
     plant_smoke_graph(source.path(), &fixture.publisher).expect("plant smoke graph");
+    // The published snapshot and the checkout it is pushed for both name the
+    // project in their manifest.
+    let manifest = "name: published-project\n";
+    std::fs::write(source.path().join(".ai/manifest.yaml"), manifest)
+        .expect("source project manifest");
     let live = tempfile::tempdir().expect("live project tempdir");
+    std::fs::create_dir_all(live.path().join(".ai")).expect("live project .ai");
+    std::fs::write(live.path().join(".ai/manifest.yaml"), manifest).expect("live project manifest");
     let live_path = live
         .path()
         .canonicalize()

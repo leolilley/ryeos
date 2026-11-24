@@ -20,6 +20,8 @@
 //! The trust store does NOT share trust policy with daemon request auth or
 //! node auth; those are distinct trust domains.
 
+use ryeos_state::principal_id::PrincipalId;
+use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -27,8 +29,10 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
+mod ownership;
 mod registry;
 pub use endorsement::*;
+pub use ownership::*;
 pub use registry::*;
 
 use crate::contracts::{
@@ -179,36 +183,37 @@ pub struct SignerContext<'a> {
     /// Item kind, or a fixed document name for signed non-item documents
     /// (for example `bundle_manifest`).
     pub kind: &'a str,
-    /// Project root the item belongs to, when it came from a project.
-    pub project_root: Option<&'a Path>,
+    /// The owner+name project the item belongs to, as this node has
+    /// established it. Never a path: an absent identity matches no scoped
+    /// signer.
+    pub project: &'a LogicalProject,
 }
 
+/// The project of bundle- and node-space contexts.
+pub static NO_PROJECT: LogicalProject = LogicalProject::Absent(LogicalProjectAbsence::Projectless);
+
 impl<'a> SignerContext<'a> {
-    pub fn new(
-        space: impl Into<SignerSpace>,
-        kind: &'a str,
-        project_root: Option<&'a Path>,
-    ) -> Self {
+    pub fn new(space: impl Into<SignerSpace>, kind: &'a str, project: &'a LogicalProject) -> Self {
         Self {
             space: space.into(),
             kind,
-            project_root,
+            project,
         }
     }
 
     /// A bundle-space item or document.
     pub fn bundle(kind: &'a str) -> Self {
-        Self::new(SignerSpace::Bundle, kind, None)
+        Self::new(SignerSpace::Bundle, kind, &NO_PROJECT)
     }
 
     /// A node-space item or document.
     pub fn node(kind: &'a str) -> Self {
-        Self::new(SignerSpace::Node, kind, None)
+        Self::new(SignerSpace::Node, kind, &NO_PROJECT)
     }
 
     /// A project-space item.
-    pub fn project(kind: &'a str, project_root: Option<&'a Path>) -> Self {
-        Self::new(SignerSpace::Project, kind, project_root)
+    pub fn project(kind: &'a str, project: &'a LogicalProject) -> Self {
+        Self::new(SignerSpace::Project, kind, project)
     }
 }
 
@@ -257,11 +262,15 @@ pub struct TrustStore {
     /// endorsement snapshot, which fixes the project identity and names the
     /// signers whose items it decides.
     launch_endorsements: Option<LaunchEndorsements>,
+    /// The node's key-succession graph, from which project ownership is
+    /// resolved. Present only on a store loaded from the node registry with
+    /// its event chain; every other store refuses ownership questions.
+    succession: Option<std::sync::Arc<SuccessionGraph>>,
 }
 
 #[derive(Debug, Clone)]
 struct LaunchEndorsements {
-    project: String,
+    project: ryeos_state::project_identity::ProjectIdentity,
     authoring_signers: std::collections::BTreeSet<String>,
 }
 
@@ -275,6 +284,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -296,6 +306,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -376,6 +387,7 @@ impl TrustStore {
             entry_scopes,
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         };
         store.apply_entry_endorsements(entries)?;
         Ok(store)
@@ -483,6 +495,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         })
     }
 
@@ -495,7 +508,8 @@ impl TrustStore {
     pub fn load_node_registry(app_root: &Path) -> Result<Self, TrustError> {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
-        let mut store = Self::from_registry(node_key, records)?;
+        let chain = load_event_chain(&events_dir(app_root), &node_key)?;
+        let mut store = Self::from_registry(node_key, records)?.with_succession_chain(&chain);
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, &store)?;
         tracing::debug!(
@@ -564,18 +578,15 @@ impl TrustStore {
 
     /// The endorsements a launch of `logical_project` carries to its runtime,
     /// taken from this store's index (a request's frozen snapshot), or `None`
-    /// when the project is unknown or nothing applies. The project identity is
-    /// the canonical root, the same one [`Self::endorsed`] matches on.
+    /// when the project states no identity or nothing applies. The identity
+    /// is the same one [`Self::endorsed`] matches on.
     pub fn launch_endorsements(
         &self,
-        logical_project: Option<&Path>,
+        logical_project: &LogicalProject,
     ) -> Option<EndorsementSnapshot> {
-        let root = logical_project?;
-        let canonical = std::fs::canonicalize(root).ok();
-        let project = canonical.as_deref().unwrap_or(root).to_str()?.to_owned();
         self.endorsements
             .current()
-            .snapshot_for(self.endorsements.gate(), &project)
+            .snapshot_for(self.endorsements.gate(), logical_project.identity()?)
     }
 
     /// The scoped signer list a launch carries: this store's entries, with the
@@ -587,9 +598,46 @@ impl TrustStore {
     pub fn launch_signer_entries(
         &self,
         frozen: &TrustStore,
-        logical_project: Option<&Path>,
+        logical_project: &LogicalProject,
     ) -> Vec<TrustedSignerEntry> {
         let mut entries = self.signer_entries();
+        // Scoped entries are judged here, against the identity the launch
+        // sealed, so a runtime that never sees that identity judges the same:
+        // a scope naming this launch's project is unscoped for the launch, and
+        // one that does not loses project space.
+        let identity = logical_project.identity();
+        let owners: HashMap<String, Option<PrincipalId>> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.fingerprint.clone(),
+                    self.signing_principal_of(&entry.fingerprint),
+                )
+            })
+            .collect();
+        entries.retain_mut(|entry| {
+            if entry.scope.projects.is_empty()
+                || !entry.scope.spaces.contains(&SignerSpace::Project)
+            {
+                return true;
+            }
+            let named = identity.is_some_and(|identity| {
+                entry.scope.projects.iter().any(|project| {
+                    project.names(
+                        identity,
+                        owners.get(&entry.fingerprint).and_then(Option::as_ref),
+                    )
+                })
+            });
+            entry.scope.projects.clear();
+            if !named {
+                entry
+                    .scope
+                    .spaces
+                    .retain(|space| *space != SignerSpace::Project);
+            }
+            !entry.scope.spaces.is_empty()
+        });
         let Some(snapshot) = frozen.launch_endorsements(logical_project) else {
             return entries;
         };
@@ -602,6 +650,52 @@ impl TrustStore {
             }
         }
         entries
+    }
+
+    /// This store with the key-succession graph built from its records and
+    /// `chain` (the verified node-signed key-event chain). Only a store with
+    /// a graph answers ownership questions.
+    pub fn with_succession_chain(mut self, chain: &[TrustEvent]) -> Self {
+        let records: Vec<SignerRecord> = self.records.values().cloned().collect();
+        self.succession = Some(std::sync::Arc::new(SuccessionGraph::build(&records, chain)));
+        self
+    }
+
+    /// The node's key-succession graph, when this store holds one.
+    pub fn succession(&self) -> Option<&SuccessionGraph> {
+        self.succession.as_deref()
+    }
+
+    /// The principal whose project namespace `key` acts in on this node.
+    /// `key` is a key fingerprint, `fp:<64 lowercase hex>` or bare hex. A
+    /// retired or revoked key has none (`owner_key_not_active`). This and
+    /// [`Self::speaks_for`] are the only ways to obtain an owner from a key.
+    pub fn owner_for(&self, key: &str) -> Result<ResolvedOwner, OwnerRefusal> {
+        let graph = self
+            .succession
+            .as_deref()
+            .ok_or(OwnerRefusal::Unavailable)?;
+        graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+    }
+
+    /// The principal a signature by `key` speaks for when verified: its
+    /// chain root's solo principal for an active or retired key; `None` for
+    /// a revoked key, a key with no record, a corrupt chain, or a store with
+    /// no registry graph. For judging signed items and stored statements,
+    /// never for acting.
+    pub fn signing_principal_of(&self, key: &str) -> Option<PrincipalId> {
+        self.succession
+            .as_deref()?
+            .signing_principal_of(key.strip_prefix("fp:").unwrap_or(key))
+            .ok()
+            .flatten()
+    }
+
+    /// Whether `key` speaks for `principal` on this node. Decides project
+    /// ownership only; never a grant, scope, session or thread read.
+    pub fn speaks_for(&self, key: &str, principal: &PrincipalId) -> bool {
+        self.owner_for(key)
+            .is_ok_and(|owner| &owner.principal == principal)
     }
 
     /// A copy of this store holding exactly `index`, frozen. For stores built
@@ -672,6 +766,7 @@ impl TrustStore {
             node_key,
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -779,9 +874,13 @@ impl TrustStore {
                     scope: record.scope.clone(),
                 };
             }
+            // Verification follows "retired verifies, revoked does not", so
+            // an `own:` scope is judged on the signing principal, not on
+            // whether the key may still act.
+            let owner = self.signing_principal_of(fingerprint);
             if record
                 .scope
-                .admits(context.space, context.kind, context.project_root)
+                .admits(context.space, context.kind, context.project, owner.as_ref())
             {
                 return ScopeDecision::Admitted;
             }
@@ -792,7 +891,7 @@ impl TrustStore {
         }
         if self.node_key.as_ref().map(compute_fingerprint).as_deref() == Some(fingerprint) {
             let scope = node_root_scope();
-            if scope.admits(context.space, context.kind, context.project_root) {
+            if scope.admits(context.space, context.kind, context.project, None) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -801,7 +900,10 @@ impl TrustStore {
             };
         }
         if let Some(scope) = self.entry_scopes.get(fingerprint) {
-            if scope.admits(context.space, context.kind, context.project_root) {
+            // A launch's signer list is already resolved against the
+            // launch's identity (see `launch_signer_entries`): no entry
+            // keeps an `own:` scope, so nothing here needs an owner.
+            if scope.admits(context.space, context.kind, context.project, None) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -825,11 +927,8 @@ impl TrustStore {
         if context.space != SignerSpace::Project {
             return false;
         }
-        let Some(root) = context.project_root else {
-            return false;
-        };
-        // A launch's runtime matches the launch's own project identity; its
-        // process path may be a checkout of that project.
+        // A store rebuilt from a launch judges only that launch's project,
+        // whose identity the daemon sealed into the frozen snapshot.
         if let Some(launch) = &self.launch_endorsements {
             return self.endorsements.current().covers(
                 self.endorsements.gate(),
@@ -839,15 +938,14 @@ impl TrustStore {
                 lillux::time::unix_secs_now(),
             );
         }
-        // Endorsements name the project by its canonical root, however the
-        // request spelled the path.
-        let canonical = std::fs::canonicalize(root).ok();
-        let Some(project) = canonical.as_deref().unwrap_or(root).to_str() else {
+        // Otherwise endorsements name a project by its owner+name identity;
+        // an absent identity is never endorsed.
+        let Some(identity) = context.project.identity() else {
             return false;
         };
         self.endorsements.current().covers(
             self.endorsements.gate(),
-            project,
+            identity,
             context.kind,
             content_digest,
             lillux::time::unix_secs_now(),
@@ -1061,8 +1159,9 @@ pub fn verify_item_signature_with_hash(
                             kind: context.kind.to_string(),
                             space: context.space.as_str().to_string(),
                             project: context
-                                .project_root
-                                .map(|root| format!(" in project {}", root.display()))
+                                .project
+                                .identity()
+                                .map(|identity| format!(" in project {identity}"))
                                 .unwrap_or_default(),
                         }
                         .into())
@@ -1145,8 +1244,7 @@ pub(crate) fn verify_resolved_item_content_with_hash(
 
     match &item.signature_header {
         Some(header) => {
-            let context =
-                SignerContext::new(item.source_space, &item.kind, item.logical_project.stated());
+            let context = SignerContext::new(item.source_space, &item.kind, &item.logical_project);
             let (trust_class, signer) = verify_item_signature(
                 content,
                 header,
@@ -1315,13 +1413,47 @@ mod tests {
             SignerScope {
                 spaces,
                 kinds: kinds.iter().map(|k| k.to_string()).collect(),
-                projects: projects.iter().map(|p| p.to_string()).collect(),
+                projects: projects.iter().map(|p| p.parse().unwrap()).collect(),
             },
             status,
         );
         record.event = "e".repeat(64);
         record
     }
+
+    const PROJECT_OWNER: &str =
+        "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A stated project owned by [`PROJECT_OWNER`], one per test name.
+    fn stated_project(name: &str) -> &'static LogicalProject {
+        fn stated(name: &str) -> LogicalProject {
+            LogicalProject::Stated(format!("{PROJECT_OWNER}/{name}").parse().unwrap())
+        }
+        static P: std::sync::LazyLock<LogicalProject> = std::sync::LazyLock::new(|| stated("p"));
+        static ALPHA: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("alpha"));
+        static BETA: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("beta"));
+        static LISTED: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("listed"));
+        static OTHER: std::sync::LazyLock<LogicalProject> =
+            std::sync::LazyLock::new(|| stated("other"));
+        match name {
+            "p" => &P,
+            "alpha" => &ALPHA,
+            "beta" => &BETA,
+            "listed" => &LISTED,
+            "other" => &OTHER,
+            other => panic!("no fixture project named {other}"),
+        }
+    }
+
+    fn absent_project() -> &'static LogicalProject {
+        &NO_STATED_PROJECT
+    }
+
+    static NO_STATED_PROJECT: LogicalProject =
+        LogicalProject::Absent(LogicalProjectAbsence::NotStated);
 
     fn publisher_record(vk: &VerifyingKey, status: SignerStatus) -> SignerRecord {
         record_for(
@@ -1538,8 +1670,49 @@ mod tests {
         let mut record = publisher_record(&pub_vk, SignerStatus::Active);
         record.schema = "ryeos/trust-signer/v0".to_string();
         write_record(root.path(), &record, &node_sk);
-        let err = TrustStore::load_node_registry(root.path()).unwrap_err();
-        assert_eq!(err.code(), "trust_record_schema_unsupported");
+        // Only that signer is unusable: the registry still loads, without it,
+        // and the refusal is reported by name.
+        let store = TrustStore::load_node_registry(root.path()).unwrap();
+        assert!(store.signer(&record.fingerprint).is_none());
+        let (records, refused) =
+            load_signer_records_reporting(&signers_dir(root.path()), &node_vk).unwrap();
+        assert!(records.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].code(), "trust_record_schema_unsupported");
+    }
+
+    #[test]
+    fn a_v1_record_without_project_entries_reads_and_one_with_entries_is_refused_alone() {
+        let (node_sk, node_vk, _) = gen_key();
+        let (_, publisher_vk, _) = gen_key2();
+        let author_vk = SigningKey::from_bytes(&[77; 32]).verifying_key();
+        let root = tempfile::tempdir().unwrap();
+        write_identity(root.path(), &node_vk);
+        let mut unscoped = publisher_record(&publisher_vk, SignerStatus::Active);
+        unscoped.schema = SIGNER_RECORD_SCHEMA_V1.to_string();
+        write_record(root.path(), &unscoped, &node_sk);
+        let mut scoped = record_for(
+            &author_vk,
+            SignerRole::ProjectAuthor,
+            vec![SignerSpace::Project],
+            &["*"],
+            &["own:alpha"],
+            SignerStatus::Active,
+        );
+        scoped.schema = SIGNER_RECORD_SCHEMA_V1.to_string();
+        write_record(root.path(), &scoped, &node_sk);
+        let (records, refused) =
+            load_signer_records_reporting(&signers_dir(root.path()), &node_vk).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            vec![unscoped.fingerprint.as_str()]
+        );
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].code(), "trust_record_schema_unsupported");
+        assert!(refused[0].to_string().contains(&scoped.file_name()));
     }
 
     #[test]
@@ -1555,7 +1728,7 @@ mod tests {
             verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
         assert_eq!(bundle_class, TrustClass::Trusted);
 
-        let ctx = SignerContext::project("tool", Some(Path::new("/work/p")));
+        let ctx = SignerContext::project("tool", stated_project("p"));
         let (project_class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
         assert_eq!(project_class, TrustClass::Untrusted);
@@ -1601,10 +1774,10 @@ mod tests {
         );
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
-        let ok = SignerContext::project("knowledge", None);
+        let ok = SignerContext::project("knowledge", absent_project());
         let (class, _) = verify_item_signature(&content, &header, &envelope, &store, &ok).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let bad = SignerContext::project("tool", None);
+        let bad = SignerContext::project("tool", absent_project());
         let (class, _) = verify_item_signature(&content, &header, &envelope, &store, &bad).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
     }
@@ -1625,7 +1798,7 @@ mod tests {
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
         for kind in ["knowledge", "directive", "tool"] {
-            let ctx = SignerContext::project(kind, Some(Path::new("/work/p")));
+            let ctx = SignerContext::project(kind, stated_project("p"));
             let (class, _) =
                 verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
             assert_eq!(class, TrustClass::Untrusted, "{kind}");
@@ -1647,16 +1820,16 @@ mod tests {
             SignerStatus::Active,
         );
         let live = TrustStore::from_registry(node_vk, vec![record]).unwrap();
-        let entries = live.launch_signer_entries(&live, Some(Path::new("/work/p")));
+        let entries = live.launch_signer_entries(&live, stated_project("p"));
         assert!(entries.iter().all(|entry| entry.endorsements.is_none()));
         let store = TrustStore::from_signer_entries(&entries).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
         for kind in ["knowledge", "directive", "tool", "config"] {
-            for root in [Some(Path::new("/work/p")), None] {
+            for root in [stated_project("p"), absent_project()] {
                 let ctx = SignerContext::project(kind, root);
                 let (class, _) =
                     verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
-                assert_eq!(class, TrustClass::Untrusted, "{kind} {root:?}");
+                assert_eq!(class, TrustClass::Untrusted, "{kind} {root}");
             }
         }
     }
@@ -1702,11 +1875,11 @@ mod tests {
         let (sk, vk, fp) = gen_key();
         let store = TrustStore::from_registry(vk, Vec::new()).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
-        let project = SignerContext::project("knowledge", Some(Path::new("/work/p")));
+        let project = SignerContext::project("knowledge", stated_project("p"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &project).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
-        let node = SignerContext::new(SignerSpace::Node, "node", None);
+        let node = SignerContext::node("node");
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &node).unwrap();
         assert_eq!(class, TrustClass::Trusted);
@@ -1721,24 +1894,272 @@ mod tests {
             SignerRole::ProjectAuthor,
             vec![SignerSpace::Project],
             &["*"],
-            &["/work/listed"],
+            &["pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/listed"],
             SignerStatus::Active,
         );
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
 
-        let listed = SignerContext::project("tool", Some(Path::new("/work/listed")));
+        let listed = SignerContext::project("tool", stated_project("listed"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &listed).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let other = SignerContext::project("tool", Some(Path::new("/work/other")));
+        let other = SignerContext::project("tool", stated_project("other"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &other).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
-        let none = SignerContext::project("tool", None);
+        let none = SignerContext::project("tool", absent_project());
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &none).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
+    }
+
+    #[test]
+    fn scoped_entries_match_only_a_stated_identity_and_own_binds_the_signers_principal() {
+        let owner_text = format!("pid:v1:{}", "a".repeat(64));
+        let other_text = format!("pid:v1:{}", "b".repeat(64));
+        let owner: PrincipalId = owner_text.parse().unwrap();
+        let signer = Some(&owner);
+        let (signer_text, other) = (owner_text.as_str(), other_text.as_str());
+        let stated = |owner: &str, name: &str| {
+            LogicalProject::Stated(format!("{owner}/{name}").parse().unwrap())
+        };
+        let scoped = SignerScope {
+            spaces: vec![SignerSpace::Project],
+            kinds: vec!["*".to_owned()],
+            projects: vec!["own:demo".parse().unwrap()],
+        };
+        let space = SignerSpace::Project;
+        assert!(scoped.admits(space, "tool", &stated(signer_text, "demo"), signer));
+        // Another owner's project of the same name is never matched.
+        assert!(!scoped.admits(space, "tool", &stated(other, "demo"), signer));
+        assert!(!scoped.admits(space, "tool", &stated(signer_text, "other"), signer));
+        // A key that speaks for no principal (retired, revoked) matches no
+        // `own:` entry.
+        assert!(!scoped.admits(space, "tool", &stated(signer_text, "demo"), None));
+        // A scoped signer never matches an absent identity.
+        for reason in [
+            LogicalProjectAbsence::NotRegistered,
+            LogicalProjectAbsence::ForeignHeadNotHeld,
+            LogicalProjectAbsence::NotStated,
+        ] {
+            assert!(!scoped.admits(space, "tool", &LogicalProject::Absent(reason), signer));
+        }
+        // An unscoped signer admits every project context, absent included.
+        let unscoped = SignerScope {
+            projects: Vec::new(),
+            ..scoped.clone()
+        };
+        assert!(unscoped.admits(
+            space,
+            "tool",
+            &LogicalProject::Absent(LogicalProjectAbsence::NotRegistered),
+            signer
+        ));
+        // A path is not a scope.
+        assert!("/work/listed".parse::<ProjectScopeEntry>().is_err());
+        assert!(format!("{other}/demo").parse::<ProjectScopeEntry>().is_ok());
+        // A key fingerprint is never an owner.
+        assert!(
+            format!("fp:{}/demo", "b".repeat(64))
+                .parse::<ProjectScopeEntry>()
+                .is_err()
+        );
+    }
+
+    /// The verdict for a signer outside its scope: untrusted, or refused as
+    /// out of scope. Any other refusal is a broken fixture.
+    fn assert_untrusted_or_out_of_scope<E: std::fmt::Debug>(verdict: Result<TrustClass, E>) {
+        match verdict {
+            Ok(class) => assert_eq!(class, TrustClass::Untrusted),
+            Err(error) => {
+                let text = format!("{error:?}");
+                assert!(text.contains("SignerOutOfScope"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_project_named_core_and_the_installed_core_bundle_are_judged_apart() {
+        // A project whose manifest says `name: core` is pid:v1:<owner>/core.
+        // The installed bundle `core` is judged in bundle space by its
+        // publisher. Neither trust ever stands in for the other, and nothing
+        // compares the two names: a project identity is a principal plus a
+        // name, never a bundle name.
+        let (author_sk, author_vk, author_fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let publisher_sk = SigningKey::from_bytes(&[11u8; 32]);
+        let publisher_vk = publisher_sk.verifying_key();
+        let publisher_fp = compute_fingerprint(&publisher_vk);
+        let core_project = format!("{PROJECT_OWNER}/core");
+        let store = TrustStore::from_registry(
+            node_vk,
+            vec![
+                record_for(
+                    &author_vk,
+                    SignerRole::ProjectAuthor,
+                    vec![SignerSpace::Project],
+                    &["*"],
+                    &[core_project.as_str()],
+                    SignerStatus::Active,
+                ),
+                publisher_record(&publisher_vk, SignerStatus::Active),
+            ],
+        )
+        .unwrap()
+        .with_succession_chain(&[]);
+        let project = LogicalProject::Stated(core_project.parse().unwrap());
+        let in_project = SignerContext::project("tool", &project);
+
+        // The project author is trusted in its project, never for the bundle.
+        let (content, envelope, header) = signed_with_header(&author_sk, &author_fp);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &in_project).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        // Outside its scope the signer is refused, never trusted.
+        let refused = verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx())
+            .map(|(class, _)| class);
+        assert_untrusted_or_out_of_scope(refused);
+
+        // The core bundle's publisher is trusted in bundle space, never as
+        // the project named core.
+        let (content, envelope, header) = signed_with_header(&publisher_sk, &publisher_fp);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        let refused = verify_item_signature(&content, &header, &envelope, &store, &in_project)
+            .map(|(class, _)| class);
+        assert_untrusted_or_out_of_scope(refused);
+
+        // `core` alone is not a project identity, so a bundle name can never
+        // be read as one.
+        assert!(
+            "core"
+                .parse::<ryeos_state::project_identity::ProjectIdentity>()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn own_scope_verification_follows_retired_verifies_and_revoked_does_not() {
+        let (root_sk, root_vk, root_fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let successor_vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let successor_fp = compute_fingerprint(&successor_vk);
+        let succeeded = TrustEvent {
+            schema: "x".into(),
+            seq: 1,
+            previous: None,
+            kind: TrustEventKind::Succeeded,
+            signer: successor_fp.clone(),
+            record_digest: String::new(),
+            request_digest: String::new(),
+            operator: String::new(),
+            predecessor: Some(root_fp.clone()),
+        };
+        let store_with = |root_status: SignerStatus| {
+            TrustStore::from_registry(
+                node_vk,
+                vec![
+                    record_for(
+                        &root_vk,
+                        SignerRole::ProjectAuthor,
+                        vec![SignerSpace::Project],
+                        &["*"],
+                        &["own:demo"],
+                        root_status,
+                    ),
+                    record_for(
+                        &successor_vk,
+                        SignerRole::ProjectAuthor,
+                        vec![SignerSpace::Project],
+                        &["*"],
+                        &["own:demo"],
+                        SignerStatus::Active,
+                    ),
+                ],
+            )
+            .unwrap()
+            .with_succession_chain(std::slice::from_ref(&succeeded))
+        };
+        let retired = store_with(SignerStatus::Retired);
+        let principal = retired.signing_principal_of(&root_fp).unwrap();
+        assert_eq!(
+            retired.signing_principal_of(&successor_fp),
+            Some(principal.clone())
+        );
+        let demo = LogicalProject::Stated(format!("{principal}/demo").parse().unwrap());
+        let (content, envelope, header) = signed_with_header(&root_sk, &root_fp);
+        // A retired key's own:-scoped items still verify after rotation.
+        let ctx = SignerContext::project("tool", &demo);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &retired, &ctx).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        // Acting is separate: the retired key owns nothing.
+        assert_eq!(
+            retired.owner_for(&root_fp).unwrap_err().code(),
+            "owner_key_not_active"
+        );
+        assert!(!retired.speaks_for(&root_fp, &principal));
+        assert!(retired.speaks_for(&successor_fp, &principal));
+        // A revoked key's items verify nowhere, and it has no signing
+        // principal for own:.
+        let revoked = store_with(SignerStatus::Revoked);
+        assert_eq!(revoked.signing_principal_of(&root_fp), None);
+        assert!(verify_item_signature(&content, &header, &envelope, &revoked, &ctx).is_err());
+    }
+
+    #[test]
+    fn launch_entries_resolve_scoped_signers_per_launch_identity_only() {
+        let (sk, vk, fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let alpha = format!("{PROJECT_OWNER}/alpha");
+        let record = record_for(
+            &vk,
+            SignerRole::ProjectAuthor,
+            vec![SignerSpace::Project, SignerSpace::Bundle],
+            &["*"],
+            &[alpha.as_str()],
+            SignerStatus::Active,
+        );
+        let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
+        let entry_for = |project: &LogicalProject| {
+            store
+                .launch_signer_entries(&store, project)
+                .into_iter()
+                .find(|entry| entry.fingerprint == fp)
+        };
+        // A launch of the scoped project carries the signer unscoped for it.
+        let own = entry_for(stated_project("alpha")).unwrap();
+        assert!(own.scope.projects.is_empty());
+        assert!(own.scope.spaces.contains(&SignerSpace::Project));
+        // A child or second launch into another project gets no widened entry:
+        // the signer loses project space there, keeping only its other spaces.
+        for other in [stated_project("beta"), absent_project()] {
+            let entry = entry_for(other).unwrap();
+            assert!(
+                !entry.scope.spaces.contains(&SignerSpace::Project),
+                "{other}"
+            );
+            assert_eq!(entry.scope.spaces, vec![SignerSpace::Bundle]);
+            // A runtime rebuilt from that entry never trusts the signer's
+            // project items, whatever project context it judges.
+            let rebuilt = TrustStore::from_signer_entries(&[entry]).unwrap();
+            let (content, envelope, header) = signed_with_header(&sk, &fp);
+            let ctx = SignerContext::project("tool", stated_project("alpha"));
+            let (class, _) =
+                verify_item_signature(&content, &header, &envelope, &rebuilt, &ctx).unwrap();
+            assert_eq!(class, TrustClass::Untrusted, "{other}");
+        }
+        // The resolution is computed afresh for every launch from the store,
+        // not cached: the same store still widens for alpha afterwards.
+        assert!(
+            entry_for(stated_project("alpha"))
+                .unwrap()
+                .scope
+                .projects
+                .is_empty()
+        );
     }
 
     #[test]

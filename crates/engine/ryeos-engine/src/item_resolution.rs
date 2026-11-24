@@ -219,7 +219,7 @@ pub struct ResolutionRoots {
     /// can supply it.
     pub owned_namespaces: Vec<OwnedNamespace>,
     /// The logical project of the project root. Signer project scopes are
-    /// judged against [`ResolutionRoots::signer_project_root`]. Every
+    /// judged against [`ResolutionRoots::signer_project`]. Every
     /// constructor takes it explicitly: a pinned or COW checkout must never be
     /// judged as its own project by omission.
     pub logical_project: LogicalProject,
@@ -232,33 +232,10 @@ impl ResolutionRoots {
         self
     }
 
-    /// The project root a signer's project scope is matched against: the
-    /// stated logical project; the project root itself only when the
-    /// resolution is live (`MaterializedLive`); otherwise none, never a
-    /// pinned checkout.
-    pub fn signer_project_root(&self) -> Option<&Path> {
-        match &self.logical_project {
-            LogicalProject::Stated(path) => Some(path),
-            LogicalProject::MaterializedLive => self.project_root(),
-            LogicalProject::Absent(_) => None,
-        }
-    }
-
-    /// [`ResolutionRoots::signer_project_root`] under admitted project
-    /// content: a live resolution is judged on the admitted root when there
-    /// is one, else on the project root; a stated project wins; an absent one
-    /// is none.
-    pub fn signer_project_root_under<'a>(
-        &'a self,
-        admitted_project_root: Option<&'a Path>,
-    ) -> Option<&'a Path> {
-        match &self.logical_project {
-            LogicalProject::Stated(path) => Some(path),
-            LogicalProject::MaterializedLive => {
-                admitted_project_root.or_else(|| self.project_root())
-            }
-            LogicalProject::Absent(_) => None,
-        }
+    /// The project a signer's project scope is matched against: the identity
+    /// admission established, never a root or checkout path.
+    pub fn signer_project(&self) -> &LogicalProject {
+        &self.logical_project
     }
 
     /// Root directory of the project (the parent of its `.ai` root), when a
@@ -1074,7 +1051,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn signer_project_root_prefers_the_logical_project_over_the_checkout() {
+    fn the_signer_project_is_never_the_checkout() {
         let checkout = || {
             ResolutionRoots::from_flat(
                 Some(PathBuf::from("/cache/pinned/ab12/project/.ai")),
@@ -1083,18 +1060,14 @@ mod tests {
             )
         };
         // A pinned checkout that states no project is never judged as its own.
-        assert_eq!(checkout().signer_project_root(), None);
-        let live = checkout().with_logical_project(LogicalProject::MaterializedLive);
         assert_eq!(
-            live.signer_project_root(),
-            Some(Path::new("/cache/pinned/ab12/project"))
+            checkout().signer_project(),
+            &LogicalProject::Absent(LogicalProjectAbsence::NotStated)
         );
-        let stated = checkout()
-            .with_logical_project(LogicalProject::Stated(PathBuf::from("/srv/projects/alpha")));
-        assert_eq!(
-            stated.signer_project_root(),
-            Some(Path::new("/srv/projects/alpha"))
-        );
+        let identity: ryeos_state::project_identity::ProjectIdentity =
+            format!("pid:v1:{}/alpha", "a".repeat(64)).parse().unwrap();
+        let stated = checkout().with_logical_project(LogicalProject::Stated(identity.clone()));
+        assert_eq!(stated.signer_project(), &LogicalProject::Stated(identity));
     }
 
     #[test]
@@ -1113,7 +1086,7 @@ mod tests {
                     canonical_root: PathBuf::from("/bundles/root/nested"),
                 },
             ],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let selected = roots
             .authoritative_root(
@@ -1391,7 +1364,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let item = CanonicalRef::parse("tool:demo/x").unwrap();
         let result = resolve_item_full(&roots, &schema, &item).unwrap();
@@ -1405,7 +1378,7 @@ mod tests {
         let mut roots = ResolutionRoots::from_flat(
             Some(project.to_path_buf()),
             vec![bundle.to_path_buf()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         roots.owned_namespaces = vec![OwnedNamespace {
             bundle: "core".to_owned(),
@@ -1430,7 +1403,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let item = CanonicalRef::parse("tool:core/x").unwrap();
         match resolve_item_full(&roots, &schema, &item) {
@@ -1606,7 +1579,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = shadow_refusing_schema("views");
 
@@ -1677,7 +1650,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = make_kind_schema("views", vec![(".yaml", "yaml")]);
         let item = CanonicalRef::parse("view:shared/x").unwrap();
@@ -1721,7 +1694,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = bundle_only_schema();
         let item = CanonicalRef::parse("service:health/status").unwrap();
@@ -1757,7 +1730,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = bundle_only_schema();
         let item = CanonicalRef::parse("service:planted/x").unwrap();
@@ -1917,7 +1890,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -1938,7 +1911,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -1961,7 +1934,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![bundle_root.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2000,7 +1973,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2048,7 +2021,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2065,7 +2038,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
 
@@ -2094,7 +2067,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2196,7 +2169,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:trace_tool").unwrap();
 
