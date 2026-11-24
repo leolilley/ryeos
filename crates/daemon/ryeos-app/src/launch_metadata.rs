@@ -2435,6 +2435,9 @@ mod tests {
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                    ryeos_state::project_identity::LogicalProjectAbsence::NotStated,
+                ),
                 workspace_outputs: None,
                 stable_project_identity: "site:a:/tmp/proj".to_string(),
                 display_path: Some(PathBuf::from("/tmp/proj")),

@@ -368,10 +368,14 @@ pub fn launch_context(
                 view_sets: Default::default(),
                 contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
                 principal_id: "fp:test".to_string(),
+                signer_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+                ),
                 project_root: project_root.map(str::to_string),
                 request_engine_generation_identity: "generation:test".to_string(),
                 node_policy_generation_digest: "22".repeat(32),
                 surface: EffectiveUiItemIdentity {
+                    chain: Vec::new(),
                     canonical_ref: surface_ref.to_string(),
                     effective_definition_digest: EffectiveDefinitionDigest::parse("33".repeat(32))
                         .expect("valid fixture digest"),

@@ -91,11 +91,23 @@ fn source_project(content: &str) -> Result<tempfile::TempDir> {
     let directory = source.path().join(".ai/knowledge/scope");
     std::fs::create_dir_all(&directory)?;
     std::fs::write(directory.join("notes.md"), content)?;
+    std::fs::write(
+        source.path().join(".ai/manifest.yaml"),
+        format!("name: {PROJECT}\n"),
+    )?;
     Ok(source)
 }
 
+/// The project every fixture checkout here names in its manifest.
+const PROJECT: &str = "scope-project";
+
 fn live_project() -> Result<(tempfile::TempDir, String)> {
     let live = tempfile::tempdir()?;
+    std::fs::create_dir_all(live.path().join(".ai"))?;
+    std::fs::write(
+        live.path().join(".ai/manifest.yaml"),
+        format!("name: {PROJECT}\n"),
+    )?;
     let path = live
         .path()
         .canonicalize()?
@@ -147,7 +159,7 @@ async fn scoped_get_serves_the_owner_and_refuses_everything_else() -> Result<()>
     let captured = project_push::capture_ai_only_snapshot(source.path(), None)?;
     let pushed = project_push::push_snapshot(&harness, &live_path, &captured).await?;
     let hashes = snapshot_object_hashes(&harness, &pushed.snapshot_hash).await?;
-    let root = json!({"kind": "project_head", "project_path": live_path});
+    let root = json!({"kind": "project_head", "project": {"kind": "named", "name": PROJECT}});
 
     // The owner reads its own head's objects and blob under its root.
     let (status, body) = harness
@@ -188,7 +200,6 @@ async fn scoped_get_serves_the_owner_and_refuses_everything_else() -> Result<()>
 
     // A hash outside the root is refused, and a hash that exists on the node
     // but outside the root is indistinguishable from one that does not exist.
-    let (_other, other_path) = live_project()?;
     let absent = "ab".repeat(32);
     let (status_absent, body_absent) = harness
         .post_json(
@@ -201,7 +212,7 @@ async fn scoped_get_serves_the_owner_and_refuses_everything_else() -> Result<()>
         .post_json(
             "/objects/get",
             json!({
-                "root": json!({"kind": "project_head", "project_path": other_path}),
+                "root": json!({"kind": "project_head", "project": {"kind": "named", "name": "scope-other"}}),
                 "object_hashes": [hashes[0]],
                 "blob_hashes": [],
             }),
@@ -268,7 +279,7 @@ async fn get_any_is_operator_only() -> Result<()> {
         .post_json(
             "/objects/get-any",
             json!({
-                "root": {"kind": "project_head", "project_path": live_path},
+                "root": {"kind": "project_head", "project": {"kind": "named", "name": PROJECT}},
                 "object_hashes": [pushed.snapshot_hash],
                 "blob_hashes": [],
             }),
@@ -296,7 +307,7 @@ async fn has_answers_only_for_the_callers_roots_and_leaks_nothing() -> Result<()
     let captured = project_push::capture_ai_only_snapshot(source.path(), None)?;
     let pushed = project_push::push_snapshot(&harness, &live_path, &captured).await?;
     let hashes = snapshot_object_hashes(&harness, &pushed.snapshot_hash).await?;
-    let root = json!({"kind": "project_head", "project_path": live_path});
+    let root = json!({"kind": "project_head", "project": {"kind": "named", "name": PROJECT}});
     let absent = "cd".repeat(32);
     let request = json!({
         "root": root,
@@ -341,7 +352,7 @@ async fn has_answers_only_for_the_callers_roots_and_leaks_nothing() -> Result<()
 async fn project_push_works_under_the_project_head_root() -> Result<()> {
     let (harness, _fixture) = DaemonHarness::start_fast_with(plant_reader, |_| {}).await?;
     let (_live, live_path) = live_project()?;
-    let root = json!({"kind": "project_head", "project_path": live_path});
+    let root = json!({"kind": "project_head", "project": {"kind": "named", "name": PROJECT}});
 
     // First push to a project that has no head yet: nothing is reachable, so
     // the receiver reports everything absent and the sender uploads it.

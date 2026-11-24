@@ -36,6 +36,11 @@ use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
 #[serde(deny_unknown_fields)]
 pub struct EffectiveUiItemIdentity {
     pub canonical_ref: String,
+    /// Canonical refs of the members of the item's extends chain, nearest
+    /// first, so a change to any member is a change to this item. Empty for
+    /// an item that extends nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<String>,
     pub effective_definition_digest: EffectiveDefinitionDigest,
     /// Effective weakest-link trust result computed by the engine. Binding
     /// admission consumes this explicitly; it must not infer trust from the
@@ -57,6 +62,12 @@ impl EffectiveUiItemIdentity {
     fn from_effective_item(item: &EffectiveItem) -> Self {
         Self {
             canonical_ref: item.canonical_ref.clone(),
+            chain: item
+                .provenance
+                .ancestors
+                .iter()
+                .map(|member| member.resolved_ref.clone())
+                .collect(),
             effective_definition_digest: item.effective_definition_digest.clone(),
             effective_trust_class: item.trust_class,
         }
@@ -368,7 +379,9 @@ pub fn embed_surface_views(
             CanonicalRef::parse(view_ref).map_err(|e| format!("invalid view ref: {e}"))?;
         engine
             .effective_item(EffectiveItemRequest {
-                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                logical_project: ryeos_engine::contracts::unestablished_project(
+                    &SubjectResolutionAuthority::for_live_project_root(project_root),
+                ),
                 item_ref,
                 expected_kind: Some("view".to_string()),
                 project_root: project_root.map(Path::to_path_buf),
@@ -716,7 +729,9 @@ fn resolve_identity_items_in_generation(
             Ok(item_ref) => {
                 valid_refs.push(view_ref);
                 requests.push(EffectiveItemRequest {
-                    logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                    logical_project: ryeos_engine::contracts::unestablished_project(
+                        &SubjectResolutionAuthority::for_live_project_root(project_root),
+                    ),
                     item_ref,
                     expected_kind: Some(kind.to_string()),
                     project_root: project_root.map(Path::to_path_buf),
@@ -775,6 +790,7 @@ mod tests {
         effective_trust_class: TrustClass,
     ) -> EffectiveUiItemIdentity {
         EffectiveUiItemIdentity {
+            chain: Vec::new(),
             canonical_ref: canonical_ref.to_string(),
             effective_definition_digest: EffectiveDefinitionDigest::parse(
                 digest_byte.to_string().repeat(64),

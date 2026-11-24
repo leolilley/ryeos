@@ -168,7 +168,7 @@ mod tests {
             "binding_attachment_id":"shared","binding_generation":1,"binding_digest":"ab".repeat(32),
             "root_ref":"config:test/presentation","root_generation":"cd".repeat(32),
             "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
-            "binding_request_bounds":bounds,
+            "named_items": [], "binding_request_bounds":bounds,
             "presentation":{"definition":{"kind":"shared_presentation","config":{
                 "category":"ui","shared_presentation":{"schema":2,"title":"Keys fixture","launcher":"launcher",
                     "dialogs":[{"id":"launcher","title":"Launcher","view":"view:test/launcher"},
@@ -181,7 +181,7 @@ mod tests {
             "binding_attachment_id":"surface","binding_generation":1,"binding_digest":"ef".repeat(32),
             "root_ref":"surface:test/feed","root_generation":"12".repeat(32),
             "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
-            "binding_request_bounds":bounds,
+            "named_items": [], "binding_request_bounds":bounds,
             "presentation":ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
                 serde_json::json!({"name":"Feeds","tiles":["view:test/feed","view:test/feed"],
                     "views":{"view:test/feed":{"widget":"sections",

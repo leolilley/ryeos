@@ -244,9 +244,17 @@ pub enum ProjectCaptureScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PinnedSource {
-    CurrentHead,
-    Snapshot { hash: String },
-    CaptureLive { scope: ProjectCaptureScope },
+    /// The acting principal's own current head of `project`. The owner is
+    /// always the acting principal, never named here.
+    CurrentHead {
+        project: ryeos_state::project_identity::PushedProject,
+    },
+    Snapshot {
+        hash: String,
+    },
+    CaptureLive {
+        scope: ProjectCaptureScope,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,10 +390,13 @@ impl ExecutionPolicy {
         }
     }
 
-    pub fn local_pinned_current_head(response: ExecutionResponse) -> Self {
+    pub fn local_pinned_current_head(
+        response: ExecutionResponse,
+        project: ryeos_state::project_identity::PushedProject,
+    ) -> Self {
         Self {
             project: ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead { project },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
@@ -529,7 +540,7 @@ impl ExecutionPolicy {
                 PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 }
-            ) && !matches!(source, PinnedSource::CurrentHead)
+            ) && !matches!(source, PinnedSource::CurrentHead { .. })
             {
                 anyhow::bail!(
                     "retain-current-head publication requires current_head pinned source"
@@ -636,10 +647,13 @@ mod tests {
 
     #[test]
     fn policy_wire_round_trip_is_strict() {
-        let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted)
-            .retain_child_results()
-            .unwrap()
-            .exclude_operator_vault();
+        let policy = ExecutionPolicy::local_pinned_current_head(
+            ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
+        )
+        .retain_child_results()
+        .unwrap()
+        .exclude_operator_vault();
         policy.validate().unwrap();
         let value = serde_json::to_value(&policy).unwrap();
         assert_eq!(
@@ -691,7 +705,10 @@ mod tests {
 
     #[test]
     fn provider_environment_policy_is_project_independent_and_canonical() {
-        let mut policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        let mut policy = ExecutionPolicy::local_pinned_current_head(
+            ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
+        );
         policy.environment = ExecutionEnvironmentPolicy::ProviderEnvironment {
             name_policy: ExecutionEnvironmentNamePolicy::Exact {
                 names: vec!["OPENAI_API_KEY".to_owned()],
@@ -716,6 +733,7 @@ mod tests {
     fn policy_rejects_unknown_fields_and_uppercase_hashes() {
         let mut value = serde_json::to_value(ExecutionPolicy::local_pinned_current_head(
             ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
         ))
         .unwrap();
         value["unknown"] = serde_json::json!(true);

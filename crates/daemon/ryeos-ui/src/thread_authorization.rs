@@ -391,6 +391,9 @@ mod tests {
             environment: EnvironmentAuthority::None,
             capability_ceiling: Vec::new(),
             child_policy: ChildProjectAuthorityPolicy::Inherit,
+            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+            ),
         }
     }
 
@@ -405,6 +408,9 @@ mod tests {
             environment: EnvironmentAuthority::None,
             capability_ceiling: Vec::new(),
             child_policy: ChildProjectAuthorityPolicy::Inherit,
+            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+            ),
         }
     }
 

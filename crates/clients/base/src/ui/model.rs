@@ -684,6 +684,8 @@ pub struct RyeOsCore {
     pub binding_attachments: BTreeMap<String, super::binding_context::RetainedUiBindingAttachment>,
     /// Context used only when inserting a new mount into a view set.
     pub view_set_insertion_attachments: BTreeMap<crate::ids::ViewSetId, String>,
+    /// In-flight live pickup of revised items (see `reducer::item_revision`).
+    pub(crate) item_revision: super::reducer::item_revision::ItemRevisionState,
     /// Runtime provenance for compositions opened from the personal library.
     /// This maps fresh set identities back to stable template identities so a
     /// later saved set can name cross-set follow relationships without ever
@@ -3990,6 +3992,7 @@ mod tests {
             session_id: "session:mismatched".to_string(),
             root_attachment_id: "mismatch".into(),
             binding_attachments: vec![super::super::binding::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "mismatch".into(),
                 binding_generation: 1,
                 binding_digest: "mismatch".into(),
@@ -4453,6 +4456,7 @@ mod tests {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
             root_attachment_id: "broken".into(),
             binding_attachments: vec![super::super::binding::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "broken".into(),
                 binding_generation: 1,
                 binding_digest: "broken".into(),

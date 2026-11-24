@@ -293,6 +293,169 @@ pub fn chain_tip(project_root: &Path, item: &ChainItem) -> Result<Option<ChainTi
     }))
 }
 
+/// What the newest record of a chain says, for announcing a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TipSummary {
+    pub seq: u64,
+    /// Digest of the record file.
+    pub record_digest: String,
+    /// Digest of the item file the change wrote; absent on a tombstone.
+    pub after_digest: Option<String>,
+    pub role: ActorRole,
+}
+
+/// The newest record of `item`'s chain, read without verifying its signature.
+/// An announcement is only a prompt to look again, so it may be made from what
+/// is on disk; whoever must rely on the record verifies it with
+/// [`verified_tip`].
+pub fn tip_summary(project_root: &Path, item: &ChainItem) -> Result<Option<TipSummary>> {
+    let Some(tip) = chain_tip(project_root, item)? else {
+        return Ok(None);
+    };
+    let directory = item.directory(project_root);
+    let bytes = read_record_bytes(&directory, tip.seq)?.ok_or_else(|| {
+        anyhow!(
+            "revision record {} of `{}` vanished",
+            tip.seq,
+            item.item_ref()
+        )
+    })?;
+    let content = std::str::from_utf8(&bytes).context("the revision record is not UTF-8")?;
+    let body = parse_body(content)?;
+    ensure!(
+        body.item_ref == item.item_ref() && body.seq == tip.seq,
+        "the newest record of `{}` does not name this item and position",
+        item.item_ref()
+    );
+    Ok(Some(TipSummary {
+        seq: tip.seq,
+        record_digest: tip.digest,
+        after_digest: body.after_digest,
+        role: body.actor.role,
+    }))
+}
+
+/// The newest record of `item`'s chain after checking every record the node
+/// has not yet attested (the whole chain when it has attested none): each
+/// signature, signer and link. A chain that does not verify is an error.
+pub fn verified_tip(
+    project_root: &Path,
+    item: &ChainItem,
+    trust: &TrustStore,
+    heads: &RevisionHeads,
+) -> Result<Option<TipSummary>> {
+    check_before_append(project_root, item, trust, heads)?;
+    tip_summary(project_root, item)
+}
+
+/// Every item in the project that has a revision chain, across all kinds.
+pub fn list_project_chains(project_root: &Path) -> Result<Vec<ChainItem>> {
+    let base = project_root
+        .join(ryeos_engine::AI_DIR)
+        .join(REVISIONS_DIRECTORY);
+    let reader = match std::fs::read_dir(&base) {
+        Ok(reader) => reader,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("list {}", base.display())),
+    };
+    let mut kinds = Vec::new();
+    for entry in reader {
+        let entry = entry.with_context(|| format!("list {}", base.display()))?;
+        if entry.file_type()?.is_dir()
+            && let Some(name) = entry.file_name().to_str()
+        {
+            kinds.push(name.to_owned());
+        }
+    }
+    kinds.sort();
+    let mut chains = Vec::new();
+    for kind in kinds {
+        chains.extend(list_chain_items(project_root, &kind)?);
+        ensure!(
+            chains.len() <= MAX_LISTED_CHAINS,
+            "the project holds more than {MAX_LISTED_CHAINS} revision chains"
+        );
+    }
+    Ok(chains)
+}
+
+/// Most chains one listing returns.
+pub const MAX_LISTED_CHAINS: usize = 4096;
+/// Deepest chain directory a listing descends to.
+const MAX_CHAIN_DEPTH: usize = 16;
+
+/// The items of `kind` that have a revision chain in the project.
+pub fn list_chain_items(project_root: &Path, kind: &str) -> Result<Vec<ChainItem>> {
+    let base = project_root
+        .join(ryeos_engine::AI_DIR)
+        .join(REVISIONS_DIRECTORY)
+        .join(kind);
+    let mut found = Vec::new();
+    collect_chains(&base, kind, "", 0, &mut found)?;
+    found.sort_by(|a, b| a.bare_id.cmp(&b.bare_id));
+    Ok(found)
+}
+
+fn collect_chains(
+    directory: &Path,
+    kind: &str,
+    prefix: &str,
+    depth: usize,
+    found: &mut Vec<ChainItem>,
+) -> Result<()> {
+    ensure!(
+        depth <= MAX_CHAIN_DEPTH,
+        "revision chains nest deeper than {MAX_CHAIN_DEPTH} levels"
+    );
+    let reader = match std::fs::read_dir(directory) {
+        Ok(reader) => reader,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("list {}", directory.display()));
+        }
+    };
+    let mut is_chain = false;
+    let mut children = Vec::new();
+    for entry in reader {
+        let entry = entry.with_context(|| format!("list {}", directory.display()))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("inspect {}", entry.path().display()))?;
+        if file_type.is_dir() {
+            children.push(name);
+        } else if file_type.is_file()
+            && name
+                .strip_suffix(RECORD_EXT)
+                .is_some_and(|stem| stem.len() == 8 && stem.bytes().all(|b| b.is_ascii_digit()))
+        {
+            is_chain = true;
+        }
+    }
+    if is_chain && !prefix.is_empty() {
+        ensure!(
+            found.len() < MAX_LISTED_CHAINS,
+            "the project holds more than {MAX_LISTED_CHAINS} revision chains"
+        );
+        found.push(ChainItem {
+            kind: kind.to_owned(),
+            bare_id: prefix.to_owned(),
+        });
+    }
+    children.sort();
+    for child in children {
+        let next = if prefix.is_empty() {
+            child.clone()
+        } else {
+            format!("{prefix}/{child}")
+        };
+        collect_chains(&directory.join(&child), kind, &next, depth + 1, found)?;
+    }
+    Ok(())
+}
+
 fn open_chain_directory(project_root: &Path, item: &ChainItem) -> Result<lillux::PinnedDirectory> {
     let project = lillux::PinnedDirectory::open(project_root)?.ok_or_else(|| {
         anyhow!(
@@ -768,7 +931,7 @@ impl RevisionHeads {
 
     /// The name a project is attested under: its canonical path, so the
     /// writer and every reader agree however the root was spelled.
-    fn project_key(project_root: &Path) -> Result<String> {
+    pub fn project_key(project_root: &Path) -> Result<String> {
         let canonical = std::fs::canonicalize(project_root)
             .with_context(|| format!("resolve project root {}", project_root.display()))?;
         canonical
@@ -814,6 +977,45 @@ impl RevisionHeads {
             "the head document is not this node's head for this project"
         );
         Ok(document)
+    }
+
+    /// The projects the node holds a valid signed head for. A document that
+    /// is not this node's valid head is left out.
+    pub fn attested_projects(&self) -> Result<Vec<String>> {
+        let reader = match std::fs::read_dir(&self.directory) {
+            Ok(reader) => reader,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("list {}", self.directory.display()));
+            }
+        };
+        let mut projects = Vec::new();
+        for entry in reader {
+            let entry = entry.with_context(|| format!("list {}", self.directory.display()))?;
+            let path = entry.path();
+            let Some(bytes) =
+                lillux::read_optional_regular_file_bounded_no_follow(&path, MAX_HEAD_BYTES)?
+            else {
+                continue;
+            };
+            let Ok(content) = std::str::from_utf8(&bytes) else {
+                continue;
+            };
+            let Ok(body) = signed_body(content) else {
+                continue;
+            };
+            let Ok(document) = serde_yaml::from_str::<HeadDocument>(body) else {
+                continue;
+            };
+            if self.path(&document.project) != path {
+                continue;
+            }
+            if self.verify_document(&bytes, &document.project).is_ok() {
+                projects.push(document.project);
+            }
+        }
+        projects.sort();
+        Ok(projects)
     }
 
     /// Attest `entry` as the head of `item_ref` in `project_root`.

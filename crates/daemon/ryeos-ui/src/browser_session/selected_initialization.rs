@@ -220,6 +220,7 @@ impl BrowserSessionStore {
             particular_resume: None,
             saved_resume: receipt,
             tab_openings: BTreeMap::new(),
+            pending_rebinds: Vec::new(),
         };
         let mut descriptors = vec![root];
         descriptors.extend(staged.iter().cloned());

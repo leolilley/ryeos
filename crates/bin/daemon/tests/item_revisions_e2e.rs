@@ -348,3 +348,233 @@ async fn a_hand_edit_reads_as_an_unrecorded_change() {
     assert_eq!(history["file"], "unrecorded_change", "{history:#}");
     assert_eq!(history["sound"], true, "{history:#}");
 }
+
+// ── announcing revisions ────────────────────────────────────────────────
+
+/// The newest revision of each item the node has announced for the project.
+fn announced(rig: &Rig) -> std::collections::BTreeMap<String, u64> {
+    let cursor = ryeos_engine::roots::RuntimeRoot::new(rig.harness.state_path.clone())
+        .item_revised_cursor_dir();
+    let project = rig.project.to_str().unwrap();
+    let path = cursor.join(format!("{}.json", lillux::sha256_hex(project.as_bytes())));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Default::default();
+    };
+    let document: Value = serde_json::from_slice(&bytes).expect("cursor document");
+    assert_eq!(document["project"], json!(project), "{document:#}");
+    serde_json::from_value(document["items"].clone()).expect("cursor items")
+}
+
+/// What `ryeos sign` leaves behind when the operator signs the item in their
+/// own process: a new signed file and a record signed with their key.
+fn operator_signs(rig: &Rig, version: &str) -> u64 {
+    use ryeos_node_runtime::item_revision::{ActorRole, ChainItem, Change, append};
+    let before = std::fs::read(rig.item_path()).ok();
+    let signed =
+        lillux::signature::sign_content(&graph_body(version), &rig.fixture.user, "#", None);
+    std::fs::write(rig.item_path(), &signed).unwrap();
+    append(
+        &rig.project,
+        &rig.fixture.user,
+        ActorRole::Operator,
+        Change {
+            item: &ChainItem::parse(ITEM).unwrap(),
+            file_ext: ".yaml",
+            before: before.as_deref(),
+            after: Some(&signed),
+            provenance: std::collections::BTreeMap::from([(
+                "action".to_owned(),
+                "sign".to_owned(),
+            )]),
+        },
+    )
+    .expect("operator record")
+    .seq
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn author_item_announces_each_change_once_it_is_durable() {
+    let rig = rig().await;
+    assert!(announced(&rig).is_empty());
+    let created = rig.author("create", "1.0.0", None).await.accepted();
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+    let upserted = rig
+        .author(
+            "upsert",
+            "2.0.0",
+            Some(created["content_digest"].as_str().unwrap()),
+        )
+        .await
+        .accepted();
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 2)].into());
+    rig.remove(Some(upserted["content_digest"].as_str().unwrap()))
+        .await
+        .accepted();
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 3)].into());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_node_announces_an_operator_change_only_after_verifying_its_record() {
+    let rig = rig().await;
+    rig.author("create", "1.0.0", None).await.accepted();
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+
+    let seq = operator_signs(&rig, "2.0.0");
+    assert_eq!(seq, 2);
+    // Recorded in the project, not yet announced: the CLI has not called.
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+
+    let project = rig.project.to_str().unwrap();
+    let result = rig
+        .service(
+            "service:items/revised",
+            json!({"project_path": project, "item_refs": [ITEM]}),
+        )
+        .await;
+    let announcements = result["announced"].as_array().expect("announced");
+    assert_eq!(announcements.len(), 1, "{result:#}");
+    assert_eq!(announcements[0]["item_ref"], ITEM, "{result:#}");
+    assert_eq!(announcements[0]["revision"], 2, "{result:#}");
+    assert_eq!(
+        announcements[0]["digest"],
+        json!(lillux::sha256_hex(&std::fs::read(rig.item_path()).unwrap())),
+        "{result:#}"
+    );
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 2)].into());
+
+    // A record the node cannot verify announces nothing: replace the newest
+    // record with one signed by a key the registry does not pin.
+    let seq = operator_signs(&rig, "3.0.0");
+    let path = rig.record_path(seq);
+    let record = std::fs::read_to_string(&path).unwrap();
+    let (_, body) = record.split_once('\n').unwrap();
+    let stranger = lillux::crypto::SigningKey::from_bytes(&[77; 32]);
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(body, &stranger, "#", None),
+    )
+    .unwrap();
+    let (status, body) = rig
+        .harness
+        .post_execute(
+            "service:items/revised",
+            ".",
+            json!({"project_path": project, "item_refs": [ITEM]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.as_u16(), 403, "{body:#}");
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 2)].into());
+
+    // An item with no records is refused, and so is a request that names
+    // neither or both of its two forms.
+    let (status, _) = rig
+        .harness
+        .post_execute(
+            "service:items/revised",
+            ".",
+            json!({"project_path": project, "item_refs": ["graph:authored/never"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.as_u16(), 404);
+    let (status, _) = rig
+        .harness
+        .post_execute(
+            "service:items/revised",
+            ".",
+            json!({"project_path": project}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.as_u16(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_request_announces_nothing() {
+    let rig = rig().await;
+    rig.author("create", "1.0.0", None).await.accepted();
+    operator_signs(&rig, "2.0.0");
+    let project = rig.project.to_str().unwrap();
+    let body = serde_json::to_vec(&json!({
+        "item_ref": "service:items/revised",
+        "ref_bindings": {},
+        "parameters": {"project_path": project, "item_refs": [ITEM]},
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
+    }))
+    .unwrap();
+    let node_key = rig.harness.node_key.clone().expect("node key");
+    let post = |headers: Vec<(String, String)>, body: Vec<u8>| {
+        let url = format!("http://{}/execute", rig.harness.bind);
+        async move {
+            let mut request = reqwest::Client::new()
+                .post(url)
+                .header("content-type", "application/json")
+                .body(body);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            request.send().await.unwrap().status().as_u16()
+        }
+    };
+
+    // Signed by a key the node does not know.
+    let stranger = lillux::crypto::SigningKey::from_bytes(&[88; 32]);
+    let headers =
+        common::build_signed_headers_for_bytes(&stranger, &node_key, "POST", "/execute", &body);
+    let status = post(headers, body.clone()).await;
+    assert!(status == 401 || status == 403, "stranger: {status}");
+
+    // Signed by the operator, then altered in flight.
+    let operator = rig.harness.user_key.clone().expect("operator key");
+    let headers =
+        common::build_signed_headers_for_bytes(&operator, &node_key, "POST", "/execute", &body);
+    let mut altered = body.clone();
+    let at = altered
+        .windows(5)
+        .position(|window| window == b"graph")
+        .expect("body mentions the item");
+    altered[at] = b'G';
+    let status = post(headers, altered).await;
+    assert!(status == 401 || status == 403, "altered: {status}");
+
+    // Not signed at all.
+    let status = post(Vec::new(), body.clone()).await;
+    assert!(status == 401 || status == 403, "unsigned: {status}");
+
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+
+    // The same request, genuinely signed, announces.
+    let headers =
+        common::build_signed_headers_for_bytes(&operator, &node_key, "POST", "/execute", &body);
+    assert_eq!(post(headers, body).await, 200);
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 2)].into());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_announces_the_revisions_the_node_has_not_announced() {
+    let mut rig = rig().await;
+    rig.author("create", "1.0.0", None).await.accepted();
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+    rig.harness.stop_gracefully().await.expect("orderly stop");
+
+    // The operator signs the item while the node is stopped.
+    operator_signs(&rig, "2.0.0");
+    assert_eq!(announced(&rig), [(ITEM.to_owned(), 1)].into());
+
+    rig.harness
+        .respawn_with(|_| {})
+        .await
+        .expect("the node starts again");
+    let mut seen = announced(&rig);
+    for _ in 0..50 {
+        if seen.get(ITEM) == Some(&2) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        seen = announced(&rig);
+    }
+    assert_eq!(seen, [(ITEM.to_owned(), 2)].into());
+}

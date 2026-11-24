@@ -204,9 +204,16 @@ pub async fn handle_items_list(
 
     // One signed config per request; a missing or untrusted file refuses.
     let titles = ItemTitleConfig::load(&state)?;
+    let signer_project = super::signed_item_topology::seat_live_project(
+        &state,
+        caller.principal_id(),
+        &ctx.scopes,
+        project_path.as_deref(),
+    );
     let response = build_items_list(
         &state,
         &titles,
+        &signer_project,
         project_path.as_ref(),
         project_access.as_ref(),
         &request,
@@ -218,14 +225,14 @@ pub async fn handle_items_list(
 fn build_items_list(
     state: &AppState,
     titles: &ItemTitleConfig,
+    signer_project: &ryeos_engine::contracts::LogicalProject,
     project_path: Option<&PathBuf>,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
 ) -> ItemsListResponse {
-    let roots = state.engine.resolution_roots(
-        project_path.cloned(),
-        ryeos_engine::contracts::LogicalProject::MaterializedLive,
-    );
+    let roots = state
+        .engine
+        .resolution_roots(project_path.cloned(), signer_project.clone());
 
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_space: BTreeMap<String, usize> = BTreeMap::new();
@@ -299,7 +306,7 @@ fn build_items_list(
                 kind_name,
                 &item_ref.bare_id,
                 project_access,
-                project_path,
+                signer_project,
             );
 
             // Shadowed candidates
@@ -361,7 +368,7 @@ fn trust_and_title(
     kind: &str,
     bare_id: &str,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
-    project_path: Option<&PathBuf>,
+    signer_project: &ryeos_engine::contracts::LogicalProject,
 ) -> (
     Option<super::signed_item_topology::TrustSummary>,
     String,
@@ -377,7 +384,7 @@ fn trust_and_title(
             &state.engine.trust_store,
             resolution.winner_space,
             kind,
-            project_path.map(PathBuf::as_path),
+            signer_project,
         )
     });
     let (title, source) = titles.title(
@@ -435,9 +442,16 @@ pub async fn handle_item_inspect(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
     let titles = ItemTitleConfig::load(&state)?;
+    let signer_project = super::signed_item_topology::seat_live_project(
+        &state,
+        caller.principal_id(),
+        &ctx.scopes,
+        project_path.as_deref(),
+    );
     let response = build_item_inspect(
         &state,
         &titles,
+        &signer_project,
         project_path.as_ref(),
         project_access.as_ref(),
         &req,
@@ -449,6 +463,7 @@ pub async fn handle_item_inspect(
 fn build_item_inspect(
     state: &AppState,
     titles: &ItemTitleConfig,
+    signer_project: &ryeos_engine::contracts::LogicalProject,
     project_path: Option<&PathBuf>,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemInspectRequest,
@@ -460,10 +475,9 @@ fn build_item_inspect(
         ))
     })?;
 
-    let roots = state.engine.resolution_roots(
-        project_path.cloned(),
-        ryeos_engine::contracts::LogicalProject::MaterializedLive,
-    );
+    let roots = state
+        .engine
+        .resolution_roots(project_path.cloned(), signer_project.clone());
 
     let Some(schema) = state.engine.kinds.get(&item_ref.kind) else {
         return Err(HandlerError::NotFound.into());
@@ -484,7 +498,7 @@ fn build_item_inspect(
         &item_ref.kind,
         &item_ref.bare_id,
         project_access,
-        project_path,
+        signer_project,
     );
 
     // Shadowed
@@ -508,7 +522,7 @@ fn build_item_inspect(
     // Effective content
     let effective = if req.include_effective {
         let effective_req = ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            logical_project: signer_project.clone(),
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),
@@ -626,6 +640,7 @@ mod tests {
             Some(TrustSummary {
                 class: "trusted".into(),
                 signer: Some("fp".into()),
+                reason: None,
             }),
             Some("Mine"),
         );

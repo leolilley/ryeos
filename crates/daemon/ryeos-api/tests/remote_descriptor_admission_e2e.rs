@@ -34,7 +34,18 @@ struct MockContacts {
     signed_contact_count: Arc<AtomicUsize>,
 }
 
+/// The project owner the mock remote reports for any caller.
+const MOCK_REMOTE_OWNER: &str =
+    "pid:v1:7777777777777777777777777777777777777777777777777777777777777777";
+
 async fn start_mock_remote(public_key: Value) -> Result<(String, MockContacts)> {
+    start_mock_remote_with_owner_route(public_key, true).await
+}
+
+async fn start_mock_remote_with_owner_route(
+    public_key: Value,
+    owner_route: bool,
+) -> Result<(String, MockContacts)> {
     let state = MockRemote {
         public_key,
         claim_count: Arc::new(AtomicUsize::new(0)),
@@ -44,7 +55,7 @@ async fn start_mock_remote(public_key: Value) -> Result<(String, MockContacts)> 
         claim_count: state.claim_count.clone(),
         signed_contact_count: state.signed_contact_count.clone(),
     };
-    let app = Router::new()
+    let mut app = Router::new()
         .route(
             "/public-key",
             get(|State(state): State<MockRemote>| async move { Json(state.public_key) }),
@@ -86,8 +97,21 @@ async fn start_mock_remote(public_key: Value) -> Result<(String, MockContacts)> 
                     }))
                 },
             ),
-        )
-        .with_state(state);
+        );
+    if owner_route {
+        app = app.route(
+            "/project/owner",
+            post(|State(state): State<MockRemote>| async move {
+                state.signed_contact_count.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
+                    "schema": 1,
+                    "owner": MOCK_REMOTE_OWNER,
+                    "via": { "kind": "solo" },
+                }))
+            }),
+        );
+    }
+    let app = app.with_state(state);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
@@ -420,6 +444,12 @@ async fn remote_admit_refuses_an_edited_pin_before_releasing_token() {
     assert_eq!(contacts.claim_count.load(Ordering::SeqCst), 0);
 }
 
+/// Gives the checkout at `root` a `.ai/manifest.yaml` declaring `name`.
+fn declare_project(root: &std::path::Path, name: &str) {
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(root.join(".ai/manifest.yaml"), format!("name: {name}\n")).unwrap();
+}
+
 #[tokio::test]
 async fn remote_bind_project_records_binding_in_the_signed_pin() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
@@ -427,10 +457,11 @@ async fn remote_bind_project_records_binding_in_the_signed_pin() {
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
-    install_remote(
-        &local_state,
-        &remote_config("prod", "https://project.example.com", &public_key),
-    );
+    declare_project(&project_root, "bound-project");
+    let (url, contacts) = start_mock_remote(public_key.clone()).await.unwrap();
+    let remote = remote_config("prod", &url, &public_key);
+    install_remote(&local_state, &remote);
+    store_operator_delegation(&local_state, &remote);
     let before = config::load_remotes_report(&local_state.config.app_root)
         .unwrap()
         .remotes["prod"]
@@ -453,24 +484,60 @@ async fn remote_bind_project_records_binding_in_the_signed_pin() {
 
     assert_eq!(result["scope"], "operator");
     assert_eq!(result["remote_project_path"], "/srv/project");
+    assert_eq!(result["remote_owner"], MOCK_REMOTE_OWNER);
+    assert_eq!(contacts.signed_contact_count.load(Ordering::SeqCst), 1);
 
     let report = config::load_remotes_report(&local_state.config.app_root).unwrap();
     assert!(report.invalid.is_empty());
     let operator_remote = &report.remotes["prod"];
     assert_eq!(operator_remote.pinned_at, before);
-    assert_eq!(
-        operator_remote.config.url.as_deref(),
-        Some("https://project.example.com")
-    );
+    assert_eq!(operator_remote.config.url.as_deref(), Some(url.as_str()));
     let local_key = project_root.to_string_lossy().to_string();
-    assert_eq!(
-        operator_remote
-            .config
+    let binding = operator_remote
+        .config
+        .project_bindings
+        .get(&local_key)
+        .unwrap();
+    assert_eq!(binding.remote_project_path, "/srv/project");
+    assert_eq!(binding.project_name.as_str(), "bound-project");
+    assert_eq!(binding.remote_owner.to_string(), MOCK_REMOTE_OWNER);
+}
+
+#[tokio::test]
+async fn remote_bind_project_refuses_a_remote_that_reports_no_owner() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let public_key = public_key_response(&remote_state);
+    let project_root = tempfile::tempdir().unwrap();
+    let project_root = project_root.path().canonicalize().unwrap();
+    declare_project(&project_root, "bound-project");
+    let (url, _contacts) = start_mock_remote_with_owner_route(public_key.clone(), false)
+        .await
+        .unwrap();
+    let remote = remote_config("prod", &url, &public_key);
+    install_remote(&local_state, &remote);
+    store_operator_delegation(&local_state, &remote);
+
+    let error = remote_bind_project::handle(
+        remote_bind_project::Request {
+            remote: "prod".to_string(),
+            project: project_root.clone(),
+            remote_project: "/srv/project".to_string(),
+            sync_scope: ProjectSyncScope::FullProject,
+        },
+        operator_context(&local_state),
+        Arc::new(local_state.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("remote_owner_unreported"),
+        "{error:#}"
+    );
+    assert!(
+        config::load_remotes(&local_state.config.app_root).unwrap()["prod"]
             .project_bindings
-            .get(&local_key)
-            .unwrap()
-            .remote_project_path,
-        "/srv/project"
+            .is_empty()
     );
 }
 
@@ -481,6 +548,7 @@ async fn remote_bind_project_refuses_an_unpinned_remote_and_a_non_operator() {
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
+    declare_project(&project_root, "bound-project");
     let request = || remote_bind_project::Request {
         remote: "prod".to_string(),
         project: project_root.clone(),
@@ -495,7 +563,7 @@ async fn remote_bind_project_refuses_an_unpinned_remote_and_a_non_operator() {
     )
     .await
     .unwrap_err();
-    assert!(format!("{error:#}").contains("is not pinned"), "{error:#}");
+    assert!(format!("{error:#}").contains("not found"), "{error:#}");
 
     install_remote(
         &local_state,
@@ -547,12 +615,16 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
     let public_key = public_key_response(&remote_state);
     let (url, contacts) = start_mock_remote(public_key).await.unwrap();
     let project = tempfile::tempdir().unwrap();
+    declare_project(project.path(), "stale-remote-project");
     let project_path = project.path().canonicalize().unwrap();
     let mut stale = remote_config("prod", &url, &public_key_response(&remote_state));
     stale.site_id = "site:stale-coordinate".to_string();
     stale.project_bindings.insert(
         project_path.to_string_lossy().to_string(),
         RemoteProjectBinding {
+            project_name: ryeos_state::project_identity::ProjectName::new("stale-remote-project")
+                .unwrap(),
+            remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
             remote_project_path: "/srv/project".to_string(),
             sync_scope: ProjectSyncScope::FullProject,
         },
@@ -689,6 +761,40 @@ fn operator_context(state: &AppState) -> HandlerContext {
         Some(AuthorizedKeyPrincipalClass::LocalClient),
         None,
     )
+}
+
+/// Store the operator's delegation to `remote`, signed by the operator key, so
+/// the operator's outbound calls to it are made as the operator.
+fn store_operator_delegation(state: &AppState, remote: &RemoteConfig) {
+    use ryeos_node_runtime::remote_delegation::{DelegationBody, DelegationParties};
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    let body = DelegationBody::new(
+        &operator.principal_id(),
+        DelegationParties {
+            delegate_site: state.threads.site_id(),
+            delegate_node: &state.identity.principal_id(),
+            audience_site: &remote.site_id,
+            audience_node: &remote.principal_id,
+        },
+        &[
+            "ryeos.execute.service.remote/bind-project".to_owned(),
+            "ryeos.execute.service.project/owner".to_owned(),
+        ],
+        lillux::time::unix_secs_now() + 3600,
+    );
+    let signed =
+        ryeos_node_runtime::remote_delegation::SignedDelegation::sign(body, operator.signing_key())
+            .unwrap();
+    ryeos_node_runtime::remote_delegation::store_delegation(
+        &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+        &remote.name,
+        &signed,
+        &state.identity,
+        lillux::time::unix_secs_now(),
+    )
+    .unwrap();
 }
 
 /// A verified local client that is not the configured local operator.

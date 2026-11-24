@@ -15,7 +15,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
-use ryeos_engine::contracts::{SignatureEnvelope, SignatureHeader, TrustClass};
+use ryeos_engine::contracts::{LogicalProject, SignatureEnvelope, SignatureHeader, TrustClass};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_engine::trust::{
     PublisherTrustDoc, SignerContext, SignerRole, SignerScope, SignerStatus, TrustStore,
@@ -27,7 +27,14 @@ use ryeos_node::offline_operation::apply::{LocalDraft, apply_local};
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
-const PROJECT: &str = "/srv/projects/alpha";
+/// The stated project the verifications below happen in.
+fn stated_project() -> LogicalProject {
+    LogicalProject::Stated(
+        format!("pid:v1:{}/alpha", "a".repeat(64))
+            .parse()
+            .expect("project identity"),
+    )
+}
 
 /// A stopped node with an identity, a local operator key, and an authoring
 /// key at its canonical path, pinned the way `ryeos init` pins it.
@@ -202,12 +209,13 @@ fn signed_by(key: &SigningKey) -> (String, SignatureHeader) {
 /// The class `key`'s signature earns for an item of `kind` in the project.
 fn class_of(store: &TrustStore, key: &SigningKey, kind: &str) -> TrustClass {
     let (content, header) = signed_by(key);
+    let project = stated_project();
     verify_item_signature(
         &content,
         &header,
         &envelope(),
         store,
-        &SignerContext::project(kind, Some(Path::new(PROJECT))),
+        &SignerContext::project(kind, &project),
     )
     .map(|(class, _)| class)
     .expect("verification")
@@ -352,12 +360,13 @@ fn a_revoked_authoring_key_verifies_nothing_it_signed() {
     );
     let store = node.registry();
     let (content, header) = signed_by(&old);
+    let project = stated_project();
     let error = verify_item_signature(
         &content,
         &header,
         &envelope(),
         &store,
-        &SignerContext::project("knowledge", Some(Path::new(PROJECT))),
+        &SignerContext::project("knowledge", &project),
     )
     .expect_err("a revoked signer is refused");
     assert!(
