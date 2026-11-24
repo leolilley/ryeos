@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:3cd8009bfe92565b70219a34fcb829512ba664c02aeba791e77ab3e4be7380f1:rnfReHW+x6BmqphL3c81gSiESfSfdY8hlrwOHc4PbeJ6xTYIzP9K4b+HPK01lyDfJLGy+H6h+uwdBH/0vezyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9014ae7ccd2ddc2488e54e100372095f0ea5eb5cbf4491bfb71ffc3a3fd270ff:jkWTLRuETS4RMXxBhcBGw2VtH83CP7siS1S8pxSzwkqNMd6DcECSd0CdBZmu1rQlyBhgZQ5OXw01Woz/UYRtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/list
 version: "1.0.0"
@@ -26,3 +26,5 @@ disclosure:
     - /work/*/owner_principal_id  # removed by: m4
     - /work/*/project/name  # removed by: m4
     - /work/*/project/path  # removed by: m4
+  max_items: 512
+  max_result_bytes: 1048576

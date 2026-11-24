@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:c71066bd500f7337215b85ad79d2891c3f7119323558e810f9096e7b2d063a64:5gQL82A98CH1MLD32DznaGwPIay9DoEi1f7kmZyIlrO2OH90nxSYefh2WixlUi2k7hedBMCg7leHwpcXprukCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:36405f2538ee13361b1d95179a49c4c7212d142b95725b016acf92c467baac99:xqOvSg17TBTxDWUTQy92XSAFnPBjRHPxGSHE96rqsuPSFEf/HXTirVBrnAoHqo5kr7nRx+2IOGp6GvVxCDsVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/field/execution
 version: "1.0.0"
@@ -43,3 +43,5 @@ disclosure:
     - "/previews"  # removed by: per-chain publication
     - "/metrics"  # removed by: per-chain publication
     - "/warnings"  # removed by: per-chain publication
+  max_items: 1024
+  max_result_bytes: 2097152

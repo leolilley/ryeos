@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:1e3380b9092ecab1c08c760b6b9ead9e80c339fa511a39fead1ec84529ab869a:hG3XY8rH92fcQonpyF1T6CE3n3h6HbeK35WxKDyhxi6b/iUkWLh3xjY505+qUJe98KosHbYYPFTMPJtC/letCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:2a14f54952e9f4dead9327608d7ce7ea5286ae34872c5c189717df583df9d915:PKj0bSW3/fb+9b6ZfOG/qeEdAXGv+SimeFn7q0RppcI2r68e7i5pzFNrjl4IP08ysAWfmMCqaqZjdtIlw+hsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/attention
 version: "1.0.0"
@@ -55,3 +55,5 @@ disclosure:
     - /counts/by_project  # removed by: m4
     - /running/by_project  # removed by: m4
     - /running/items/*/project_root  # removed by: m4
+  max_items: 512
+  max_result_bytes: 2097152

@@ -451,7 +451,7 @@ fn disclose_service_result(
             class,
             disclosure,
             value,
-            ryeos_node_runtime::disclosure::DisclosureBounds::default(),
+            disclosure.map_or_else(Default::default, |declared| declared.bounds()),
         )
         .map_err(|refusal| anyhow::Error::new(HandlerError::Forbidden(refusal.to_string()))),
         Err(error) => {

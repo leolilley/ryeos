@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:a9ae0c2ddb2792dc48920eb4f36adda2d4e461e44b4aac2c425801be451c9cb5:MAM7mIkMBc6Ho1tvbnQ8yuNSHcRXdsflwdIHjOoKKQ/jFnxAs4NTg9VORILU8rDV8fD+aqzwykPZ+tKwTPdoDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:7e2b54f59ce41bed3e3d45cab3a128462e0b36667cfb036bb4c3234fe3e4691b:B7mTnvvjJRZ5lbLYSJaiT9MJVah3UzCQJdT6Z7KI/QYWoVXIdGKeF2EwZqjgedI9p20OJrMfBMvPxGyFz4E6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/field/runs
 version: "1.0.0"
@@ -43,3 +43,5 @@ disclosure:
     - "/previews"
     - "/metrics"
     - "/warnings"
+  max_items: 1024
+  max_result_bytes: 2097152

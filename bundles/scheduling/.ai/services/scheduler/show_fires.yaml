@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:06e4c0c7008d0c25fb9b2837d5e394f0a47585ee119c62bff3edc4eef9d3914f:TU9+E+ZwKIFCkAkwL3StXoZfSID+K1qIMsHbnNchMo/+WPeE8a0gE/eRaYhRJX6VS/jMMO9mL8rRRgggLqL4CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9b35a2504669263d4a5cbefc61e87fe84f570780b2c6f3fd8811c419c7a8029e:RtmQlTWwjHuGDyQQ31zC+k7JNfEZGPDJxqc29OAqBlwiZea96tra02LF1EKnAb3wRF4eiEDguheGltV92PQWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "show_fires"
 kind: service
@@ -25,3 +25,5 @@ disclosure:
   free_text:
     - /fires/*/signer_fingerprint
     - /fires/*/project_authority
+  max_items: 512
+  max_result_bytes: 1048576

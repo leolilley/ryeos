@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:55b074e27c023c2f54847c1d54fcdb5e09f2f1d5850db5e1713194dc7ae053fd:X3YTdDT4RBaWdvfLLuZOH5ldY2mZgwj9Cbkriiuoxzg1AQwAJg2GZxv3Muy9/X4pfDE58Vxsw5WXrTklpETXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:774d49b406d70fca85a5d87fef160e7104f6fb754da4f14dc685acd1586bbe20:IDoniZf4HjjsvV8PScQzzhpIIsttgpL//ux0V7Zema+h9Eabl3B/xa5MuJv83sDI7LD1AZhOOMW1WRWd/L+qCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/threads/list
 version: "1.0.0"
@@ -39,3 +39,5 @@ disclosure:
     - /threads/*/project/name  # removed by: m4
     - /threads/*/project/path  # removed by: m4
     - /threads/*/requested_by  # removed by: m4
+  max_items: 2048
+  max_result_bytes: 4194304

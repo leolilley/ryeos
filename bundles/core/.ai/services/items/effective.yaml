@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:dcf489020f5000d3580df5ba5d9aed925cad87aca60dbbd52a8c264d6e9a56fe:jXREIlXUpX1A4TGcfHm86x9eM6rWqswHuwyvlE+UYeE6+ZjwcUiXEGvYShtgdMVgo/+TdloCKiWQf2haWffGCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:c2ff8cec5174c4f6bfc928ac7412a20f8eb752927627df9708cd59fb6be30729:xgPCQ89CkdKNZ9Uyn/rpjdz6mpCJpjuGiaCkoXKux5RdOm2VK73YHAYCNf0x4s2OBmAoEdDfvXTYbn83wytdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: effective
 version: "1.0.0"
@@ -39,3 +39,5 @@ disclosure:
     - "/as_launched"
   free_text:
     - "/diagnostics"
+  max_items: 2048
+  max_result_bytes: 1048576

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:c12f8b8e69d953a934558516e7d6b57d0641286ee47b82489c2c7debf87bfefa:wgTutKXdCrYsAfn2V6Eh67BOOiRsTmgeg07yqCGnntjYU+sHIdZSl20qCnPTmjGAoih6rfXZbLJvmZk2FGKQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:88d404f2abccc95eaff861a01d92d89fa56a401e3bd39e3ea40d1bc86dc67995:6ialP8Zs1+5WpzgpFIyxdiJnxoptq1rFhOfnDge415TQbWvkiotgCesZrxhhTpJKEuS/zdLLWsavODQuSZr9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/read
 version: "1.0.0"
@@ -8,5 +8,12 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
-# File contents and paths are operator-only; a principal receives nothing.
-disclosure: {}
+disclosure:
+  principal:
+    - /root
+    - /size
+    - /truncated
+  interim_free_text:
+    - /path  # removed by: m4
+    - /content  # removed by: m4
+  max_result_bytes: 1048576

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:aa92781bbaa7506e758943fc40970d1a91275108083eaf0561d8234057128d02:vQBjKy5uee7LjPHnuGlqwvcloK+0sxYHL4weglegFmreJC9UWrQz2LodiJ+LCFbCzkp2Ij7ccTTa66H/BWBTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:4a023f3688065751f31104c695d5d9ee0c24939b7a73d76f344087f30b270881:IUeotQIB3OTCwJerU971H/oR76FRu+cutMJwnxih1gS2jOhLDPkeB6ABYcXEV1oVrEybM+V86bEClfJiBBQmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "events"
 name: "replay"
 kind: service
@@ -26,3 +26,5 @@ disclosure:
     - "/next_cursor"
   free_text:
     - "/events/*/payload"
+  max_items: 512
+  max_result_bytes: 2097152

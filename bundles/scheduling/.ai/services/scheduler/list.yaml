@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:ae7aef22f9452671e3fa40f1d658d3e4d747e747d0425099df69012257a784a5:nHuoHlGIsCD1IK4hsheU3nbSRd067S9EWxHKVmDDKWQUnBp94F1qyQGs2M39FCYgdKftrmhaAshrqa5XB+v+DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9321a926363a43e833a3280cb07f6bcd415e03ca15e672d6602b6d3d0c520b82:OQcBS4dhQJO+3Ltni4g3Pkx/V/cAxx0iK0Alf6Hb+zhVbsKGIz+EAPssgHq0U4PpehxIT+RW5U/7Bm0hrd5VDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "list"
 kind: service
@@ -43,3 +43,5 @@ disclosure:
     - "/note"
     - "/schedules/*/last_fire_reason"
     - "/schedules/*/decision_reason"
+  max_items: 2048
+  max_result_bytes: 1048576

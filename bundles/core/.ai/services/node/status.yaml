@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:238c7735d37d074dbb455551a3c27a79284ac3e8156103cd274206d7ac112577:1nalMSTKS+VrrmvbrCGT3/KQ1rWFT8XJqrPC5v8wylL8msxDi71TUEmXyAolamYVRNWahm7IJhMh0EVLY6VEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:13c0ca0de8a6c81d84b9dc59f4f76d79fdfbb497e2ecd99430f1f33bd65ae238:peVd2ICCyceg16lsL5+zmoZG2K5SzXb0G3UJKlHtUZbnAhCV3fxmpRuBz/GiucEviV1ou+19wv8l+eEg0EN5CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.status
 ui_read_only: true
@@ -26,3 +26,5 @@ disclosure:
     - "/thread_projection"
     - "/pending_head_transitions"
     - "/accounting"
+  max_items: 64
+  max_result_bytes: 65536

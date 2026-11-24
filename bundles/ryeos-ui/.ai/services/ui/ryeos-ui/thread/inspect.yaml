@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:bcfc0d694517bbd0f3a630dcb2779fe11ee4e6a70e66906a5cfaa56882e41193:YcnZV4BxZd+m5Tg4OgT579/atrov6QNZWcbbvye8phcf2UiTmWqV12mOkVf3ZCqu+4X6Crpi7941bCn6OqcCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:b6df9de450694639e087281264061640f5f4e6dd953eb81efe5cf66484a1bc13:fZko0RP6yOvRqCDdMETq1kN12RusbdnWD19ZsfyJUjd2O2nY0979XLtwTxo9xYQTNkKS8NCy8OzGXv83ZGCHCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/inspect
 version: "1.0.0"
@@ -59,3 +59,5 @@ disclosure:
     - /launch_facts/*/properties/isolation_enforced  # removed by: per-chain publication
     - /launch_facts/*/properties/isolation_policy_digest  # removed by: per-chain publication
     - /launch_facts/*/properties/isolation_backend_inspection_digest  # removed by: per-chain publication
+  max_items: 512
+  max_result_bytes: 2097152

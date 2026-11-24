@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:1f5146972e7730faea1a45499921bf323389b8d6760ed61a9e1e22f2b111f4ec:ARtUsZGwiGtgIiqB8L1DsjjZvj/oeXl4xHqV9D0ioaUnVYq/QidKzjT3fXsLsGS9EZdCUxOmmF2jLYkfgLbkDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:19fa656ec37739329d8b5cc053d42b765e4a1f512643042302eba318015a2779:jM6oSlbjrW24IruZ/U2UNP1vwGac2ELqN4HqBkPwQXVWtTX0uNd7+xOP/ImxnFeyUvBrNMP2aT+Wf5f5R8Z2Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/items/list
 version: "1.0.0"
@@ -30,3 +30,5 @@ disclosure:
     - /items/*/shadowed
   interim_free_text:
     - /items/*/title  # removed by: m4
+  max_items: 2048
+  max_result_bytes: 2097152

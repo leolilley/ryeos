@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:6ee95771f9be944b4f573e5ca455329f2393e8aa9d176e42a91b3c889be79d06:OexTJPYTHVSd2lLRRvMd3nVoKkj5wRdBMBmReOUaImhQi0qjO2g0h34OzQpVGEMfjfPyC2nKK11iwGjhkbM4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:3ee22efe44a7de30d53eb8b4be09d23938529d923555d72106a79a2e39a9c01b:Q+aI/Lw++KnNmaJncWkXgu/Hemmp5mbJsGyZrp4g0V2Cz/zKFDp3E848fIlOKasI5DtUwMHnYvHlIkxGoeQUCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "timeline"
 kind: service
@@ -35,3 +35,5 @@ disclosure:
   free_text:
     - "/items"
     - "/notice_noun"
+  max_items: 1024
+  max_result_bytes: 2097152

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:0bb7141dea69b4a7a740f4d0643b262486d081aaf4d254e23017dd38a62012aa:cdtfVMWwTWxT+BURG7CZKf0yruc9T1ffLM8OUFf73LkJI75JVVy+NRqH6MBWkwYFQRFhXNh/GI4KONq4vZsRBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:c4e310b073ac5c85824bb0da346e473f668782968f60b5de0f90b061b255e901:Ya+vQ55JotNYdtQ48wlKRf7tvKajEqk8yJCGql9Z9LTZkrjPnJvhEOfSByzu1KFHTs/I0598OtfUri4U1BqnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.locality.groups
 ui_read_only: true
@@ -15,3 +15,5 @@ disclosure:
     - "/groups"
     - "/invalid_declarations/*/label"
     - "/invalid_declarations/*/code"
+  max_items: 1024
+  max_result_bytes: 1048576

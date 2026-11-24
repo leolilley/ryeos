@@ -104,8 +104,6 @@ const OPERATOR_ONLY: &[&str] = &[
     "node/doctor",
     "node/logs",
     "system/ingest-ignore",
-    "ui/ryeos-ui/files/read",
-    "ui/ryeos-ui/files/tree",
 ];
 
 #[test]
@@ -270,6 +268,10 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
         "/warnings",
         "per-chain publication",
     ),
+    ("ui/ryeos-ui/files/read", "/path", "m4"),
+    ("ui/ryeos-ui/files/read", "/content", "m4"),
+    ("ui/ryeos-ui/files/tree", "/entries/*/path", "m4"),
+    ("ui/ryeos-ui/files/tree", "/entries/*/name", "m4"),
     ("ui/ryeos-ui/item/inspect", "/item/title", "m4"),
     ("ui/ryeos-ui/item/inspect", "/item/trust/signer", "m4"),
     ("ui/ryeos-ui/item/inspect", "/item/trust/reason", "m4"),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:efd04940d99f9af8f217a4e5929ea0ad438f53c0332349b08802b1827ad51f4e:gfusH1Nnj7pj8VcYWflth4LYESwtX3qVDOT9SjYzvwE+paxtqCmSAkWh0zm07E5wW2HTpYTw3VkNoZpm0nfaBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:9f4fc4868d8540f31275b00cd2d5ebe779fccae4bfa66417832814651e9710e6:ogJZVyGQJ7xOyjIHQMpxhX3obzs2sIN+SbI/zbBJq0FtzrgmRB8oNjtkt5gPaOkNSB7SlLY0iZ2iWuI1obmEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "list"
 kind: service
@@ -33,3 +33,5 @@ disclosure:
     - "/threads/*/current_node"
   free_text:
     - "/threads/*/error"
+  max_items: 2048
+  max_result_bytes: 4194304

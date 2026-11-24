@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:3886e41c8aa972a1d94ab77e16b1385bf15b52934ef8fb14515f481799e92d7d:r6VvUk5t0X7HDhZH9Kx3QngAJxRdfVEMfZYrNDJZKOwN0DaidCDs+9x1tjqh+cLK+tkTx+zWAMmkDnBjW7NaCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:31708def4a8b218550b3dc379d7c63d786e238f83c441a7d75a985c0e4af77d7:RetclD2kLp9z42pU9S57l4VFEXyAgiYzirDOF7rBcvzSkNGDmDKws7O+djZQKHxdKv3lfKUBI480njX5lFXXAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -113,6 +113,8 @@ composed_value_contract:
             type: single
             prim: sequence
             elements: { type: single, prim: string }
+          max_result_bytes: { type: single, prim: integer }
+          max_items: { type: single, prim: integer }
     ui_read_only: { type: single, prim: boolean }
     ui_dispatch:
       type: single

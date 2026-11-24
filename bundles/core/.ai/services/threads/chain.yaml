@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:f5992478937a6ca35ee9408893b1553ebc830a58fa250a410414ff5872616d5f:R7ZQ9n8Yv+kwAs4U6IIFl1ML8PR70PyEgGtxAAIRhmunYEBDgHNo44bcfJ+UPGkmnNUQVesVGa29I7pCB5OUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:b6e3be9ca5fb12ccbb3e07f53eb0b1eb47a031997060b461c4ed158b1e1fb1c7:X1eA5W4tzlF0JFIbEEw82vHVfscPWd/9SdLZS258nTJmt0nLtvnj1CqO5pQeE0QM3sG6M8i/5OpM2I4WoiVsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "chain"
 kind: service
@@ -53,3 +53,5 @@ disclosure:
     - "/threads/*/runtime"
     - "/threads/*/follow/follow_node"
     - "/edges/*/metadata"
+  max_items: 512
+  max_result_bytes: 2097152

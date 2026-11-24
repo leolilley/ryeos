@@ -259,6 +259,35 @@ async fn the_shipped_policy_keeps_node_status_without_its_filesystem_paths() {
     assert!(shown["isolation"].get("source").is_none());
 }
 
+/// A UI-plane service has no seat-policy entry, so the only thing shaping its
+/// answer is the service item's own tier. The seat's key is not the operator's,
+/// so a field the tier withholds must stay withheld in the dispatch envelope's
+/// `result`, the path a client reads every bound source through.
+#[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
+async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
+    let (_tmp, _owner, state) = build_test_state_with_live_bundles();
+    let (_id, ctx, producer, coordinate) =
+        live_presentation_with_surface(&state, NODE_SURFACE).await;
+    let state = Arc::new(state);
+    let gc = dispatch_source(
+        &state,
+        &ctx,
+        &producer,
+        &coordinate,
+        "view:ryeos/node/gc",
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("gc status: {}", refusal_text(&error)));
+    let shown = &gc["result"]["result"];
+    assert!(shown.is_object(), "{shown}");
+    // The service item names `state` and `recent_events` as free text: raw
+    // sidecar and log JSON that only the operator may read.
+    assert!(shown.get("state").is_none(), "{shown}");
+    assert!(shown.get("recent_events").is_none(), "{shown}");
+}
+
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn dispatch_refuses_a_read_whose_entry_is_gone_even_with_a_live_binding() {

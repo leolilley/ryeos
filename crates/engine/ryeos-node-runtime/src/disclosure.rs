@@ -46,6 +46,7 @@ pub struct ServiceDisclosure {
     public: Vec<KeepPath>,
     free_text: Vec<KeepPath>,
     interim: Vec<KeepPath>,
+    bounds: DisclosureBounds,
 }
 
 impl ServiceDisclosure {
@@ -84,6 +85,7 @@ impl ServiceDisclosure {
             public: list("public")?,
             free_text: list("free_text")?,
             interim: list("interim_free_text")?,
+            bounds: declared_bounds(map)?,
         };
         // An interim entry is free text the principal tier carries for now,
         // because the seat that owns the answer reads it today. It is the
@@ -148,6 +150,11 @@ impl ServiceDisclosure {
         Ok(parsed)
     }
 
+    /// The most a non-operator answer of this item may hold.
+    pub fn bounds(&self) -> DisclosureBounds {
+        self.bounds
+    }
+
     /// The free-text leaves this item lets a principal see for now.
     pub fn interim_free_text(&self) -> impl Iterator<Item = &str> {
         self.interim.iter().map(KeepPath::text)
@@ -202,6 +209,39 @@ impl std::error::Error for DisclosureRefusal {}
 pub struct DisclosureBounds {
     pub max_result_bytes: u64,
     pub max_items: u32,
+}
+
+/// Largest bound an item may declare for itself. An answer bigger than this is
+/// never disclosed to a non-operator, whatever the item says.
+pub const CEILING_MAX_RESULT_BYTES: u64 = 8 * 1024 * 1024;
+pub const CEILING_MAX_ITEMS: u32 = 4096;
+
+fn declared_bounds(map: &Map<String, Value>) -> Result<DisclosureBounds> {
+    let mut bounds = DisclosureBounds::default();
+    if let Some(value) = map.get("max_result_bytes") {
+        let bytes = value
+            .as_u64()
+            .filter(|bytes| (1..=CEILING_MAX_RESULT_BYTES).contains(bytes))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`disclosure.max_result_bytes` must be an integer from 1 to {CEILING_MAX_RESULT_BYTES}"
+                )
+            })?;
+        bounds.max_result_bytes = bytes;
+    }
+    if let Some(value) = map.get("max_items") {
+        let items = value
+            .as_u64()
+            .and_then(|items| u32::try_from(items).ok())
+            .filter(|items| (1..=CEILING_MAX_ITEMS).contains(items))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`disclosure.max_items` must be an integer from 1 to {CEILING_MAX_ITEMS}"
+                )
+            })?;
+        bounds.max_items = items;
+    }
+    Ok(bounds)
 }
 
 impl Default for DisclosureBounds {
@@ -416,6 +456,26 @@ mod tests {
             json!({"free_text": ["/rows"], "interim_free_text": ["/rows/*/detail"]}),
             json!({"principal": ["/rows/*/detail"], "public": ["/rows/*/detail"], "interim_free_text": ["/rows/*/detail"]}),
             json!({"interim_free_text": ["/rows/*"]}),
+        ] {
+            assert!(ServiceDisclosure::parse(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_item_may_raise_its_own_bounds_within_the_ceiling_and_no_further() {
+        let wide = declared(json!({
+            "principal": ["/rows/*/id"],
+            "max_items": 4096,
+            "max_result_bytes": 1_000_000,
+        }));
+        assert_eq!(wide.bounds().max_items, 4096);
+        assert_eq!(wide.bounds().max_result_bytes, 1_000_000);
+        assert_eq!(declared(json!({})).bounds(), DisclosureBounds::default());
+        for bad in [
+            json!({"max_items": 4097}),
+            json!({"max_items": 0}),
+            json!({"max_result_bytes": 8 * 1024 * 1024 + 1}),
+            json!({"max_items": "many"}),
         ] {
             assert!(ServiceDisclosure::parse(&bad).is_err(), "{bad}");
         }

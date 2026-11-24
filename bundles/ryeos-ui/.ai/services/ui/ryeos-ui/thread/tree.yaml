@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:4d55bc7666ae7fe5f759eed54f7540ca115c886e05a97d34aed3bbf6b1e21bce:eDSAQI9e/iSf1CX6Gm6+rgd+exGmOZ0bV1HCXCdP2+6ZmqqHgun22QYKDoGVrDeBjPDxFfeuT3L+JZZlrbG4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:5837ab511ad2c5f54c147956214f0f5aa6fb8fdb1f2f078e7b597e1ed1eb87e6:8aE5zSU6D9Wde5T1JEKnYd8P2KsOg2N4uNv3Q+SC0Hj4z846PjfOoSRur64Bc1nbubfDLVlE1redOamRmfvwDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/tree
 version: "1.0.0"
@@ -57,3 +57,5 @@ disclosure:
     - /threads/*/follow/parent_successor_thread_id  # removed by: per-chain publication
     - /threads/*/follow/cohort/done  # removed by: per-chain publication
     - /threads/*/follow/cohort/expected  # removed by: per-chain publication
+  max_items: 1024
+  max_result_bytes: 2097152

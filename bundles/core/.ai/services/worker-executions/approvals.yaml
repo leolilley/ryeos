@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:fa9c0226ec00a3d632591b3868750ead67954d09496bea3a8d7532e7291648c7:iwegZBwcm8iwwmHqwR2jJhVlclEHop5C2XYMyz2ibU5L5RdJJsgx+IC78tbXfev0AqgXzQsB8Bz8FHjodVqIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:05038294307bc69d07894a2618504c41042e95e723a1787fb0d3fe6ab3e8e95e:1MNlai4LR3oDIk2kILoEncRp9C4YZkvAMJnnOfha+RbajLWgvdDop9VeGPzHqzjQl2IouusHgvvHKm0s4JWlBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: approvals
 kind: service
@@ -20,3 +20,5 @@ disclosure:
     - "/approvals/*/created_at_ms"
   interim_free_text:
     - "/approvals/*/requested_authority/display"  # removed by: per-chain publication
+  max_items: 256
+  max_result_bytes: 262144

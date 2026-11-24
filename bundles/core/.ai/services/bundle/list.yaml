@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:41109e21526066283de07dde2fcf3076d6f0a65de729b8e219a74293f3e8fa08:AQCYKv2EhgGf9ZNftlzY7xtJqBWbRf7smPkpH2XrB2D3ejo9YN2W1PCO8G4EiQHhqX0JhpHX2BUpEBzQre6XAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:183fb63fd8c79a94034f2ba0c5f63a7177ec85b889e5f95a8f9829e56639f1df:OXEUtkUl0Qi0H66osNltLpDCg3/uHJv/q1l5lFSCkzqKBg3MyNCqyobwE1srvR/qG51WoKJBte9QhDP03co3Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
@@ -9,3 +9,5 @@ description: "List installed bundles"
 disclosure:
   principal:
     - "/bundles/*/name"
+  max_items: 512
+  max_result_bytes: 65536

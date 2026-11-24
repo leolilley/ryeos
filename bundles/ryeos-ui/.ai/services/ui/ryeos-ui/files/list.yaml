@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:52Z:fdb09e9a9c0f8e044980c43eaea6eb1b6ee4b8cbc79c3e27606c91b57222e62b:Zrn7btxvJj7XX4Y4H8nIUFv5hlUJf2EjU1hm44tyHvxqx4sIHMU/7rs84tlp3aIlJjsfTC7W29JEwODFCHy2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:f38573409ce47bc2e2c4b0b3121db13fb13cf48ca88c755b8f9754f0fc900c98:78YI8+eIeuGrMNZzqM5NHwpVuzO2xo72jRxnHgekCsZB6fFLJi88ubJuwjQwG/331Wt3FJPBe41eh8Gs3HS2Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/list
 version: "1.0.0"
@@ -28,3 +28,5 @@ disclosure:
     - "/path"
     - "/entries/*/name"
     - "/coverage/directory/failure"
+  max_items: 2048
+  max_result_bytes: 1048576

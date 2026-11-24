@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:161d5baecad30580411515cdd001c1c855a722b5af755f7a38f097f113712533:AAUSgcxniTzQwymQ7rPpenZPpf7fn9uTkwBs6cjHxcR/9YgsSN9/jv9CliuS8OsQL9Tr/UraRmYMMcvawHTvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:5cafaa4bd633e295937e029fd3c4509cf59adb0ef8471ba8016af00a413a58da:uc3jNEHh1QmDMW1eCHdYplKHhmL+jNgqrU91vUE3WokVM4WOwOwWeKlDqJmPh3QIlT++Bn3wfvczbwLfDEq0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "list"
 kind: service
@@ -21,3 +21,5 @@ disclosure:
     - "/commands/*/control_flags"
     - "/commands/*/project"
     - "/commands/*/invocable"
+  max_items: 4096
+  max_result_bytes: 4194304

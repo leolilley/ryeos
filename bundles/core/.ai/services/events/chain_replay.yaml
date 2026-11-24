@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:06222f9887b680de1c395300d17d3a7bfe38083dd72a065ea3b9e1fa09a29720:benqIXkpeaZ68LcWtPDsRO/k1UC8WWo5Zimj2frDZ8oaVCIMpZA40n9pk5I4v/zw8cFFmP2H8Ot1ATcXFUrlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:1183abfe250688ad19a0dbad55c520dbe2d2a430957ea4b825e34e076c66113e:n80blpc/ad7ZkDWlYmBge2s0PujZDNLUiPV2gDMod4Hlu63DzEgmbcQPMXK3iq6koK0AbkwlYDgrLVzUoV7ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "events"
 name: "chain_replay"
 kind: service
@@ -33,3 +33,5 @@ disclosure:
     - "/summary/turns"
   free_text:
     - "/events/*/payload"
+  max_items: 512
+  max_result_bytes: 2097152

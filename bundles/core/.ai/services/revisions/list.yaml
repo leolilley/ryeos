@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:08:57Z:149f460b9965db1dceabce6a0c7b1f77f7bed4360d2a813a854de61862d0208d:Flf+Gx1fQc7R3BQ3n/8voikh+68jP+Hk0ZlGNxHATq/PmtA0a9wsRHJcH0xtebSNW/NGfCUK+WpOJWvj/GxBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:9edd513fc4db0cd01cca1d766bf94f29ca0e18bde1c885dab8043834278db686:tga/EMyqZN6/tZgYuDqTb9ScpvwaPgoZp9dMHjEePQmdvnlIokbazMtG5QHnz4QhbO4s9KNM9d/2uVOH27BXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.list
 availability: both
@@ -46,3 +46,5 @@ disclosure:
   free_text:
     - "/file"
     - "/records/*/verify/reason"
+  max_items: 200
+  max_result_bytes: 524288

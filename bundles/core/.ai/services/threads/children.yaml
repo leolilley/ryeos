@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:2ae02390006de1b12fca87d102b064f19018ec8a8fb59190de4a2fb8950d9e27:XobXbpHf2jA1l5XzaBD11JByTYG5EtTaHvuzUTgN1JZC3zeH1w0ri10vzRfchtNyg8sVpH9FZjdmdqQ8gCAdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:b9993fb1a4cf5f84be7532ad7378b69bc00d177a4bd7c302e98c6ce81ac3c1ca:lh0lascmkc4L8A6Jf3PXnvHN7y8Tz+g5w97uEB3LRPRRt+nyee8wF07MF6gYbpEvhjH2rF8xUrv1AbCBWKdNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "children"
 kind: service
@@ -46,3 +46,5 @@ disclosure:
     - "/children/*/result_workspace_output_capture_hash"
     - "/children/*/runtime"
     - "/children/*/follow/follow_node"
+  max_items: 512
+  max_result_bytes: 1048576
