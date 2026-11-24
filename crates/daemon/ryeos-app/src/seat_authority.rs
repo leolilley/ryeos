@@ -253,6 +253,11 @@ impl ThreadReader {
             }
             ExecutionProjectAuthority::Projectless { .. } => (None, false),
         };
+        // A stated project's threads are read by the keys of its owner: an
+        // ownership consequence, never a grant of any act. These three arms
+        // are this file's entry in the principal-owner guard's
+        // SPEAKS_FOR_CALLERS, which pins their count; unstated threads never
+        // ask it.
         if self.project_authored_source {
             return live
                 && sealed.is_some_and(|project| {
