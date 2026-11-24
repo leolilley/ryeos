@@ -62,8 +62,7 @@ pub struct Request {
     pub title: Option<String>,
 }
 
-/// Facet key carrying a thread's human title.
-const TITLE_FACET_KEY: &str = "title";
+use ryeos_app::thread_lifecycle::TITLE_FACET_KEY;
 /// Longest accepted title, in Unicode scalar values.
 const TITLE_MAX_SCALARS: usize = 160;
 /// Longest stretch of `input` a derived title keeps, in Unicode scalar values.

@@ -1201,6 +1201,7 @@ mod tests {
             project: None,
             pending: 0,
             facets: Default::default(),
+            title: None,
             current_node: None,
             error: None,
         };
