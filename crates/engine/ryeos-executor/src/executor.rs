@@ -468,27 +468,29 @@ fn disclose_service_result(
                 error = %format!("{error:#}"),
                 "service failure withheld from a non-operator caller"
             );
-            Err(match ryeos_app::handler_error::extract_handler_error(&error) {
-                Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
-                Some(HandlerError::Forbidden(_)) => anyhow::Error::new(HandlerError::Forbidden(
-                    "the service refused the request".to_owned(),
-                )),
-                Some(HandlerError::BadRequest(_)) => anyhow::Error::new(HandlerError::BadRequest(
-                    "the request was not valid".to_owned(),
-                )),
-                Some(HandlerError::Conflict(_)) => anyhow::Error::new(HandlerError::Conflict(
-                    "the request conflicts with current state".to_owned(),
-                )),
-                _ => {
-                    let (code, sentence) =
-                        ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
-                    anyhow::Error::new(HandlerError::Structured {
-                        status: 500,
-                        body: serde_json::json!({"error": {"code": code, "message": sentence}}),
-                        code,
-                    })
-                }
-            })
+            Err(
+                match ryeos_app::handler_error::extract_handler_error(&error) {
+                    Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
+                    Some(HandlerError::Forbidden(_)) => anyhow::Error::new(
+                        HandlerError::Forbidden("the service refused the request".to_owned()),
+                    ),
+                    Some(HandlerError::BadRequest(_)) => anyhow::Error::new(
+                        HandlerError::BadRequest("the request was not valid".to_owned()),
+                    ),
+                    Some(HandlerError::Conflict(_)) => anyhow::Error::new(HandlerError::Conflict(
+                        "the request conflicts with current state".to_owned(),
+                    )),
+                    _ => {
+                        let (code, sentence) =
+                            ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
+                        anyhow::Error::new(HandlerError::Structured {
+                            status: 500,
+                            body: serde_json::json!({"error": {"code": code, "message": sentence}}),
+                            code,
+                        })
+                    }
+                },
+            )
         }
     }
 }
@@ -1181,8 +1183,11 @@ pub async fn execute_service_verified(
             .await;
             // Shaped before it is recorded, so the durable result and the
             // caller's answer are the same disclosed value.
-            let dispatch_result =
-                disclose_service_result(disclosure_class, task_disclosure.as_ref(), dispatch_result);
+            let dispatch_result = disclose_service_result(
+                disclosure_class,
+                task_disclosure.as_ref(),
+                dispatch_result,
+            );
 
             let (terminal, result_retention_error) = recorded_service_terminal_projection(
                 &task_invocation_id,
