@@ -19,6 +19,57 @@ pub fn operator_signing_key_path(app_root: &Path) -> PathBuf {
         .join("private_key.pem")
 }
 
+/// The environment variable that names the key this client signs with, in place
+/// of the operator key under the app root. It selects a key and nothing else:
+/// whoever holds the key has exactly the key's grant.
+pub const CLIENT_KEY_ENV: &str = "RYEOS_CLIENT_KEY";
+
+/// The key file this client signs with: the file `RYEOS_CLIENT_KEY` names when
+/// it is set, else the operator key under `app_root`.
+///
+/// A selected key fails closed. It must be an absolute path to a regular file
+/// that is readable by its owner only, and it must not sit inside the node's
+/// own state (`<app_root>/.ai/node/`), where the node's keys live. A selection
+/// that fails any of these is `client_key_unreadable`, never a fall back to
+/// the operator key.
+pub fn client_signing_key_path(app_root: &Path) -> Result<PathBuf, TransportError> {
+    client_key_from(std::env::var_os(CLIENT_KEY_ENV).as_deref(), app_root)
+}
+
+fn client_key_from(
+    selected: Option<&std::ffi::OsStr>,
+    app_root: &Path,
+) -> Result<PathBuf, TransportError> {
+    let Some(selected) = selected else {
+        return Ok(operator_signing_key_path(app_root));
+    };
+    let path = PathBuf::from(selected);
+    let unreadable = |detail: String| TransportError::ClientKeyUnreadable {
+        path: path.clone(),
+        detail,
+    };
+    if !path.is_absolute() {
+        return Err(unreadable("the path must be absolute".to_owned()));
+    }
+    let real = std::fs::canonicalize(&path).map_err(|error| unreadable(error.to_string()))?;
+    let node_state = app_root.join(".ai").join("node");
+    if let Ok(node_state) = std::fs::canonicalize(&node_state)
+        && real.starts_with(&node_state)
+    {
+        return Err(unreadable(format!(
+            "the key is inside the node's own state {}",
+            node_state.display()
+        )));
+    }
+    match lillux::regular_file_is_owner_only(&path) {
+        Ok(true) => Ok(path),
+        Ok(false) => Err(unreadable(
+            "the key file is readable by its group or others; make it mode 0600".to_owned(),
+        )),
+        Err(error) => Err(unreadable(format!("{error:#}"))),
+    }
+}
+
 /// Loaded signing material for request signing.
 pub struct Signer {
     signing_key: SigningKey,
@@ -27,7 +78,9 @@ pub struct Signer {
 
 impl Signer {
     /// Resolve the signing key:
-    ///   1. [`operator_signing_key_path`] under `app_root`.
+    ///   1. The key `RYEOS_CLIENT_KEY` names, when set (see
+    ///      [`client_signing_key_path`]); else [`operator_signing_key_path`]
+    ///      under `app_root`.
     ///      This is the operator's persistent identity, created by `ryeos init`.
     ///   2. Fail
     ///
@@ -38,7 +91,7 @@ impl Signer {
     /// The app root is supplied by the transport after applying CLI/env config
     /// resolution; no separate `RYEOS_APP_ROOT` lookup is performed here.
     pub fn resolve(app_root: &Path) -> Result<Self, TransportError> {
-        Self::load(&operator_signing_key_path(app_root))
+        Self::load(&client_signing_key_path(app_root)?)
     }
 
     /// Load signing material from an explicit key file.
@@ -156,6 +209,74 @@ mod tests {
                 .collect::<Vec<_>>(),
             [".ai", "node", "operator", "signing", "private_key.pem"]
         );
+    }
+
+    fn private_key(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(name);
+        lillux::atomic_write_private(&path, b"key").unwrap();
+        path
+    }
+
+    fn refused(selected: &Path, app_root: &Path) -> String {
+        client_key_from(Some(selected.as_os_str()), app_root)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn with_no_selection_the_operator_key_is_the_client_key() {
+        let app_root = Path::new("/srv/ryeos-app-root");
+        assert_eq!(
+            client_key_from(None, app_root).unwrap(),
+            operator_signing_key_path(app_root)
+        );
+    }
+
+    #[test]
+    fn a_selected_private_key_outside_the_node_state_is_used() {
+        let app_root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let key = private_key(elsewhere.path(), "client.pem");
+        assert_eq!(
+            client_key_from(Some(key.as_os_str()), app_root.path()).unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn a_selected_key_that_cannot_be_used_is_refused_with_no_fallback() {
+        let app_root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let relative = client_key_from(Some(std::ffi::OsStr::new("client.pem")), app_root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(relative.starts_with("client_key_unreadable"), "{relative}");
+
+        let missing = refused(&elsewhere.path().join("absent.pem"), app_root.path());
+        assert!(missing.starts_with("client_key_unreadable"), "{missing}");
+
+        let wide = elsewhere.path().join("wide.pem");
+        lillux::atomic_write_with_mode(&wide, b"key", 0o644).unwrap();
+        let wide = refused(&wide, app_root.path());
+        assert!(wide.contains("0600"), "{wide}");
+
+        let directory = refused(elsewhere.path(), app_root.path());
+        assert!(
+            directory.starts_with("client_key_unreadable"),
+            "{directory}"
+        );
+    }
+
+    #[test]
+    fn a_key_inside_the_nodes_own_state_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let state = app_root.path().join(".ai/node/operator/signing");
+        std::fs::create_dir_all(&state).unwrap();
+        // Even the operator's own key file: a client selects a key of its own.
+        let inside = private_key(&state, "private_key.pem");
+        let error = refused(&inside, app_root.path());
+        assert!(error.contains("node's own state"), "{error}");
     }
 
     #[test]
