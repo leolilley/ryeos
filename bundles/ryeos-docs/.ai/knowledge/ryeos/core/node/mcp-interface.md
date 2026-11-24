@@ -1,32 +1,89 @@
-<!-- ryeos:signed:2026-08-11T02:28:32Z:1674a9e5f579f79d24b2a92e53865492300dba2cc836ab074098807e81c11cad:PU4kVzjb/E+EFgIZxthBXBb3Ohv96WC8PiGZOyFW6SQwF+rsIqaZ6DuU6hZrhZJy9am86vnXKUAoUKVrk/hdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:35:40Z:ea8913c3c1e82e0ff3e6318db18b6223df858badeb511657def0221d1a4d53dc:GBPg8RoxgPhetVbFnJxvjbaQPxfqTHciRvGREtwtAtj2TUr+begk5J3YdFEUjxmS/ju37YPBvLKf+/SdaySaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
-tags: [fundamentals, mcp, agent-interface, tools]
-version: "2.0.0"
+tags: [fundamentals, mcp, key-holder, tools]
+version: "3.0.0"
 description: >
-  How AI agents interact with Rye OS via MCP — the single `cli`
-  tool, argument passing, and routing patterns.
+  The MCP server as its own key holder: the single `cli` tool, the key it acts
+  with, the grant that bounds it, and what that does and does not cover.
 ---
 
-# MCP Agent Interface
+# MCP Key Holder
 
-AI agents (Claude Code, Cursor, amp, etc.) interact with Rye OS through
-**MCP (Model Context Protocol)**. The MCP server is a thin wrapper
-that exposes a single tool, `cli`, which shells out to the `ryeos`
-CLI binary.
+The MCP (Model Context Protocol) server lets an outside tool call Rye OS. It is
+a thin wrapper that exposes a single tool, `cli`, which shells out to the
+`ryeos` CLI binary. The server is a **key holder**: it acts with a signing key of
+its own, under a grant that a person gives that key. It never borrows the
+operator's key.
 
-## Threat Model
+## Authority: the key and its grant
 
-The MCP server is intended for **local single-user use**:
+Authority in Rye OS comes from a key, the grants and capabilities attached to it,
+and nothing else. The MCP server follows the same rule as every other client:
 
-- Transport: stdio over a process owned by the operator's OS user
-- Caller authentication: assumed (the OS user IS the operator)
-- Capability gating: none at the MCP layer — every CLI verb the
-  `ryeos` binary exposes is available
+- It starts only when `RYEOS_CLIENT_KEY` names its key file in the server's
+  environment. There is no default and no fallback to the operator's key.
+- It hands that key to every `ryeos` process it starts, so every request is
+  signed by the server's key.
+- The daemon authorizes each request by that key's grant, the way it does for any
+  other key. A service the grant does not name is refused with a
+  missing-capability error, for whoever holds the key.
+- `endorse` and other operator-only acts are refused because the key is not a
+  pinned operator signer; `ryeos sign` run with it produces a signature by a key
+  nobody pinned, so the result is untrusted.
 
-Do NOT expose the MCP server over the network without a separate
-auth-terminating proxy.
+The server adds no gating of its own and does not look at what is calling it. To
+restrict it further, narrow the key's grant.
+
+### Set it up
+
+```bash
+# 1. The server's own key, readable by its owner only.
+openssl genpkey -algorithm ed25519 -out mcp-key.pem && chmod 600 mcp-key.pem
+
+# 2. Its public key in the form a grant takes (ed25519:<base64 of the 32 raw bytes>).
+echo "ed25519:$(openssl pkey -in mcp-key.pem -pubout -outform DER | tail -c 32 | base64)"
+
+# 3. As the operator, authorize that public key with a narrowed grant and a
+#    lifetime (see `ryeos help authorize-key` for the form).
+ryeos authorize-key ...
+
+# 4. Run the server with the key.
+RYEOS_CLIENT_KEY=/abs/path/to/mcp-key.pem ryeosd-mcp
+```
+
+The key file must be an absolute path to a regular file readable by its owner
+only (mode 0600), and it must not sit inside the node's own state
+(`<app root>/.ai/node/`). Anything else is refused with `client_key_unreadable`.
+
+Give the key only the capabilities its work needs, for example
+`ryeos.execute.service.threads/list` and `ryeos.execute.service.threads/get` to
+read threads, `ryeos.execute.tool.<id>` for particular tools, and the project
+read or write capabilities for the projects it works in. Leave out
+`ryeos.execute.service.identity/authorize-key`, the endorsement, vault, bundle
+and remote-trust services. The daemon enforces what the grant actually says.
+
+### Threads and projects belong to the key
+
+The MCP key is its own principal. Threads it starts are its own, not the
+operator's, and the operator's registered checkouts are not registered for it,
+so a project path it names is judged on its own terms. Until keys can be paired,
+use `ryeos` as the operator to see its work.
+
+### What this does not cover
+
+Commands that act directly on a node's files (key rotation, signer pinning,
+project registration, state resets) have no daemon to check them. They need the
+node's operator key, so with another key selected they are refused with
+`operator_key_required`. But a file's permissions are an OS fact: on a node that
+does not enclose its processes, a process of the same OS user can read the
+operator's key files. Operations on a node's files require the operator key, and
+only its holder can use it; to keep that key out of reach, run the server as a
+separate OS user or inside the enclosure.
+
+Do not expose the server over a network without a separate auth-terminating
+proxy: the key it holds is the only gate.
 
 ## The `cli` Tool
 
@@ -50,9 +107,9 @@ The server exposes one tool:
 
 ### Returns
 
-A JSON object with `exit_code`, `stdout`, `stderr`, and (if stdout is
-valid JSON) a parsed `json` field. On validation errors or timeouts, a
-typed error is returned with `error` and `type` fields.
+A JSON object with `exit_code`, `stdout`, `stderr`, and (if stdout is valid JSON)
+a parsed `json` field. On validation errors or timeouts, a typed error is
+returned with `error` and `type` fields.
 
 ### Discovery
 
@@ -60,9 +117,10 @@ typed error is returned with `error` and `type` fields.
 {"tool": "cli", "args": ["help"]}
 ```
 
-Lists all available verbs in the current project. Verbs are loaded
-data-driven from `.ai/config/cli/*.yaml` — installing a new bundle
-makes new verbs immediately callable with no MCP redeploy.
+Lists the verbs available in the current project. Verbs are loaded data-driven
+from signed `.ai/node/commands/*.yaml` items in the installed bundles, so
+installing a bundle makes its verbs callable with no MCP redeploy. Whether a verb
+succeeds depends on the key's grant.
 
 ### Binary Discovery
 
@@ -74,21 +132,15 @@ The server finds the `ryeos` binary via:
 ## Example Invocations
 
 ```json
-// Execute a directive
-{"tool": "cli", "args": ["execute", "directive:my/workflow"], "project_path": "/path"}
-
 // Fetch an item
-{"tool": "cli", "args": ["fetch", "tool:ryeos/core/sign", "--with-content"], "project_path": "/path"}
-
-// Sign items
-{"tool": "cli", "args": ["sign", "directive:*"], "project_path": "/path"}
-
-// Push to a remote
-{"tool": "cli", "args": ["remote", "push", "--remote", "prod", "--project", "/abs/path"]}
+{"tool": "cli", "args": ["fetch", "tool:my/helper", "--with-content"], "project_path": "/path"}
 
 // Thread operations
 {"tool": "cli", "args": ["thread", "list"], "project_path": "/path"}
 {"tool": "cli", "args": ["thread", "tail", "T-abc123"], "project_path": "/path"}
+
+// Execute a directive (needs the execute capability for it)
+{"tool": "cli", "args": ["execute", "directive:my/workflow"], "project_path": "/path"}
 ```
 
 ## Workflow Patterns
@@ -97,14 +149,14 @@ The server finds the `ryeos` binary via:
 ```json
 {"tool": "cli", "args": ["execute", "directive:deploy"], "project_path": "/path"}
 ```
-The response contains the execution result. For directives, follow the
-returned directions.
+The response contains the execution result. For directives, follow the returned
+directions.
 
 ### Pattern 2: Discover First
 ```json
 {"tool": "cli", "args": ["help"], "project_path": "/path"}
 ```
-List all available verbs, then execute the appropriate one.
+List the available verbs, then run the one you need.
 
 ### Pattern 3: Read-Only Inspection
 ```json
