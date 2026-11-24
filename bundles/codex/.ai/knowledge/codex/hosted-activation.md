@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T08:18:29Z:af097c703273ff3d3a5d496b6c9b70918a3d8d678b06e14de6bd3c0071a5e5a8:nDZGrgBfkfVwK9m76e9d/4sO1cXFwFC29se6kgpAuZzDKEUffA59x1oC+oZUTcvVrlAE0Log1BfCUbmjNuBvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:a679695c9462d817319c5b1f8152aafcc376f19df59ba68a3ee024e67d1351a3:D2rOEisFhvgh5tLm8iFOJ/0cuJIbKdJaMdH54YAollTkFJ3n0b1y6gMTb2ikbSt5uOdZfyGvgezx7rgd/Lx2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -31,7 +31,7 @@ activation and source closure.
 The signed Codex worker profiles do not claim a finite RyeOS `spend_usd`
 allowance. The worker-execution runtime has no provider financial authority,
 and Codex does not expose authoritative ChatGPT-subscription charges to this
-contract. Unattended execution can still use the shared whole-tree duration,
+contract. A worker under the authoring profile can still use the shared whole-tree duration,
 logical-worker, and bounded hosted-turn contact ceilings; none of those is
 presented as subscription billing evidence.
 
@@ -208,7 +208,8 @@ configured-operator forwarding route to inspect profiles on a remote node.
    mount their executable resources and command tools in the existing immutable
    execution-runtime namespace, not under the editable project. The minimal
    hosted profile admits only those inputs through its nested sandbox. The
-   unattended authoring profile instead selects `danger-full-access`; a
+   authoring profile (`approval_policy=never`) instead selects the sandbox mode
+   `danger-full-access`; a
    hard-contained node relies on its qualified Lillux process/filesystem
    boundary, while a trusted disposable node explicitly accepts the broader
    container boundary. Runtime mountpoint setup must not become source edits in
@@ -427,14 +428,14 @@ replace the owner-route frontier proved by that fence; placement and admitted
 capsule must still match exactly.
 
 `worker_execution:codex/bounded-turn` packages that same generic protocol for
-one followed, unattended turn. Its signed routes and retry ceiling are fixed by
+one followed turn under the authoring profile. Its signed routes and retry ceiling are fixed by
 the profile; invocation input supplies the credential profile, the two typed
 route payloads, and any separately admitted read-only evidence attachments.
 Only a root-proved uncontacted command can move to the next attempt. Successful
 completion freezes the private CoW result and terminalizes it as
 `retained_for_review`, so a graph follow receives a reviewable candidate and
 the exact command/turn/fence evidence without polling session status. This is
-additional to `codex/session`, which remains the interactive owner-directed
+additional to `codex/session`, which remains the owner-directed
 session surface.
 
 The daemon applies the same bounded admission checks to runtime callbacks and
@@ -547,7 +548,7 @@ Use two deliberately separate qualification environments:
   external-content bindings, and session state across ordinary daemon
   restarts.
 
-Neither tier should casually mutate the developer's primary interactive node.
+Neither tier should casually mutate the developer's primary node.
 Run the following matrix in the tier appropriate to the behavior under test,
 and prove:
 

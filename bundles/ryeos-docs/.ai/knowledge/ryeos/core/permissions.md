@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:28:44Z:977a6eb361e735da6847f203d1d9394b12bce7f5b1684cffe8a43964c16bbc6d:MVAU1DWDudhgpNqjfpf2hcclnp+3Rmq/C8kBN6OCRQhryZLe138ZPBKqdQ+B9oLoTi/HFHfZcEwvWHH7oG4tCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:d6edbc0514fb3833cc5513c79b45c199106fd8b853aceb8959688a04f27f8068:lR6fyCHpKdJrgcKsrB8el1CmY5uloy0R0bSiHFmY7WkOM7nubmzTVTK08fhMfZBfyoX9MAYOh+41aDR+G0l7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -195,8 +195,9 @@ fire (the schedule's stored caps are its scopes) and to an operator follow-up
 on a running thread: the follow-up runs with the thread's sealed caps exactly,
 and the sender must cover them.
 
-Launches with no human caller still have a caller: a principal whose authority
-is declared in signed data. There is no separate grant class for them.
+Every launch has a caller: a principal whose authority is declared in signed
+data, including a launch that arrives with no signing key of its own. There is no
+separate grant class for them.
 
 | Launch | The caller is | Its authority comes from |
 |---|---|---|
