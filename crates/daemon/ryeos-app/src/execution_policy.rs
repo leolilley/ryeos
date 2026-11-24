@@ -402,6 +402,9 @@ pub(crate) fn synthetic_test_live_project_authority(
         },
         capability_ceiling: Vec::new(),
         child_policy: ChildProjectAuthorityPolicy::Inherit,
+        signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+            ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+        ),
     };
     authority
         .validate()
@@ -530,14 +533,17 @@ mod policy_tests {
 
     #[test]
     fn local_pinned_current_head_is_daemon_owned_cow_with_retained_current_head() {
-        let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        let policy = ExecutionPolicy::local_pinned_current_head(
+            ExecutionResponse::Accepted,
+            ryeos_state::project_identity::PushedProject::test_named("demo"),
+        );
         assert_eq!(policy.response, ExecutionResponse::Accepted);
         assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
         assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
         assert!(matches!(
             policy.project,
             ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
+                source: PinnedSource::CurrentHead { .. },
                 realization: PinnedRealization::Cow {
                     terminal_publication: TerminalPublication::RetainCurrentHead,
                 },

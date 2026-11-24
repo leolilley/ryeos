@@ -155,18 +155,18 @@ pub async fn handle(
         }
     };
     let mut scope = ProjectSyncScope::default();
+    let mut binding = None;
     if let Some(loaded) = loaded_remote.as_ref() {
-        match config::resolve_loaded_project_binding(loaded, &abs_project_path) {
-            Ok(binding) => {
-                scope = binding.sync_scope;
-                project_path_for_ref = binding.remote_project_path;
-            }
-            Err(_) => {
-                // No binding is required for the default ai_only push; use
-                // the canonical local project path as the remote path ref.
-            }
-        }
+        // No binding is required for the default ai_only push; one that
+        // exists must resolve.
+        binding = config::existing_project_binding(loaded, &abs_project_path)?;
     }
+    if let Some(binding) = binding.as_ref() {
+        scope = binding.sync_scope;
+        project_path_for_ref = binding.remote_project_path.clone();
+    }
+    let project_name = config::push_project_name(binding.as_ref(), &abs_project_path)?;
+    let remote_owner = binding.as_ref().map(|binding| binding.remote_owner.clone());
 
     match scope {
         ProjectSyncScope::AiOnly => {
@@ -195,13 +195,15 @@ pub async fn handle(
                 &state,
                 &authority,
                 &abs_project_path,
-                &project_path_for_ref,
+                &project_name,
                 &remote_ignore,
+                remote_owner.as_ref(),
             )
             .await?;
             Ok(serde_json::json!({
                 "scope": "ai_only",
                 "remote_project_path": project_path_for_ref,
+                "project_name": project_name,
                 "snapshot_hash": result.snapshot_hash,
                 "tree_hash": result.tree_hash,
                 "tree_entries": result.tree_entries,
@@ -244,13 +246,15 @@ pub async fn handle(
                 &state,
                 &authority,
                 &abs_project_path,
-                &project_path_for_ref,
+                &project_name,
                 &remote_ignore,
+                remote_owner.as_ref(),
             )
             .await?;
             Ok(serde_json::json!({
                 "scope": "full_project",
                 "remote_project_path": project_path_for_ref,
+                "project_name": project_name,
                 "snapshot_hash": result.snapshot_hash,
                 "tree_hash": result.tree_hash,
                 "tree_entries": result.tree_entries,

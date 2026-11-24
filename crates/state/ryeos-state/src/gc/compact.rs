@@ -308,12 +308,20 @@ fn compact_single_project(
         .unwrap_or(head_hash.clone());
 
     if new_head_hash != head_hash && !dry_run {
+        // Compaction is the node's own maintenance rewrite of the same
+        // content under new hashes, so the node key is recorded as the key
+        // that moved the head.
+        let advancer = crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", signer.fingerprint()),
+            via_root: None,
+        };
         refs::advance_verified_project_head_ref_in_directory(
             refs_directory,
             principal_key,
             project_hash,
             &new_head_hash,
             &head_hash,
+            &advancer,
             signer,
             trust_store,
             &_head_lock,

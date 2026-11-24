@@ -76,12 +76,22 @@ pub fn load_descriptor(path: &Path) -> Result<RemoteDescriptor> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteProjectBinding {
+    /// The project name the local tree declared when it was bound. Heads on
+    /// both nodes are keyed by it; every use re-reads the local declaration
+    /// and refuses a mismatch.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     /// Absolute project path on the remote node. This is not
     /// canonicalized locally; the remote canonicalizes it before use.
     pub remote_project_path: String,
     /// Sync/execution scope for this binding.
     #[serde(default)]
     pub sync_scope: ProjectSyncScope,
+    /// The project owner the remote reported for this node's outbound key
+    /// when the project was bound. Every head read or advance on the remote
+    /// asserts it (`expected_owner`), and the remote refuses
+    /// `remote_owner_changed` when its resolver now says otherwise. Never
+    /// used as the owner itself.
+    pub remote_owner: ryeos_state::principal_id::PrincipalId,
 }
 
 /// Named remote configuration.
@@ -419,8 +429,13 @@ pub struct RemotesLoadReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProjectBinding {
     pub local_project_path: PathBuf,
+    /// The bound name, equal to what the local tree declares now.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     pub remote_project_path: String,
     pub sync_scope: ProjectSyncScope,
+    /// The owner the remote reported at bind; sent as `expected_owner` on
+    /// every head read or advance.
+    pub remote_owner: ryeos_state::principal_id::PrincipalId,
 }
 
 /// Directory holding the node-signed remote pin records.
@@ -797,12 +812,69 @@ pub fn resolve_project_binding(
         )
     })?;
     validate_remote_project_path(&binding.remote_project_path)?;
+    require_bound_name(&canonical, &binding.project_name)?;
 
     Ok(ResolvedProjectBinding {
         local_project_path: canonical,
+        project_name: binding.project_name.clone(),
         remote_project_path: binding.remote_project_path.clone(),
         sync_scope: binding.sync_scope,
+        remote_owner: binding.remote_owner.clone(),
     })
+}
+
+/// Refuse unless the local tree at `canonical` still declares `bound`. A
+/// stored binding name is never used without re-reading the declaration.
+pub fn require_bound_name(
+    canonical: &Path,
+    bound: &ryeos_state::project_identity::ProjectName,
+) -> Result<()> {
+    let declared = ryeos_state::project_identity::ProjectDeclaration::declared_name(canonical)?;
+    if declared.as_ref() != Some(bound) {
+        anyhow::bail!(
+            "project_name_mismatch: the binding for '{}' names project {bound} but the tree declares {}; re-run `ryeos remote bind-project`",
+            canonical.display(),
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
+        );
+    }
+    Ok(())
+}
+
+/// The binding for `local_project_path` when one exists. A binding that
+/// exists must resolve, including its name check: its failure is an error,
+/// never "unbound".
+pub fn existing_project_binding(
+    loaded: &LoadedRemote,
+    local_project_path: &Path,
+) -> Result<Option<ResolvedProjectBinding>> {
+    let canonical = canonical_local_project_path(local_project_path)?;
+    if !loaded
+        .config
+        .project_bindings
+        .contains_key(local_project_identity(&canonical)?)
+    {
+        return Ok(None);
+    }
+    resolve_project_binding(&loaded.config, local_project_path).map(Some)
+}
+
+/// The name a push of `local_project_path` keys its head by: the binding's
+/// (already re-checked against the tree), else what the tree declares now.
+pub fn push_project_name(
+    binding: Option<&ResolvedProjectBinding>,
+    local_project_path: &Path,
+) -> Result<ryeos_state::project_identity::ProjectName> {
+    if let Some(binding) = binding {
+        return Ok(binding.project_name.clone());
+    }
+    ryeos_state::project_identity::ProjectDeclaration::declared_name(local_project_path)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest; a pushed head is keyed by it",
+                local_project_path.display(),
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+            )
+        })
 }
 
 /// Resolve a local->remote binding from operator-local project_bindings.
@@ -1205,7 +1277,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".ai")).unwrap();
+        std::fs::write(project.join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         write_remote_pin(
             tmp.path(),
             &key,
@@ -1223,6 +1296,8 @@ mod tests {
             bindings.insert(
                 identity.clone(),
                 RemoteProjectBinding {
+                    project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                    remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                     remote_project_path: "/srv/project".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },
@@ -1532,7 +1607,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".ai")).unwrap();
+        std::fs::write(project.join(".ai/manifest.yaml"), "name: demo\n").unwrap();
         let descriptor = signed_descriptor(9, None, true);
         pin_remote(tmp.path(), &key, "origin", &descriptor, None).unwrap();
         let canonical = canonical_local_project_path(&project).unwrap();
@@ -1541,6 +1617,8 @@ mod tests {
             bindings.insert(
                 identity.clone(),
                 RemoteProjectBinding {
+                    project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                    remote_owner: format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                     remote_project_path: "/srv/p".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },

@@ -605,6 +605,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                     &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                         ryeos_app::execution_policy::ExecutionResponse::Wait,
                     ),
+                    None,
                 )
                 .await;
             match result {

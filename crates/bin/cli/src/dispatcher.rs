@@ -411,6 +411,25 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 /// The signed `/execute` body for one verified, compiled command. Every
 /// daemon dispatch, including client composites, builds its request here.
 fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError> {
+    // A current-head run names the caller's own head by the name the checkout
+    // declares now.
+    let current_head_name = match (
+        &resolved.project_path,
+        resolved.pin_current_head_at_admission,
+    ) {
+        (Some(root), true) => Some(
+            ryeos_state::project_identity::ProjectDeclaration::declared_name(root)
+                .map_err(|error| CliError::ProjectResolution(format!("{error:#}")))?
+                .ok_or_else(|| {
+                    CliError::ProjectResolution(format!(
+                        "project_manifest_missing: --current-head needs {} to have a {} whose `name:` is the project's name",
+                        root.display(),
+                        ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+                    ))
+                })?,
+        ),
+        _ => None,
+    };
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
@@ -427,6 +446,7 @@ fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError>
             resolved.retain_child_results,
             resolved.exclude_operator_vault,
             resolved.live_project,
+            current_head_name.as_ref(),
         ),
     });
     insert_source_observation_scope(&mut body, resolved.validation_scope);
@@ -600,7 +620,7 @@ async fn try_dispatch_client_handler(
         "endorse_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "endorse.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
-            crate::client_handlers::endorse_items(app_root, &parameters)
+            crate::client_handlers::endorse_items(app_root, console, &parameters)
                 .await
                 .map(ClientHandlerOutcome::json)
         }
@@ -715,6 +735,7 @@ fn execution_policy_value(
     retain_child_results: bool,
     exclude_operator_vault: bool,
 ) -> Value {
+    let test_name = ryeos_state::project_identity::ProjectName::new("demo").unwrap();
     execution_policy_value_with_snapshot(
         project_backed,
         accepted,
@@ -724,6 +745,7 @@ fn execution_policy_value(
         retain_child_results,
         exclude_operator_vault,
         false,
+        pin_current_head_at_admission.then_some(&test_name),
     )
 }
 
@@ -736,6 +758,7 @@ fn execution_policy_value_with_snapshot(
     retain_child_results: bool,
     exclude_operator_vault: bool,
     live_project: bool,
+    current_head_name: Option<&ryeos_state::project_identity::ProjectName>,
 ) -> Value {
     let controls = ryeos_app::command_invocation::CommandInvocationControls {
         async_launch: accepted,
@@ -748,8 +771,12 @@ fn execution_policy_value_with_snapshot(
         ..Default::default()
     };
     serde_json::to_value(
-        ryeos_app::command_invocation::command_execution_policy(project_backed, &controls)
-            .expect("compiled command has valid execution policy"),
+        ryeos_app::command_invocation::command_execution_policy(
+            project_backed,
+            current_head_name,
+            &controls,
+        )
+        .expect("compiled command has valid execution policy"),
     )
     .expect("typed execution policy serialization cannot fail")
 }
@@ -1333,7 +1360,7 @@ pub(crate) async fn execute_service(
         "parameter_encoding": "command",
         "validate_only": false,
         "execution_policy": execution_policy_value_with_snapshot(
-            false, false, false, false, None, false, false, false,
+            false, false, false, false, None, false, false, false, None,
         ),
     });
     let payload = post_to_daemon(app_root, "/execute", &body, |_| Ok(())).await?;
@@ -2493,7 +2520,7 @@ mod tests {
         let default = execution_policy_value(true, false, false, false, false, false);
         assert!(default["project"].get("intent").is_none(), "{default}");
         let demanded = execution_policy_value_with_snapshot(
-            true, false, false, false, None, false, false, true,
+            true, false, false, false, None, false, false, true, None,
         );
         assert_eq!(demanded["project"]["kind"], "live_direct");
         assert_eq!(demanded["project"]["intent"], "live");
@@ -2830,6 +2857,8 @@ mod tests {
     #[test]
     fn direct_execute_current_head_is_typed_control_not_item_input() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
+        std::fs::write(tmp.path().join(".ai/manifest.yaml"), "name: fixture\n").unwrap();
         let commands = vec![direct_execute_command()];
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
@@ -2877,6 +2906,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert_eq!(policy["project"]["kind"], "pinned");
         assert_eq!(policy["project"]["source"]["kind"], "snapshot");
@@ -2960,6 +2990,8 @@ mod tests {
             serde_yaml::from_str(&body).expect("parse signed validate command");
         command.name = "validate".to_string();
         let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai")).unwrap();
+        std::fs::write(project.path().join(".ai/manifest.yaml"), "name: fixture\n").unwrap();
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
                 "validate",
@@ -2988,6 +3020,7 @@ mod tests {
             serde_json::to_value(
                 ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
+                    ryeos_state::project_identity::PushedProject::test_named("demo")
                 )
                 .exclude_operator_vault()
             )

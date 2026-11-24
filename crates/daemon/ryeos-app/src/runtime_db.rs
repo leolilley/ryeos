@@ -2764,7 +2764,14 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // from v2 to v3 inside the cut, adding `retry_after_max_ms`; the reset clears
 // every in-flight thread whose retry decisions sealed a v2 digest, and recovery
 // refuses one it still meets rather than re-deriving it.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 143;
+// Epoch 144: the owner+name project identity cut. Sealed project authority
+// carries the signer project (`pid:v1:<owner>/<name>`), head refs and
+// publication keys name the owner principal's storage component
+// (`pid-v1-<hex>`), and durable remote operations seal `remote_owner`. An
+// epoch-143 store is a predecessor and is reset without decoding, with the
+// project heads: `--schema-cut-from 143 --schema-cut-to 144
+// --include-project-heads --confirm-project-heads`.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 144;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

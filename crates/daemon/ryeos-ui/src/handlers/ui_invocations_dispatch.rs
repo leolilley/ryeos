@@ -1573,7 +1573,12 @@ pub(crate) fn prepare_item_ref(
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        logical_project: ryeos_app::project_registry::live_logical_project(
+            state,
+            &ctx.fingerprint,
+            &ctx.scopes,
+            project_path,
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: ctx.fingerprint.clone(),

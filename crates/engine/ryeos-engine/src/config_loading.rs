@@ -324,10 +324,7 @@ fn config_signer_context<'a>(
                 .map(|_| crate::contracts::ItemSpace::Project)
         })
         .unwrap_or(crate::contracts::ItemSpace::Node);
-    let project_root = ctx
-        .roots
-        .signer_project_root_under(ctx.project_authority.map(|(root, _)| root));
-    crate::trust::SignerContext::new(space, "config", project_root)
+    crate::trust::SignerContext::new(space, "config", ctx.roots.signer_project())
 }
 
 fn load_and_verify_config_file_with_policy(
