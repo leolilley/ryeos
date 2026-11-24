@@ -270,6 +270,15 @@ async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
     let (_id, ctx, producer, coordinate) =
         live_presentation_with_surface(&state, NODE_SURFACE).await;
     let state = Arc::new(state);
+    // Positive control: the handler's own answer, before the executor shapes
+    // it for a non-operator key, holds the two fields the tier withholds.
+    let raw =
+        (ryeos_ui::handlers::ui_gc::DESCRIPTOR.handler)(json!({}), ctx.clone(), state.clone())
+            .await
+            .unwrap_or_else(|error| panic!("gc handler: {}", refusal_text(&error)));
+    assert!(raw.get("state").is_some(), "{raw}");
+    assert!(raw.get("recent_events").is_some(), "{raw}");
+    assert!(raw.get("schema_version").is_some(), "{raw}");
     let gc = dispatch_source(
         &state,
         &ctx,
@@ -282,6 +291,7 @@ async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
     .unwrap_or_else(|error| panic!("gc status: {}", refusal_text(&error)));
     let shown = &gc["result"]["result"];
     assert!(shown.is_object(), "{shown}");
+    assert!(shown.get("schema_version").is_some(), "{shown}");
     // The service item names `state` and `recent_events` as free text: raw
     // sidecar and log JSON that only the operator may read.
     assert!(shown.get("state").is_none(), "{shown}");
