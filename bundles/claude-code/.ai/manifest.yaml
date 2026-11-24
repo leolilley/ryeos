@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-16T09:38:06Z:b0d1f4a65f167b40dcd245354156f779b2cfb54bf09c8c10ff9a799a7ea1b2e6:vunQSfS0SPvC2StgHadcwj6eti96GA0dp8AX4hUddAKwzt2lIHmxWB7e5QUxC8nLWEx5gukO2HMgL602PTzZAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T07:17:57Z:f423286f9107af69242c2545762463f28d31065ee67a32e7c15de0c9ea4f862c:IzyzYvTw1aoehknViZG7791NOWkxOxRrsILLA6vkUIQ6DyriUfi1OH1yLKNBBSMbJEp7AW94r3u8n+3snnS8CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: claude-code
 version: 0.1.0
-description: RyeOS-hosted Claude Code structured-session worker and activation surfaces (stub adapter)
+description: RyeOS-hosted Claude Code structured-session worker and activation surfaces (Claude Code worker driver)
 provides_kinds: []
 requires_kinds:
 - config

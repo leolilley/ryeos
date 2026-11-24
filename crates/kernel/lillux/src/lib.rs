@@ -162,7 +162,7 @@ pub use secure_fs::{
     read_open_regular_file_bounded, read_open_regular_file_exact_bounded,
     read_open_regular_file_stable_bounded, read_optional_regular_file_bounded_no_follow,
     read_optional_regular_file_no_follow, read_regular_file_bounded_no_follow,
-    read_regular_file_no_follow, read_regular_file_to_string_no_follow,
+    read_regular_file_no_follow, read_regular_file_to_string_no_follow, regular_file_is_owner_only,
     require_effective_user_owned_executable, require_effective_user_owned_regular,
     require_unwritable_by_effective_user, same_open_file_identity, set_open_regular_file_mode,
     visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,

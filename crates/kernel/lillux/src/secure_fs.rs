@@ -8590,6 +8590,27 @@ pub fn inspect_optional_entry_no_follow(path: &Path) -> Result<Option<PinnedEntr
     }
 }
 
+/// Whether the regular file at `path` grants no permission to its group or to
+/// others (mode at most `0600`). A link is not followed and a non-regular entry
+/// is an error. Permission bits are an OS fact, so callers ask here.
+pub fn regular_file_is_owner_only(path: &Path) -> Result<bool> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("regular-file permission inspection is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("inspect {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
+        Ok(metadata.permissions().mode() & 0o077 == 0)
+    }
+}
+
 /// Open and read an existing regular file without following any path
 /// component. Missing files are errors.
 pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
