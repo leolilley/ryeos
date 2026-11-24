@@ -55,37 +55,6 @@ fn services() -> Vec<(String, Value)> {
     found
 }
 
-fn find<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    match value {
-        Value::Object(map) => map
-            .get(key)
-            .or_else(|| map.values().find_map(|inner| find(inner, key))),
-        Value::Array(items) => items.iter().find_map(|inner| find(inner, key)),
-        _ => None,
-    }
-}
-
-/// The service scopes a hosted browser session is minted with.
-fn session_service_patterns() -> Vec<String> {
-    let profile = yaml(&repo().join("bundles/.ai/node/init/profiles/core.yaml"));
-    find(&profile, "ui_browser_sessions")
-        .and_then(|section| section.get("session_scopes"))
-        .and_then(Value::as_array)
-        .expect("core profile names the browser session scopes")
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(|scope| scope.strip_prefix("ryeos.execute.service."))
-        .map(str::to_owned)
-        .collect()
-}
-
-fn covers(pattern: &str, name: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => name.starts_with(prefix),
-        None => pattern == name,
-    }
-}
-
 /// The services each route serves, with whether the route needs no
 /// authentication. A route's caller is whoever the route admits, so a service
 /// behind one is reachable by callers other than the operator.
@@ -114,18 +83,6 @@ fn route_targets() -> Vec<(String, bool)> {
         }
     }
     found
-}
-
-/// Every service can be called by a caller that is not the node operator: a
-/// route admits whoever it admits, and any principal may hold a grant that
-/// covers a service's capability. So every service declares its disclosure.
-fn is_reachable(
-    _name: &str,
-    _body: &Value,
-    _patterns: &[String],
-    _routed: &BTreeSet<String>,
-) -> bool {
-    true
 }
 
 /// Services deliberately served to no caller but the operator. Adding to this
@@ -243,9 +200,7 @@ const OPERATOR_ONLY: &[&str] = &[
 
 #[test]
 fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
-    let patterns = session_service_patterns();
     let routes = route_targets();
-    let routed: BTreeSet<String> = routes.iter().map(|(name, _)| name.clone()).collect();
     let unauthenticated: BTreeSet<String> = routes
         .iter()
         .filter(|(_, open)| *open)
@@ -255,9 +210,6 @@ fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
     let mut missing = Vec::new();
     let mut declared_operator_only = BTreeSet::new();
     for (name, body) in services() {
-        if !is_reachable(&name, &body, &patterns, &routed) {
-            continue;
-        }
         let Some(block) = body.get("disclosure") else {
             missing.push(name);
             continue;

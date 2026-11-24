@@ -168,24 +168,18 @@ pub fn require_admitted_operator(
         (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), Some(_)) => {
             remote_principal_fingerprint(context)
         }
-        (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => {
-            return Err(not_operator(
-                "operator_rejects_remote_node",
-                "operator actions reject remote_node grants",
-            ));
-        }
-        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => {
-            return Err(not_operator(
-                "operator_origin_proof_missing",
-                "remote_principal request has no authenticated source-node forwarding proof",
-            ));
-        }
-        _ => {
-            return Err(not_operator(
-                "operator_class_required",
-                "action requires an authenticated admitted-operator class",
-            ));
-        }
+        (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => Err(not_operator(
+            "operator_rejects_remote_node",
+            "operator actions reject remote_node grants",
+        )),
+        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => Err(not_operator(
+            "operator_origin_proof_missing",
+            "remote_principal request has no authenticated source-node forwarding proof",
+        )),
+        _ => Err(not_operator(
+            "operator_class_required",
+            "action requires an authenticated admitted-operator class",
+        )),
     }
 }
 
