@@ -2199,6 +2199,14 @@ fn recover_thread_usage(
             {
                 anyhow::bail!("resume: thread_usage cumulative authority regressed");
             }
+            // The status is cumulative too: a settlement that follows one that
+            // admitted missing usage cannot claim the usage is complete.
+            if let Some(previous) = latest.as_ref()
+                && !previous.usage_status.is_complete()
+                && usage.usage_status.is_complete()
+            {
+                anyhow::bail!("resume: thread_usage usage status regressed to complete");
+            }
             unconsumed_settlement_turn = Some(usage.last_settled_turn_seq);
             latest = Some(usage);
             continue;
@@ -3874,6 +3882,49 @@ mod tests {
         let usage = recover_thread_usage(&events, progress).unwrap().unwrap();
         assert_eq!(usage.completed_turns, 1);
         assert_eq!(usage.last_settled_turn_seq, 1);
+    }
+
+    fn usage_event_with_status(
+        completed_turns: u32,
+        last_settled_turn_seq: u64,
+        status: &str,
+    ) -> ReplayedEventRecord {
+        let mut event = usage_event(completed_turns, last_settled_turn_seq);
+        if status != "complete" {
+            event.payload["usage_status"] = json!(status);
+        }
+        event
+    }
+
+    #[test]
+    fn a_recovered_usage_carries_the_status_its_turns_earned() {
+        let events = vec![
+            usage_event(1, 1),
+            usage_event_with_status(2, 2, "partial"),
+            usage_event_with_status(3, 3, "partial"),
+        ];
+        let progress = recover_turn_progress(&events).unwrap();
+        let usage = recover_thread_usage(&events, progress).unwrap().unwrap();
+        assert_eq!(
+            usage.usage_status,
+            ryeos_runtime::envelope::UsageStatus::Partial
+        );
+        assert_eq!(usage.completed_turns, 3);
+    }
+
+    #[test]
+    fn a_settlement_after_missing_usage_cannot_claim_complete() {
+        let events = vec![
+            usage_event_with_status(1, 1, "unavailable"),
+            usage_event(2, 2),
+        ];
+        let progress = recover_turn_progress(&events).unwrap();
+        assert!(
+            recover_thread_usage(&events, progress)
+                .unwrap_err()
+                .to_string()
+                .contains("usage status regressed to complete")
+        );
     }
 
     #[test]

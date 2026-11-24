@@ -189,6 +189,16 @@ pub struct ThreadUsage {
     pub settled_at: String,
     pub last_settled_turn_seq: u64,
     pub elapsed_ms: u64,
+    /// How much of the real usage the cumulative figures above account for.
+    /// A run that had a turn it could not fully measure carries `Partial` or
+    /// `Unavailable` here at every later settlement, so a resumed run seeds
+    /// its cost with the status the earlier turns earned instead of
+    /// presenting the carried-over figure as complete. Absent means complete.
+    #[serde(
+        default,
+        skip_serializing_if = "ryeos_accounting::UsageStatus::is_complete"
+    )]
+    pub usage_status: ryeos_accounting::UsageStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1781,6 +1791,36 @@ mod tests {
     }
 
     #[test]
+    fn thread_usage_names_its_status_only_when_it_is_not_complete() {
+        use ryeos_accounting::UsageStatus;
+        let usage = |usage_status| ThreadUsage {
+            completed_turns: 1,
+            input_tokens: 2,
+            output_tokens: 3,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.5").unwrap(),
+            spawns_used: 0,
+            started_at: "2026-04-21T12:00:00Z".to_string(),
+            settled_at: "2026-04-21T12:00:01Z".to_string(),
+            last_settled_turn_seq: 1,
+            elapsed_ms: 1_000,
+            usage_status,
+            provider_id: None,
+            model: None,
+            profile: None,
+        };
+        let complete = serde_json::to_value(usage(UsageStatus::Complete)).unwrap();
+        assert!(complete.get("usage_status").is_none());
+        let round: ThreadUsage = serde_json::from_value(complete).unwrap();
+        assert_eq!(round.usage_status, UsageStatus::Complete);
+        for status in [UsageStatus::Partial, UsageStatus::Unavailable] {
+            let value = serde_json::to_value(usage(status)).unwrap();
+            assert_eq!(value["usage_status"], status.as_str());
+            let round: ThreadUsage = serde_json::from_value(value).unwrap();
+            assert_eq!(round.usage_status, status);
+        }
+    }
+
+    #[test]
     fn thread_usage_requires_canonical_chronology_and_string_money() {
         let mut usage = ThreadUsage {
             completed_turns: 1,
@@ -1792,6 +1832,7 @@ mod tests {
             settled_at: "2026-04-21T12:00:01Z".to_string(),
             last_settled_turn_seq: 1,
             elapsed_ms: 1_000,
+            usage_status: Default::default(),
             provider_id: None,
             model: None,
             profile: None,
