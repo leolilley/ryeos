@@ -986,7 +986,7 @@ mod revisions {
         .unwrap();
         seat_view("get", &get_shaping, get_answer(&"x".repeat(512 * 1024)))
             .expect("a large authored item fits");
-        let refusal = shown(
+        let refusal = seat_view(
             "get",
             &get_shaping,
             get_answer(&"x".repeat(2 * 1024 * 1024)),
