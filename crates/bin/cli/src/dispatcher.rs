@@ -2167,6 +2167,7 @@ mod tests {
             &hash('a'),
             &hash('b'),
             "tool:ryeos/core/evaluate/unchecked",
+            "--input",
             r#"{"launch_id":"L-0123456789abcdef0123456789abcdef","evaluator_parameters":{"accept_unchecked":true}}"#,
         ]);
         let resolved = resolve_command_for_daemon_with_commands(
