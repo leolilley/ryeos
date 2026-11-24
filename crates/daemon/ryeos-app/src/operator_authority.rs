@@ -84,6 +84,14 @@ impl AdmittedOperatorAuthority {
     }
 }
 
+/// The refusal a caller that is not the operator gets: a stable code with a 403
+/// so a non-operator never reads it as a node fault. The sentence stays the
+/// context of the error, so a log or a test reads it as before.
+fn not_operator(code: &str, message: &str) -> anyhow::Error {
+    anyhow::Error::new(crate::handler_error::typed_refusal(code, 403, message))
+        .context(message.to_owned())
+}
+
 /// Require the app root's exact local configured operator.
 pub fn require_local_configured_operator(
     state: &AppState,
@@ -95,13 +103,19 @@ pub fn require_local_configured_operator(
     if context.authorized_key_class != Some(AuthorizedKeyPrincipalClass::LocalClient)
         || context.authenticated_origin_site_id.is_some()
     {
-        bail!("action requires a local_client configured operator");
+        return Err(not_operator(
+            "local_operator_required",
+            "action requires a local_client configured operator",
+        ));
     }
     let operator =
         ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
             .context("load configured local operator identity")?;
     if context.fingerprint != operator.principal_id() {
-        bail!("local action requires the configured local operator");
+        return Err(not_operator(
+            "local_operator_required",
+            "local action requires the configured local operator",
+        ));
     }
     Ok(operator.fingerprint().to_owned())
 }
@@ -155,12 +169,23 @@ pub fn require_admitted_operator(
             remote_principal_fingerprint(context)
         }
         (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => {
-            bail!("operator actions reject remote_node grants")
+            return Err(not_operator(
+                "operator_rejects_remote_node",
+                "operator actions reject remote_node grants",
+            ));
         }
         (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => {
-            bail!("remote_principal request has no authenticated source-node forwarding proof")
+            return Err(not_operator(
+                "operator_origin_proof_missing",
+                "remote_principal request has no authenticated source-node forwarding proof",
+            ));
         }
-        _ => bail!("action requires an authenticated admitted-operator class"),
+        _ => {
+            return Err(not_operator(
+                "operator_class_required",
+                "action requires an authenticated admitted-operator class",
+            ));
+        }
     }
 }
 

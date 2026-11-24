@@ -285,8 +285,18 @@ impl ReconciliationOperation {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    validate_hash("expected local HEAD", &req.expected_local_head)?;
-    validate_hash("expected remote HEAD", &req.expected_remote_head)?;
+    for (label, value) in [
+        ("expected local HEAD", &req.expected_local_head),
+        ("expected remote HEAD", &req.expected_remote_head),
+    ] {
+        validate_hash(label, value).map_err(|error| {
+            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                "head_hash_invalid",
+                400,
+                format!("{error:#}"),
+            ))
+        })?;
+    }
     let operator_fingerprint =
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let (local_project_path, remote, remote_project_path, project_name, remote_owner) =
@@ -333,11 +343,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             .state_store
             .with_state_db(|db| db.read_project_head(&head))?;
         if local_head.as_deref() != Some(operation.expected_local_head.as_str()) {
-            bail!(
-                "local project HEAD mismatch: expected {}, current is {:?}",
-                operation.expected_local_head,
-                local_head
-            );
+            return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                "local_head_mismatch",
+                409,
+                format!(
+                    "local project HEAD mismatch: expected {}, current is {:?}",
+                    operation.expected_local_head, local_head
+                ),
+            )));
         }
     }
     let response = execute_operation(state, operation, true).await?;
@@ -1005,7 +1018,11 @@ fn resolve_initial_route(
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
-        bail!("project-head reconciliation requires a full_project remote binding");
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "remote_binding_not_full_project",
+            409,
+            "project-head reconciliation requires a full_project remote binding",
+        )));
     }
     Ok((
         local_project_path,

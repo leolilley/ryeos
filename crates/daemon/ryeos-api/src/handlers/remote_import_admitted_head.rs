@@ -61,19 +61,33 @@ fn default_limit() -> usize {
     DEFAULT_LIMIT
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if req.policy.is_empty() {
-        anyhow::bail!("admission policy must not be empty");
+        return Err(refuse(
+            "admission_policy_empty",
+            400,
+            "admission policy must not be empty",
+        ));
     }
     let remote_cfg = {
         let remotes = config::load_remotes(&state.config.app_root)?;
         config::get_remote(&remotes, &req.remote)?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
-    let expected_key = remote_cfg.pinned_signing_key().with_context(|| {
-        format!(
-            "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",
-            remote_cfg.name, remote_cfg.name,
+    let expected_key = remote_cfg.pinned_signing_key().map_err(|error| {
+        refuse(
+            "remote_signing_key_unpinned",
+            409,
+            format!(
+                "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`: {error:#}",
+                remote_cfg.name, remote_cfg.name,
+            ),
         )
     })?;
     let expected_signer = lillux::crypto::fingerprint(&expected_key);
@@ -95,10 +109,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         )
         .await?;
     if heads.truncated && req.subject_hash.is_none() {
-        anyhow::bail!(
-            "remote returned a truncated admission head list for policy '{}'; pass subject_hash",
-            req.policy
-        );
+        return Err(refuse(
+            "admission_head_list_truncated",
+            409,
+            format!(
+                "remote returned a truncated admission head list for policy '{}'; pass subject_hash",
+                req.policy
+            ),
+        ));
     }
     let selected = select_admission_head(&heads.heads, &req.policy, req.subject_hash.as_deref())?;
     let selected_subject = admission_subject_from_head(selected, &req.policy)?;
@@ -166,12 +184,19 @@ fn select_admission_head<'a>(
     match matches.as_slice() {
         [head] => Ok(*head),
         [] => match subject_hash {
-            Some(subject) => anyhow::bail!(
-                "remote has no admission head for policy '{}' subject '{}'",
-                policy,
-                subject,
-            ),
-            None => anyhow::bail!("remote has no admission heads for policy '{}'", policy),
+            Some(subject) => Err(refuse(
+                "admission_head_not_found",
+                404,
+                format!(
+                    "remote has no admission head for policy '{}' subject '{}'",
+                    policy, subject,
+                ),
+            )),
+            None => Err(refuse(
+                "admission_head_not_found",
+                404,
+                format!("remote has no admission heads for policy '{}'", policy),
+            )),
         },
         _ => anyhow::bail!(
             "remote returned {} admission heads for policy '{}'; pass subject_hash to choose one",
@@ -201,7 +226,11 @@ fn admission_subject_from_head(head: &FederationHeadRemoteRecord, policy: &str) 
 
 fn validate_subject_hash(subject_hash: &str) -> Result<()> {
     if !lillux::valid_hash(subject_hash) || subject_hash.bytes().any(|b| b.is_ascii_uppercase()) {
-        anyhow::bail!("invalid admission subject hash: {subject_hash}");
+        return Err(refuse(
+            "admission_subject_hash_invalid",
+            400,
+            format!("invalid admission subject hash: {subject_hash}"),
+        ));
     }
     Ok(())
 }

@@ -99,6 +99,23 @@ pub fn extract_handler_error(err: &anyhow::Error) -> Option<HandlerError> {
     None
 }
 
+/// A refusal a caller caused (bad input, a missing record, a policy or a
+/// state that does not admit the request) with its stable code and status. The
+/// message is the sentence the operator reads; a non-operator caller receives
+/// the code and status with a fixed sentence. A fault of the node itself is not
+/// a refusal and stays an untyped error.
+pub fn typed_refusal(code: &str, status: u16, message: impl Into<String>) -> HandlerError {
+    HandlerError::Structured {
+        code: code.to_owned(),
+        status,
+        body: serde_json::json!({
+            "code": code,
+            "error": message.into(),
+            "retryable": false,
+        }),
+    }
+}
+
 /// The structured response for a refused remote delegation: the stable code,
 /// the message naming the cure, and 403 because the caller is known but not
 /// authorized to act this way.

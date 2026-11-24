@@ -12,6 +12,7 @@
 //! Blobs return base64-encoded data. Objects return the JSON value.
 //! Missing hashes are returned with `kind: "missing"`.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::io::{Read as _, Seek as _};
 use std::sync::Arc;
 
@@ -124,10 +125,20 @@ async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     if let Some(chunk) = req.blob_chunk {
         if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
-            anyhow::bail!("objects/get blob chunk length is outside the bounded range");
+            return Err(typed_refusal(
+                "objects_get_chunk_length_out_of_range",
+                400,
+                "objects/get blob chunk length is outside the bounded range",
+            )
+            .into());
         }
         if !is_canonical_sha256(&chunk.hash) {
-            anyhow::bail!("objects/get blob chunk hash is not canonical SHA-256");
+            return Err(typed_refusal(
+                "objects_get_chunk_hash_invalid",
+                400,
+                "objects/get blob chunk hash is not canonical SHA-256",
+            )
+            .into());
         }
         let Some((mut source, total_size)) = cas.open_blob(&chunk.hash)? else {
             return Ok(serde_json::json!({
@@ -138,7 +149,12 @@ async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
             }));
         };
         if chunk.offset > total_size {
-            anyhow::bail!("objects/get blob chunk offset exceeds blob size");
+            return Err(typed_refusal(
+                "objects_get_chunk_offset_out_of_range",
+                400,
+                "objects/get blob chunk offset exceeds blob size",
+            )
+            .into());
         }
         source.seek(std::io::SeekFrom::Start(chunk.offset))?;
         let remaining = total_size - chunk.offset;
@@ -157,9 +173,7 @@ async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
         }));
     }
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
-        anyhow::bail!(
-            "objects/get requires typed object_hashes/blob_hashes, one blob chunk request, or one large-object chunk request"
-        );
+        return Err(typed_refusal("objects_get_request_empty", 400, "objects/get requires typed object_hashes/blob_hashes, one blob chunk request, or one large-object chunk request").into());
     }
 
     let mut entries = Vec::with_capacity(req.object_hashes.len() + req.blob_hashes.len());
@@ -195,9 +209,7 @@ async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
         match cas.open_blob(hash)? {
             Some((mut source, size)) => {
                 if size > MAX_INLINE_BLOB_BYTES {
-                    anyhow::bail!(
-                        "blob {hash} exceeds the inline response limit; use a bounded blob_chunk request"
-                    );
+                    return Err(typed_refusal("objects_get_blob_exceeds_inline_limit", 422, format!("blob {hash} exceeds the inline response limit; use a bounded blob_chunk request")).into());
                 }
                 let mut data = vec![0_u8; usize::try_from(size)?];
                 source.read_exact(&mut data)?;
@@ -227,23 +239,45 @@ async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
 fn validate_request_modes(req: &Request) -> Result<()> {
     let batches = !req.object_hashes.is_empty() || !req.blob_hashes.is_empty();
     if req.blob_chunk.is_some() && req.large_object_chunk.is_some() {
-        anyhow::bail!("objects/get cannot mix a blob chunk with a large-object chunk request");
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(
+                "objects/get cannot mix a blob chunk with a large-object chunk request".into(),
+            ),
+        ));
     }
     if batches && req.blob_chunk.is_some() {
-        anyhow::bail!("objects/get cannot mix hash batches with a blob chunk request");
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(
+                "objects/get cannot mix hash batches with a blob chunk request".into(),
+            ),
+        ));
     }
     if batches && req.large_object_chunk.is_some() {
-        anyhow::bail!("objects/get cannot mix hash batches with a large-object chunk request");
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(
+                "objects/get cannot mix hash batches with a large-object chunk request".into(),
+            ),
+        ));
     }
     Ok(())
 }
 
 fn validate_large_object_chunk(chunk: &LargeObjectChunkRequest) -> Result<()> {
     if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
-        anyhow::bail!("objects/get large-object chunk length is outside the bounded range");
+        return Err(typed_refusal(
+            "objects_get_chunk_length_out_of_range",
+            400,
+            "objects/get large-object chunk length is outside the bounded range",
+        )
+        .into());
     }
     if !is_canonical_sha256(&chunk.hash) {
-        anyhow::bail!("objects/get large-object chunk hash is not canonical SHA-256");
+        return Err(typed_refusal(
+            "objects_get_chunk_hash_invalid",
+            400,
+            "objects/get large-object chunk hash is not canonical SHA-256",
+        )
+        .into());
     }
     Ok(())
 }
@@ -273,7 +307,12 @@ fn serve_large_object_chunk(chunk: &LargeObjectChunkRequest, state: &AppState) -
         return Ok(missing());
     };
     if chunk.offset > total_size {
-        anyhow::bail!("objects/get large-object chunk offset exceeds object size");
+        return Err(typed_refusal(
+            "objects_get_chunk_offset_out_of_range",
+            400,
+            "objects/get large-object chunk offset exceeds object size",
+        )
+        .into());
     }
     let mut file = leased.file();
     file.seek(std::io::SeekFrom::Start(chunk.offset))?;
@@ -298,10 +337,20 @@ fn validate_typed_hash_request(object_hashes: &[String], blob_hashes: &[String])
         let mut seen = std::collections::BTreeSet::new();
         for hash in hashes {
             if !is_canonical_sha256(hash) {
-                anyhow::bail!("objects/get contains an invalid {namespace} hash");
+                return Err(typed_refusal(
+                    "objects_get_hash_invalid",
+                    400,
+                    format!("objects/get contains an invalid {namespace} hash"),
+                )
+                .into());
             }
             if !seen.insert(hash) {
-                anyhow::bail!("objects/get contains a duplicate {namespace} hash");
+                return Err(typed_refusal(
+                    "objects_get_hash_duplicate",
+                    400,
+                    format!("objects/get contains a duplicate {namespace} hash"),
+                )
+                .into());
             }
         }
     }
