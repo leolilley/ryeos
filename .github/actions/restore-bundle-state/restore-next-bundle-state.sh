@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Restores the bundle state of the newest next CI push run (of the last 50) whose
-# artifact is retained and whose commit has no bundles/ difference from this
-# branch and no difference on any path the state would write or delete. Newer
-# next commits the branch differs from are skipped, so the branch is never
-# tested against next's bundle files; the merge base alone is not used. At most
-# 5 artifacts are downloaded. When none qualifies (artifacts live 1 day) or the
-# API stays unavailable, it exits 1 and the caller refreshes the bundles from
-# the branch. The job summary names the next commit used, or that the fallback ran.
+# Restores the newest retained bundle-state artifact (any workflow event or
+# branch) whose commit is on next, has no bundles/ difference from this branch
+# and no difference on any path the state would write or delete. Next commits
+# the branch differs from are skipped, so the branch is never tested against
+# next's bundle files; the merge base alone is not used. At most 5 artifacts are
+# downloaded. When none qualifies or the API stays unavailable, it exits 1 and
+# the caller refreshes the bundles from the branch. The job summary names the
+# next commit used, or that the fallback ran.
 set -euo pipefail
+export LC_ALL=C
+
+if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
+    echo "restore-next-bundle-state.sh only runs inside GitHub Actions (GITHUB_ACTIONS=true): it unpacks a bundle state over the working tree and fetches next commits. Refusing to run." >&2
+    exit 2
+fi
+
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 work="$(mktemp -d)"
@@ -15,15 +22,15 @@ trap 'rm -rf "$work"' EXIT
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 # Next commits are fetched shallowly into a separate throwaway repository, never
-# into the checkout's own .git. It borrows the checkout's objects (alternates) so
-# the branch head can be diffed against the fetched commit there.
+# into the checkout's own .git. The scratch repository shares no objects with the
+# checkout: the branch and the candidate are compared by their listed trees.
 scratch="$work/scratch.git"
 git init -q --bare "$scratch"
-printf '%s\n' "$(git rev-parse --absolute-git-dir)/objects" > "$scratch/objects/info/alternates"
-head_sha="$(git rev-parse HEAD)"
 remote_url="https://github.com/${repo}.git"
 auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-echo "::add-mask::${auth_header#AUTHORIZATION: basic }"
+auth_b64="${auth_header#AUTHORIZATION: basic }"
+echo "::add-mask::${auth_b64}"
+git ls-tree -r -z HEAD | sort -z > "$work/head-tree"
 
 # gh api with backoff: a rate limit or a transient error is retried a few times
 # with growing sleeps, never in a tight loop.
@@ -52,9 +59,19 @@ fallback() {
     exit 1
 }
 
-runs="$(gh_retry "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=50" \
-    --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')" \
-    || fallback "the list of next CI runs could not be read"
+# Candidates: every retained bundle-state artifact of this repository, from any
+# workflow event and branch (full runs of next are sometimes dispatched from a
+# branch pointing at a next commit), newest upload first. A candidate counts only
+# when its commit is on next (compare says identical or behind).
+: > "$work/artifacts"
+for page in 1 2 3; do
+    gh_retry "repos/$repo/actions/artifacts?per_page=100&page=$page" \
+        --jq '.artifacts[] | select((.name | startswith("bundle-state-")) and (.expired | not) and .name == "bundle-state-\(.workflow_run.head_sha)") | "\(.created_at) \(.workflow_run.id) \(.workflow_run.head_sha) \(.workflow_run.head_branch)"' \
+        >> "$work/artifacts" \
+        || fallback "the artifact list could not be read"
+done
+sort -r -u "$work/artifacts" > "$work/runs"
+echo "$(wc -l < "$work/runs") retained bundle-state artifacts found"
 
 # Newest first. A next commit's state is usable only when this branch has no
 # bundles/ difference from that commit and no difference on any path the state
@@ -66,34 +83,37 @@ sha=""
 considered=0
 downloads=0
 skipped=""
-while read -r id head; do
+while read -r created id head branch; do
     [[ -n "$id" ]] || continue
     considered=$((considered + 1))
-    live="$(gh_retry "repos/$repo/actions/runs/$id/artifacts?name=bundle-state-$head&per_page=100" \
-        --jq '[.artifacts[] | select(.expired | not)] | length')" \
-        || fallback "the artifact list of ci.yml run $id could not be read after retries"
-    if [[ "$live" -eq 0 ]]; then
-        echo "next $head (run $id): no retained bundle state"
+    [[ "$considered" -le 40 ]] || { echo "candidate limit of 40 reached"; break; }
+    where="$head (run $id, branch $branch)"
+    rel="$(gh_retry "repos/$repo/compare/next...$head" --jq .status)" \
+        || fallback "the next ancestry of $head could not be read after retries"
+    if [[ "$rel" != behind && "$rel" != identical ]]; then
+        echo "$where: not a next commit ($rel), skipped"
         continue
     fi
-    if ! git --git-dir="$scratch" -c "http.https://github.com/.extraheader=$auth_header" fetch -q --no-tags --depth=1 "$remote_url" "$head" 2>/dev/null; then
-        echo "next $head (run $id): could not fetch the commit, skipped"
+    if ! git --git-dir="$scratch" -c "http.https://github.com/.extraheader=$auth_header" fetch -q --no-tags --depth=1 "$remote_url" "$head" 2>"$work/fetch-err"; then
+        echo "$where: could not fetch the commit, skipped: $(head -c 400 "$work/fetch-err" | sed -e "s/$auth_b64/***/g" -e "s/${GH_TOKEN}/***/g" | tr '\n' ' ')"
         continue
     fi
-    git --git-dir="$scratch" diff --name-only "$head" "$head_sha" | sort -u > "$work/differs"
+    git --git-dir="$scratch" ls-tree -r -z "$head" | sort -z > "$work/cand-tree"
+    # A path whose entry (mode, type, object) differs, or exists on one side only.
+    sort -z "$work/cand-tree" "$work/head-tree" | uniq -z -u | cut -z -f2 | sort -z -u | tr '\0' '\n' > "$work/differs"
     if grep -q '^bundles/' "$work/differs"; then
-        echo "next $head (run $id): branch differs under bundles/, skipped"
+        echo "$where: branch differs under bundles/, skipped"
         skipped="$skipped $head"
         continue
     fi
     if [[ "$downloads" -ge 5 ]]; then
-        echo "next $head (run $id): download cap of 5 reached, stopping the search"
+        echo "$where: download cap of 5 reached, stopping the search"
         break
     fi
     downloads=$((downloads + 1))
     rm -rf "$work/dl"
     if ! gh run download "$id" --repo "$repo" -n "bundle-state-$head" -D "$work/dl"; then
-        echo "::warning::next $head (run $id): the bundle state artifact could not be downloaded (expired or rate limited), skipped"
+        echo "::warning::$where: the bundle state artifact could not be downloaded (expired or rate limited), skipped"
         continue
     fi
     state="$work/dl/bundle-state.tar.zst"
@@ -103,7 +123,7 @@ while read -r id head; do
     sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
     comm -12 "$work/touched" "$work/differs" > "$work/conflicts"
     if [[ -s "$work/conflicts" ]]; then
-        echo "next $head (run $id): branch differs on paths the state would overwrite or delete, skipped:"
+        echo "$where: branch differs on paths the state would overwrite or delete, skipped:"
         sed 's/^/  conflict: /' "$work/conflicts"
         skipped="$skipped $head"
         continue
@@ -111,10 +131,10 @@ while read -r id head; do
     run_id="$id"
     sha="$head"
     break
-done <<<"$runs"
+done < "$work/runs"
 
 if [[ -z "$run_id" ]]; then
-    fallback "none of the $considered newest ci.yml push runs on next has a retained bundle state compatible with this branch (retention is 1 day)"
+    fallback "none of the $considered newest retained bundle states is compatible with this branch (retention is 1 day)"
 fi
 
 echo "Bundle state comes from next $sha (ci.yml run $run_id)"
