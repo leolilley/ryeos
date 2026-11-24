@@ -925,7 +925,7 @@ pub async fn handle_projects_open(
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = completed_admission_append_limit(&state)?;
     let mut admitted_result = None;
-    let mut journal_failure: Option<String> = None;
+    let mut journal_failure: Option<HandlerError> = None;
     let root_resolution = root_attachment
         .project_authority
         .as_ref()
@@ -1028,7 +1028,7 @@ pub async fn handle_projects_open(
                                     creation_request_id: &req.creation_request_id,
                                 },
                             ) {
-                                journal_failure = Some(error.to_string());
+                                journal_failure = Some(journal_write_refusal(&error));
                                 return Err(crate::browser_session::AttachmentStoreError::PresentationInvalid);
                             }
                             admitted_result = Some(result);
@@ -1036,9 +1036,7 @@ pub async fn handle_projects_open(
                         },
                     )
                     .map_err(|error| match journal_failure.take() {
-                        Some(failure) => anyhow::Error::from(HandlerError::Internal(format!(
-                            "project attachment was not admitted: {failure}"
-                        ))),
+                        Some(refusal) => anyhow::Error::from(refusal),
                         None => anyhow::Error::from(HandlerError::Conflict(error.to_string())),
                     })
                     })?;
@@ -2163,8 +2161,49 @@ descriptor!(
     &["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 );
 
+/// The typed refusal for a project open the node could not journal. The cause
+/// names which half failed: the retained chain does not verify, or the record
+/// could not be written (disk, permissions). Nothing was admitted.
+fn journal_write_refusal(error: &ryeos_node::node_journal::JournalError) -> HandlerError {
+    let cause = match error {
+        ryeos_node::node_journal::JournalError::Integrity(_) => "chain_integrity",
+        ryeos_node::node_journal::JournalError::Write(_) => "write",
+    };
+    HandlerError::Structured {
+        code: "journal_write_failed".into(),
+        status: 500,
+        body: serde_json::json!({
+            "code": "journal_write_failed",
+            "cause": cause,
+            "error": format!("the project was not opened: {error}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_journal_failure_refuses_the_open_with_a_typed_cause() {
+        use ryeos_node::node_journal::JournalError;
+        for (error, cause) in [
+            (
+                JournalError::Integrity(anyhow::anyhow!("bad chain")),
+                "chain_integrity",
+            ),
+            (JournalError::Write(anyhow::anyhow!("disk full")), "write"),
+        ] {
+            match journal_write_refusal(&error) {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, "journal_write_failed");
+                    assert_eq!(status, 500);
+                    assert_eq!(body["cause"], cause);
+                    assert!(body["error"].as_str().unwrap().contains("not opened"));
+                }
+                other => panic!("expected the typed refusal, got {other:?}"),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
