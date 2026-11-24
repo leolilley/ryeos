@@ -891,7 +891,9 @@ mod tests {
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             upstream_thread_id: None,
-            requested_by: Some("fp:test".into()),
+            requested_by: Some(
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57".into(),
+            ),
             project_root: None,
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,

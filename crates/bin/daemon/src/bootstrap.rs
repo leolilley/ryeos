@@ -650,7 +650,9 @@ fn load_node_config_two_phase_with_socket(
                 .collect(),
             compiled_features: compiled_features(),
             listeners,
-            policy_generation: format!("sha256:{}", node_policy.generation_digest()),
+            policy_generation: ryeos_node::capability_report::report_policy_generation(
+                node_policy.generation_digest(),
+            ),
             isolation: isolation.inspection(),
             host_runtime_provider: host_runtime.map(|runtime| runtime.provider),
             provider_environment: provider_environment.environment().as_ref(),

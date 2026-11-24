@@ -31,7 +31,7 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
     let project_root = project_root
         .canonicalize()
         .expect("canonical fixture project");
-    let project_authority = ExecutionProjectAuthority::live(
+    let mut project_authority = ExecutionProjectAuthority::live(
         project_root.clone(),
         format!("local:{}", project_root.display()),
         LiveProjectAccess::ReadOnly,
@@ -40,6 +40,12 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
         Vec::new(),
     )
     .expect("live fixture project authority");
+    // The fixture key registered this checkout: the thread states its project.
+    if let ExecutionProjectAuthority::LiveProject { signer_project, .. } = &mut project_authority {
+        *signer_project = ryeos_state::project_identity::LogicalProject::Stated(
+            test_state::fixture_project_identity(&project_root),
+        );
+    }
     state
         .state_store
         .create_thread_for_test(&NewThreadRecord {
@@ -52,7 +58,7 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
-            requested_by: Some("fp:test".to_string()),
+            requested_by: Some(test_state::FIXTURE_KEY.to_string()),
             project_root: Some(project_root),
             project_authority,
             base_project_snapshot_hash: None,
@@ -85,7 +91,7 @@ fn create_outside_thread(
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
-            requested_by: Some("fp:test".to_string()),
+            requested_by: Some(test_state::FIXTURE_KEY.to_string()),
             project_root: None,
             base_project_snapshot_hash: match &project_authority {
                 ExecutionProjectAuthority::PinnedGeneration {
@@ -313,6 +319,12 @@ fn compiled_project_session(
             .expect("open session project")
             .expect("session project exists"),
     ));
+    // The seat is a view of the project the fixture key registered there.
+    Arc::make_mut(&mut launch.compiled_binding)
+        .binding
+        .signer_project = ryeos_state::project_identity::LogicalProject::Stated(
+        test_state::fixture_project_identity(&project_root),
+    );
     let (session_id, token) = test_state::mint_launch(state, launch);
     assert_eq!(
         get_ui_state(state)
@@ -879,7 +891,8 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
     let mut roots = Vec::new();
     let mut decoy_session = None;
     for project in [&plain, &decoy] {
-        let principal = test_state::register_fixture_project(&state, project).await;
+        let operator = test_state::operator_launch_context(&state);
+        let principal = operator.fingerprint.clone();
         let minted = ryeos_ui::handlers::ui_launch_mint::handle(
             ryeos_ui::handlers::ui_launch_mint::Request {
                 ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
@@ -888,7 +901,7 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
                 user_principal_id: Some(principal.clone()),
                 scopes: None,
             },
-            HandlerContext::new(principal, vec!["*".into()], true),
+            operator,
             Arc::new(state.clone()),
         )
         .await
@@ -966,7 +979,8 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
         ".ai/surfaces/ryeos/ui/project.yaml",
         "name: decoy-surface\nversion: \"1.0.0\"\n",
     );
-    let principal = test_state::register_fixture_project(&state, &project).await;
+    let operator = test_state::operator_launch_context(&state);
+    let principal = operator.fingerprint.clone();
 
     let refused = ryeos_ui::handlers::ui_launch_mint::handle(
         ryeos_ui::handlers::ui_launch_mint::Request {
@@ -976,7 +990,7 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
             user_principal_id: Some(principal.clone()),
             scopes: None,
         },
-        HandlerContext::new(principal, vec!["*".into()], true),
+        operator,
         Arc::new(state.clone()),
     )
     .await;

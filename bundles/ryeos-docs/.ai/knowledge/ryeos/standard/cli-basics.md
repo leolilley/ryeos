@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:d24ebc86fdb60d01fbd09dbb9ca8329cf5b0637331bb29ee6c02e4053356621f:smiMAXMPNVdX01Q2Rp46EtZo9ofMTw8D8fiwo3ufjvHmd7axZCu87Kio6ad2Y3AS6U8uOfQbVPxKtjlSI3OiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T02:33:22Z:4972b18b59ffa0f637c17a553655212d8eaa56a424e29d43b4b745d67ae95265:vwbyYbwtySjVYw1Itrzxcx/d5+vJ89E74Zr8LzElk7YtP1XxLJ4fG1nm9JOvNftIkJUsLCDZ8Ny6XKQaN5HFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -8,7 +8,7 @@ description: >
   local execution, project execution, thread inspection, and remote execution.
 ---
 
-# Rye CLI Basics for Agents
+# Rye CLI Basics
 
 This page is the fast operational reference to give an LLM when it needs
 to use Rye OS from a shell. It covers the normal path from a fresh install
@@ -78,7 +78,7 @@ If the daemon is managed outside `ryeos start`, run it directly:
 ryeosd --app-root ~/.local/share/ryeos --bind 127.0.0.1:7400
 ```
 
-Useful rules for agents:
+Useful rules:
 
 - If a command says it cannot contact the daemon, run `ryeos node status`.
 - If aliases seem stale after installing bundles, restart the daemon.
@@ -422,8 +422,8 @@ ryeos remote sync-project-ai prod --project /local/project
 ryeos remote run prod directive:apps/demo/chat --project /local/project
 ```
 
-`remote run` is the preferred flow for deployed app agents where `.ai/`
-content has already been synchronized to the node.
+`remote run` is the preferred flow for deployed apps where `.ai/` content has
+already been synchronized to the node.
 
 For complex item parameters through `remote run`, call the service escape
 hatch with `--input`:

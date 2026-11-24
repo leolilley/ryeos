@@ -254,6 +254,15 @@ pub(crate) fn compiled_ui_source_is_project_authored() -> bool {
         .unwrap_or(false)
 }
 
+/// The browser session id the dispatch owner associated with this compiled
+/// UI dispatch after authenticating it, if any. Never taken from a request.
+pub(crate) fn compiled_ui_browser_session_id() -> Option<String> {
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.browser_session_id.clone())
+        .ok()
+        .flatten()
+}
+
 pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachment>> {
     COMPILED_UI_DISPATCH
         .try_with(|context| context.attachment.clone())
@@ -448,6 +457,47 @@ pub fn require_seat_caller(
     })
 }
 
+/// Require that the seat caller is this node's configured local operator.
+///
+/// Registering a host folder in a seat registry widens what the seat can
+/// reach (files under the folder), so it is a local-operator act. A signed caller must be the app root's configured
+/// local operator; a browser seat must have been minted for that operator's
+/// principal. Any other principal is refused with a typed error.
+pub fn require_local_operator_seat(
+    caller: &SeatCaller,
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<(), HandlerError> {
+    let refusal = || HandlerError::Structured {
+        code: "local_operator_required".into(),
+        status: 403,
+        body: serde_json::json!({
+            "code": "local_operator_required",
+            "error": "only the node's configured local operator may do this",
+        }),
+    };
+    match caller {
+        SeatCaller::Operator { .. } => {
+            ryeos_app::operator_authority::require_local_configured_operator(state, ctx)
+                .map(|_| ())
+                .map_err(|_| refusal())
+        }
+        SeatCaller::Attachment(attachment) => {
+            let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                &state.config.app_root,
+            )
+            .map_err(|error| {
+                HandlerError::Internal(format!("load configured local operator: {error:#}"))
+            })?;
+            if attachment.compiled_binding.binding.principal_id == operator.principal_id() {
+                Ok(())
+            } else {
+                Err(refusal())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +517,8 @@ mod tests {
                 binding: crate::compiled_binding::CompiledUiBinding {
                     view_sets: Default::default(),
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-                    principal_id: "fp:test".into(),
+                    principal_id:
+                        "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57".into(),
                     signer_project: ryeos_engine::contracts::LogicalProject::Absent(
                         ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
                     ),
@@ -525,6 +576,87 @@ mod tests {
                 .expect("fixture project exists"),
         ));
         attachment
+    }
+
+    #[tokio::test]
+    async fn local_operator_seat_gate_refuses_other_principals_and_admits_the_operator() {
+        let (_tmp, _state_owner, state) = crate::test_support::build_test_state();
+        let operator_ctx = crate::test_support::local_operator_context(&state, vec!["*".into()]);
+        let operator_principal = operator_ctx.fingerprint.clone();
+
+        // A browser seat minted for some other principal is refused.
+        let other_seat = SeatCaller::Attachment(attachment());
+        let refused = require_local_operator_seat(&other_seat, &operator_ctx, &state)
+            .expect_err("a non-operator seat must be refused");
+        match refused {
+            HandlerError::Structured { code, status, .. } => {
+                assert_eq!(code, "local_operator_required");
+                assert_eq!(status, 403);
+            }
+            other => panic!("expected the typed refusal, got {other:?}"),
+        }
+
+        // A browser seat minted for the configured operator passes.
+        let mut operator_attachment = attachment();
+        Arc::get_mut(
+            &mut Arc::get_mut(&mut operator_attachment)
+                .expect("fixture owns attachment")
+                .compiled_binding,
+        )
+        .expect("fixture owns compiled binding")
+        .binding
+        .principal_id = operator_principal.clone();
+        require_local_operator_seat(
+            &SeatCaller::Attachment(operator_attachment),
+            &operator_ctx,
+            &state,
+        )
+        .expect("the configured operator's seat passes");
+
+        // A signed caller that is not the configured local operator is refused.
+        let stranger =
+            HandlerContext::new("fp:".to_string() + &"ab".repeat(32), vec!["*".into()], true);
+        let signed = SeatCaller::Operator {
+            principal_id: stranger.fingerprint.clone(),
+        };
+        assert!(require_local_operator_seat(&signed, &stranger, &state).is_err());
+        let signed_operator = SeatCaller::Operator {
+            principal_id: operator_principal,
+        };
+        require_local_operator_seat(&signed_operator, &operator_ctx, &state)
+            .expect("the configured operator passes as a signed caller");
+    }
+
+    #[tokio::test]
+    async fn projects_add_refuses_a_non_operator_seat_and_registers_nothing() {
+        let (_tmp, _state_owner, state) = crate::test_support::build_test_state();
+        let operator_ctx = crate::test_support::local_operator_context(&state, vec!["*".into()]);
+        let state = Arc::new(state);
+        let folder = tempfile::TempDir::new().expect("folder");
+
+        let error = with_compiled_ui_attachment(
+            attachment(),
+            crate::handlers::ui_projects::handle_projects_add(
+                serde_json::json!({ "root": folder.path() }),
+                operator_ctx.clone(),
+                state.clone(),
+            ),
+        )
+        .await
+        .expect_err("a non-operator seat cannot add a host folder");
+        assert!(
+            format!("{error:#}").contains("local_operator_required"),
+            "{error:#}"
+        );
+
+        let listed = crate::handlers::ui_projects::handle_projects_list(
+            serde_json::json!(null),
+            operator_ctx,
+            state,
+        )
+        .await
+        .expect("list projects");
+        assert!(listed["projects"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

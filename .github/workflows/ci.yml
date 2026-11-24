@@ -260,6 +260,12 @@ jobs:
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
 
+      - name: Check the shipped candidate evaluator
+        run: python3 -B tests/development/test_unchecked_evaluator.py
+
+      - name: Check worker capability ceilings name tools only
+        run: python3 -B tests/development/test_worker_cap_ceilings.py
+
       - name: Check composition daemon features match their bundle sets
         run: |
           python3 -B scripts/release/test-check-composition-daemon-features.py
@@ -268,6 +274,17 @@ jobs:
       - name: Run central-auth bundle Python tests
         working-directory: bundles/central-auth
         run: python3 -B -m unittest discover -s tests
+
+      # The MCP server's own tests, in a throwaway virtualenv with only its
+      # declared dependencies. The two tests that need the real `ryeos` binary
+      # skip here (no Rust build in this job).
+      - name: Run MCP server Python tests
+        env:
+          RYEOSD_MCP_NO_BUILD: "1"
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mcp-venv"
+          "$RUNNER_TEMP/mcp-venv/bin/pip" install --quiet "./integrations/mcp/ryeosd[dev]"
+          "$RUNNER_TEMP/mcp-venv/bin/python" -B -m pytest -q -p no:cacheprovider integrations/mcp/ryeosd/tests
 
       - name: Check image build cache boundaries
         run: ./scripts/ci/test-image-build-cache.sh

@@ -1103,6 +1103,10 @@ pub struct SubprocessResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// The signal that ended the process, when it did not exit on its own
+    /// (`exit_code` is then -1). `None` for a normal exit and on platforms
+    /// without signals.
+    pub signal: Option<i32>,
     pub duration_ms: f64,
     pub pid: u32,
     pub timed_out: bool,
@@ -8930,6 +8934,7 @@ impl RunningProcess {
                     "Refused to wait: supervised target was not released after durable attachment",
                 ),
                 exit_code: -1,
+                signal: None,
                 duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
                 pid: self.pid,
                 timed_out: false,
@@ -9070,8 +9075,11 @@ impl RunningProcess {
             Err(error) => Some(error),
         };
         let code = status.code().unwrap_or(-1);
+        let signal = exit_signal(&status);
         if let Some(exceeded) = output_limit_exceeded(&out, &err) {
-            return self.output_limit_result(out, err, exceeded);
+            let mut result = self.output_limit_result(out, err, exceeded);
+            result.signal = signal;
+            return result;
         }
         // Exit may be observed before the running-child timeout branch, or
         // bounded draining may consume the last part of the admission budget.
@@ -9096,6 +9104,7 @@ impl RunningProcess {
                     })
             },
             exit_code: code,
+            signal,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out,
@@ -9122,6 +9131,7 @@ impl RunningProcess {
                 &format!("Wait failed: {error}"),
             ),
             exit_code: -1,
+            signal: None,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: false,
@@ -9370,6 +9380,7 @@ impl RunningProcess {
                 &format!("Command timed out after {} seconds", self.timeout),
             )),
             exit_code: -1,
+            signal: None,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: true,
@@ -9399,6 +9410,7 @@ impl RunningProcess {
                 ),
             )),
             exit_code: -1,
+            signal: None,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: false,
@@ -12978,6 +12990,18 @@ fn append_captured_stderr(reason: String, capture: &BoundedCapture) -> String {
     append_diagnostic(&reason, &diagnostic)
 }
 
+/// The signal that terminated a reaped child, if any.
+#[cfg(unix)]
+fn exit_signal(status: &process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &process::ExitStatus) -> Option<i32> {
+    None
+}
+
 fn spawn_deadline_failure(start: Instant) -> SubprocessResult {
     let mut failure = spawn_failure(
         start,
@@ -13508,6 +13532,19 @@ mod absolute_spawn_deadline_tests {
     }
 
     #[test]
+    fn a_signal_death_reports_the_signal_and_a_plain_exit_does_not() {
+        let killed = lib_run(request("kill -KILL $$"));
+        assert!(!killed.success, "{killed:?}");
+        assert_eq!(killed.exit_code, -1, "{killed:?}");
+        assert_eq!(killed.signal, Some(libc::SIGKILL), "{killed:?}");
+
+        let failed = lib_run(request("exit 7"));
+        assert!(!failed.success, "{failed:?}");
+        assert_eq!(failed.exit_code, 7, "{failed:?}");
+        assert_eq!(failed.signal, None, "{failed:?}");
+    }
+
+    #[test]
     fn quiesce_timeout_is_typed_busy() {
         let (release, holder) = hold_lease_elsewhere();
         let refused = match quiesce_fork_sensitive_descriptors_typed(
@@ -13929,6 +13966,7 @@ pub(crate) fn spawn_failure(start: Instant, reason: impl Into<String>) -> Subpro
         stdout: String::new(),
         stderr: reason.into(),
         exit_code: -1,
+        signal: None,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         pid: 0,
         timed_out: false,
@@ -13947,6 +13985,7 @@ fn spawn_failure_with_launcher_refusal(start: Instant, diagnostic: String) -> Su
         stdout: String::new(),
         stderr: "Failed to spawn: supervised launcher refused target execution".to_string(),
         exit_code: -1,
+        signal: None,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         pid: 0,
         timed_out: false,
