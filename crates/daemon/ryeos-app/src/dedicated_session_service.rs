@@ -2454,6 +2454,166 @@ struct ApprovalRequestAuthority {
     requested_authority: Value,
 }
 
+/// What the admitted profile's rule for a request's method says about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuleVerdict {
+    /// The method is named, its class matches, and the rule is not deny-only.
+    Acceptable,
+    /// The method's rule is deny-only.
+    DenyOnly,
+    /// The profile names no rule for the method (or the request carries none).
+    UnnamedMethod,
+    /// The worker reported an operation class other than the rule's.
+    ClassMismatch { profile_class: String },
+}
+
+/// Judge a request by the frozen profile, from its upstream method: the rule
+/// for that method fixes the operation class and whether accept is possible at
+/// all. The class the worker reports must be the rule's; it is a claim, not a
+/// source.
+fn rule_verdict(contract: &Value, method: Option<&str>, reported_class: &str) -> RuleVerdict {
+    let Some(method) = method.filter(|method| !method.is_empty()) else {
+        return RuleVerdict::UnnamedMethod;
+    };
+    let rules: Vec<&Value> = contract
+        .get("server_requests")
+        .and_then(Value::as_array)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter(|rule| rule.get("method").and_then(Value::as_str) == Some(method))
+                .collect()
+        })
+        .unwrap_or_default();
+    if rules.is_empty() {
+        return RuleVerdict::UnnamedMethod;
+    }
+    for rule in &rules {
+        let class = rule
+            .get("operation_class")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if class != reported_class {
+            return RuleVerdict::ClassMismatch {
+                profile_class: class.to_owned(),
+            };
+        }
+    }
+    if rules
+        .iter()
+        .any(|rule| rule.get("deny_only").and_then(Value::as_bool) == Some(true))
+    {
+        return RuleVerdict::DenyOnly;
+    }
+    RuleVerdict::Acceptable
+}
+
+fn request_method(requested_authority: &Value) -> Option<&str> {
+    requested_authority.get("method").and_then(Value::as_str)
+}
+
+/// Refuse, when a worker's approval request arrives, a method the frozen
+/// profile does not name and an operation class that is not that method's rule
+/// class. The class is derived from the method through the profile; what the
+/// worker reports must agree.
+fn validate_approval_rule(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    authority: &ApprovalRequestAuthority,
+) -> Result<()> {
+    let profile = admitted_structured_protocol(state, &session.admitted_capsule_hash)?;
+    match rule_verdict(
+        &profile.contract,
+        request_method(&authority.requested_authority),
+        &authority.operation_class,
+    ) {
+        RuleVerdict::UnnamedMethod => bail!(
+            "approval_method_unnamed: the admitted profile names no rule for the request's method"
+        ),
+        RuleVerdict::ClassMismatch { profile_class } => bail!(
+            "approval_class_mismatch: the worker reported operation class `{}` but the admitted \
+             profile's rule for that method says `{profile_class}`",
+            authority.operation_class
+        ),
+        RuleVerdict::Acceptable | RuleVerdict::DenyOnly => Ok(()),
+    }
+}
+
+/// Why an owner's accept is not taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    /// The retained request was not offered as acceptable (the worker's own
+    /// report says so; it can only narrow).
+    NotOffered,
+    /// The admitted profile's rule for the request's method is deny-only.
+    RefusedByProfile { operation_class: String },
+    /// The profile names no rule for the request's method.
+    UnnamedMethod,
+    /// The worker's class is not the class of the profile's rule.
+    ClassMismatch { profile_class: String },
+}
+
+/// Whether an owner's accept of a pending approval may be taken: the worker's
+/// report must allow it AND the admitted profile's rule for the request's
+/// method must. `None` means it may.
+pub fn check_accept(
+    state: &AppState,
+    capsule_hash: &str,
+    operation_class: &str,
+    requested_authority: &Value,
+) -> Result<Option<AcceptRefusal>> {
+    if requested_authority
+        .get("accept_allowed")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(Some(AcceptRefusal::NotOffered));
+    }
+    let profile = admitted_structured_protocol(state, capsule_hash)?;
+    Ok(
+        match rule_verdict(
+            &profile.contract,
+            request_method(requested_authority),
+            operation_class,
+        ) {
+            RuleVerdict::Acceptable => None,
+            RuleVerdict::DenyOnly => Some(AcceptRefusal::RefusedByProfile {
+                operation_class: operation_class.to_owned(),
+            }),
+            RuleVerdict::UnnamedMethod => Some(AcceptRefusal::UnnamedMethod),
+            RuleVerdict::ClassMismatch { profile_class } => {
+                Some(AcceptRefusal::ClassMismatch { profile_class })
+            }
+        },
+    )
+}
+
+/// Whether surfaces may offer accept for this request in this session: the
+/// admitted profile's rule, failing closed when the session or its profile
+/// cannot be read.
+pub fn approval_accept_ceiling(
+    state: &AppState,
+    placement_thread_id: &str,
+    operation_class: &str,
+    requested_authority: &Value,
+) -> bool {
+    state
+        .state_store
+        .dedicated_session(placement_thread_id)
+        .ok()
+        .flatten()
+        .and_then(|session| {
+            check_accept(
+                state,
+                &session.admitted_capsule_hash,
+                operation_class,
+                requested_authority,
+            )
+            .ok()
+        })
+        .is_some_and(|refusal| refusal.is_none())
+}
+
 /// Public, presentation-safe portion of a retained worker approval request.
 /// Upstream request/session/operation coordinates are delivery authority and
 /// must remain inside the dedicated-session owner.
@@ -3028,6 +3188,7 @@ fn project_worker_events(
                 .worker_instance_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("approval event has no attached worker"))?;
+            validate_approval_rule(state, session, &authority)?;
             let expires_at_ms = validate_approval_request_fact(state, session, &authority)?;
             state
                 .state_store
@@ -7338,6 +7499,44 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_admitted_profile_not_the_worker_decides_whether_accept_is_allowed() {
+        let contract = json!({"server_requests": [
+            {"method": "m/exec", "operation_class": "command_execution", "deny_only": true},
+            {"method": "m/file", "operation_class": "file_change"},
+        ]});
+        // A worker that reports accept for a deny-only method is not believed.
+        assert_eq!(
+            rule_verdict(&contract, Some("m/exec"), "command_execution"),
+            RuleVerdict::DenyOnly
+        );
+        assert_eq!(
+            rule_verdict(&contract, Some("m/file"), "file_change"),
+            RuleVerdict::Acceptable
+        );
+        // The class is the rule's: a worker cannot move a deny-only method
+        // into an acceptable class by reporting another class.
+        assert_eq!(
+            rule_verdict(&contract, Some("m/exec"), "file_change"),
+            RuleVerdict::ClassMismatch {
+                profile_class: "command_execution".to_owned()
+            }
+        );
+        // A method the profile does not name, or a request with none, is refused.
+        assert_eq!(
+            rule_verdict(&contract, Some("m/invented"), "file_change"),
+            RuleVerdict::UnnamedMethod
+        );
+        assert_eq!(
+            rule_verdict(&contract, None, "file_change"),
+            RuleVerdict::UnnamedMethod
+        );
+        assert_eq!(
+            rule_verdict(&json!({}), Some("m/file"), "file_change"),
+            RuleVerdict::UnnamedMethod
+        );
+    }
 
     #[test]
     fn the_worker_fence_moves_only_running_or_recoverable_sessions() {
