@@ -25,7 +25,7 @@ pub use execution_plan::{
     LogicalProjectAbsence, MaterializationRequirement, PlanArgument, PlanBundleExecutorIdentity,
     PlanCapabilities, PlanContext, PlanExecutionProjectFileInput, PlanNode, PlanNodeId,
     PlanRuntimeBinarySelection, PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec,
-    PlanTrustAuthority, PlanVerifiedCommand, SubjectResolutionAuthority,
+    PlanTrustAuthority, PlanVerifiedCommand, SubjectResolutionAuthority, unestablished_project,
 };
 pub use execution_target::{
     CurrentExecutionTargetRequest, ExecutionResourceAccess, ExecutionResourceAdmissionPolicy,

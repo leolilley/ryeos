@@ -47,6 +47,7 @@ pub fn build_effective_item_engine(
 }
 
 pub fn resolve_effective_composed_value(
+    app_root: &Path,
     engine: &Engine,
     execute_ref: &str,
     project_path: Option<&Path>,
@@ -55,7 +56,14 @@ pub fn resolve_effective_composed_value(
         .with_context(|| format!("parse canonical ref '{execute_ref}'"))?;
     let item = engine
         .effective_item(EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            // Offline as the node's operator: a live checkout states the
+            // identity the operator registered for it.
+            logical_project: match project_path {
+                Some(root) => crate::offline_dispatch::operator_live_project(app_root, root),
+                None => ryeos_engine::contracts::unestablished_project(
+                    &SubjectResolutionAuthority::Projectless,
+                ),
+            },
             item_ref,
             expected_kind: None,
             project_root: project_path.map(Path::to_path_buf),

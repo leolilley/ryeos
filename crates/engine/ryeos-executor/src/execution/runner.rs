@@ -1914,22 +1914,13 @@ fn post_execution_foldback(
             else {
                 unreachable!("advance-head branch is guarded by the publication variant")
             };
-            let project_str = project_path.to_str().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cannot advance fold-back HEAD for non-UTF-8 project identity {}",
-                    project_path.display()
-                )
-            })?;
-            let canonical_project =
-                crate::execution::project_source::canonical_project_ref(project_str)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let project_hash = lillux::cas::sha256_hex(canonical_project.as_bytes());
-            let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)
-                .context("derive fold-back principal storage identity")?;
-            let expected_head_ref = format!("projects/{principal_key}/{project_hash}/head");
-            if head_ref != &expected_head_ref {
+            // The sealed ref is the only head this fold-back may advance; it
+            // is never rebuilt. It must still be the acting principal's own.
+            let sealed = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
+                .context("sealed terminal publication ref")?;
+            if !ryeos_app::project_owner::speaks_for(state, acting_principal, sealed.owner()) {
                 anyhow::bail!(
-                    "sealed terminal publication ref changed before fold-back: expected {expected_head_ref:?}, got {head_ref:?}"
+                    "sealed terminal publication ref {head_ref:?} is not the acting principal's own head"
                 );
             }
             Some((head_ref, expected_hash))
@@ -5802,10 +5793,7 @@ pub async fn run_and_wait(
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(
             Some(effective_path.clone()),
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &params.provenance.subject_resolution_authority(),
-            ),
+            params.provenance.signer_project(),
         ),
         &state.config.app_root,
     )
@@ -7277,10 +7265,7 @@ async fn dispatch_detached_bg_task(
     let roots = match ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &eng_for_spawn.resolution_roots(
             project_root,
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &res_for_spawn.plan_context.subject_resolution_authority,
-            ),
+            res_for_spawn.plan_context.logical_project.clone(),
         ),
         &bg_runtime_state_dir,
     ) {
@@ -9029,7 +9014,8 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         EnvironmentAuthority::None,
         candidate_capabilities,
     )?
-    .with_child_policy(ChildProjectAuthorityPolicy::Inherit)?;
+    .with_child_policy(ChildProjectAuthorityPolicy::Inherit)?
+    .with_signer_project(resume.project_authority.signer_project())?;
     let base_provenance = ExecutionProvenance::root_pushed_head(
         original_project_path.clone(),
         base.request_engine.clone(),
@@ -9038,10 +9024,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            base_provenance.logical_project_root(&resume.current_site_id),
-            &base_provenance.subject_resolution_authority(),
-        ),
+        logical_project: base_provenance.signer_project(),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -9431,10 +9414,7 @@ async fn run_existing_recovered_thread(
             retained_admission
                 .resolution_workspace()
                 .map(std::path::Path::to_path_buf),
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                retained_admission.resolution_subject_authority(),
-            ),
+            params.provenance.signer_project(),
         ),
         retained_admission.resolution_subject_authority(),
         &mut selection_resolution,

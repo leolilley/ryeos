@@ -363,6 +363,12 @@ async fn scrub_quarantines_rotten_object_launch_refuses_reimport_heals_and_purge
     )
     .await?;
     let project = tempfile::tempdir()?;
+    // A snapshot names its project by the checkout's manifest.
+    std::fs::create_dir_all(project.path().join(".ai"))?;
+    std::fs::write(
+        project.path().join(".ai/manifest.yaml"),
+        "name: quarantine-project\n",
+    )?;
 
     // 1. Import, bind, and launch the healthy consumer.
     let imported = import_payload(&h).await?;

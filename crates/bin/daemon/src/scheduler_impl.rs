@@ -83,13 +83,15 @@ impl AppSchedulerContext {
             PinnedProjectRealization::Cow {
                 terminal_publication:
                     PinnedTerminalPublication::RetainCurrentHead {
-                        principal_key,
+                        owner_component: principal_key,
                         project_hash,
                         expected_hash,
                     },
             } => Some(ResolvedCurrentHeadDestination {
-                principal_key: principal_key.clone(),
-                project_hash: project_hash.clone(),
+                head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
+                    principal_key,
+                    project_hash,
+                )?,
                 expected_hash: expected_hash.clone(),
             }),
             _ => None,
@@ -123,7 +125,10 @@ impl AppSchedulerContext {
                     environment: &self.0.provider_env,
                     principal: spec.execution.principal_id(),
                 },
-            )?;
+            )?
+            // The identity was sealed when the schedule bound; it is carried,
+            // never re-derived here.
+            .with_signer_project(authority.signer_project())?;
         if &expected != authority {
             bail!(
                 "persisted scheduler project authority disagrees with the signed execution policy"
@@ -355,6 +360,16 @@ impl SchedulerContext for AppSchedulerContext {
                         environment: &self.0.provider_env,
                         principal: spec.execution.principal_id(),
                     },
+                )?
+                .with_signer_project(
+                    ryeos_api::routes::response_modes::execute_mode::admission_signer_project(
+                        &self.0,
+                        &spec.execution.policy,
+                        Some(&canonical),
+                        None,
+                        spec.execution.principal_id(),
+                        &handler_context.scopes,
+                    )?,
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -364,7 +379,9 @@ impl SchedulerContext for AppSchedulerContext {
             ProjectExecutionPolicy::Pinned { source, .. } => {
                 let project_root = Self::project_root(spec)?;
                 let project_source = match source {
-                    PinnedSource::CurrentHead => ProjectSource::PushedHead,
+                    PinnedSource::CurrentHead { project } => ProjectSource::PushedHead {
+                        project: project.clone(),
+                    },
                     PinnedSource::Snapshot { hash } => {
                         ProjectSource::Snapshot { hash: hash.clone() }
                     }
@@ -405,10 +422,20 @@ impl SchedulerContext for AppSchedulerContext {
                             environment: &state.provider_env,
                             principal: execution.principal_id(),
                         },
+                    )?
+                    .with_signer_project(
+                        ryeos_api::routes::response_modes::execute_mode::admission_signer_project(
+                            &state,
+                            &execution.policy,
+                            Some(&context.original_path),
+                            context.current_head_destination.as_ref(),
+                            execution.principal_id(),
+                            &handler_context.scopes,
+                        )?,
                     )?;
                     ryeos_api::routes::response_modes::execute_mode::authorize_terminal_publication(
                         &execution.policy,
-                        &context.original_path,
+                        context.current_head_destination.as_ref(),
                         execution.principal_id(),
                         &handler_context.scopes,
                         context.snapshot_hash.as_deref(),
@@ -500,10 +527,7 @@ impl SchedulerContext for AppSchedulerContext {
             }
         };
         let plan_ctx = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                provenance.logical_project_root(&current_site_id),
-                &provenance.subject_resolution_authority(),
-            ),
+            logical_project: provenance.signer_project(),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: spec.execution.principal_id().to_owned(),
                 scopes: spec.execution.capabilities.clone(),

@@ -617,6 +617,7 @@ mod tests {
         let source = source_with_policy(
             ryeos_engine::execution_contract::ExecutionPolicy::local_pinned_current_head(
                 ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ryeos_state::project_identity::PushedProject::test_named("demo"),
             ),
             Some("/project"),
         );
@@ -625,7 +626,7 @@ mod tests {
         assert!(matches!(
             source.execution.policy.project,
             ProjectExecutionPolicy::Pinned {
-                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead { .. },
                 ..
             }
         ));
