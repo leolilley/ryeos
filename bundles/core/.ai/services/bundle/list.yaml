@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:5a608e5699da275aa4422c5f7114b77fc4bff8a49bb382d4b72a3b9b29c0355f:KWtrzcyQFYHRsFE4zdxcOGSoM0yTcI+ZwBv2YLIeeC8VJu3IIk0Gnna0UcoMlPahe5BiR5gD+Cm+QVX2G/JCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:08:57Z:41109e21526066283de07dde2fcf3076d6f0a65de729b8e219a74293f3e8fa08:AQCYKv2EhgGf9ZNftlzY7xtJqBWbRf7smPkpH2XrB2D3ejo9YN2W1PCO8G4EiQHhqX0JhpHX2BUpEBzQre6XAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
@@ -6,3 +6,6 @@ state_access: read_only_existing
 record_thread: false
 required_caps: []
 description: "List installed bundles"
+disclosure:
+  principal:
+    - "/bundles/*/name"

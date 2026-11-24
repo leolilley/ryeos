@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T02:24:20Z:982daa152bd3dfcbbf31f4bdfd6043a9fb801591c19381a3940a8f1f0241459e:IY8e+Jg7/wgo1RxsyUHytcig4AG253Q/1fSStDzH8cAMAVeC+QHWAKtj8NgBvOpS5wHBsa4YXvzuflgAj/AACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:08:57Z:0bb7141dea69b4a7a740f4d0643b262486d081aaf4d254e23017dd38a62012aa:cdtfVMWwTWxT+BURG7CZKf0yruc9T1ffLM8OUFf73LkJI75JVVy+NRqH6MBWkwYFQRFhXNh/GI4KONq4vZsRBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.locality.groups
 ui_read_only: true
@@ -8,3 +8,10 @@ availability: daemon_only
 required_caps:
   - ryeos.execute.service.node/locality/groups
 description: "Which of the operator's nodes share a boot, storage or account: this node's facts compared with each configured remote's, graded, with did-not-answer and not-granted kept apart from unknown"
+disclosure:
+  principal:
+    - "/schema"
+    - "/as_of"
+    - "/groups"
+    - "/invalid_declarations/*/label"
+    - "/invalid_declarations/*/code"

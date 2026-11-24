@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-15T23:05:10Z:d1641f4ec41a2dd2dd52cd05aea09c7e267d60dc63477cd7ad8cc0c95a7f98d4:weLJgF2CY2lUBlLwZoLUnQaZj6hgtM0Jrzhcgy+JuBJpKwYvdtkvqfEqKhelxqsC0PhjtPGV6+xkVQJqEK4fBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:08:57Z:efd04940d99f9af8f217a4e5929ea0ad438f53c0332349b08802b1827ad51f4e:gfusH1Nnj7pj8VcYWflth4LYESwtX3qVDOT9SjYzvwE+paxtqCmSAkWh0zm07E5wW2HTpYTw3VkNoZpm0nfaBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "list"
 kind: service
@@ -11,3 +11,25 @@ schema:
   limit: integer?
   sort: string?
 description: "List threads, optionally limited; sort: default (oldest-first) | newest (newest-first) | watch (active-first, then newest)"
+disclosure:
+  principal:
+    - "/next_cursor"
+    - "/threads/*/thread_id"
+    - "/threads/*/chain_root_id"
+    - "/threads/*/kind"
+    - "/threads/*/status"
+    - "/threads/*/item_ref"
+    - "/threads/*/launch_mode"
+    - "/threads/*/current_site_id"
+    - "/threads/*/origin_site_id"
+    - "/threads/*/upstream_thread_id"
+    - "/threads/*/successor_thread_id"
+    - "/threads/*/created_at"
+    - "/threads/*/updated_at"
+    - "/threads/*/execution"
+    - "/threads/*/follow"
+    - "/threads/*/pending"
+    - "/threads/*/facets"
+    - "/threads/*/current_node"
+  free_text:
+    - "/threads/*/error"

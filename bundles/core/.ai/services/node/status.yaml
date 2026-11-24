@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:776b43afa20cc280b20d97c22dcc3bac62ba3d7a0dfec6da36bce96dfb084f13:N6pGFc3N4+KjPnFddr7Mk5n9ao6WrEh8sPnd8m1kqBzfyc095RQ5nDIzqcMwFU6MIOZ6hjylE8O/I/bmd+SUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:08:57Z:238c7735d37d074dbb455551a3c27a79284ac3e8156103cd274206d7ac112577:1nalMSTKS+VrrmvbrCGT3/KQ1rWFT8XJqrPC5v8wylL8msxDi71TUEmXyAolamYVRNWahm7IJhMh0EVLY6VEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.status
 ui_read_only: true
@@ -6,3 +6,23 @@ state_access: read_only_existing
 record_thread: false
 required_caps: []
 description: "Daemon status: version, uptime, bind address, active threads"
+disclosure:
+  principal:
+    - "/node_id"
+    - "/version"
+    - "/revision"
+    - "/build_date"
+    - "/started_at"
+    - "/uptime_seconds"
+    - "/bind"
+    - "/active_threads"
+    - "/isolation/mode"
+    - "/isolation/filesystem_mode"
+    - "/isolation/network_mode"
+    - "/isolation/version"
+    - "/isolation/policy_digest"
+    - "/isolation/backend"
+    - "/isolation/process_scopes"
+    - "/thread_projection"
+    - "/pending_head_transitions"
+    - "/accounting"

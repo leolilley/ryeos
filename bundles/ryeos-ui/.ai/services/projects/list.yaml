@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:a8784f7d7e9f40992153e1a2a7d9282571d5523eb78392a89391b48cbd808cd0:8eUQg/5XHcjyuhyMYwNfSBizcD2rJI9DiOMI6KfBTHuqJjHcO4m2UzkvdD+en8gXTDqMz9lGNfzzNr1cTYgqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:08:57Z:f6c4e3397ad514dae798dca85404cc35220abbe43e29255f63894a14b933e2a4:cu41tCyO8taG2+JdJoolf8SpumhKBU7bSiJOxoNO6SpxJ0+4jUwbK05MeK+yNW+SJJHMm4B0nBWfoiBJrga+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/list
 version: "1.0.0"
@@ -8,3 +8,15 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/version"
+    - "/projects/*/local_id"
+    - "/projects/*/name"
+    - "/projects/*/added_at"
+    - "/projects/*/tags"
+    - "/projects/*/exists"
+    - "/projects/*/current"
+    - "/projects/*/registered"
+  free_text:
+    - "/projects/*/root"
