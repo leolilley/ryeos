@@ -198,11 +198,19 @@ fn select_admission_head<'a>(
                 format!("remote has no admission heads for policy '{}'", policy),
             )),
         },
-        _ => anyhow::bail!(
-            "remote returned {} admission heads for policy '{}'; pass subject_hash to choose one",
-            matches.len(),
-            policy,
-        ),
+        _ => {
+            let message = format!(
+                "remote returned {} admission heads for policy '{}'; pass subject_hash to choose one",
+                matches.len(),
+                policy,
+            );
+            return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                "admission_head_ambiguous",
+                409,
+                message.clone(),
+            ))
+            .context(message));
+        }
     }
 }
 
