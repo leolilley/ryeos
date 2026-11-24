@@ -220,6 +220,8 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
     ("objects/get", "/entries/*/data", "m4"),
     ("objects/get", "/blob_chunk/data", "m4"),
     ("objects/get", "/large_object_chunk/data", "m4"),
+    ("revisions/get", "/record/body/previous", "m4"),
+    ("revisions/get", "/record/body/content", "m4"),
     (
         "worker-executions/approvals",
         "/approvals/*/requested_authority/display",

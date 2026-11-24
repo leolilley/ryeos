@@ -13,7 +13,6 @@ use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_client_base::surface::opening::{SurfaceOpenRequest, SurfaceOpenSelection};
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
 
 use crate::browser_session::{AttachmentStoreError, BindingAttachmentCoordinate};
 use crate::handlers::ui_seat::seat_kind;
@@ -103,7 +102,6 @@ pub async fn handle_open_surface(
         &compile_context,
         &state,
         root.project_authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = super::ui_projects::completed_admission_append_limit(&state)?
@@ -711,7 +709,6 @@ pub async fn handle_revise(
         &compile_context,
         &state,
         old.project_authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     if binding.binding_digest == from.binding_digest {

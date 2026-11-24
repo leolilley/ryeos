@@ -2,12 +2,12 @@
 //!
 //! A bound source reaches a read service when its Surface lists it, the
 //! seat's grant holds the service's capabilities, and the node's signed
-//! `ui_seat_reads` policy has an entry for it that admits the seat's class.
+//! `read_disclosure` policy has an entry for it.
 //! [`decide`] is the only place that last judgement is made. It is called at
-//! mint (is there any admitting entry, and does it fit the service?), at
+//! mint (is there an entry, and does it fit the service?), at
 //! dispatch before the call (apply pins, refuse denied parameters, select the
 //! entry by its conditions) and, through the returned [`Shaping`], at
-//! disclosure (drop every field not kept, then enforce the bounds).
+//! disclosure (narrow to the fields an entry keeps, then enforce its bounds).
 //!
 //! The policy only narrows. Nothing here grants a capability, widens a lane
 //! or admits a record the service would refuse, and every doubt is a refusal.
@@ -17,36 +17,16 @@ use std::collections::BTreeMap;
 use ryeos_node_runtime::disclosure::{longest_array, project};
 use serde_json::{Map, Value};
 
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-    KeepSegment, MARKER_PRINCIPAL_ID, MARKER_PROJECT_ROOT, MARKER_PROJECT_ROOT_OR_NULL, SeatClass,
-    SeatReadEntry, UiSeatReadsPolicy,
+use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+    KeepSegment, MARKER_PRINCIPAL_ID, MARKER_PROJECT_ROOT, MARKER_PROJECT_ROOT_OR_NULL,
+    ReadDisclosurePolicy, ReadEntry,
 };
-
-/// Services under this namespace are the UI plane's own projections. Each
-/// scopes and authorizes its result itself from the calling seat, so the
-/// policy does not gate them. The namespace is the canonical ref's own
-/// structure: kind `service`, no suffix, and at least one segment after the
-/// `ui/ryeos-ui/` directory. It is read from no flag and no handler name.
-pub const UI_PLANE_SERVICE_PREFIX: &str = "ui/ryeos-ui/";
-
-/// Whether a canonical ref names a UI-plane service, exempt from the policy.
-pub fn is_ui_plane_service(target_ref: &str) -> bool {
-    let Ok(parsed) = ryeos_engine::canonical_ref::CanonicalRef::parse(target_ref) else {
-        return false;
-    };
-    parsed.kind == "service"
-        && parsed.suffix.is_none()
-        && parsed
-            .bare_id
-            .strip_prefix(UI_PLANE_SERVICE_PREFIX)
-            .is_some_and(|rest| !rest.is_empty())
-}
 
 /// Why a seat read was not admitted. Display never carries a parameter value
 /// or any part of a result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeatReadRefusal {
-    /// No entry of the policy admits this class for this service.
+    /// No entry of the policy admits this service to a seat.
     NoEntry { target: String },
     /// An entry names a parameter the service does not declare.
     UndeclaredParameter { target: String, name: String },
@@ -163,7 +143,7 @@ pub struct Admitted<'a> {
 #[derive(Debug)]
 pub struct Shaping<'a> {
     target: String,
-    entry: &'a SeatReadEntry,
+    entry: &'a ReadEntry,
 }
 
 impl Shaping<'_> {
@@ -187,7 +167,7 @@ impl Shaping<'_> {
 #[derive(Debug, Clone)]
 pub struct DetachedShaping {
     target: String,
-    entry: SeatReadEntry,
+    entry: ReadEntry,
 }
 
 impl DetachedShaping {
@@ -196,55 +176,54 @@ impl DetachedShaping {
     }
 }
 
-fn shape(target: &str, entry: &SeatReadEntry, result: Value) -> Result<Value, SeatReadRefusal> {
-    let paths: Vec<&[KeepSegment]> = entry.keep.iter().map(|path| path.segments()).collect();
-    let Some(kept) = project(&result, &paths) else {
-        return Err(SeatReadRefusal::NothingDisclosable {
-            target: target.to_owned(),
-        });
+fn shape(target: &str, entry: &ReadEntry, result: Value) -> Result<Value, SeatReadRefusal> {
+    // A service entry that keeps nothing leaves the item's own tier as it is;
+    // a stream route entry always names what it keeps.
+    let kept = if entry.keep.is_empty() {
+        result
+    } else {
+        let paths: Vec<&[KeepSegment]> = entry.keep.iter().map(|path| path.segments()).collect();
+        let Some(kept) = project(&result, &paths) else {
+            return Err(SeatReadRefusal::NothingDisclosable {
+                target: target.to_owned(),
+            });
+        };
+        kept
     };
-    if longest_array(&kept) > usize::try_from(entry.max_items).unwrap_or(usize::MAX) {
+    if let Some(max_items) = entry.max_items
+        && longest_array(&kept) > usize::try_from(max_items).unwrap_or(usize::MAX)
+    {
         return Err(SeatReadRefusal::TooManyItems {
             target: target.to_owned(),
         });
     }
-    let fits = serde_json::to_vec(&kept)
-        .ok()
-        .and_then(|bytes| u64::try_from(bytes.len()).ok())
-        .is_some_and(|length| length <= entry.max_result_bytes);
-    if fits {
-        Ok(kept)
-    } else {
-        Err(SeatReadRefusal::ResultTooLarge {
-            target: target.to_owned(),
-        })
+    if let Some(max_bytes) = entry.max_result_bytes {
+        let fits = serde_json::to_vec(&kept)
+            .ok()
+            .and_then(|bytes| u64::try_from(bytes.len()).ok())
+            .is_some_and(|length| length <= max_bytes);
+        if !fits {
+            return Err(SeatReadRefusal::ResultTooLarge {
+                target: target.to_owned(),
+            });
+        }
     }
+    Ok(kept)
 }
 
 /// Decide one seat read.
 ///
-/// With `request` absent this is the mint-time question: does any entry
-/// admit this class for this service, and does every entry for it fit the
+/// With `request` absent this is the mint-time question: is there an entry
+/// for this service, and does every entry for it fit the
 /// service's declared parameters. With a request it is the dispatch-time
 /// decision, returning the parameters to execute and the shaping to apply.
 pub fn decide<'a>(
-    policy: &'a UiSeatReadsPolicy,
-    class: SeatClass,
+    policy: &'a ReadDisclosurePolicy,
     target_ref: &str,
     parameter_schema: &BTreeMap<String, String>,
     request: Option<RequestFacts<'_>>,
 ) -> Result<Admitted<'a>, SeatReadRefusal> {
-    if is_ui_plane_service(target_ref) {
-        return Ok(Admitted {
-            params: request.map(|request| request.params),
-            shaping: None,
-        });
-    }
-    let candidates: Vec<&SeatReadEntry> = policy
-        .entries_for(target_ref)
-        .into_iter()
-        .filter(|entry| entry.classes.contains(&class))
-        .collect();
+    let candidates: Vec<&ReadEntry> = policy.entries_for(target_ref);
     if candidates.is_empty() {
         return Err(SeatReadRefusal::NoEntry {
             target: target_ref.to_owned(),
@@ -277,7 +256,7 @@ pub fn decide<'a>(
             });
         }
     };
-    let mut matching: Vec<(&SeatReadEntry, Map<String, Value>)> = Vec::new();
+    let mut matching: Vec<(&ReadEntry, Map<String, Value>)> = Vec::new();
     let mut unavailable: Option<SeatReadRefusal> = None;
     for entry in candidates {
         let mut pinned = supplied.clone();
@@ -371,8 +350,8 @@ mod tests {
             .collect()
     }
 
-    fn policy(entries: Vec<Value>) -> UiSeatReadsPolicy {
-        let policy: UiSeatReadsPolicy =
+    fn policy(entries: Vec<Value>) -> ReadDisclosurePolicy {
+        let policy: ReadDisclosurePolicy =
             serde_json::from_value(json!({"schema": 1, "reads": entries})).unwrap();
         policy.validate().unwrap();
         policy
@@ -381,7 +360,6 @@ mod tests {
     fn entry(extra: Value) -> Value {
         let mut base = json!({
             "target": TARGET,
-            "classes": ["local_operator", "hosted_principal"],
             "keep": ["/kind", "/rows/*/id"],
             "max_result_bytes": 4096,
             "max_items": 3
@@ -402,14 +380,9 @@ mod tests {
         })
     }
 
-    fn call(
-        policy: &UiSeatReadsPolicy,
-        class: SeatClass,
-        params: Value,
-    ) -> Result<Admitted<'_>, SeatReadRefusal> {
+    fn call(policy: &ReadDisclosurePolicy, params: Value) -> Result<Admitted<'_>, SeatReadRefusal> {
         decide(
             policy,
-            class,
             TARGET,
             &schema(&["kind", "holder", "root", "include_unverified"]),
             request(params),
@@ -417,110 +390,32 @@ mod tests {
     }
 
     #[test]
-    fn ui_plane_exemption_is_exact() {
-        for exempt in [
-            "service:ui/ryeos-ui/threads/list",
-            "service:ui/ryeos-ui/a",
-            "service:ui/ryeos-ui/field/project",
-        ] {
-            assert!(is_ui_plane_service(exempt), "{exempt}");
-        }
-        for gated in [
-            "service:ui/ryeos-ui",
-            "service:ui/ryeos-ui/",
-            "service:ui/ryeos-uix/threads/list",
-            "service:ui/session/surfaces/open",
-            "service:ui/launch/mint",
-            "service:xui/ryeos-ui/threads/list",
-            "service:ryeos-ui/threads/list",
-            "service:node/status",
-            "service:ui/ryeos-ui/threads/list@t:2026",
-            "tool:ui/ryeos-ui/threads/list",
-            "directive:ui/ryeos-ui/threads/list",
-            "ui/ryeos-ui/threads/list",
-            "service:ui/ryeos-ui/../node/status",
-            "",
-        ] {
-            assert!(!is_ui_plane_service(gated), "{gated}");
-        }
-    }
-
-    #[test]
-    fn an_exempt_service_needs_no_entry_and_is_left_alone() {
-        let empty = UiSeatReadsPolicy::admitting_nothing();
-        let admitted = decide(
-            &empty,
-            SeatClass::HostedPrincipal,
-            "service:ui/ryeos-ui/threads/list",
-            &BTreeMap::new(),
-            request(json!({"x": 1})),
-        )
-        .unwrap();
-        assert_eq!(admitted.params, Some(json!({"x": 1})));
-        assert!(admitted.shaping.is_none());
-        let at_mint = decide(
-            &empty,
-            SeatClass::LocalOperator,
-            "service:ui/ryeos-ui/threads/list",
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        assert!(at_mint.params.is_none() && at_mint.shaping.is_none());
-    }
-
-    #[test]
     fn no_entry_is_refused_at_mint_and_at_dispatch() {
-        let empty = UiSeatReadsPolicy::admitting_nothing();
-        for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
-            for facts in [None, request(json!({}))] {
-                let refusal = decide(&empty, class, TARGET, &schema(&[]), facts).unwrap_err();
-                assert_eq!(refusal.code(), "seat_read_no_entry");
-            }
+        let empty = ReadDisclosurePolicy::admitting_nothing();
+        for facts in [None, request(json!({}))] {
+            let refusal = decide(&empty, TARGET, &schema(&[]), facts).unwrap_err();
+            assert_eq!(refusal.code(), "seat_read_no_entry");
         }
         // An entry for another service does not admit this one.
         let other = policy(vec![entry(json!({"target": "service:test/other"}))]);
         assert!(matches!(
-            call(&other, SeatClass::LocalOperator, json!({})),
+            call(&other, json!({})),
             Err(SeatReadRefusal::NoEntry { .. })
         ));
     }
 
     #[test]
-    fn classes_are_split() {
-        let local_only = policy(vec![entry(json!({"classes": ["local_operator"]}))]);
-        assert!(call(&local_only, SeatClass::LocalOperator, json!({})).is_ok());
-        assert!(matches!(
-            call(&local_only, SeatClass::HostedPrincipal, json!({})),
-            Err(SeatReadRefusal::NoEntry { .. })
-        ));
-        assert!(matches!(
-            decide(
-                &local_only,
-                SeatClass::HostedPrincipal,
-                TARGET,
-                &schema(&[]),
-                None
-            ),
-            Err(SeatReadRefusal::NoEntry { .. })
-        ));
-
-        // Different shaping per class for one service.
-        let split = policy(vec![
-            entry(json!({"classes": ["local_operator"], "keep": ["/kind", "/path"]})),
-            entry(json!({"classes": ["hosted_principal"], "keep": ["/kind"]})),
-        ]);
+    fn an_entry_narrows_the_answer_and_a_bare_entry_leaves_it_as_it_is() {
+        let narrowed = policy(vec![entry(json!({"keep": ["/kind"]}))]);
         let result = json!({"kind": "k", "path": "/home/leo/x"});
-        let local = call(&split, SeatClass::LocalOperator, json!({})).unwrap();
+        let shaped = call(&narrowed, json!({})).unwrap();
         assert_eq!(
-            local.shaping.unwrap().apply(result.clone()).unwrap(),
-            json!({"kind": "k", "path": "/home/leo/x"})
-        );
-        let hosted = call(&split, SeatClass::HostedPrincipal, json!({})).unwrap();
-        assert_eq!(
-            hosted.shaping.unwrap().apply(result).unwrap(),
+            shaped.shaping.unwrap().apply(result.clone()).unwrap(),
             json!({"kind": "k"})
         );
+        let bare = policy(vec![json!({"target": TARGET})]);
+        let left = call(&bare, json!({})).unwrap();
+        assert_eq!(left.shaping.unwrap().apply(result.clone()).unwrap(), result);
     }
 
     #[test]
@@ -528,14 +423,7 @@ mod tests {
         let p = policy(vec![entry(
             json!({"pin": {"holder": "@session:principal_id"}}),
         )]);
-        let refusal = decide(
-            &p,
-            SeatClass::LocalOperator,
-            TARGET,
-            &schema(&["kind"]),
-            None,
-        )
-        .unwrap_err();
+        let refusal = decide(&p, TARGET, &schema(&["kind"]), None).unwrap_err();
         assert!(matches!(
             refusal,
             SeatReadRefusal::UndeclaredParameter { ref name, .. } if name == "holder"
@@ -546,13 +434,7 @@ mod tests {
         ] {
             let p = policy(vec![entry(mentioned)]);
             assert!(matches!(
-                decide(
-                    &p,
-                    SeatClass::LocalOperator,
-                    TARGET,
-                    &schema(&["kind"]),
-                    None
-                ),
+                decide(&p, TARGET, &schema(&["kind"]), None),
                 Err(SeatReadRefusal::UndeclaredParameter { .. })
             ));
         }
@@ -560,16 +442,7 @@ mod tests {
         let p = policy(vec![entry(
             json!({"pin": {"holder": "@session:principal_id"}}),
         )]);
-        assert!(
-            decide(
-                &p,
-                SeatClass::LocalOperator,
-                TARGET,
-                &schema(&["kind"]),
-                request(json!({}))
-            )
-            .is_err()
-        );
+        assert!(decide(&p, TARGET, &schema(&["kind"]), request(json!({}))).is_err());
     }
 
     #[test]
@@ -579,7 +452,6 @@ mod tests {
         }))]);
         let admitted = call(
             &p,
-            SeatClass::HostedPrincipal,
             json!({"holder": "fp:someone-else", "root": "/elsewhere", "kind": "chosen", "extra": 1}),
         )
         .unwrap();
@@ -588,7 +460,7 @@ mod tests {
             json!({"holder": "fp:seat", "root": "/project", "kind": "fixed", "extra": 1})
         );
         // Absent parameters are pinned too.
-        let admitted = call(&p, SeatClass::LocalOperator, json!({})).unwrap();
+        let admitted = call(&p, json!({})).unwrap();
         assert_eq!(admitted.params.unwrap()["holder"], "fp:seat");
     }
 
@@ -604,14 +476,7 @@ mod tests {
                 project_root: None,
             },
         });
-        let refusal = decide(
-            &p,
-            SeatClass::LocalOperator,
-            TARGET,
-            &schema(&["root"]),
-            no_project,
-        )
-        .unwrap_err();
+        let refusal = decide(&p, TARGET, &schema(&["root"]), no_project).unwrap_err();
         assert_eq!(refusal.code(), "seat_read_marker_unavailable");
 
         let p = policy(vec![entry(
@@ -624,14 +489,7 @@ mod tests {
                 project_root: None,
             },
         });
-        let admitted = decide(
-            &p,
-            SeatClass::LocalOperator,
-            TARGET,
-            &schema(&["root"]),
-            no_project,
-        )
-        .unwrap();
+        let admitted = decide(&p, TARGET, &schema(&["root"]), no_project).unwrap();
         assert_eq!(admitted.params.unwrap(), json!({"root": null}));
     }
 
@@ -639,24 +497,19 @@ mod tests {
     fn denied_parameters_are_refused_whatever_their_value() {
         let p = policy(vec![entry(json!({"deny_params": ["include_unverified"]}))]);
         for value in [json!(true), json!(false), json!(null), json!("x")] {
-            let refusal = call(
-                &p,
-                SeatClass::LocalOperator,
-                json!({"include_unverified": value}),
-            )
-            .unwrap_err();
+            let refusal = call(&p, json!({"include_unverified": value})).unwrap_err();
             assert_eq!(refusal.code(), "seat_read_parameter_denied");
             assert!(!refusal.to_string().contains("\"x\""));
         }
-        assert!(call(&p, SeatClass::LocalOperator, json!({"kind": "a"})).is_ok());
+        assert!(call(&p, json!({"kind": "a"})).is_ok());
     }
 
     #[test]
     fn when_must_hold_after_pinning() {
         let p = policy(vec![entry(json!({"when": {"kind": ["a", "b"]}}))]);
-        assert!(call(&p, SeatClass::LocalOperator, json!({"kind": "a"})).is_ok());
+        assert!(call(&p, json!({"kind": "a"})).is_ok());
         for params in [json!({"kind": "c"}), json!({}), json!({"kind": null})] {
-            let refusal = call(&p, SeatClass::LocalOperator, params).unwrap_err();
+            let refusal = call(&p, params).unwrap_err();
             assert_eq!(refusal.code(), "seat_read_no_matching_entry");
         }
         // A pinned value satisfies a condition the client could not.
@@ -664,21 +517,14 @@ mod tests {
             "when": {"kind": ["fixed"]},
             "pin": {"kind": "fixed"}
         }))]);
-        assert!(call(&pinned, SeatClass::LocalOperator, json!({"kind": "other"})).is_ok());
+        assert!(call(&pinned, json!({"kind": "other"})).is_ok());
         // A condition on a pinned value the client cannot change is not
         // satisfied by what the client sends.
         let overridden = policy(vec![entry(json!({
             "when": {"kind": ["wanted"]},
             "pin": {"kind": "fixed"}
         }))]);
-        assert!(
-            call(
-                &overridden,
-                SeatClass::LocalOperator,
-                json!({"kind": "wanted"})
-            )
-            .is_err()
-        );
+        assert!(call(&overridden, json!({"kind": "wanted"})).is_err());
     }
 
     #[test]
@@ -687,7 +533,7 @@ mod tests {
             entry(json!({"when": {"kind": ["a"]}, "keep": ["/kind"]})),
             entry(json!({"when": {"kind": ["b"]}, "keep": ["/rows"]})),
         ]);
-        let a = call(&p, SeatClass::LocalOperator, json!({"kind": "a"})).unwrap();
+        let a = call(&p, json!({"kind": "a"})).unwrap();
         assert_eq!(
             a.shaping
                 .unwrap()
@@ -695,7 +541,7 @@ mod tests {
                 .unwrap(),
             json!({"kind": 1})
         );
-        let b = call(&p, SeatClass::LocalOperator, json!({"kind": "b"})).unwrap();
+        let b = call(&p, json!({"kind": "b"})).unwrap();
         assert_eq!(
             b.shaping
                 .unwrap()
@@ -708,13 +554,13 @@ mod tests {
     #[test]
     fn overlapping_entries_that_slip_past_load_are_refused_at_call() {
         // Built without the loader's validation, as a stale value might be.
-        let unchecked: UiSeatReadsPolicy = serde_json::from_value(json!({
+        let unchecked: ReadDisclosurePolicy = serde_json::from_value(json!({
             "schema": 1,
             "reads": [entry(json!({})), entry(json!({}))]
         }))
         .unwrap();
         assert!(unchecked.validate().is_err());
-        let refusal = call(&unchecked, SeatClass::LocalOperator, json!({})).unwrap_err();
+        let refusal = call(&unchecked, json!({})).unwrap_err();
         assert_eq!(refusal.code(), "seat_read_ambiguous_entries");
     }
 
@@ -723,11 +569,11 @@ mod tests {
         let p = policy(vec![entry(json!({}))]);
         for params in [json!([1]), json!("x"), json!(3)] {
             assert!(matches!(
-                call(&p, SeatClass::LocalOperator, params),
+                call(&p, params),
                 Err(SeatReadRefusal::ParametersNotAnObject { .. })
             ));
         }
-        let admitted = call(&p, SeatClass::LocalOperator, Value::Null).unwrap();
+        let admitted = call(&p, Value::Null).unwrap();
         assert_eq!(admitted.params.unwrap(), json!({}));
     }
 
@@ -736,10 +582,7 @@ mod tests {
         let p = policy(vec![entry(json!({
             "keep": ["/kind", "/rows/*/id", "/nested/a"]
         }))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         let result = json!({
             "kind": "k",
             "path": "/srv/secret",
@@ -763,10 +606,7 @@ mod tests {
     #[test]
     fn a_pointer_that_ends_keeps_the_whole_subtree() {
         let p = policy(vec![entry(json!({"keep": ["/rows", "/rows/*/id"]}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         let result = json!({"rows": [{"id": 1, "x": 2}], "other": 1});
         assert_eq!(
             shaping.apply(result).unwrap(),
@@ -777,10 +617,7 @@ mod tests {
     #[test]
     fn wildcards_match_one_key_or_index_and_literal_indices_match_one() {
         let p = policy(vec![entry(json!({"keep": ["/map/*/v", "/rows/1/id"]}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         let result = json!({
             "map": {"a": {"v": 1, "w": 2}, "b": {"v": 3}},
             "rows": [{"id": 10}, {"id": 11}, {"id": 12}]
@@ -800,10 +637,7 @@ mod tests {
     #[test]
     fn an_empty_list_stays_an_empty_list_and_a_missing_field_is_not_an_error() {
         let p = policy(vec![entry(json!({}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         assert_eq!(
             shaping.apply(json!({"rows": [], "kind": "k"})).unwrap(),
             json!({"rows": [], "kind": "k"})
@@ -815,10 +649,7 @@ mod tests {
     #[test]
     fn a_scalar_result_has_nothing_to_disclose() {
         let p = policy(vec![entry(json!({}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         for result in [json!("text"), json!(1), json!(null), json!(true)] {
             assert_eq!(
                 shaping.apply(result).unwrap_err().code(),
@@ -830,10 +661,7 @@ mod tests {
     #[test]
     fn bounds_refuse_and_never_truncate() {
         let p = policy(vec![entry(json!({"max_result_bytes": 40, "max_items": 3}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
 
         // Exactly at the item bound passes; one more is refused.
         let at_bound = json!({"rows": [{"id": 1}, {"id": 2}, {"id": 3}]});
@@ -865,10 +693,7 @@ mod tests {
     #[test]
     fn the_item_bound_counts_nested_arrays() {
         let p = policy(vec![entry(json!({"keep": ["/rows"], "max_items": 2}))]);
-        let shaping = call(&p, SeatClass::LocalOperator, json!({}))
-            .unwrap()
-            .shaping
-            .unwrap();
+        let shaping = call(&p, json!({})).unwrap().shaping.unwrap();
         let nested = json!({"rows": [[1, 2, 3]]});
         assert_eq!(
             shaping.apply(nested).unwrap_err().code(),
@@ -879,12 +704,7 @@ mod tests {
     #[test]
     fn refusal_text_never_carries_values() {
         let p = policy(vec![entry(json!({"deny_params": ["include_unverified"]}))]);
-        let refusal = call(
-            &p,
-            SeatClass::LocalOperator,
-            json!({"include_unverified": "SECRET-VALUE"}),
-        )
-        .unwrap_err();
+        let refusal = call(&p, json!({"include_unverified": "SECRET-VALUE"})).unwrap_err();
         assert!(!refusal.to_string().contains("SECRET-VALUE"));
         assert!(refusal.to_string().contains("include_unverified"));
     }

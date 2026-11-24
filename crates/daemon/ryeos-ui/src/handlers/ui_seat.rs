@@ -23,7 +23,6 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{CutAppendResult, ExactSeat, NewEventRecord, SeatCut};
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
 use ryeos_ui_presentation_contract::seat_control::{SEAT_APPEND_RECEIPT_SCHEMA, SeatAppendReceipt};
 
 use crate::browser_session::transfer_reservation::CompletedPairedCut;
@@ -1604,7 +1603,6 @@ pub async fn handle_open(
                                     &compile_context,
                                     &state,
                                     attachment.project_authority.as_deref(),
-                                    SeatClass::of_session(session.user_principal_id.as_deref()),
                                 )?
                             };
                             candidates.push(crate::browser_session::InitialSurfaceCandidate {

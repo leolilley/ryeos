@@ -14,7 +14,7 @@
 use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 
-use crate::node_policy::sections::ui_seat_reads::{KeepPath, KeepSegment};
+use crate::node_policy::sections::read_disclosure::{KeepPath, KeepSegment};
 
 /// How much of a result a caller may see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

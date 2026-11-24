@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T16:53:50Z:313f1de5b5e7aa0875d9b0ed626bc8a282f97c3e80084f0d92d3d12c9be74542:BvHRf3ZrpaOZpdifPQFAxZ0GO45++fnZgQ2trlKc9q9oWyrl2sji5GWTVwbVroJi+I4D+eWBmyrOcuKL1tiQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T18:46:54Z:d6e51c84d34eb9915d46083ad6cbf1b8f23dac5b667b975ac6b567c2974b809b:jYc4kZaVwVnYrwLWKlpC5bxTiLyu3JTu1hP9reA5Iyehif/5Bu2Sc7ue7CbtvBCKbSuE2qtMB/CtRE0Fby0hAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -276,7 +276,7 @@ updating presentation. Current policy and attachment admission are also checked
 by the daemon; client checks do not grant authority.
 
 A source a Surface binds is read by a seat only when the node's signed
-`ui_seat_reads` policy has an entry for its service that admits the seat's class
+`read_disclosure` policy has an entry for its service that admits the seat's class
 (`local_operator` or `hosted_principal`, from whether the session carries a
 hosted principal). A service with no entry is attenuated at mint and refused at
 dispatch; services under `ui/ryeos-ui/` scope their own results and are exempt.

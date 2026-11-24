@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:27:27Z:9edd513fc4db0cd01cca1d766bf94f29ca0e18bde1c885dab8043834278db686:tga/EMyqZN6/tZgYuDqTb9ScpvwaPgoZp9dMHjEePQmdvnlIokbazMtG5QHnz4QhbO4s9KNM9d/2uVOH27BXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T18:46:54Z:0b1a2758e44ad3d262d0efb555617ef931d629dc087cc599df1f88e33fa67787:IL/QHW6Prp48wBF9+LVBsjaTHVFtL5/dCH5Zt0VA82qkKk6LTPACDBqBRyvfSBBI+4aV04FInpMvDR7uQNfnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.list
 availability: both
@@ -14,6 +14,7 @@ schema:
 description: "List the signed revision records of one project item, oldest first, each with what was checked (signature, signer, links), the chain's standing against the node's signed head, and whether the live file is what the last record wrote"
 disclosure:
   principal:
+    - "/file"
     - "/item_ref"
     - "/total"
     - "/sound"
@@ -44,7 +45,6 @@ disclosure:
     - "/records/*/provenance/target_ref"
     - "/records/*/provenance/content_digest"
   free_text:
-    - "/file"
     - "/records/*/verify/reason"
   max_items: 200
   max_result_bytes: 524288
