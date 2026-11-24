@@ -1,21 +1,19 @@
-<!-- ryeos:signed:2026-11-17T10:07:49Z:2fd694c9d8dd55125c1a2fde6a2f905d5d5635cfcf5aa52d377b553a341cb63c:kJuoD83jwlVYTR/BdpmpqkvZ0T2Yd6gEMFRdpdrNCXFJTPB2FXlmjWD6mauBwzK77xWJvcK1JM7jJ4Ijmda0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T07:17:57Z:661ecf011be7ca3caba0eeecde31d06daad436d41594e53b3d2701afee711a80:7U8QKu6F3rDamlAMYBMur7hSbuUunnoPS2i4wp7xXwf3dw1VQFph7aaQYeLdxWxNG94YJ9HL3IihZzkoZMPgAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
 version: "0.1.0"
 description: >-
-  Operator runbook for the claude-code bundle. This slice is a stub: the
-  adapter answers the structured-session wire with scripted turns and runs no
-  model and no Claude Code.
+  Operator runbook for the claude-code bundle: installing and launching the
+  Claude Code worker driver, which runs one Claude Code process per turn.
 ---
 
 # claude-code hosted activation
 
-**This slice is a stub.** `claude-code-adapter` speaks the structured-session
-wire and produces scripted turns from the goal payload. It starts no Claude
-Code process, opens no network connection and calls no model. Do not point a
-real task at it: every turn "succeeds" with the text the goal's `stub` object
-asks for, or with a default sentence.
+`claude-code-adapter` is a worker driver: it speaks the structured-session
+wire and runs Claude Code, one `claude -p` process per turn (see "The live
+driver"). Claude Code's own executable is configured by path and not pinned
+yet, so set `CLAUDE_CODE_EXECUTABLE` before launching.
 
 ## What is installed
 
@@ -65,10 +63,11 @@ asks for, or with a default sentence.
    `subscription-trusted-lane`). Turns draw on the subscription's own usage
    limits.
 
-## Driving the stub
+## The test-only stub driver
 
-The turn goal's `turn_start_payload` carries the task and, in this slice, an
-optional `stub` object:
+Test builds only (see the end of the next section): the turn goal's
+`turn_start_payload` carries the task and an optional `stub` object that
+replaces the Claude Code run with a scripted turn:
 
     {"prompt": "...", "stub": {"duration_ms": 0, "outcome": "completed",
      "text": "hello", "progress_events": 3, "structured_output": null}}
@@ -76,12 +75,12 @@ optional `stub` object:
 `outcome` is `completed`, `crash` (turn ends with status `crashed`) or
 `interrupt` (turn ends with status `interrupted`). A turn that cannot report
 its own end would hang the session, so each outcome still emits
-`turn/completed`. Without `stub` the turn completes at once.
+`turn/completed`. In a stub build a turn without `stub` completes at once.
 
 ## The live driver
 
-Without a `stub` object the adapter runs Claude Code, one `claude -p` process
-per turn, in its own process group. It needs:
+The adapter runs Claude Code, one `claude -p` process per turn, in its own
+process group. It needs:
 
 - `CLAUDE_CODE_EXECUTABLE`, an absolute path to Claude Code's executable. The
   environment templates carry the placeholder `/path/to/claude-code/bin/claude`;
@@ -115,8 +114,8 @@ Only the test bundle refresh (`populate-bundles.sh --build-profile test`, which
 `gate.sh --refresh-bundles` selects) builds the adapter with its `stub-driver`
 feature.
 
-## Not in this slice
+## Not yet
 
-Claude Code's executable storage and pinning arrive in a later slice. Until
-then `configuration_absence` already refuses a workspace that carries Claude Code
-project settings, hooks or MCP definitions, and the profile is schema 12.
+Claude Code's executable storage and pinning arrive in a later slice.
+`configuration_absence` already refuses a workspace that carries Claude Code
+project settings, hooks or MCP definitions. The profile is schema 13.
