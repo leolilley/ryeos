@@ -393,7 +393,16 @@ async fn usage_observes_only_signed_subjects_owned_by_projectless_caller() {
         ThreadHistoryRetention,
     };
     let (_tmp, _state_owner, state) = test_state::build_test_state();
-    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+    for (thread_id, principal) in [
+        (
+            "T-visible",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+        ),
+        (
+            "T-private",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        ),
+    ] {
         state
             .state_store
             .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
@@ -455,7 +464,16 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
         ThreadHistoryRetention,
     };
     let (_tmp, _state_owner, state) = test_state::build_test_state();
-    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+    for (thread_id, principal) in [
+        (
+            "T-visible",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+        ),
+        (
+            "T-private",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        ),
+    ] {
         state
             .state_store
             .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
@@ -524,7 +542,9 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
     assert!(events.iter().all(|event| event["thread_id"] == "T-visible"));
     let encoded = serde_json::to_string(&result).unwrap();
     assert!(!encoded.contains("T-private"));
-    assert!(!encoded.contains("fp:foreign"));
+    assert!(
+        !encoded.contains("fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0")
+    );
     assert_eq!(result["usage_coverage"]["state"], "unavailable");
     assert_eq!(
         result["pulse"].as_array().unwrap().len(),
@@ -548,9 +568,21 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
     // Live-project visibility follows the admitted project, not only creator
     // identity. Own work elsewhere must not leak into this project's activity.
     for (thread_id, principal, root) in [
-        ("T-visible", "fp:collaborator", Some(admitted_root.clone())),
-        ("T-private", "fp:test", Some(foreign_root)),
-        ("T-projectless", "fp:test", None),
+        (
+            "T-visible",
+            "fp:c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            Some(admitted_root.clone()),
+        ),
+        (
+            "T-private",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            Some(foreign_root),
+        ),
+        (
+            "T-projectless",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            None,
+        ),
     ] {
         let authority = match &root {
             // These are signed live execution subjects on an unconfined test
@@ -625,7 +657,9 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
     let encoded = serde_json::to_string(&result).unwrap();
     assert!(!encoded.contains("T-private"));
     assert!(!encoded.contains("T-projectless"));
-    assert!(!encoded.contains("fp:test"));
+    assert!(
+        !encoded.contains("fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57")
+    );
     assert_eq!(result["usage_coverage"]["state"], "unavailable");
     assert_eq!(
         result["pulse"].as_array().unwrap().len(),
@@ -653,9 +687,21 @@ async fn activity_reports_windowed_usage_for_seat_attributed_launches() {
     // (thread, owner, attributed subject)
     let attributed = ryeos_ui::handlers::ui_usage::ui_usage_subject(None);
     for (thread_id, principal, subject) in [
-        ("T-seat", "fp:test", Some(attributed.clone())),
-        ("T-unattributed", "fp:test", None),
-        ("T-foreign", "fp:foreign", Some(attributed.clone())),
+        (
+            "T-seat",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            Some(attributed.clone()),
+        ),
+        (
+            "T-unattributed",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            None,
+        ),
+        (
+            "T-foreign",
+            "fp:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+            Some(attributed.clone()),
+        ),
     ] {
         state
             .state_store

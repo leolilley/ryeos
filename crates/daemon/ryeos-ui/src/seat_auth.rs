@@ -508,7 +508,8 @@ mod tests {
                 binding: crate::compiled_binding::CompiledUiBinding {
                     view_sets: Default::default(),
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-                    principal_id: "fp:test".into(),
+                    principal_id:
+                        "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57".into(),
                     signer_project: ryeos_engine::contracts::LogicalProject::Absent(
                         ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
                     ),

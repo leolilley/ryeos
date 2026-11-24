@@ -355,6 +355,39 @@ pub async fn live_presentation_with_surface_in_project(
     (id, ctx, producer, coordinate)
 }
 
+/// The key fixture seats are minted for and fixture threads are launched by.
+/// It has no registry record, so it acts for its own solo principal.
+pub const FIXTURE_KEY: &str = "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57";
+
+/// The project identity a fixture checkout at `root` states for
+/// [`FIXTURE_KEY`]'s principal, named after the checkout's directory.
+pub fn fixture_project_identity(
+    root: &std::path::Path,
+) -> ryeos_state::project_identity::ProjectIdentity {
+    let raw = root
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    let name = format!("p{}", cleaned.trim_start_matches(['.', '_', '-']));
+    let name: String = name.chars().take(64).collect();
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(
+            FIXTURE_KEY
+                .strip_prefix("fp:")
+                .expect("fixture key is a fingerprint"),
+        )
+        .expect("an unrecorded key acts for itself")
+        .principal;
+    ryeos_state::project_identity::ProjectIdentity::new(
+        owner,
+        name.parse().expect("fixture project name"),
+    )
+}
+
 pub fn launch_context(
     surface_ref: &str,
     project_root: Option<&str>,
@@ -374,7 +407,7 @@ pub fn launch_context(
             binding: CompiledUiBinding {
                 view_sets: Default::default(),
                 contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                principal_id: "fp:test".to_string(),
+                principal_id: FIXTURE_KEY.to_string(),
                 signer_project: ryeos_engine::contracts::LogicalProject::Absent(
                     ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
                 ),
@@ -606,14 +639,18 @@ pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
     let state_store = Arc::clone(native.store());
     let (store_owner, node) = native.into_parts();
     let (config, identity, write_barrier) = node.into_parts();
-    let engine = Arc::new(ryeos_engine::engine::Engine::new(
-        ryeos_engine::kind_registry::KindRegistry::empty(),
-        ryeos_engine::parsers::ParserDispatcher::new(
-            ryeos_engine::parsers::ParserRegistry::empty(),
-            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-        ),
-        Vec::new(),
-    ));
+    let engine = Arc::new(
+        ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        )
+        // A registry with no records: every key acts for its own solo principal.
+        .with_trust_store(ryeos_engine::trust::TrustStore::empty().with_succession_chain(&[])),
+    );
     let kind_profiles = Arc::new(
         ryeos_app::kind_profiles::KindProfileRegistry::build(None).with_test_profile(
             "seat_session",

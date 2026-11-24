@@ -2881,7 +2881,7 @@ pub(crate) mod tests {
                 presentation: context.presentation,
                 project_authority: Some(authority),
             },
-            "fp:test",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
             &"22".repeat(32),
         )
         .unwrap();
@@ -2912,7 +2912,7 @@ pub(crate) mod tests {
                     presentation: attachment.presentation.clone(),
                     project_authority: attachment.project_authority.clone(),
                 },
-                "fp:test",
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32)
             )
             .is_err()
@@ -2943,7 +2943,7 @@ pub(crate) mod tests {
                 presentation: context.presentation,
                 project_authority: None,
             },
-            "fp:test",
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
             &"22".repeat(32),
         )
         .unwrap();
@@ -2963,7 +2963,7 @@ pub(crate) mod tests {
                     presentation: context.presentation,
                     project_authority: None,
                 },
-                "fp:test",
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32)
             )
             .is_err()
@@ -3017,7 +3017,7 @@ pub(crate) mod tests {
             }] },
         };
         let proof = admission::SavedSurfaceAdmission::reusable(
-            "fp:test".into(),
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57".into(),
             identity.clone(),
             None,
             vec![None],
@@ -3384,7 +3384,7 @@ pub(crate) mod tests {
                 },
             };
             let proof = admission::SavedSurfaceAdmission::reusable(
-                "fp:test".into(),
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57".into(),
                 identity,
                 None,
                 vec![None, None],
@@ -3838,8 +3838,10 @@ pub(crate) mod tests {
                 tabs: vec![record("first"), record("second")],
             },
         };
-        let proof =
-            admission::SavedSurfaceAdmission::projectless_fixture("fp:test", identity.clone());
+        let proof = admission::SavedSurfaceAdmission::projectless_fixture(
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            identity.clone(),
+        );
         let request = uuid::Uuid::new_v4().to_string();
         assert!(
             store
@@ -3935,7 +3937,10 @@ pub(crate) mod tests {
             .as_mut()
             .unwrap()
             .thread = "T-next".into();
-        let later = admission::SavedSurfaceAdmission::projectless_fixture("fp:test", later);
+        let later = admission::SavedSurfaceAdmission::projectless_fixture(
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            later,
+        );
         let before = store.get_session(&id).unwrap();
         let (retry, _, _) = store
             .publish_saved_surface(
@@ -4028,7 +4033,8 @@ pub(crate) mod tests {
             binding: crate::compiled_binding::CompiledUiBinding {
                 view_sets: Default::default(),
                 contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                principal_id: "fp:test".to_string(),
+                principal_id: "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57"
+                    .to_string(),
                 signer_project: ryeos_engine::contracts::LogicalProject::Absent(
                     ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
                 ),
@@ -5446,7 +5452,10 @@ pub(crate) mod tests {
         let listed = store.list_sessions();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, session_id);
-        assert_eq!(listed[0].principal_id, "fp:test");
+        assert_eq!(
+            listed[0].principal_id,
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57"
+        );
         assert_eq!(listed[0].granted_caps, vec!["ui.read"]);
         let rendered = serde_json::to_string(&listed).unwrap();
         assert!(!rendered.contains(&token), "{rendered}");
@@ -5634,7 +5643,10 @@ pub(crate) mod tests {
             .publish_attachment(&session_id, &origin, candidate, 4, &"22".repeat(32))
             .expect("publish");
         assert_eq!(published.binding_generation, 2);
-        assert!(store.has_retained_attachment_for_project("fp:test", "project-a"));
+        assert!(store.has_retained_attachment_for_project(
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            "project-a"
+        ));
     }
 
     #[test]
@@ -5653,7 +5665,10 @@ pub(crate) mod tests {
         context.registered_project_id = Some("project-pending".into());
         let (session_id, token) = mint(&store, context);
 
-        assert!(store.has_retained_attachment_for_project("fp:test", "project-pending"));
+        assert!(store.has_retained_attachment_for_project(
+            "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+            "project-pending"
+        ));
         store.consume_launch_token(&token).expect("activate");
         let session = store.get_session(&session_id).expect("active session");
         let coordinate = session
@@ -5665,7 +5680,10 @@ pub(crate) mod tests {
             .revoke_attachment(&session_id, &coordinate)
             .expect("revoke active attachment");
         assert!(
-            !store.has_retained_attachment_for_project("fp:test", "project-pending"),
+            !store.has_retained_attachment_for_project(
+                "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
+                "project-pending"
+            ),
             "activated replay token must not retain independently revocable project authority"
         );
     }
