@@ -33104,8 +33104,18 @@ mod tests {
         };
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        // With no stop written yet, the fence records an explicit kill: every
+        // stop has an origin.
+        db.fence_thread_process_scope_recovery(&reservation)
+            .unwrap();
+        let fenced = db.get_runtime_info("scope-recovery").unwrap().unwrap();
+        assert_eq!(fenced.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("scope-recovery").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
         // A parent-end cancel written first keeps its origin through the
-        // fence's escalation to kill.
+        // fence's escalation to kill (reset the row to model that order).
         db.conn
             .with_sql(|conn| {
                 conn.execute(
