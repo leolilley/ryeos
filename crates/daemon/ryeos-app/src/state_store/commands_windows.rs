@@ -219,6 +219,22 @@ impl StateStore {
             .release_child_link_draw(child_thread_id, released_usd_nanos, settled_at_ms)
     }
 
+    /// Settle a child's link that carries no spend draw; see
+    /// [`runtime_db::RuntimeDb::settle_child_link`].
+    pub fn settle_child_link(&self, child_thread_id: &str, settled_at_ms: i64) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .settle_child_link(child_thread_id, settled_at_ms)
+    }
+
+    /// Up to `limit` children whose links are unsettled, in child id order,
+    /// strictly after `after` (empty for the first page).
+    pub fn unsettled_child_links(&self, after: &str, limit: usize) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.unsettled_child_links(after, limit)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was

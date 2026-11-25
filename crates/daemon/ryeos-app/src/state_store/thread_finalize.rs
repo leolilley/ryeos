@@ -857,6 +857,31 @@ impl StateStore {
             cas_mutation_guard,
         )?);
 
+        // The child's terminal state settles its link when the link carries no
+        // spend draw. A link with a draw is left alone here: it settles only
+        // when the spend unit releases the draw, after the child's accounting
+        // settlement is durable, so a terminal child with an unsettled draw
+        // keeps counting until then. The terminal is already committed, so a
+        // failure here is logged and never fails the finalize; startup
+        // reconcile settles whatever this misses.
+        let settle = g
+            .runtime_db
+            .child_link_spend(thread_id)
+            .and_then(|spend| match spend {
+                Some(spend) if spend.draw.is_none() => g
+                    .runtime_db
+                    .settle_child_link(thread_id, lillux::time::timestamp_millis())
+                    .map(|_| ()),
+                _ => Ok(()),
+            });
+        if let Err(error) = settle {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %error,
+                "failed to settle the terminal child's link; reconcile will retry"
+            );
+        }
+
         Ok((
             persisted_from_append(&result, &events_to_append)?,
             effective_update,

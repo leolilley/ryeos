@@ -1371,6 +1371,65 @@ fn mirror_process_quarantine_report(state: &AppState) {
 /// Retire every predecessor qualification child before root recovery can
 /// select a new launch. No phase here authorizes another allocation, process
 /// attachment, release, natural-exit claim, or provider contact.
+/// Links read per page when settling the links of children that ended without
+/// settling theirs.
+const CHILD_LINK_RECONCILE_BATCH: usize = 256;
+
+/// What [`reconcile_terminal_child_links`] found.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChildLinkReconcileReport {
+    /// No-draw links settled by this pass.
+    settled: usize,
+    /// Terminal children whose link carries a spend draw and is still
+    /// unsettled. Left untouched: the spend unit's reconcile settles them
+    /// after accounting settlement, by releasing the draw.
+    draw_bearing: Vec<String>,
+}
+
+/// Settle the links of children that reached a terminal state without their
+/// terminal path settling the link (a crash between the terminal commit and
+/// the link write). Only links with no spend draw are settled; a link with a
+/// draw is reported and left for the release that settles it. Pages through
+/// the unsettled links in bounded batches; idempotent.
+fn reconcile_terminal_child_links(state: &AppState) -> Result<ChildLinkReconcileReport> {
+    let mut report = ChildLinkReconcileReport::default();
+    let mut after = String::new();
+    loop {
+        let page = state
+            .state_store
+            .unsettled_child_links(&after, CHILD_LINK_RECONCILE_BATCH)?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after.clone_from(last);
+        let full_page = page.len() == CHILD_LINK_RECONCILE_BATCH;
+        for child in &page {
+            let Some(thread) = state.state_store.get_thread(child)? else {
+                continue;
+            };
+            if !ryeos_app::state_store::is_terminal_status(&thread.status) {
+                continue;
+            }
+            let has_draw = state
+                .state_store
+                .child_link_spend(child)?
+                .is_some_and(|spend| spend.draw.is_some());
+            if has_draw {
+                report.draw_bearing.push(child.clone());
+            } else if state
+                .state_store
+                .settle_child_link(child, lillux::time::timestamp_millis())?
+            {
+                report.settled += 1;
+            }
+        }
+        if !full_page {
+            break;
+        }
+    }
+    Ok(report)
+}
+
 fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
     let ids = state.state_store.unsettled_scoped_child_attempt_ids()?;
     for attempt_id in &ids {
@@ -1484,6 +1543,21 @@ async fn reconcile_active_threads_inner(
             );
         }
         reconcile_dedicated_worker_startup(state).await?;
+        let child_links = reconcile_terminal_child_links(state)
+            .context("settle the links of terminal children")?;
+        if child_links.settled != 0 {
+            tracing::warn!(
+                settled = child_links.settled,
+                "settled child links left unsettled by terminal children"
+            );
+        }
+        if !child_links.draw_bearing.is_empty() {
+            tracing::warn!(
+                count = child_links.draw_bearing.len(),
+                children = ?child_links.draw_bearing,
+                "terminal children whose links still carry an unreleased spend draw"
+            );
+        }
     }
     reconcile_abandoned_workspace_members(state)?;
     let blocked_workspace_operations =
@@ -4894,6 +4968,89 @@ mod tests {
         };
         assert_eq!(spawned("T-p1"), 0);
         assert_eq!(spawned("T-p2"), 1);
+    }
+
+    #[test]
+    fn terminal_child_links_settle_without_draw_and_report_with_draw() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let store = &state.state_store;
+        for thread in ["T-lp", "T-bare", "T-drawn", "T-live"] {
+            store
+                .create_thread_for_test(&lineage_thread(thread))
+                .unwrap();
+            store.mark_thread_running(thread, None).unwrap();
+        }
+        for child in ["T-bare", "T-drawn", "T-live"] {
+            store.record_child_link("T-lp", child, "dispatch").unwrap();
+        }
+        // Give one link a draw, as the spend unit would have at birth.
+        store
+            .with_runtime_sql_for_test(|conn| {
+                Ok(conn.execute(
+                    "UPDATE thread_child_link
+                        SET spend_draw_usd_nanos = 50, session_key = 's'
+                      WHERE child_thread_id = 'T-drawn'",
+                    [],
+                )?)
+            })
+            .unwrap();
+        // Children ended without their links settled: undo the terminal path's
+        // own settle to model a crash between the terminal commit and it.
+        for child in ["T-bare", "T-drawn"] {
+            store
+                .finalize_thread(
+                    child,
+                    &ryeos_app::state_store::FinalizeThreadRecord {
+                        status: "completed".to_string(),
+                        outcome_code: Some("completed".to_string()),
+                        result_json: None,
+                        error_json: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        managed_envelope: None,
+                        result_project_snapshot_hash: None,
+                        result_workspace_output_capture_hash: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .with_runtime_sql_for_test(|conn| {
+                Ok(conn.execute(
+                    "UPDATE thread_child_link SET settled_at_ms = NULL
+                      WHERE child_thread_id = 'T-bare'",
+                    [],
+                )?)
+            })
+            .unwrap();
+
+        let report = reconcile_terminal_child_links(&state).unwrap();
+        assert_eq!(report.settled, 1);
+        assert_eq!(report.draw_bearing, vec!["T-drawn".to_string()]);
+        assert!(
+            store
+                .child_link_spend("T-bare")
+                .unwrap()
+                .unwrap()
+                .settled_at_ms
+                .is_some()
+        );
+        for child in ["T-drawn", "T-live"] {
+            assert_eq!(
+                store
+                    .child_link_spend(child)
+                    .unwrap()
+                    .unwrap()
+                    .settled_at_ms,
+                None,
+                "{child} stays unsettled"
+            );
+        }
+        // Idempotent: nothing more to settle, the draw-bearing link is still reported.
+        let again = reconcile_terminal_child_links(&state).unwrap();
+        assert_eq!(again.settled, 0);
+        assert_eq!(again.draw_bearing, vec!["T-drawn".to_string()]);
     }
 
     use ryeos_app::launch_metadata::ResumeContext;

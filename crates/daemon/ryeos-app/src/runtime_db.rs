@@ -168,8 +168,8 @@ pub struct ChildLinkSpendRow {
 /// written around them.
 ///
 /// Covered: a release above its draw, a release without a settlement time, a
-/// release without a draw, a draw without a session key, a negative amount,
-/// and a per-session sum of unreleased draws that overflows.
+/// release without a draw, a settled draw without a release, a draw without a
+/// session key, a negative amount, and a per-session sum of unreleased draws that overflows.
 ///
 /// Not covered here, because each needs data the link table does not hold: a
 /// session whose unreleased draws exceed its grant total needs the grant
@@ -198,6 +198,9 @@ pub fn child_link_spend_findings(rows: &[ChildLinkSpendRow]) -> Vec<String> {
             if row.settled_at_ms.is_none() {
                 findings.push(format!("{id}: release without a settlement time"));
             }
+        }
+        if row.draw.is_some() && row.settled_at_ms.is_some() && row.released.is_none() {
+            findings.push(format!("{id}: settled draw without a release"));
         }
         if let (Some(draw), Some(key)) = (row.draw, row.session_key.as_deref()) {
             let unreleased = draw.saturating_sub(row.released.unwrap_or(0).min(draw));
@@ -2511,7 +2514,10 @@ CREATE TABLE IF NOT EXISTS thread_child_link (
     CHECK (spend_released_usd_nanos IS NULL
            OR (spend_draw_usd_nanos IS NOT NULL
                AND spend_released_usd_nanos <= spend_draw_usd_nanos
-               AND settled_at_ms IS NOT NULL))
+               AND settled_at_ms IS NOT NULL)),
+    CHECK (spend_draw_usd_nanos IS NULL
+           OR settled_at_ms IS NULL
+           OR spend_released_usd_nanos IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
@@ -2907,8 +2913,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // root the draw is summed under, so a successor session cannot reset its
 // total), `spend_released_usd_nanos` and `settled_at_ms` (written together,
 // only after the child's accounting settlement is durable). CHECKs: a draw
-// carries a session key, a release carries a draw and a settlement time, and
-// a release never exceeds its draw.
+// carries a session key, a release carries a draw and a settlement time, a
+// release never exceeds its draw, and a settled link that carries a draw
+// carries its release too (0 when nothing is released). A link with no draw
+// settles with `settled_at_ms` alone, written by the child's terminal path.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
@@ -23475,6 +23483,55 @@ impl RuntimeDb {
         })
     }
 
+    /// Settle a link that carries no spend draw: record `settled_at_ms` only
+    /// when the link is not already settled. Returns whether this call settled
+    /// it. A link with a draw is refused: it settles through
+    /// [`Self::release_child_link_draw`], after its accounting settlement, and
+    /// must never be settled without its release. An absent link is `Ok(false)`.
+    pub fn settle_child_link(&self, child_thread_id: &str, settled_at_ms: i64) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let draw: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT spend_draw_usd_nanos FROM thread_child_link WHERE child_thread_id=?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match draw {
+                None => return Ok(false),
+                Some(Some(_)) => bail!(
+                    "child link {child_thread_id} carries a spend draw; it settles only by releasing it"
+                ),
+                Some(None) => {}
+            }
+            let updated = conn.execute(
+                "UPDATE thread_child_link SET settled_at_ms = ?2
+                  WHERE child_thread_id = ?1 AND settled_at_ms IS NULL
+                    AND spend_draw_usd_nanos IS NULL",
+                params![child_thread_id, settled_at_ms],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    /// Up to `limit` children whose links are not yet settled, in child id
+    /// order and strictly after `after` (empty for the first page), so a caller
+    /// can page through a set larger than one batch.
+    pub fn unsettled_child_links(&self, after: &str, limit: usize) -> Result<Vec<String>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id FROM thread_child_link
+                  WHERE settled_at_ms IS NULL AND child_thread_id > ?1
+                  ORDER BY child_thread_id ASC
+                  LIMIT ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![after, limit as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
     /// Every spend-bearing or settled link row, for [`child_link_spend_findings`].
     pub fn child_link_spend_rows(&self) -> Result<Vec<ChildLinkSpendRow>> {
         self.conn.with_sql(|conn| {
@@ -33239,6 +33296,7 @@ mod tests {
             ("released-no-settled", "10, 's', 4, NULL"),
             ("released-no-draw", "NULL, NULL, 4, 99"),
             ("negative-release", "10, 's', -1, 99"),
+            ("settled-draw-no-release", "10, 's', NULL, 99"),
         ] {
             raw_insert(&db, name, cols, values).expect_err(&format!("{name} must violate a CHECK"));
         }
@@ -33325,6 +33383,61 @@ mod tests {
         let spend = db.child_link_spend("child").unwrap().unwrap();
         assert_eq!(spend.released_usd_nanos, Some(60));
         assert_eq!(spend.settled_at_ms, Some(7));
+    }
+
+    #[test]
+    fn settle_child_link_settles_no_draw_links_once_and_refuses_draws() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "bare", None).unwrap();
+        link_with_draw(&db, "p", "drawn", Some(&draw(100, "s"))).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        assert!(db.settle_child_link("bare", 5).unwrap());
+        assert_eq!(
+            db.child_link_spend("bare").unwrap().unwrap().settled_at_ms,
+            Some(5)
+        );
+        assert!(!db.settle_child_link("bare", 9).unwrap());
+        assert_eq!(
+            db.child_link_spend("bare").unwrap().unwrap().settled_at_ms,
+            Some(5)
+        );
+        assert!(!db.settle_child_link("absent", 9).unwrap());
+        db.settle_child_link("drawn", 9)
+            .expect_err("a draw settles only by release");
+        let spend = db.child_link_spend("drawn").unwrap().unwrap();
+        assert_eq!(spend.settled_at_ms, None);
+        assert_eq!(spend.released_usd_nanos, None);
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        // A release of zero still satisfies the settled-draw CHECK.
+        assert!(db.release_child_link_draw("drawn", 0, 9).unwrap());
+    }
+
+    #[test]
+    fn settle_child_link_drops_the_live_count_and_unsettled_listing() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "plain1", None).unwrap();
+        link_with_draw(&db, "p", "plain2", None).unwrap();
+        // session_live_count keys on session_key, which only a draw sets, so
+        // the flagged link below carries one and a no-draw link is not counted.
+        assert_eq!(db.session_live_count("s").unwrap(), 0);
+        db.conn
+            .with_sql(|conn| {
+                Ok(conn.execute(
+                    "UPDATE thread_child_link SET session_key = 's' WHERE child_thread_id = 'plain1'",
+                    [],
+                )?)
+            })
+            .unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 1);
+        assert_eq!(db.unsettled_child_links("", 10).unwrap().len(), 2);
+        assert_eq!(db.unsettled_child_links("", 1).unwrap(), vec!["plain1"]);
+        assert_eq!(
+            db.unsettled_child_links("plain1", 1).unwrap(),
+            vec!["plain2"]
+        );
+        assert!(db.settle_child_link("plain1", 3).unwrap());
+        assert_eq!(db.session_live_count("s").unwrap(), 0);
+        assert_eq!(db.unsettled_child_links("", 10).unwrap(), vec!["plain2"]);
     }
 
     #[test]
@@ -33426,6 +33539,7 @@ mod tests {
             row("nosettled", Some(10), Some(4), None, Some("s")),
             row("nokey", Some(10), None, None, None),
             row("nodraw", None, Some(4), Some(1), None),
+            row("norelease", Some(10), None, Some(1), Some("s")),
             row("max1", Some(i64::MAX), None, None, Some("huge")),
             row("max2", Some(1), None, None, Some("huge")),
         ];
@@ -33435,6 +33549,7 @@ mod tests {
             "nosettled: release without a settlement time",
             "nokey: draw without a session key",
             "nodraw: release without a draw",
+            "norelease: settled draw without a release",
             "session huge: unreleased draws overflow",
         ] {
             assert!(
