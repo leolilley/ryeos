@@ -240,12 +240,13 @@ pub fn cancel_queued_descendants(
             continue;
         }
         if !crate::state_store::is_terminal_status(&thread.status) {
+            let (outcome_code, reason) = unlaunched_cancel_outcome(state, &thread.thread_id)?;
             state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread.thread_id,
                 status: "cancelled".to_string(),
-                outcome_code: Some("cancelled".to_string()),
+                outcome_code: Some(outcome_code.to_string()),
                 result: None,
-                error: Some(json!({"reason": "ancestor_cancelled_before_launch"})),
+                error: Some(json!({ "reason": reason })),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
@@ -255,6 +256,27 @@ pub fn cancel_queued_descendants(
         state.state_store.discard_window_member(chain_root)?;
     }
     Ok(removed)
+}
+
+/// The outcome code and error reason for cancelling a never-launched
+/// descendant because an ancestor was cancelled. A flagged `dispatch` child is
+/// cancelled because its session ended, and says so; any other descendant keeps
+/// the plain cancel outcome.
+fn unlaunched_cancel_outcome(
+    state: &AppState,
+    thread_id: &str,
+) -> anyhow::Result<(&'static str, &'static str)> {
+    Ok(
+        if state
+            .state_store
+            .flagged_dispatch_parent(thread_id)?
+            .is_some()
+        {
+            (PARENT_END_OUTCOME_CODE, PARENT_END_REASON)
+        } else {
+            ("cancelled", "ancestor_cancelled_before_launch")
+        },
+    )
 }
 
 pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
@@ -269,12 +291,13 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
             && thread.status == "created"
             && thread.runtime.process_identity.is_none()
         {
+            let (outcome_code, reason) = unlaunched_cancel_outcome(state, &thread.thread_id)?;
             state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread.thread_id.clone(),
                 status: "cancelled".into(),
-                outcome_code: Some("cancelled".into()),
+                outcome_code: Some(outcome_code.to_string()),
                 result: None,
-                error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                error: Some(json!({ "reason": reason })),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
@@ -436,9 +459,344 @@ pub fn stop_thread_and_descendants(
     ))
 }
 
+/// Outcome code of a child stopped because the session that spawned it ended.
+/// The child finalizes as stopped (cancelled or killed per its stop intent),
+/// never as failed, whether the stop was graceful or forced.
+pub const PARENT_END_OUTCOME_CODE: &str = "cancelled_by_parent_end";
+
+/// Error reason recorded on a child stopped because its session ended.
+pub const PARENT_END_REASON: &str = "parent_session_ended";
+
+/// Grace a flagged child gets to stop cooperatively before it is forced, when
+/// the node does not state one.
+pub const PARENT_END_GRACE_DEFAULT: Duration = Duration::from_secs(30);
+
+/// Hard ceiling on the grace; a larger configured value is clamped to it.
+pub const PARENT_END_GRACE_MAX: Duration = Duration::from_secs(300);
+
+/// The grace to apply for a configured value: the default when none is
+/// configured, otherwise the value clamped to [`PARENT_END_GRACE_MAX`].
+pub fn parent_end_grace(configured: Option<Duration>) -> Duration {
+    configured.map_or(PARENT_END_GRACE_DEFAULT, |grace| {
+        grace.min(PARENT_END_GRACE_MAX)
+    })
+}
+
+/// How long a stopped child's row is given to reach a terminal on its own
+/// before it is finalized on its behalf: the grace, at most this long.
+const PARENT_END_SETTLE_WAIT_MAX: Duration = Duration::from_secs(5);
+
+/// Poll interval while waiting for a stopped child to reach a terminal.
+const PARENT_END_POLL: Duration = Duration::from_millis(50);
+
+/// Links read per page when sweeping for children of ended parents.
+const PARENT_END_SWEEP_BATCH: usize = 256;
+
+/// What a parent-end stop did, per flagged child.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ParentEndStopReport {
+    /// Ended parents the report covers (a sweep may cover several).
+    pub parents: usize,
+    /// Children this call saw reach a stopped terminal.
+    pub stopped: Vec<String>,
+    /// Children that were already terminal and were left untouched.
+    pub already_terminal: Vec<String>,
+    /// Children that could not be stopped, with the reason. Each stays
+    /// non-terminal (or unproven) and is retried by the next sweep.
+    pub failed: Vec<(String, String)>,
+}
+
+impl ParentEndStopReport {
+    fn absorb(&mut self, other: ParentEndStopReport) {
+        self.parents += other.parents;
+        self.stopped.extend(other.stopped);
+        self.already_terminal.extend(other.already_terminal);
+        self.failed.extend(other.failed);
+    }
+}
+
+/// Stop the flagged `dispatch` children of an ended session. Unflagged
+/// children and children of any other relation are never touched.
+///
+/// Each live child is stopped gracefully (its descendants with it); one still
+/// not terminal after `grace` (clamped to [`PARENT_END_GRACE_MAX`]) is forced.
+/// Either way it finalizes as stopped with outcome
+/// [`PARENT_END_OUTCOME_CODE`], never failed. A zero grace forces at once.
+///
+/// This takes no hosted-operation gate and holds no store lock across a wait,
+/// so it is safe to run while the parent is still terminalizing. A child that
+/// cannot be stopped is recorded in the report and does not affect the others;
+/// only failing to list the parent's children is an error.
+pub fn stop_flagged_children_on_parent_end(
+    state: &AppState,
+    parent_thread_id: &str,
+    grace: Duration,
+) -> anyhow::Result<ParentEndStopReport> {
+    let grace = grace.min(PARENT_END_GRACE_MAX);
+    let mut report = ParentEndStopReport {
+        parents: 1,
+        ..ParentEndStopReport::default()
+    };
+    let mut live = Vec::new();
+    for child in state
+        .state_store
+        .flagged_dispatch_children(parent_thread_id)
+        .with_context(|| format!("list the flagged children of {parent_thread_id}"))?
+    {
+        match state.state_store.get_thread(&child) {
+            Ok(Some(thread)) if crate::state_store::is_terminal_status(&thread.status) => {
+                report.already_terminal.push(child);
+            }
+            Ok(Some(_)) => live.push(child),
+            Ok(None) => report.failed.push((child, "no thread row".to_string())),
+            Err(error) => report.failed.push((child, format!("{error:#}"))),
+        }
+    }
+    // Children stop in parallel, so the wait is the longest grace, not their
+    // sum, and one child's failure never holds up another.
+    let results = std::thread::scope(|scope| {
+        let handles = live
+            .iter()
+            .map(|child| scope.spawn(move || stop_flagged_child(state, child, grace)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .zip(&live)
+            .map(|(handle, child)| {
+                let result = handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("stop worker panicked")));
+                (child.clone(), result)
+            })
+            .collect::<Vec<_>>()
+    });
+    for (child, result) in results {
+        match result {
+            Ok(()) => report.stopped.push(child),
+            Err(error) => {
+                tracing::warn!(
+                    parent_thread_id,
+                    child_thread_id = %child,
+                    error = %format!("{error:#}"),
+                    "failed to stop a flagged child at the end of its session; the next sweep retries"
+                );
+                report.failed.push((child, format!("{error:#}")));
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Stop the flagged children of every ended parent that still has one live:
+/// the children found by walking the unsettled child links, grouped by parent,
+/// and stopped with [`stop_flagged_children_on_parent_end`]. A parent counts as
+/// ended when it is terminal and not merely a continued segment. Pages through
+/// the links in bounded batches; idempotent, and the repair for a parent that
+/// ended without its own stop running (a crash between its terminal commit and
+/// the stop, or a child linked after the parent ended).
+pub fn stop_flagged_children_of_ended_parents(
+    state: &AppState,
+    grace: Duration,
+) -> anyhow::Result<ParentEndStopReport> {
+    let mut parents = BTreeSet::new();
+    let mut after = String::new();
+    loop {
+        let page = state
+            .state_store
+            .unsettled_child_links(&after, PARENT_END_SWEEP_BATCH)?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after.clone_from(last);
+        let full_page = page.len() == PARENT_END_SWEEP_BATCH;
+        for child in &page {
+            let Some(parent_id) = state.state_store.flagged_dispatch_parent(child)? else {
+                continue;
+            };
+            let Some(thread) = state.state_store.get_thread(child)? else {
+                continue;
+            };
+            if crate::state_store::is_terminal_status(&thread.status) {
+                continue;
+            }
+            if let Some(parent) = state.state_store.get_thread(&parent_id)?
+                && crate::state_store::is_terminal_status(&parent.status)
+                && parent.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
+            {
+                parents.insert(parent_id);
+            }
+        }
+        if !full_page {
+            break;
+        }
+    }
+    let mut report = ParentEndStopReport::default();
+    for parent in &parents {
+        report.absorb(stop_flagged_children_on_parent_end(state, parent, grace)?);
+    }
+    Ok(report)
+}
+
+fn child_is_terminal(state: &AppState, child: &str) -> anyhow::Result<bool> {
+    let thread = state
+        .state_store
+        .get_thread(child)?
+        .ok_or_else(|| anyhow::anyhow!("thread row missing for {child}"))?;
+    Ok(crate::state_store::is_terminal_status(&thread.status))
+}
+
+/// How long to wait for a stopped child's row before finalizing it on its
+/// behalf.
+fn parent_end_settle_wait(grace: Duration) -> Duration {
+    grace.min(PARENT_END_SETTLE_WAIT_MAX)
+}
+
+/// Wait until `child` is terminal or the grace runs out; `true` means it ran
+/// out. Once the graceful stop has returned (the process group is proven gone)
+/// the remaining wait shrinks to the settle wait: only the child's own
+/// launcher can still be finalizing it.
+fn wait_for_child_terminal(
+    state: &AppState,
+    child: &str,
+    grace: Duration,
+    graceful: &std::thread::ScopedJoinHandle<'_, anyhow::Result<()>>,
+) -> anyhow::Result<bool> {
+    let mut deadline = std::time::Instant::now() + grace;
+    let mut graceful_returned = false;
+    loop {
+        if child_is_terminal(state, child)? {
+            return Ok(false);
+        }
+        let now = std::time::Instant::now();
+        if !graceful_returned && graceful.is_finished() {
+            graceful_returned = true;
+            deadline = deadline.min(now + parent_end_settle_wait(grace));
+        }
+        if now >= deadline {
+            return Ok(true);
+        }
+        std::thread::sleep(PARENT_END_POLL.min(deadline - now));
+    }
+}
+
+/// Stop one flagged child and its descendants and see it terminal.
+fn stop_flagged_child(state: &AppState, child: &str, grace: Duration) -> anyhow::Result<()> {
+    if grace.is_zero() {
+        return force_flagged_child(state, child, grace);
+    }
+    std::thread::scope(|scope| {
+        let graceful = scope
+            .spawn(|| stop_thread_and_descendants(state, child, CascadeMode::Graceful).map(|_| ()));
+        let timed_out = match wait_for_child_terminal(state, child, grace, &graceful) {
+            Ok(timed_out) => timed_out,
+            Err(error) => {
+                let _ = graceful.join();
+                return Err(error);
+            }
+        };
+        if !timed_out {
+            // Terminal: the graceful stop returns once its group is gone.
+            return graceful
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("graceful stop worker panicked")));
+        }
+        if graceful.is_finished() {
+            // Stopped and proven, but nothing finalized the row: settle it on
+            // its behalf as a graceful stop.
+            graceful
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("graceful stop worker panicked")))?;
+            return settle_flagged_child(state, child, CascadeMode::Graceful, grace);
+        }
+        // The grace ran out with the graceful stop still working: force it.
+        // The hard stop makes the graceful one return.
+        let forced = force_flagged_child(state, child, grace);
+        let _ = graceful.join();
+        forced
+    })
+}
+
+/// Force-stop one flagged child and its descendants and settle it.
+fn force_flagged_child(state: &AppState, child: &str, grace: Duration) -> anyhow::Result<()> {
+    stop_thread_and_descendants(state, child, CascadeMode::Hard)
+        .with_context(|| format!("force-stop flagged child {child}"))?;
+    settle_flagged_child(state, child, CascadeMode::Hard, grace)
+}
+
+/// After a proven stop, give the child's own launcher the settle wait to
+/// finalize its row, then finalize it on its behalf as stopped. The durable
+/// stop intent decides cancelled or killed and the parent-end outcome code;
+/// the values passed here only name the intended shape.
+fn settle_flagged_child(
+    state: &AppState,
+    child: &str,
+    mode: CascadeMode,
+    grace: Duration,
+) -> anyhow::Result<()> {
+    let wait = parent_end_settle_wait(grace);
+    settle_stopped_descendants(state, child, mode, wait)?;
+    let deadline = std::time::Instant::now() + wait;
+    while !child_is_terminal(state, child)? {
+        if std::time::Instant::now() >= deadline {
+            let status = match mode {
+                CascadeMode::Graceful => "cancelled",
+                CascadeMode::Hard => "killed",
+            };
+            let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: child.to_string(),
+                status: status.to_string(),
+                outcome_code: Some(PARENT_END_OUTCOME_CODE.to_string()),
+                result: None,
+                error: Some(json!({ "reason": PARENT_END_REASON })),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            });
+            if let Err(error) = finalized
+                && !child_is_terminal(state, child)?
+            {
+                return Err(error).with_context(|| format!("settle stopped flagged child {child}"));
+            }
+            return Ok(());
+        }
+        std::thread::sleep(PARENT_END_POLL);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_end_grace_defaults_to_thirty_seconds_and_clamps_to_three_hundred() {
+        assert_eq!(parent_end_grace(None), Duration::from_secs(30));
+        assert_eq!(
+            parent_end_grace(Some(Duration::from_secs(45))),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            parent_end_grace(Some(Duration::from_secs(300))),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            parent_end_grace(Some(Duration::from_secs(301))),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            parent_end_grace(Some(Duration::from_secs(86_400))),
+            Duration::from_secs(300)
+        );
+        assert_eq!(parent_end_grace(Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    #[test]
+    fn parent_end_outcome_is_stopped_never_failed() {
+        assert!(!ryeos_state::event_types::outcome_code_is_failure(
+            PARENT_END_OUTCOME_CODE
+        ));
+    }
 
     #[test]
     fn hard_mode_always_kills_ignoring_declared_mode() {

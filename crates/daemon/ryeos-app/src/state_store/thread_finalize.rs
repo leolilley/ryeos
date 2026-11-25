@@ -616,11 +616,23 @@ impl StateStore {
                 StopIntent::Cancel => ThreadStatus::Cancelled,
                 StopIntent::Kill => ThreadStatus::Killed,
             };
+            // A child stopped because its flagged parent session ended is a
+            // stopped child like any other (cancelled or killed per the
+            // intent), told apart only by its outcome code and reason.
+            let parent_ended = stopped_by_parent_session_end(g, thread_id)?;
             effective_update.status = status.as_str().to_string();
-            effective_update.outcome_code = Some(status.as_str().to_string());
+            effective_update.outcome_code = Some(if parent_ended {
+                crate::cascade::PARENT_END_OUTCOME_CODE.to_string()
+            } else {
+                status.as_str().to_string()
+            });
             effective_update.result_json = None;
             effective_update.error_json = Some(json!({
-                "reason": "durable_stop_intent",
+                "reason": if parent_ended {
+                    crate::cascade::PARENT_END_REASON
+                } else {
+                    "durable_stop_intent"
+                },
                 "intent": intent.as_str(),
             }));
             // The runtime supplied envelope describes its reported outcome,
@@ -1218,6 +1230,26 @@ pub fn is_terminal_status(status: &str) -> bool {
         status,
         "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
     )
+}
+
+/// Whether `thread_id` is a flagged `dispatch` child whose parent session has
+/// ended: the parent is terminal (a continued segment is not an end) or already
+/// carries a durable stop. A stop of such a child, from the parent's end or from
+/// the cascade of the parent's own cancel, finalizes with the parent-end outcome.
+/// A stop of a child whose parent is still running is an ordinary stop.
+fn stopped_by_parent_session_end(g: &Inner, thread_id: &str) -> Result<bool> {
+    let Some(parent_id) = g.runtime_db.flagged_dispatch_parent(thread_id)? else {
+        return Ok(false);
+    };
+    if let Some(parent) = g.state_db.get_thread(&parent_id)?
+        && is_terminal_status(&parent.status)
+        && parent.status != ThreadStatus::Continued.as_str()
+    {
+        return Ok(true);
+    }
+    Ok(g.runtime_db
+        .get_runtime_info(&parent_id)?
+        .is_some_and(|runtime| runtime.stop_intent.is_some()))
 }
 
 pub(super) fn terminal_event_type(status: &str) -> Result<&'static str> {

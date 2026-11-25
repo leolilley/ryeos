@@ -6828,6 +6828,7 @@ async fn run_periodic_recovery_pass(
         Mutex<ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff>,
     >,
 ) -> Result<()> {
+    spawn_parent_end_sweep(state);
     let recovered_project_applies =
         ryeos_api::handlers::project_apply_snapshot::retry_retained_project_snapshot_applies(state)
             .await
@@ -6970,6 +6971,54 @@ async fn run_periodic_recovery_pass(
     ensure_recovery_targets_classified(state, &targets)
         .context("periodic recovery ownership boundary")?;
     Ok(())
+}
+
+/// Stop the flagged detached children of sessions that have ended. A session's
+/// terminal wakes this pass (and the periodic tick finds anything it missed), so
+/// the stop runs here, after the session's terminal commit and outside its
+/// finalize: it never waits on the session's own hosted-operation gate. The
+/// sweep waits out the stop grace, so it runs on its own host task instead of
+/// holding up the rest of the pass; one sweep runs at a time and the next pass
+/// starts another if work remains. A failure is logged and retried.
+fn spawn_parent_end_sweep(state: &AppState) {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    if RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let state = state.clone();
+    let spawned = lillux::task::spawn_host_task("parent-end-sweep", move || {
+        let _release = Release;
+        let grace = ryeos_app::cascade::parent_end_grace(None);
+        match ryeos_app::cascade::stop_flagged_children_of_ended_parents(&state, grace) {
+            Ok(report) => {
+                if report.parents != 0 {
+                    tracing::info!(
+                        parents = report.parents,
+                        stopped = report.stopped.len(),
+                        failed = report.failed.len(),
+                        "stopped the flagged children of ended sessions"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                error = %format!("{error:#}"),
+                "parent-end sweep failed; the next pass retries"
+            ),
+        }
+    });
+    match spawned {
+        Ok(task) => task.detach(),
+        Err(error) => {
+            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            tracing::warn!(error = %error, "failed to start the parent-end sweep");
+        }
+    }
 }
 
 async fn recover_external_candidate_cleanups_async(

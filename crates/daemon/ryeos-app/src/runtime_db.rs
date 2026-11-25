@@ -23366,9 +23366,9 @@ impl RuntimeDb {
     }
 
     /// Whether the child's link asks that it be cancelled when its parent
-    /// ends, or `None` when no link has been recorded. Nothing acts on the
-    /// flag yet: it is recorded with the link so the parent's end can find the
-    /// children it owes a cancel.
+    /// ends, or `None` when no link has been recorded. The flag is recorded
+    /// with the link so the parent's end can find the children it owes a stop
+    /// (see [`Self::flagged_dispatch_children`]).
     pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {
         self.conn.with_sql(|conn| {
             conn.query_row(
@@ -23568,6 +23568,39 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             conn.query_row(
                 "SELECT relation FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The direct children of `parent_thread_id` whose link is a `dispatch`
+    /// link flagged to be cancelled when the parent ends, in spawn order. Any
+    /// other relation, and any unflagged dispatch link, is excluded.
+    pub fn flagged_dispatch_children(&self, parent_thread_id: &str) -> Result<Vec<String>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id FROM thread_child_link
+                  WHERE parent_thread_id = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1
+                  ORDER BY created_at_ms ASC, child_thread_id ASC",
+            )?;
+            let rows = stmt.query_map(params![parent_thread_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
+    /// The parent of `child_thread_id` when its link is a `dispatch` link
+    /// flagged to be cancelled when the parent ends, else `None`.
+    pub fn flagged_dispatch_parent(&self, child_thread_id: &str) -> Result<Option<String>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT parent_thread_id FROM thread_child_link
+                  WHERE child_thread_id = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1",
                 params![child_thread_id],
                 |row| row.get(0),
             )

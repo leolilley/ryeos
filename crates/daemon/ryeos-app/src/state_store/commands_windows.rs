@@ -194,6 +194,20 @@ impl StateStore {
             .child_link_cancel_on_parent_end(child_thread_id)
     }
 
+    /// The direct flagged `dispatch` children of `parent_thread_id`, in spawn
+    /// order; see [`runtime_db::RuntimeDb::flagged_dispatch_children`].
+    pub fn flagged_dispatch_children(&self, parent_thread_id: &str) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.flagged_dispatch_children(parent_thread_id)
+    }
+
+    /// The parent of a flagged `dispatch` child, else `None`; see
+    /// [`runtime_db::RuntimeDb::flagged_dispatch_parent`].
+    pub fn flagged_dispatch_parent(&self, child_thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db.flagged_dispatch_parent(child_thread_id)
+    }
+
     /// The spend columns of the child's link, or `None` when no link has been
     /// recorded.
     pub fn child_link_spend(
@@ -256,7 +270,8 @@ impl StateStore {
     /// As [`Self::record_child_link`], also recording in the link's own
     /// transaction whether the child is to be cancelled when its parent ends.
     /// A detached spawn from a grant-bearing parent passes `true`; the flag is
-    /// recorded before the child is launched, and nothing acts on it yet.
+    /// recorded before the child is launched; the parent's end stops the
+    /// children it flags (see `cascade::stop_flagged_children_on_parent_end`).
     pub fn record_child_link_with_cancel_flag(
         &self,
         parent_thread_id: &str,

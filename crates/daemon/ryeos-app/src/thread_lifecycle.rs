@@ -5159,6 +5159,7 @@ impl ThreadLifecycleService {
         // by signal, which never drains its own command) reaches finalization
         // HERE, not through `finalize_thread_inner`.
         self.settle_open_commands(thread_id, terminal_status);
+        self.nudge_parent_end_stop(thread_id, terminal_status);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -5688,6 +5689,7 @@ impl ThreadLifecycleService {
         // `commands.wait` blocked on them — otherwise the await rides to its
         // timeout. Best-effort: a failure here must not fail finalization.
         self.settle_open_commands(&params.thread_id, terminal_status);
+        self.nudge_parent_end_stop(&params.thread_id, terminal_status);
 
         let finalized = self
             .get_thread(&params.thread_id)?
@@ -5706,6 +5708,42 @@ impl ThreadLifecycleService {
         );
 
         Ok(finalized)
+    }
+
+    /// After a thread's terminal commit: when it has flagged detached children
+    /// still live, wake the daemon's recovery pass, whose sweep stops them (see
+    /// `cascade::stop_flagged_children_of_ended_parents`). The stop runs in that
+    /// pass, never here, so a finalizing session never waits on its own
+    /// children, on its own hosted-operation gate, or on a grace period. A
+    /// continued segment is not an end. Best-effort: a failure here is logged
+    /// and never fails finalization; the periodic sweep finds the same
+    /// children.
+    fn nudge_parent_end_stop(&self, thread_id: &str, terminal_status: &str) {
+        if terminal_status == ThreadStatus::Continued.as_str() {
+            return;
+        }
+        let children = match self.state_store.flagged_dispatch_children(thread_id) {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to list the ended session's flagged children; the periodic sweep retries"
+                );
+                return;
+            }
+        };
+        for child in children {
+            let live = match self.state_store.get_thread(&child) {
+                Ok(Some(thread)) => !crate::state_store::is_terminal_status(&thread.status),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            if live {
+                crate::recovery_nudge::nudge();
+                return;
+            }
+        }
     }
 
     /// Reject any commands still open for a finalized thread and wake blocked
