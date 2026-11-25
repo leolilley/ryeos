@@ -518,7 +518,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
                 // The transcript's raw channel returns the chain's durable events
                 // for a range, exactly as the daemon retains them; the folded
                 // default channel returns timeline items instead.
-                "params": { "chain_root_id": owned_chain, "from_chain_seq": 1, "to_chain_seq": 200 }
+                "params": { "chain_root_id": owned_chain, "from_chain_seq": "1", "to_chain_seq": "200" }
             }
             }
         }),
