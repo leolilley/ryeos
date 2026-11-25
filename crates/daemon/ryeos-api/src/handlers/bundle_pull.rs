@@ -77,7 +77,8 @@ pub enum PullRefusal {
     NodeMismatch(String),
     #[error(
         "publication_version_mismatch: the node runs {remote}, this daemon runs {local}; pulls \
-         need the same major.minor on both"
+         need the same major.minor on both, so a node upgrade can invalidate a shared link until \
+         the other node is upgraded too"
     )]
     VersionMismatch { local: String, remote: String },
     #[error("publication_hash_mismatch: {0}")]
@@ -203,6 +204,41 @@ fn is_loopback(host: Option<url::Host<&str>>) -> bool {
     }
 }
 
+/// An IP-literal host in a range a public publication never lives in: private,
+/// link-local, unique-local, unspecified or cloud-metadata. Hostnames that
+/// resolve into these ranges are not checked here; that needs a resolver-level
+/// check in the egress client, a follow-up before a node inside a private
+/// network offers the pull.
+fn is_internal_literal(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.octets() == [100, 100, 100, 200]
+                || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_internal_literal(Some(url::Host::Ipv4(v4)));
+            }
+            let first = ip.segments()[0];
+            ip.is_unspecified() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        _ => false,
+    }
+}
+
+/// A remote's error code is carried into the operator's message only when it
+/// is a plain token; anything else is dropped.
+fn is_plain_code(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// Parse `https://<host>/published/<id>`. Plain http is accepted only for a
 /// loopback address; credentials, a query and a fragment are refused.
 pub(crate) fn parse_target(raw: &str) -> Result<PullTarget, PullRefusal> {
@@ -218,6 +254,14 @@ pub(crate) fn parse_target(raw: &str) -> Result<PullTarget, PullRefusal> {
                     .into(),
             ));
         }
+    }
+    if is_internal_literal(url.host()) {
+        return Err(PullRefusal::Malformed(
+            "the host is an IP address in a private, link-local, unique-local, unspecified or \
+             metadata range; a publication is pulled from a public host. Hostnames that resolve \
+             into those ranges are not checked yet"
+                .into(),
+        ));
     }
     if url.host().is_none()
         || !url.username().is_empty()
@@ -454,7 +498,12 @@ impl PublicHttp {
         let code = match read_bounded(response, ERROR_BODY_MAX_BYTES).await {
             Ok(Some(bytes)) => serde_json::from_slice::<Value>(&bytes)
                 .ok()
-                .and_then(|value| value["error"]["code"].as_str().map(str::to_owned)),
+                .and_then(|value| {
+                    value["error"]["code"]
+                        .as_str()
+                        .filter(|code| is_plain_code(code))
+                        .map(str::to_owned)
+                }),
             _ => None,
         };
         Err(PullRefusal::FetchFailed(format!(

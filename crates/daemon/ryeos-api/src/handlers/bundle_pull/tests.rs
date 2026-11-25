@@ -229,6 +229,38 @@ fn the_public_key_must_be_the_pinned_node_on_the_same_series() {
 }
 
 #[test]
+fn an_https_ip_literal_in_an_internal_range_is_refused() {
+    let path = format!("/published/{ID}");
+    for host in [
+        "10.1.2.3",
+        "172.16.0.9",
+        "192.168.1.1",
+        "169.254.169.254",
+        "0.0.0.0",
+        "100.100.100.200",
+        "100.64.0.1",
+        "[fd00::1]",
+        "[fe80::1]",
+        "[::]",
+        "[::ffff:10.0.0.1]",
+    ] {
+        let refused = parse_target(&format!("https://{host}{path}")).unwrap_err();
+        assert_eq!(refused.code(), "publication_malformed", "{host}");
+        assert!(refused.to_string().contains("not checked yet"), "{host}");
+    }
+    parse_target(&format!("https://93.184.216.34{path}")).unwrap();
+}
+
+#[test]
+fn a_remote_error_code_is_carried_only_as_a_plain_token() {
+    assert!(is_plain_code("publication_not_found"));
+    assert!(!is_plain_code(""));
+    assert!(!is_plain_code(&"a".repeat(65)));
+    assert!(!is_plain_code("Run `rm -rf`"));
+    assert!(!is_plain_code("a\nb"));
+}
+
+#[test]
 fn only_https_or_a_loopback_address_is_pulled_from() {
     let path = format!("/published/{ID}");
     for url in [
