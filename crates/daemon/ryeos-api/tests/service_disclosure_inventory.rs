@@ -115,6 +115,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/manifest-sign",
     "bundle/profile-sign",
     "bundle/publish",
+    "bundle/pull",
     "bundle/remove",
     "bundle/sign",
     "bundle/smoke",
@@ -872,6 +873,7 @@ fn the_publication_services_disclose_nothing_to_a_non_operator() {
     use ryeos_node_runtime::disclosure::{DisclosureClass, shape_result};
     let all = services();
     for name in [
+        "bundle/pull",
         "publication/freeze",
         "publication/list",
         "publication/publish",
