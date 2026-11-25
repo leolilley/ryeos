@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:36:15Z:37c9a47e4c3a0b2c859007a45993ae2b317c73ce88c6203159201d40d5f5642d:C1qF9JZW7P5awms4He7zGEwiJMR3E71wk4UMgNEtX2uctUYorGPLzbHW47wQKF85e0zkRbHWOXgenuUPINEmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T03:32:53Z:942448d31d111cd88e8cc09eb3da6bad1f8250f9e91149cf129da633c6287319:i8sKYN95KWXWRd8R0kKWjZwmHc1bSqE4vpiF8gfnrnznVVM4THsfxX6aI/fMEIxB2oZXw8OMFme6oDrnwUKOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1005,7 +1005,7 @@ the operator key inside the CLI and submitted to the running node; see
 | Verb | Effect |
 |---|---|
 | `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `pid:v1:<owner>/<declared name>` with the operator's principal as owner (printed before signing) |
-| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes when given |
+| `ryeos --project <dir> endorse --standing --kind <kind>... --lifetime-secs <n>` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes (required, at most 30 days; the expiry is printed before signing). Only kinds whose schema allows a standing endorsement can be named; others are refused with `endorsement_kind_not_standing` |
 | `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |

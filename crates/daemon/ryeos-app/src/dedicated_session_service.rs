@@ -25,6 +25,7 @@ use crate::state_store::{
     DedicatedSessionRecord, NewDedicatedSessionApproval, NewDedicatedSessionCommand,
     NewEventRecord, ObservationBatchReservation,
 };
+use ryeos_node_runtime::node_policy::sections::approval_ceiling::ApprovalCeilingPolicy;
 
 /// Readiness for generic workspace capture, under the caller's existing root
 /// operation barrier. Pool absence is not worker death, and a missing journal
@@ -2551,6 +2552,9 @@ pub enum AcceptRefusal {
     UnnamedMethod,
     /// The worker's class is not the class of the profile's rule.
     ClassMismatch { profile_class: String },
+    /// The node's approval ceiling does not list this class `allow`: every
+    /// placement is unmeasured today, so an unlisted class is refused.
+    RefusedByNodePolicy { operation_class: String },
 }
 
 /// Whether an owner's accept of a pending approval may be taken: the worker's
@@ -2562,30 +2566,54 @@ pub fn check_accept(
     operation_class: &str,
     requested_authority: &Value,
 ) -> Result<Option<AcceptRefusal>> {
+    let profile = admitted_structured_protocol(state, capsule_hash)?;
+    // Read at accept time, so tightening the policy takes effect on approvals
+    // that are already pending.
+    let ceiling = state.node_policy.require::<ApprovalCeilingPolicy>()?;
+    Ok(decide_accept(
+        &profile.contract,
+        ceiling,
+        operation_class,
+        requested_authority,
+    ))
+}
+
+/// The accept decision over the frozen profile contract and the node's
+/// approval ceiling: the worker's report, then the profile's rule for the
+/// request's method, then the node's ceiling for its class. Each can only
+/// narrow what the one before allowed.
+fn decide_accept(
+    contract: &Value,
+    ceiling: &ApprovalCeilingPolicy,
+    operation_class: &str,
+    requested_authority: &Value,
+) -> Option<AcceptRefusal> {
     if requested_authority
         .get("accept_allowed")
         .and_then(Value::as_bool)
         != Some(true)
     {
-        return Ok(Some(AcceptRefusal::NotOffered));
+        return Some(AcceptRefusal::NotOffered);
     }
-    let profile = admitted_structured_protocol(state, capsule_hash)?;
-    Ok(
-        match rule_verdict(
-            &profile.contract,
-            request_method(requested_authority),
-            operation_class,
-        ) {
-            RuleVerdict::Acceptable => None,
-            RuleVerdict::DenyOnly => Some(AcceptRefusal::RefusedByProfile {
+    match rule_verdict(
+        contract,
+        request_method(requested_authority),
+        operation_class,
+    ) {
+        RuleVerdict::Acceptable => {}
+        RuleVerdict::DenyOnly => {
+            return Some(AcceptRefusal::RefusedByProfile {
                 operation_class: operation_class.to_owned(),
-            }),
-            RuleVerdict::UnnamedMethod => Some(AcceptRefusal::UnnamedMethod),
-            RuleVerdict::ClassMismatch { profile_class } => {
-                Some(AcceptRefusal::ClassMismatch { profile_class })
-            }
-        },
-    )
+            });
+        }
+        RuleVerdict::UnnamedMethod => return Some(AcceptRefusal::UnnamedMethod),
+        RuleVerdict::ClassMismatch { profile_class } => {
+            return Some(AcceptRefusal::ClassMismatch { profile_class });
+        }
+    }
+    (!ceiling.allows(operation_class)).then(|| AcceptRefusal::RefusedByNodePolicy {
+        operation_class: operation_class.to_owned(),
+    })
 }
 
 /// Whether surfaces may offer accept for this request in this session: the
@@ -7499,6 +7527,82 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ceiling(classes: serde_json::Value) -> ApprovalCeilingPolicy {
+        serde_json::from_value(json!({"schema": 1, "classes": classes})).unwrap()
+    }
+
+    #[test]
+    fn the_node_ceiling_can_only_narrow_and_refuses_what_it_does_not_list() {
+        let contract = json!({"server_requests": [
+            {"method": "m/exec", "operation_class": "command_execution", "deny_only": true},
+            {"method": "m/file", "operation_class": "file_change"},
+        ]});
+        let offered = |method: &str| json!({"accept_allowed": true, "method": method});
+        // Shipped policy lists nothing: an acceptable-by-profile request is
+        // still refused, by the node.
+        assert_eq!(
+            decide_accept(
+                &contract,
+                &ceiling(json!({})),
+                "file_change",
+                &offered("m/file")
+            ),
+            Some(AcceptRefusal::RefusedByNodePolicy {
+                operation_class: "file_change".to_owned()
+            })
+        );
+        // Listed allow, and the profile allows: accepted.
+        let allowing = ceiling(json!({"file_change": "allow"}));
+        assert_eq!(
+            decide_accept(&contract, &allowing, "file_change", &offered("m/file")),
+            None
+        );
+        // Listed refuse is final.
+        assert!(matches!(
+            decide_accept(
+                &contract,
+                &ceiling(json!({"file_change": "refuse"})),
+                "file_change",
+                &offered("m/file")
+            ),
+            Some(AcceptRefusal::RefusedByNodePolicy { .. })
+        ));
+        // `allow` never widens a deny-only profile rule: the profile answers first.
+        assert_eq!(
+            decide_accept(
+                &contract,
+                &ceiling(json!({"command_execution": "allow"})),
+                "command_execution",
+                &offered("m/exec")
+            ),
+            Some(AcceptRefusal::RefusedByProfile {
+                operation_class: "command_execution".to_owned()
+            })
+        );
+        // The same request under a tightened policy is refused: the policy is
+        // an input to every decision, so a pending approval follows it.
+        assert!(decide_accept(&contract, &allowing, "file_change", &offered("m/file")).is_none());
+        assert!(
+            decide_accept(
+                &contract,
+                &ceiling(json!({})),
+                "file_change",
+                &offered("m/file")
+            )
+            .is_some()
+        );
+        // A worker that did not offer accept is not accepted whatever the policy says.
+        assert_eq!(
+            decide_accept(
+                &contract,
+                &allowing,
+                "file_change",
+                &json!({"accept_allowed": false, "method": "m/file"})
+            ),
+            Some(AcceptRefusal::NotOffered)
+        );
+    }
 
     #[test]
     fn the_admitted_profile_not_the_worker_decides_whether_accept_is_allowed() {

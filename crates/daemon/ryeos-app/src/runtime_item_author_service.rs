@@ -4,9 +4,13 @@
 //! item-signing key. The daemon authenticates the runtime callback, authorizes
 //! the target with `ryeos.author.<kind>.<bare_id>`, derives the path from the
 //! kind schema, injects signed provenance, and signs with the node's authoring
-//! key. That key is neither the node key nor the operator key: its registry
-//! scope admits no kind until the operator widens it, so authored items are
-//! machine drafts until the operator reviews and re-signs them. Ordinary execution writes its admitted live project root; an
+//! key. That key is neither the node key nor the operator key, and it is
+//! never trusted by its registry scope: authored items are untrusted machine
+//! drafts unless an operator endorsement covers them. A per-change endorsement
+//! names exact digests the operator reviewed; a standing endorsement covers a
+//! whole kind and so is allowed only for kinds whose signed schema says
+//! `standing_endorsement: allowed` (items that never run or invoke), for at most
+//! 30 days. Ordinary execution writes its admitted live project root; an
 //! explicitly sealed candidate-integration operation writes only its private
 //! retained CoW workspace.
 

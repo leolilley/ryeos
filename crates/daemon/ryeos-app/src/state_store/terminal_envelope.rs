@@ -260,6 +260,7 @@ pub(super) struct ValidatedFinalCost {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) spend_usd: ryeos_engine::launch_envelope_types::UsdNanos,
+    pub(super) usage_status: ryeos_engine::launch_envelope_types::UsageStatus,
 }
 
 pub(super) fn validate_final_cost(
@@ -271,6 +272,7 @@ pub(super) fn validate_final_cost(
         input_tokens: cost.input_tokens,
         output_tokens: cost.output_tokens,
         spend_usd: cost.spend,
+        usage_status: cost.usage_status,
     })
 }
 

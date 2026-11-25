@@ -758,7 +758,8 @@ fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
     let surface_ref = "surface:ryeos/ui/base";
 
     let (session, access) = retained_access_then_swap(&state, &project, &decoy);
-    let owner = format!("session:{}", session.session_id);
+    // A seat is launched by the key its session was minted for.
+    let owner = session.principal_id.clone();
 
     // A by-name walk of the project path now reaches the decoy's shadow.
     let by_name = ryeos_app::thread_lifecycle::admit_non_execution_root(
@@ -1083,4 +1084,28 @@ async fn binding_compiled_under_another_project_authoring_list_is_stale() {
             Ok(())
         })
         .expect("revalidate under the installed list");
+}
+
+/// A seat is admitted as the key its session was minted for, and its ceiling
+/// is the session's granted scopes, never that key's own grant. The node
+/// operator's key holds every scope; a session minted for it with `ui.read`
+/// alone gives a seat root whose ceiling is `ui.read` and nothing else.
+#[test]
+fn a_seat_root_admitted_as_its_key_is_capped_at_the_session_scopes() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let operator = test_state::local_operator_context(&state, vec!["*".into()]);
+    assert!(operator.scopes.iter().any(|scope| scope == "*"));
+    let admission = ryeos_ui::handlers::ui_seat::admit_seat_root(
+        &state,
+        "surface:ryeos/ui/base",
+        None,
+        &operator.fingerprint,
+        vec!["ui.read".to_string()],
+    )
+    .expect("seat admission as the operator key");
+    assert_eq!(
+        admission.project_authority().capability_ceiling(),
+        ["ui.read".to_string()].as_slice(),
+        "the seat's ceiling is the session's scopes, not the key's grant"
+    );
 }

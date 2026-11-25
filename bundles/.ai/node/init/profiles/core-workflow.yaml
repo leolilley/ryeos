@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:12f460a0219ba77a0ce944f2f34483f9225c5846174d4b30350ead78f2f504d6:LrvQ36ufhsHJPFKVXb6Bl8boaxwNxkoM8TCEMsxnRcS9b7TVt4FNsLMPAMVg4sx6UeT2BGpAsP9UpB4hKRFOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:06:14Z:6062c34a902439737a784a7146ae6ed064c4581bf904f680c9b27021714e633f:x6LYV80rCw5HHzw2gCLqWfKl92VH8DjdxtB34aC+HgfEdztSRCo7oqU9h64PqvhxE8QbaipKdx/9dBczrGOTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -156,6 +156,13 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  approval_ceiling:
+    schema: 1
+    # Which classes of worker approval request an owner may accept on this node.
+    # Narrow-only: `allow` still needs the admitted profile to allow it, and
+    # `refuse` is final. A class not listed is refused, so no class is accepted
+    # until it is listed `allow` here.
+    classes: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

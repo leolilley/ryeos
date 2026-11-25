@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:39e89fec401a4d5322ade04713d3513efefde28a0257eb4a27961bd9c9dbfe83:LcifaX3aq7WRzIo39BVu2YtrJP5A/JxCj9ATkeUQ0i3AV5N/uOElF41APS1HAx9/A1+a995vr04BJOb8YlOeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:06:14Z:2637d038d53c6aa1535bc2878e35d46393a6a6b98651121c59ef06bbf7bf2d25:kZ8ijMx8jRybc3KMnKSQ6Ixw6nTwYRy1WClNnMbVp/38YKAx+XWXzFuZl1YOREIEAqjp5nKxq/PKD6KomvR1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -182,6 +182,13 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  approval_ceiling:
+    schema: 1
+    # Which classes of worker approval request an owner may accept on this node.
+    # Narrow-only: `allow` still needs the admitted profile to allow it, and
+    # `refuse` is final. A class not listed is refused, so no class is accepted
+    # until it is listed `allow` here.
+    classes: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
