@@ -525,6 +525,9 @@ mod tests {
         let declared = declared(json!({
             "principal": ["/rows/*/id"],
             "max_items": 12000,
+            // 12,000 rows are about 150 KB: over the 64 KiB default, so the
+            // item states its bytes, as every service with a long list does.
+            "max_result_bytes": 1_048_576,
         }));
         let rows = |count: usize| json!({"rows": (0..count).map(|n| json!({"id": n})).collect::<Vec<_>>()});
         let fits = shape_result(
@@ -540,6 +543,7 @@ mod tests {
             rows(12001),
             declared.bounds(),
         );
+        // Refused for its item count, not its size.
         assert_eq!(over, Err(DisclosureRefusal::TooManyItems));
     }
 
