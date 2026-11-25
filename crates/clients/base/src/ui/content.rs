@@ -162,10 +162,15 @@ impl ItemAuthorship {
         }
     }
 
-    /// Signer label, or the trust word when the item has no signer.
+    /// Signer label, or the trust word when the item has no signer. An item
+    /// that is not trusted (untrusted, unendorsed or unsigned) always leads
+    /// with its trust word, so a signer's name never reads as admission.
     pub fn mark_tail(&self) -> String {
-        self.signer_label()
-            .unwrap_or_else(|| self.trust_word().to_owned())
+        match self.signer_label() {
+            Some(signer) if self.trust_class == "trusted_project" => signer,
+            Some(signer) => format!("{} \u{b7} {signer}", self.trust_word()),
+            None => self.trust_word().to_owned(),
+        }
     }
 }
 
@@ -2618,6 +2623,26 @@ mod tests {
         assert_eq!(authorship.signer, None);
         assert!(authorship.source_refs.is_empty());
         assert_eq!(authorship.mark_tail(), "untrusted");
+    }
+
+    #[test]
+    fn an_untrusted_signer_never_hides_the_trust_word() {
+        let authorship = |trust_class: &str| ItemAuthorship {
+            space: "project".into(),
+            trust_class: trust_class.into(),
+            item_ref: None,
+            signer: Some(ItemSigner {
+                fingerprint: "0123456789abcdef".into(),
+                name: Some("leo".into()),
+            }),
+            source_refs: Vec::new(),
+        };
+        assert_eq!(authorship("trusted_project").mark_tail(), "leo");
+        assert_eq!(
+            authorship("untrusted_project").mark_tail(),
+            "untrusted \u{b7} leo"
+        );
+        assert_eq!(authorship("unsigned").mark_tail(), "unsigned \u{b7} leo");
     }
 
     #[test]
