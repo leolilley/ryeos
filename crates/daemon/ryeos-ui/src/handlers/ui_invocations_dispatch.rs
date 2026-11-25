@@ -1764,7 +1764,26 @@ async fn execute_prepared_item_ref(
         &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
-    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+    .map_err(|error| {
+        // The refusal names the capability the seat lacks. It travels as a
+        // typed field so a non-operator seat reads it too: a capability name
+        // is policy vocabulary, not a path or a secret.
+        let message = format!("{error:#}");
+        let capability = ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY;
+        let mut body = json!({
+            "code": "capability_required",
+            "error": message,
+            "retryable": false,
+        });
+        if message.contains(capability) {
+            body["capability"] = json!(capability);
+        }
+        HandlerError::Structured {
+            code: "capability_required".to_owned(),
+            status: 403,
+            body,
+        }
+    })?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_root.clone(),
         exec_ctx.engine.clone(),

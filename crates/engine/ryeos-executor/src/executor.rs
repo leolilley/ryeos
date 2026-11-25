@@ -453,7 +453,21 @@ fn disclose_service_result(
             value,
             disclosure.map_or_else(Default::default, |declared| declared.bounds()),
         )
-        .map_err(|refusal| anyhow::Error::new(HandlerError::Forbidden(refusal.to_string()))),
+        .map_err(|refusal| {
+            tracing::warn!(
+                code = refusal.code(),
+                "service answer withheld from a non-operator caller"
+            );
+            anyhow::Error::new(HandlerError::Structured {
+                code: refusal.code().to_owned(),
+                status: 403,
+                body: serde_json::json!({
+                    "code": refusal.code(),
+                    "error": refusal.to_string(),
+                    "retryable": false,
+                }),
+            })
+        }),
         Err(error) => {
             if error
                 .downcast_ref::<crate::dispatch_error::DispatchError>()
@@ -567,6 +581,17 @@ fn redact_refusal_body(body: &Value) -> Value {
     for (key, value) in map {
         match (key.as_str(), value) {
             ("code" | "error_code", Value::String(text)) if safe_code(text) => {
+                shown.insert(key.clone(), value.clone());
+            }
+            // A capability name (`ryeos.…`) is policy vocabulary the caller
+            // needs to be told it lacks; only a plain one passes.
+            ("capability", Value::String(text))
+                if text.starts_with("ryeos.")
+                    && text.len() <= 128
+                    && text.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:/-*".contains(&b)
+                    }) =>
+            {
                 shown.insert(key.clone(), value.clone());
             }
             ("retryable", Value::Bool(_)) => {
