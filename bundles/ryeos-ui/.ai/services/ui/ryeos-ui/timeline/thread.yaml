@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:27:28Z:3b7d971b4f752e86553f057a137ed690f5897a057b616e503645aac9beefebad:4WWHEf6pJKjNsPxXarAppbNsTHidF1FN9ahmRMO1FbMryf0sDe/Sp5zv9gi+KIpHPmhhnmFiRvuJ/1HxIBZMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T06:59:45Z:a155bf82331d33cb0bf9e31c42bdeb0741ebf05d9d088e6835f7854ca9ebc51d:UuVVEl5QD1I+QsFRcFme+sin9gkvcZ9vZ/snvW5RTl/tP+4PF/DzYwcHzVTuQbBFQCTfnhML/EXw3/WCBeZMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/timeline/thread
 version: "1.0.0"
@@ -24,5 +24,5 @@ disclosure:
     - /items  # removed by: per-chain publication
     - /order  # removed by: per-chain publication
     - /undeclared  # removed by: per-chain publication
-  max_items: 1024
-  max_result_bytes: 2097152
+  max_items: 4096
+  max_result_bytes: 8388608
