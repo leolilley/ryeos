@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T04:58:17Z:6fb7e2d89f6b1a0eaaa8c1be76ea8ad2456cecdf12f8a5b76f3e2e42a10f47a0:BZpt5a2KV6iF+Qv568f+QJbm3Uv7t4jsMpwWQdM4FSly0IIP3uavyzctORQCYR28H0t7ly/h5iYxLTnCHMDuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T22:23:18Z:5a305a27efd4313f18bc4bc778ac52ecc913566d330fe2f962aa15229395815f:JbwMbZot1bvN3cs8rS3qYG4fMEwBYlBKir3so7NAw5pYMFzV/IkdqwLn5MXvZsRzm4DARI6HWuaWA5+N9dYTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -385,18 +385,17 @@ Both CLI reset reports expose the actual source/target epoch and whether no
 rows, dispatch-effect rows, or all replay rows were selected for retirement.
 
 `accounting.sqlite3` is the durable financial source of truth paired with its
-node-local external financial anchor. Accounting schema v2 extends the exact v1
-ledger with launch-gate directive bindings and operation-keyed cross-site
-allowance export/import tables. Its sole automatic migration accepts only the
-fully validated exact v1 application ID and complete v1 table/index SQL, then
-applies the additive v2 contract in one immediate transaction. Every retained
-v1 gate is materialized with an explicit null directive binding because v1
-committed execution-budget authority only; the migration never infers broader
-launch authority from per-attempt directive rows. It then validates the
-complete resulting schema before commit. This is a forward migration of
-financial authority, not an execution-format compatibility reader.
+node-local external financial anchor. Its schema is exact: startup accepts only
+the current version (8) and refuses every earlier version (1 through 7) with a
+typed error that names the file. There is no migration and no compatibility
+reader; hard admission stays fail-closed until the old ledger is removed and
+the node starts with a fresh one. The ledger is not covered by
+`reset execution-history`, so removing it is a separate operator step. The
+current contract carries launch-gate directive bindings (a gate with no
+directive binding is an explicit null, never inferred from per-attempt rows) and
+the operation-keyed cross-site allowance export/import tables described below.
 
-The v2 export transition atomically records the externally anchored financial
+The export transition atomically records the externally anchored financial
 sequence, immutable transfer receipt, and per-account debit rows. Target import
 creates zero-use `prepared` accounts, then records the exact rooted source
 transfer and activates them atomically during remote adoption. An exported
