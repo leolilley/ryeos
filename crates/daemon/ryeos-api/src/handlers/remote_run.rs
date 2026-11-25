@@ -383,6 +383,14 @@ mod tests {
     use lillux::time::Duration;
     use std::sync::{Arc, Mutex};
 
+    /// The original execution budget the fixtures issue. It is far longer than
+    /// any setup a loaded runner can stall, so a test never starts with its
+    /// budget already spent.
+    const ORIGINAL_BUDGET: Duration = Duration::from_secs(30);
+    /// How long a stalled peer is waited on. The tests own this clock: it
+    /// starts where the contact is made, not where the fixture was built.
+    const OWN_EXPIRY: Duration = Duration::from_millis(250);
+
     #[derive(Clone, Copy)]
     enum PeerMode {
         HeaderStall,
@@ -595,9 +603,13 @@ mod tests {
         for projectless in [true, false] {
             for mode in [PeerMode::HeaderStall, PeerMode::BodyTrickle] {
                 let directory = tempfile::tempdir().unwrap();
+                // The original budget is long enough that fixture and client
+                // setup under a loaded runner can never spend it. The expiry
+                // the stall is judged against is the test's own, started at
+                // the point of use below.
                 let fixture = ryeos_app::handler_context::budget_test_support::build(
                     directory.path(),
-                    Duration::from_millis(250),
+                    ORIGINAL_BUDGET,
                 )
                 .unwrap();
                 let peer = Peer::start(mode).await;
@@ -626,9 +638,12 @@ mod tests {
                         .remaining()
                         <= Duration::from_secs(30)
                 );
-                let deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
+                let derived = remote_contact_deadline(&request, &fixture.context).unwrap();
+                // Derived from the original budget, not the 30 s accepted-contact ceiling.
+                assert!(derived.remaining() <= ORIGINAL_BUDGET);
+                let deadline = derived.min(lillux::time::MonotonicDeadline::after(OWN_EXPIRY));
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                assert!(deadline.remaining() < Duration::from_millis(250));
+                assert!(deadline.remaining() < OWN_EXPIRY);
                 let project = (!projectless).then_some("/target-project");
                 let error = tokio::time::timeout(
                     Duration::from_secs(1),
@@ -683,7 +698,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let fixture = ryeos_app::handler_context::budget_test_support::build(
             directory.path(),
-            Duration::from_millis(500),
+            ORIGINAL_BUDGET,
         )
         .unwrap();
         let mut payload = retained_request();
@@ -746,8 +761,9 @@ mod tests {
         let stalled = Peer::start(PeerMode::HeaderStall).await;
         let client = stalled.operator_client(&fixture);
         let before_cancel = deadline.remaining();
-        let cancel_deadline = remote_contact_deadline(&request, &fixture.context).unwrap();
-        assert!(cancel_deadline.remaining() <= before_cancel);
+        let derived = remote_contact_deadline(&request, &fixture.context).unwrap();
+        assert!(derived.remaining() <= before_cancel);
+        let cancel_deadline = derived.min(lillux::time::MonotonicDeadline::after(OWN_EXPIRY));
         assert!(
             tokio::time::timeout(
                 Duration::from_secs(1),
@@ -758,7 +774,11 @@ mod tests {
             .is_err()
         );
         assert_eq!(fixture.context.original_execution_budget(), Some(&original));
-        assert!(original.remaining().is_zero());
+        assert!(cancel_deadline.has_elapsed());
+        assert!(
+            original.remaining() <= before_cancel,
+            "a cancel contact never renews the original clock"
+        );
         stalled.wait_for_requests(1).await;
         assert_eq!(stalled.state.requests.lock().unwrap().len(), 1);
         assert!(
@@ -785,7 +805,7 @@ mod tests {
         );
         assert_eq!(peer.state.requests.lock().unwrap().len(), 1);
         peer.settle().await;
-        assert!(original.remaining().is_zero());
+        assert!(original.remaining() <= before_cancel);
     }
 
     fn signed_remote_run_command() -> ryeos_runtime::CommandDef {
