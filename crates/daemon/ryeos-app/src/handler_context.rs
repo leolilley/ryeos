@@ -1270,6 +1270,7 @@ mod tests {
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
             detached: false,
+            collect: false,
         };
         let grant = crate::callback_token::AdmittedWorkloadClientGrant {
             schema: crate::callback_token::AdmittedWorkloadClientGrant::SCHEMA,

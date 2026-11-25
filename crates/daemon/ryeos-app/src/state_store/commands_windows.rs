@@ -186,6 +186,16 @@ impl StateStore {
         g.runtime_db.child_link_relation(child_thread_id)
     }
 
+    /// The `(parent thread, relation)` recorded for `child_thread_id`, or
+    /// `None` when no link has been recorded.
+    pub fn child_link_parent_and_relation(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let g = self.lock()?;
+        g.runtime_db.child_link_parent_and_relation(child_thread_id)
+    }
+
     /// Whether the child's link asks that it be cancelled when its parent
     /// ends, or `None` when no link has been recorded.
     pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {

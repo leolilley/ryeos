@@ -21,9 +21,9 @@ use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmission
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use ryeos_runtime::workload_client::{
     WORKLOAD_CLIENT_CHANNEL_ENV, WORKLOAD_CLIENT_CHANNEL_TARGET_FD, WORKLOAD_CLIENT_PROTOCOL,
-    WorkloadClientBootFrame, WorkloadClientDispatchFrame, WorkloadClientOperation,
-    WorkloadClientOutcome, WorkloadClientReadyFrame, WorkloadClientRequestContract,
-    WorkloadClientResponseFrame,
+    WorkloadClientBootFrame, WorkloadClientCollectedChild, WorkloadClientCollectedResult,
+    WorkloadClientDispatchFrame, WorkloadClientOperation, WorkloadClientOutcome,
+    WorkloadClientReadyFrame, WorkloadClientRequestContract, WorkloadClientResponseFrame,
 };
 
 const WORKLOAD_PRESENTATION_EVENT: &str = "hosted_session.workload_client_admitted";
@@ -679,7 +679,43 @@ fn serve_daemon_broker(
     Ok(())
 }
 
+/// Route one validated frame by its operation. Collect is answered here from
+/// the daemon's own records; it is not a runtime callback method, so it adds
+/// nothing to any callback method surface or thread-ceiling list.
 fn dispatch_request(
+    state: &AppState,
+    runtime: &tokio::runtime::Handle,
+    grant: &AdmittedWorkloadClientGrant,
+    grant_digest: &str,
+    callback_token: &str,
+    thread_auth_token: &str,
+    dispatch: WorkloadClientDispatchFrame,
+) -> WorkloadClientResponseFrame {
+    if matches!(
+        dispatch.request.operation,
+        WorkloadClientOperation::Collect(_)
+    ) {
+        return collect_request(
+            state,
+            grant,
+            grant_digest,
+            callback_token,
+            thread_auth_token,
+            dispatch,
+        );
+    }
+    execute_request(
+        state,
+        runtime,
+        grant,
+        grant_digest,
+        callback_token,
+        thread_auth_token,
+        dispatch,
+    )
+}
+
+fn execute_request(
     state: &AppState,
     runtime: &tokio::runtime::Handle,
     grant: &AdmittedWorkloadClientGrant,
@@ -702,7 +738,9 @@ fn dispatch_request(
             callback_token,
             thread_auth_token,
         )?;
-        let WorkloadClientOperation::Execute(execute) = dispatch.request.operation;
+        let WorkloadClientOperation::Execute(execute) = dispatch.request.operation else {
+            bail!("workload operation is not an execute");
+        };
         // The request id is the runtime-asserted occurrence coordinate. Keep
         // behavior out of this identity: runtime.dispatch_action separately
         // retains the canonical action digest, so replaying the same
@@ -760,6 +798,117 @@ fn dispatch_request(
         request_id,
         outcome,
     }
+}
+
+/// Answer one collect request. The frame's only input is a child id; whether
+/// this session may read that child is decided from the daemon's own link and
+/// thread records, never from the request.
+fn collect_request(
+    state: &AppState,
+    grant: &AdmittedWorkloadClientGrant,
+    grant_digest: &str,
+    callback_token: &str,
+    thread_auth_token: &str,
+    dispatch: WorkloadClientDispatchFrame,
+) -> WorkloadClientResponseFrame {
+    let request_id = dispatch.request.request_id.clone();
+    let outcome = (|| -> Result<WorkloadClientOutcome> {
+        dispatch.validate()?;
+        grant.validate()?;
+        if !grant.ingresses.contains(&dispatch.source.ingress()) {
+            bail!("workload invocation selected an ungranted ingress");
+        }
+        validate_live_boot(
+            state,
+            grant,
+            grant_digest,
+            callback_token,
+            thread_auth_token,
+        )?;
+        let WorkloadClientOperation::Collect(collect) = &dispatch.request.operation else {
+            bail!("workload operation is not a collect");
+        };
+        let child_id = collect.child_thread_id.as_str();
+        let link = state.state_store.child_link_parent_and_relation(child_id)?;
+        let thread = state.threads.get_thread(child_id)?;
+        collect_outcome(
+            grant,
+            link.as_ref()
+                .map(|(parent, relation)| (parent.as_str(), relation.as_str())),
+            thread
+                .as_ref()
+                .and_then(|thread| thread.requested_by.as_deref()),
+            thread.as_ref().map(collected_child_from_thread),
+            || {
+                Ok(state.threads.get_thread_result(child_id)?.map(|record| {
+                    WorkloadClientCollectedResult {
+                        outcome_code: record.outcome_code,
+                        result: record.result,
+                        error: record.error,
+                    }
+                }))
+            },
+        )
+    })();
+    WorkloadClientResponseFrame {
+        protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+        request_id,
+        outcome: outcome.unwrap_or_else(|error| classify_workload_dispatch_error(&error)),
+    }
+}
+
+/// The fixed allow-list of a thread row a session may read of its child.
+fn collected_child_from_thread(
+    thread: &ryeos_app::state_store::ThreadDetail,
+) -> WorkloadClientCollectedChild {
+    WorkloadClientCollectedChild {
+        thread_id: thread.thread_id.clone(),
+        status: thread.status.clone(),
+        kind: thread.kind.clone(),
+        item_ref: thread.item_ref.clone(),
+        created_at: thread.created_at.clone(),
+        started_at: thread.started_at.clone(),
+        finished_at: thread.finished_at.clone(),
+        result: None,
+    }
+}
+
+fn collect_not_permitted() -> WorkloadClientOutcome {
+    WorkloadClientOutcome::Failed {
+        code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE.to_owned(),
+        message: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_MESSAGE.to_owned(),
+        retryable: false,
+    }
+}
+
+/// Decide one collect from the facts the daemon holds. `child` is the thread
+/// row's allow-list projection and is `None` when no such thread exists;
+/// `read_result` is called only for a permitted, terminal child. A refused
+/// request yields one outcome whatever the reason.
+fn collect_outcome(
+    grant: &AdmittedWorkloadClientGrant,
+    link: Option<(&str, &str)>,
+    child_requested_by: Option<&str>,
+    child: Option<WorkloadClientCollectedChild>,
+    read_result: impl FnOnce() -> Result<Option<WorkloadClientCollectedResult>>,
+) -> Result<WorkloadClientOutcome> {
+    if grant.authorize_collect(link, child_requested_by).is_err() {
+        return Ok(collect_not_permitted());
+    }
+    let Some(mut child) = child else {
+        return Ok(collect_not_permitted());
+    };
+    if ryeos_app::state_store::is_terminal_status(&child.status) {
+        child.result = read_result()?;
+    }
+    if !child.result_within_cap()? {
+        return Ok(WorkloadClientOutcome::Failed {
+            code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE.to_owned(),
+            message: "the child's result exceeds the per-call collect byte cap".to_owned(),
+            retryable: false,
+        });
+    }
+    Ok(WorkloadClientOutcome::Collected { child })
 }
 
 fn classify_workload_dispatch_error(error: &anyhow::Error) -> WorkloadClientOutcome {
@@ -908,7 +1057,294 @@ mod tests {
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
             detached: false,
+            collect: false,
         }
+    }
+
+    const SESSION: &str = "T-00000000-0000-4000-8000-0000000000aa";
+    const CHILD: &str = "T-00000000-0000-4000-8000-0000000000c1";
+
+    fn collect_grant(detached: bool, collect: bool) -> AdmittedWorkloadClientGrant {
+        let mut execution = test_execution("tool:project/check");
+        execution.detached = detached;
+        execution.collect = collect;
+        AdmittedWorkloadClientGrant {
+            schema: AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: SESSION.to_owned(),
+            placement_thread_id: SESSION.to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            executions: vec![execution],
+            execution_product_selections: BTreeMap::new(),
+            execution_presentation: Value::Null,
+            effective_caps: vec!["ryeos.execute.tool.project/check".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        }
+    }
+
+    fn child_row(status: &str) -> WorkloadClientCollectedChild {
+        WorkloadClientCollectedChild {
+            thread_id: CHILD.to_owned(),
+            status: status.to_owned(),
+            kind: "tool".to_owned(),
+            item_ref: "tool:project/check".to_owned(),
+            created_at: "2026-11-25T00:00:00Z".to_owned(),
+            started_at: Some("2026-11-25T00:00:01Z".to_owned()),
+            finished_at: None,
+            result: None,
+        }
+    }
+
+    fn recorded_result(value: Value) -> Result<Option<WorkloadClientCollectedResult>> {
+        Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(value),
+            error: None,
+        }))
+    }
+
+    fn unreachable_result() -> Result<Option<WorkloadClientCollectedResult>> {
+        panic!("a result is read only for a permitted, terminal child")
+    }
+
+    #[test]
+    fn collect_returns_status_for_a_running_child_and_the_result_once_terminal() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let link = Some((SESSION, "dispatch"));
+
+        let running = collect_outcome(
+            &grant,
+            link,
+            Some(owner.as_str()),
+            Some(child_row("running")),
+            unreachable_result,
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Collected { child } = running else {
+            panic!("a running child is collected as status");
+        };
+        assert_eq!(child.status, "running");
+        assert!(child.result.is_none());
+
+        let done = collect_outcome(
+            &grant,
+            link,
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || recorded_result(json!({"answer": 42})),
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Collected { child } = done else {
+            panic!("a terminal child is collected with its result");
+        };
+        assert_eq!(child.status, "completed");
+        assert_eq!(child.result.unwrap().result, Some(json!({"answer": 42})));
+        // A collected child is data, never an execution success.
+        let frame = WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: WorkloadClientOutcome::Collected {
+                child: child_row("running"),
+            },
+        };
+        frame.validate().unwrap();
+        assert!(!frame.outcome.succeeded());
+    }
+
+    #[test]
+    fn every_refused_collect_is_the_same_outcome() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let row = || Some(child_row("completed"));
+        let refused = |link: Option<(&str, &str)>,
+                       requested_by: Option<&str>,
+                       child: Option<WorkloadClientCollectedChild>| {
+            collect_outcome(&grant, link, requested_by, child, unreachable_result).unwrap()
+        };
+        let outcomes = [
+            // A thread id that does not exist.
+            refused(None, None, None),
+            // A thread that exists and is the owner's but this session was
+            // never given.
+            refused(None, Some(owner.as_str()), row()),
+            // A sibling session's child.
+            refused(
+                Some(("T-00000000-0000-4000-8000-0000000000bb", "dispatch")),
+                Some(owner.as_str()),
+                row(),
+            ),
+            // A grandchild: its link names the child.
+            refused(
+                Some(("T-00000000-0000-4000-8000-0000000000c2", "dispatch")),
+                Some(owner.as_str()),
+                row(),
+            ),
+            // A direct child launched by a different key.
+            refused(Some((SESSION, "dispatch")), Some("fp:someone-else"), row()),
+            // A direct link under another relation.
+            refused(Some((SESSION, "continuation")), Some(owner.as_str()), row()),
+        ];
+        for outcome in &outcomes {
+            let WorkloadClientOutcome::Failed {
+                code, retryable, ..
+            } = outcome
+            else {
+                panic!("a refused collect is a typed failure");
+            };
+            assert_eq!(
+                code,
+                ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE
+            );
+            assert!(!retryable);
+            assert_eq!(outcome, &outcomes[0], "no existence oracle");
+        }
+        // The refusal is itself a valid wire answer.
+        WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: outcomes[0].clone(),
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_grant_that_does_not_allow_collect_refuses_it_identically() {
+        let owner = collect_grant(true, true).owner_principal;
+        let attempt = |grant: &AdmittedWorkloadClientGrant| {
+            collect_outcome(
+                grant,
+                Some((SESSION, "dispatch")),
+                Some(owner.as_str()),
+                Some(child_row("completed")),
+                unreachable_result,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            attempt(&collect_grant(true, true)),
+            WorkloadClientOutcome::Collected { .. }
+        ));
+        let no_collect = attempt(&collect_grant(true, false));
+        let no_detached = attempt(&collect_grant(false, false));
+        let collect_without_detached = attempt(&collect_grant(false, true));
+        for outcome in [&no_collect, &no_detached, &collect_without_detached] {
+            let WorkloadClientOutcome::Failed { code, .. } = outcome else {
+                panic!("a grant without collect refuses it");
+            };
+            assert_eq!(
+                code,
+                ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE
+            );
+            assert_eq!(outcome, &no_collect);
+        }
+    }
+
+    #[test]
+    fn a_result_over_the_cap_is_refused_typed_and_not_cut() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let outcome = collect_outcome(
+            &grant,
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || {
+                recorded_result(json!("x".repeat(
+                    ryeos_runtime::workload_client::MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES
+                )))
+            },
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Failed {
+            code, retryable, ..
+        } = &outcome
+        else {
+            panic!("an oversize result is refused");
+        };
+        assert_eq!(
+            code,
+            ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE
+        );
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn a_collected_child_is_a_fixed_allow_list_of_the_thread_row() {
+        let value = serde_json::to_value(child_row("completed")).unwrap();
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        // No project path, authority, capsule, lineage, requester or runtime
+        // detail crosses the worker boundary.
+        assert_eq!(
+            keys,
+            [
+                "created_at",
+                "finished_at",
+                "item_ref",
+                "kind",
+                "started_at",
+                "status",
+                "thread_id"
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_adds_no_callback_method_and_detach_stays_unreachable() {
+        // Collect is answered by the broker from its own records. The session's
+        // callback surface is still exactly the one dispatch method, and the
+        // production inline surface still refuses a detached action.
+        let source = include_str!("workload_client.rs");
+        let (production, _tests) = source
+            .split_once("#[cfg(test)]")
+            .expect("module has a test section");
+        assert_eq!(
+            production
+                .matches("CallbackRuntimeMethodSurface::exact(vec![")
+                .count(),
+            1
+        );
+        assert!(production.contains("thread: \"inline\".to_owned()"));
+        assert!(!production.contains("thread: \"detached\""));
+        assert!(!production.contains("authorize_detached_ceiling"));
+        let grant = collect_grant(true, true);
+        let mut action = ryeos_runtime::callback::ActionPayload {
+            product_selections: Default::default(),
+            operation_id: None,
+            item_id: "tool:project/check".to_owned(),
+            ref_bindings: BTreeMap::new(),
+            params: json!({}),
+            thread: "detached".to_owned(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        assert!(grant.authorize_action(&action).is_err());
+        action.thread = "inline".to_owned();
+        assert!(grant.authorize_action(&action).is_ok());
     }
 
     #[test]

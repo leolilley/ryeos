@@ -7297,6 +7297,7 @@ mod tests {
                     workspace_access:
                         ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
                     detached,
+                    collect: false,
                 },
             ],
             execution_product_selections: std::collections::BTreeMap::new(),

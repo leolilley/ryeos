@@ -410,6 +410,43 @@ impl AdmittedWorkloadClientGrant {
         Ok(())
     }
 
+    /// Whether any execution of the grant both launches detached children and
+    /// lets the session collect their results.
+    pub fn admits_collect(&self) -> bool {
+        self.executions
+            .iter()
+            .any(|execution| execution.detached && execution.collect)
+    }
+
+    /// Admit the collection of one child's result. The facts come from the
+    /// daemon's own records, never from the request: `link` is the child's
+    /// recorded `(parent thread, relation)` and `child_requested_by` is the
+    /// key that launched the child. Collectable is exactly a direct
+    /// `dispatch` child of this session's thread launched by the grant's own
+    /// owner. Every other case, including a child that does not exist, is the
+    /// same refusal with the same text, so the answer is no oracle for which
+    /// thread ids exist or who owns them.
+    pub fn authorize_collect(
+        &self,
+        link: Option<(&str, &str)>,
+        child_requested_by: Option<&str>,
+    ) -> std::result::Result<(), ThreadCeilingRefusal> {
+        let permitted = self.admits_collect()
+            && link.is_some_and(|(parent, relation)| {
+                parent == self.placement_thread_id && relation == "dispatch"
+            })
+            && child_requested_by == Some(self.owner_principal.as_str());
+        if permitted {
+            Ok(())
+        } else {
+            Err(ThreadCeilingRefusal {
+                code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE,
+                message: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_MESSAGE
+                    .to_owned(),
+            })
+        }
+    }
+
     /// The item, product-selection, ref-binding and call checks shared by
     /// every action mode. Mode and facet handling belong to the callers.
     fn authorize_execution_surface(
@@ -2792,6 +2829,7 @@ mod tests {
                     workspace_access:
                         ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
                     detached: false,
+                    collect: false,
                 },
             ],
             execution_product_selections: std::collections::BTreeMap::new(),
@@ -2893,6 +2931,80 @@ mod tests {
         grant
     }
 
+    fn collecting_grant() -> AdmittedWorkloadClientGrant {
+        let mut grant = detached_grant(&["live", "recorded"]);
+        grant.executions[0].collect = true;
+        grant.validate().unwrap();
+        grant
+    }
+
+    #[test]
+    fn collect_is_admitted_only_for_a_direct_dispatch_child_of_this_session_by_its_owner() {
+        use ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE;
+        let grant = collecting_grant();
+        assert!(grant.admits_collect());
+        let owner = grant.owner_principal.clone();
+        let session = grant.placement_thread_id.clone();
+        grant
+            .authorize_collect(Some((session.as_str(), "dispatch")), Some(owner.as_str()))
+            .unwrap();
+
+        let refusals = [
+            // A child id that was never given: no link, and no thread.
+            grant.authorize_collect(None, None),
+            // A thread that exists and is the owner's but was never linked.
+            grant.authorize_collect(None, Some(owner.as_str())),
+            // A sibling session's child.
+            grant.authorize_collect(Some(("T-other-session", "dispatch")), Some(owner.as_str())),
+            // A grandchild: its link names the child, not this session.
+            grant.authorize_collect(Some(("T-child", "dispatch")), Some(owner.as_str())),
+            // This session's own link under another relation.
+            grant.authorize_collect(
+                Some((session.as_str(), "continuation")),
+                Some(owner.as_str()),
+            ),
+            // A direct child launched by another key.
+            grant.authorize_collect(
+                Some((session.as_str(), "dispatch")),
+                Some("fp:someone-else"),
+            ),
+            grant.authorize_collect(Some((session.as_str(), "dispatch")), None),
+        ];
+        let first = refusals[0].as_ref().unwrap_err();
+        assert_eq!(first.code, WORKLOAD_COLLECT_NOT_PERMITTED_CODE);
+        for refusal in &refusals {
+            // One code and one message: no answer tells absent from not yours.
+            assert_eq!(refusal.as_ref().unwrap_err(), first);
+        }
+    }
+
+    #[test]
+    fn collect_needs_the_grant_to_launch_detached_and_to_collect() {
+        let owner_link = |grant: &AdmittedWorkloadClientGrant| {
+            grant.authorize_collect(
+                Some((grant.placement_thread_id.as_str(), "dispatch")),
+                Some(grant.owner_principal.as_str()),
+            )
+        };
+        // Detached but not collecting.
+        let detached_only = detached_grant(&["live", "recorded"]);
+        assert!(!detached_only.admits_collect());
+        assert!(owner_link(&detached_only).is_err());
+        // Neither.
+        assert!(owner_link(&workload_client_grant()).is_err());
+        // Collecting without a detached execution is not a valid ceiling and
+        // admits nothing even when the validation is bypassed.
+        let mut collect_only = workload_client_grant();
+        collect_only.executions[0].collect = true;
+        assert!(
+            ryeos_runtime::workload_client::validate_execution_ceilings(&collect_only.executions)
+                .is_err()
+        );
+        assert!(!collect_only.admits_collect());
+        assert!(owner_link(&collect_only).is_err());
+        assert!(owner_link(&collecting_grant()).is_ok());
+    }
+
     #[test]
     fn detached_is_admitted_only_when_the_item_ceiling_opts_in() {
         // Absent opt-in: the detached surface refuses with its own code, and
@@ -2945,6 +3057,7 @@ mod tests {
         for grant in [
             workload_client_grant(),
             detached_grant(&["live", "recorded"]),
+            collecting_grant(),
         ] {
             assert!(grant.authorize_action(&detached_action()).is_err());
         }

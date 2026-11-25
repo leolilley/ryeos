@@ -23576,6 +23576,24 @@ impl RuntimeDb {
         })
     }
 
+    /// The `(parent thread, relation)` of the link that records
+    /// `child_thread_id`, or `None` when no link has been recorded.
+    pub fn child_link_parent_and_relation(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT parent_thread_id, relation FROM thread_child_link
+                  WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
     /// The direct children of `parent_thread_id` whose link is a `dispatch`
     /// link flagged to be cancelled when the parent ends, in spawn order. Any
     /// other relation, and any unflagged dispatch link, is excluded.
@@ -33218,6 +33236,30 @@ mod tests {
             .lineage_reaches_chain("C", "SOURCE")
             .expect_err("a parent with no runtime row cannot be proved unrelated");
         assert!(error.to_string().contains("no runtime row"), "{error:#}");
+    }
+
+    #[test]
+    fn child_link_reader_names_the_one_recorded_parent_and_relation() {
+        let (_tmp, db) = fresh_db();
+        db.record_child_link("S", "child", "dispatch").unwrap();
+        db.record_child_link("child", "grandchild", "dispatch")
+            .unwrap();
+        db.record_child_link("S", "successor", "continuation")
+            .unwrap();
+        assert_eq!(
+            db.child_link_parent_and_relation("child").unwrap(),
+            Some(("S".to_owned(), "dispatch".to_owned()))
+        );
+        // A descendant of a child names the child, not the session.
+        assert_eq!(
+            db.child_link_parent_and_relation("grandchild").unwrap(),
+            Some(("child".to_owned(), "dispatch".to_owned()))
+        );
+        assert_eq!(
+            db.child_link_parent_and_relation("successor").unwrap(),
+            Some(("S".to_owned(), "continuation".to_owned()))
+        );
+        assert_eq!(db.child_link_parent_and_relation("T-never").unwrap(), None);
     }
 
     #[test]
