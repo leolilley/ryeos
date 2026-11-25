@@ -960,6 +960,7 @@ pub mod budget_test_support {
             Some(sealed.effective_definition_digest().to_string()),
             serde_json::to_value(limits)?,
             0,
+            ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         );
         anyhow::ensure!(
             state
@@ -1103,6 +1104,7 @@ pub mod budget_test_support {
             original.effective_definition_digest.clone(),
             original.hard_limits.clone(),
             original.depth,
+            original.thread_ceiling,
         );
         anyhow::ensure!(
             state
@@ -1301,6 +1303,7 @@ mod tests {
                     original_cap.effective_definition_digest.clone(),
                     original_cap.hard_limits.clone(),
                     original_cap.depth,
+                    original_cap.thread_ceiling,
                 );
                 assert!(fixture.state.callback_tokens.set_launch_owner(
                     &callback.token,

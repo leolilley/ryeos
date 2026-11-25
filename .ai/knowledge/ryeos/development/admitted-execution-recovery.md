@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:14:08Z:0b879d58604c9653b6ed23de39216d6068754ef92568db6db7b3d759d40bdd4c:2MalG6sS4iX4ALOyVaD8N6kWsknZ8ZZsf+NqE9PGUZ6ufuRkc3F+l3pvSq8kGMnYG2T9D5vzKVHGF/hyESbWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T20:09:10Z:c669ba9e05a5d5680273175bec43f3058068dc25faf839d8653eadcdf686a8c4:R51OX1ekYh3+zphEc//tyrLArTa70oobB0z/qoaGpF6eGmIV06vfWsLjbU1pj/3SS2o1YLOo049fn4NSxS5ICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -178,7 +178,15 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 18 for the schema-39
+Dispatch-effect replay moves to operational epoch 19 for the schema-40
+contract. Capsule 40 seals the thread workload ceiling, the required bound on
+the effect class and workspace access of every tool call made from the launch's
+thread tree. A root launch seals `unbounded`; a callback-dispatched child
+seals its parent's ceiling, so a ceiling is only ever narrowed. Under a bounded
+ceiling every dispatch is judged against the child's own declared effect class
+and workspace access, a child that declares no workspace-access projection is
+refused, and hook, effect and non-inline spawn routes are refused. Epoch 18
+paired with the schema-39
 contract. Capsule 39 seals an unknown-outcome retry ceiling in every
 external-effect authority: the number of leading retries a runtime may issue
 after a provider failure that leaves it unknown whether the provider acted

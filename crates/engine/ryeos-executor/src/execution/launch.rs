@@ -4305,6 +4305,32 @@ fn resolve_accounting_scope(
     ))
 }
 
+/// Resolve the workload ceiling a managed launch seals.
+///
+/// - A continuation, recovery or follow successor carries the ceiling sealed
+///   with its original launch, narrowed by its parent context if it has one.
+/// - A callback-dispatched child takes its parent context's ceiling, which the
+///   spawning path already narrowed from the calling thread's.
+/// - Only a launch with neither is a root launch, and only it is unbounded.
+///
+/// The value never comes from action params or any runtime-supplied field.
+fn resolve_thread_ceiling(
+    params: &BuildAndLaunchParams<'_>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+) -> ryeos_state::objects::ThreadWorkloadCeiling {
+    let sealed = metadata_template
+        .and_then(|template| template.resume_context.as_ref())
+        .map(|resume| resume.thread_ceiling);
+    let inherited = params
+        .parent_execution_context
+        .map(|parent| parent.thread_ceiling);
+    match (sealed, inherited) {
+        (Some(sealed), Some(inherited)) => sealed.meet(inherited),
+        (Some(ceiling), None) | (None, Some(ceiling)) => ceiling,
+        (None, None) => ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+    }
+}
+
 /// The share of the tree's run deadline this launch leaves to its ancestors.
 ///
 /// A thread seals it once, at its first launch: a continuation, resume or
@@ -6031,6 +6057,7 @@ async fn prepare_managed_launch_authority_in_mode(
                 parent_delegation_caps: metadata_template
                     .and_then(|template| template.resume_context.as_ref())
                     .and_then(|resume| resume.parent_delegation_caps.clone()),
+                thread_ceiling: resolve_thread_ceiling(params, metadata_template),
                 executor_ref: Some(executor_ref.clone()),
                 runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
             });
@@ -7322,6 +7349,18 @@ async fn run_claimed_thread_row_inner(
     let accounting_scope = launch_metadata
         .as_ref()
         .and_then(|metadata| metadata.accounting_scope.clone());
+    // The bearer carries the ceiling sealed into this launch's resume
+    // identity; a managed launch without one is refused rather than minted
+    // unbounded.
+    let thread_ceiling = launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .map(|resume| resume.thread_ceiling)
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch {thread_id} has no sealed thread workload ceiling"
+            ))
+        })?;
     let engine = provenance.request_engine();
     // Resolution and callback/state authority remain anchored at the
     // authoritative project path. Only the subprocess cwd/project input path
@@ -7719,6 +7758,7 @@ async fn run_claimed_thread_row_inner(
         Some(effective_program.effective_definition_digest().to_string()),
         serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
         current_depth,
+        thread_ceiling,
     );
     if !state
         .callback_tokens
@@ -9694,6 +9734,11 @@ async fn prepare_follow_child_launch_inner(
         host_access: None,
         // A follow-child root is not a callback-dispatched tool, so no caller bounds it.
         deadline_end_at_ms: None,
+        // Never wider than the parent context it was spawned under, nor than
+        // the ceiling sealed into its own launch identity.
+        thread_ceiling: operational_resume
+            .thread_ceiling
+            .meet(parent_context.thread_ceiling),
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
@@ -12145,6 +12190,7 @@ async fn launch_claimed_follow_child(
                 hard_limits: p.hard_limits,
                 depth: p.depth,
                 accounting_scope: p.accounting_scope,
+                thread_ceiling: p.thread_ceiling,
             });
     let sealed_root_request = metadata.sealed_root_request.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no sealed root execution request")
@@ -15566,6 +15612,7 @@ mod tests {
             hard_limits: serde_json::to_value(&parent_hard_limits).unwrap(),
             depth: 4,
             accounting_scope: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         };
 
         let parent_limits = parent_limits_from_context(Some(&ctx))
@@ -15627,6 +15674,7 @@ mod tests {
             hard_limits: json!({}),
             depth: 2,
             accounting_scope: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         };
 
         assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
@@ -15640,6 +15688,7 @@ mod tests {
             hard_limits: json!({"turns": "not-a-number"}),
             depth: 0,
             accounting_scope: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         };
 
         let err = parent_limits_from_context(Some(&ctx)).unwrap_err();
