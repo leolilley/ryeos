@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:06Z:3a87e8368fe15cd98dd4d8ed35f77b019d73e08c1476f484b14033a5532256ab:i33v87l8FRUiURlgiJldvTwmRGFmmDbK3BbMyWW4A5xO11kVJAqJJI6j19h2GwlQvKkKcq9MmqeTD2Iz3NM5DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T18:53:31Z:a8ec723a734d40c8e9e0b95a71671a13e50307a53443ffc134bd1b421164acb9:IzwRmfycNHN6a87OI19WI4lCai+H9x4rTYcy/nWrYC563/QQEJwVKJ/m+lvehaajxCLE6sOtHWgJV7cdjc++AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.get
 availability: both
@@ -6,6 +6,12 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.records/get"]
+schema:
+  record_kind: string
+  key: string?
+  hash: string?
+  holder: string?
+  include_unverified: boolean?
 description: "Read one signed record of this node by its declared kind, with what was checked: scheme, signer, freshness. A record that fails verification is withheld"
 disclosure:
   principal:

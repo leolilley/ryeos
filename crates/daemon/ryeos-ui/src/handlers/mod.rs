@@ -70,7 +70,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_timeline::DESCRIPTOR,
     ui_timeline_raw::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
-    ui_node_capabilities::FACTS_DESCRIPTOR,
     ui_node_capabilities::WORDING_DESCRIPTOR,
     ui_usage::USAGE_DESCRIPTOR,
     ui_machines::MACHINES_DESCRIPTOR,

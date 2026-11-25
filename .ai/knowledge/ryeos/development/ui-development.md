@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:22:30Z:3fb02177536acfc700c297278d004a52a35cea61059541c9e4422feef3b609e8:zW9hWvXigaM7J42iDHWvuZwxKVsXlDSbAb17ITGuRrw0Dj8dQfU63MjP1yFyNBehHastbbcajepxTiQVOUp+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T18:53:46Z:19f091fbe7e1e6212b509542e9f4c4044324632778731d4991b76e67715af4e3:4nnYIUNq3eOYRfxV0HUjj/nvUJaZFFvTeh0wF6RSD5/dkMrKN98CtqafsIgHonOOBd0lH4gU3x84pkak+li/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"

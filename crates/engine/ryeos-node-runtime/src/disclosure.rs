@@ -281,8 +281,9 @@ pub fn shape_result(
     let kept = project(&result, &paths).unwrap_or(Value::Null);
     if longest_array(&kept) > usize::try_from(bounds.max_items).unwrap_or(usize::MAX) {
         // For the operator's log only; the caller's refusal carries no path.
+        // Debug level: a caller can trigger this at will.
         let (path, length) = longest_array_path(&kept);
-        tracing::warn!(
+        tracing::debug!(
             array_path = %path,
             array_length = length,
             max_items = bounds.max_items,

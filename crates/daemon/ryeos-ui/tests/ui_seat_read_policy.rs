@@ -295,6 +295,36 @@ async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
     assert!(!text.contains("/srv/private"), "{text}");
 }
 
+/// The dispatch envelope allows 12000 items, but the read it dispatches is
+/// shaped by its own block first. bundle/list declares 512 items, so 600
+/// bundles are refused by that bound, not passed because the wrapper is wide.
+#[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
+async fn a_dispatched_reads_own_bound_refuses_before_the_wrappers_does() {
+    let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
+    let names: Vec<String> = (0..600).map(|n| format!("bundle-{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    add_bundles(&mut state, &names);
+    let (_session_id, ctx, producer, coordinate) =
+        live_presentation_with_surface(&state, NODE_SURFACE).await;
+    let state = Arc::new(state);
+    let refused = dispatch_source(
+        &state,
+        &ctx,
+        &producer,
+        &coordinate,
+        "view:ryeos/node/bundles",
+        json!({}),
+    )
+    .await
+    .expect_err("600 bundles are over bundle/list's own 512");
+    assert!(
+        refusal_text(&refused).contains("read_too_many_items"),
+        "{}",
+        refusal_text(&refused)
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn dispatch_refuses_a_read_whose_entry_is_gone_even_with_a_live_binding() {

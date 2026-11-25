@@ -110,6 +110,35 @@ async fn the_capability_report_is_listed_read_and_summarised() -> Result<()> {
     assert_eq!(got["verify"]["signer_status"], "node", "{got}");
     assert!(got["verify"].get("signing_principal").is_none(), "{got}");
     assert!(got["body"].is_object(), "{got}");
+    // The declared collections are the body's maps as lists of rows, each row
+    // carrying its key, and every one says whether the body held its map.
+    for name in [
+        "provided",
+        "missing",
+        "floor_met",
+        "floor_unmet",
+        "capacity",
+    ] {
+        assert!(got["collections"][name].is_array(), "{name}: {got}");
+        assert!(
+            got["collections_coverage"][name].is_string(),
+            "{name}: {got}"
+        );
+    }
+    assert_eq!(
+        got["collections"]["provided"].as_array().map(Vec::len),
+        got["body"]["provided"].as_object().map(|map| map.len()),
+        "{got}"
+    );
+    if let Some(row) = got["collections"]["provided"]
+        .as_array()
+        .and_then(|rows| rows.first())
+    {
+        assert!(
+            row["name"].is_string() && row["source"].is_string(),
+            "{row}"
+        );
+    }
     assert_eq!(got["truncated"], false);
     let hash = got["hash"].as_str().expect("a hash").to_owned();
 
