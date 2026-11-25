@@ -594,6 +594,9 @@ pub struct ThreadListFilter {
     /// Exclude item refs beginning with any of these prefixes. Exclusions are
     /// applied in SQL before ordering and limit.
     pub exclude_item_prefixes: Vec<String>,
+    /// Exclude threads whose kind is exactly one of these names. Applied in
+    /// SQL before ordering and limit.
+    pub exclude_kinds: Vec<String>,
     /// Exact local project scope. Unattributed rows do not match.
     pub project_root: Option<PathBuf>,
 }
@@ -727,6 +730,10 @@ fn list_threads_query_after(
             conditions.push("substr(item_ref, 1, length(?)) != ?".into());
             params.push(prefix);
             params.push(prefix);
+        }
+        for kind in &filter.exclude_kinds {
+            conditions.push("kind != ?".into());
+            params.push(kind);
         }
         let project_root = filter
             .project_root

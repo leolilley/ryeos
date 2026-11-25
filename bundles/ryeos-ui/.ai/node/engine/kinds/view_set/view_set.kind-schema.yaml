@@ -1,5 +1,8 @@
-# ryeos:signed:2026-11-20T23:17:59Z:155a86f37222572aae43521e909400e9dcc0ed0524fc30354b58d2198f339f52:hJc2TfQJpN6HgdQKZXdK4IJKZs/DRh3oERJ7MDJYL084F6OmQsGu2c9TvHjMsL4+zy2s9i6wMAzFwAaBwQWHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:26:02Z:8aa65b5ad27f9e4b18828d7589300b089e837a53554c12f571f14fc45f6a1965:zvY9+LBYFNIwhR/L66sD+u/IsUyHD57EMlYe+i3BmnWDnZYP5iRbhEQaggIl7BklREHwqFDztV+mOIdiDCIWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view_set"
+# A standing endorsement may name this kind (a view set only lays out views by name: it carries no invocation).
+# Kinds that run or invoke are endorsed one change at a time.
+standing_endorsement: allowed
 version: "1.0.0"
 # A project file may not take the ref of a view set an installed bundle
 # supplies. Resolution refuses the ref, naming both files, so a project can

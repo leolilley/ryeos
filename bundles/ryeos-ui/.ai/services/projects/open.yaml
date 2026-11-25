@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:0e20c1b1a15d34675bfde2010c1bd5e81186a91a335ac697e2652ed51c092858:DFYuLAAJYP9jyJtY9yg4ZWCDL0cmTYx/Mz2h3r65OY7yrJq7Ne9HWs0pzO+jnoO6OVSy0Kr/jMfDM8kiNlajCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T07:56:08Z:89b510164526f30ccf689ead7d9e79d2a2c6aeddf6e963fbcccba799eea31081:P/bwNOSJeX7lgvseuvuCPjqQhWrEYcoZ4L67rcTrZL0jjV5MukhZM8e7QhWAfbrEGgNflzTo1P2aXh31yXFDAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: Open an explicitly selected Surface for a registered project in the current presentation.
 endpoint: projects.open
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: surface_opening
 schema:

@@ -592,6 +592,7 @@ pub mod test_support {
                     ryeos_node_runtime::node_policy::default_authorization_record(),
                     ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+                    ryeos_node_runtime::node_policy::shipped_approval_ceiling_record(),
                 ]),
             ),
             vault: Arc::new(crate::vault::EmptyVault),

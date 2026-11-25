@@ -23,6 +23,15 @@ fn store_structured_session_capsule_with_schema(
     state: &ryeos_app::state::AppState,
     schema: Value,
 ) -> (String, String, Value) {
+    store_capsule_with_contract(state, schema, json!({}))
+}
+
+/// As above, with `extra` merged into the frozen profile contract.
+fn store_capsule_with_contract(
+    state: &ryeos_app::state::AppState,
+    schema: Value,
+    extra: Value,
+) -> (String, String, Value) {
     use ryeos_state::objects::{
         AdmittedDirectCommandClosure, AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity,
         AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
@@ -32,7 +41,10 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay", "schema_version":ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]}, "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
+    let mut contract = json!({"fixture":"terminal-replay", "schema_version":ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]}, "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
+    if let (Some(contract), Some(extra)) = (contract.as_object_mut(), extra.as_object()) {
+        contract.extend(extra.clone());
+    }
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
@@ -2535,6 +2547,79 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
     assert!(
         unsettled.to_string().contains("not durably appendable"),
         "{unsettled:#}"
+    );
+}
+
+/// The daemon decides whether an owner's accept is taken from the admitted,
+/// frozen profile, not from the worker's report: a worker that marks a
+/// deny-only class acceptable is refused; the worker's own report can only
+/// narrow what the profile allows.
+#[test]
+fn a_worker_claiming_accept_for_a_deny_only_method_or_the_wrong_class_is_refused_by_the_frozen_profile()
+ {
+    use ryeos_app::dedicated_session_service::{AcceptRefusal, check_accept};
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let (capsule, _profile, _schemas) = store_capsule_with_contract(
+        &state,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION),
+        json!({"server_requests": [
+            {"method": "item/commandExecution/requestApproval",
+             "operation_class": "command_execution", "deny_only": true},
+            {"method": "item/fileChange/requestApproval",
+             "operation_class": "file_change"},
+        ]}),
+    );
+    let claims = |method: &str, allowed: bool| json!({"request_id": "r", "method": method, "accept_allowed": allowed});
+    let exec = "item/commandExecution/requestApproval";
+    let file = "item/fileChange/requestApproval";
+
+    // The worker says accept is fine for a deny-only method: refused.
+    assert_eq!(
+        check_accept(&state, &capsule, "command_execution", &claims(exec, true)).unwrap(),
+        Some(AcceptRefusal::RefusedByProfile {
+            operation_class: "command_execution".to_owned()
+        })
+    );
+    // A method the profile names without deny_only passes the profile, but the
+    // shipped node policy lists no class `allow`, so the node refuses it.
+    assert_eq!(
+        check_accept(&state, &capsule, "file_change", &claims(file, true)).unwrap(),
+        Some(AcceptRefusal::RefusedByNodePolicy {
+            operation_class: "file_change".to_owned()
+        })
+    );
+    assert_eq!(
+        check_accept(&state, &capsule, "file_change", &claims(file, false)).unwrap(),
+        Some(AcceptRefusal::NotOffered)
+    );
+    // The class is the method's rule's: a worker cannot move a deny-only
+    // method into an acceptable class by reporting another class.
+    assert_eq!(
+        check_accept(&state, &capsule, "file_change", &claims(exec, true)).unwrap(),
+        Some(AcceptRefusal::ClassMismatch {
+            profile_class: "command_execution".to_owned()
+        })
+    );
+    // A method the profile does not name, or a request without one, is refused.
+    assert_eq!(
+        check_accept(
+            &state,
+            &capsule,
+            "file_change",
+            &claims("invented/method", true)
+        )
+        .unwrap(),
+        Some(AcceptRefusal::UnnamedMethod)
+    );
+    assert_eq!(
+        check_accept(
+            &state,
+            &capsule,
+            "file_change",
+            &json!({"request_id": "r", "accept_allowed": true})
+        )
+        .unwrap(),
+        Some(AcceptRefusal::UnnamedMethod)
     );
 }
 

@@ -130,7 +130,7 @@ pub const LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
             let req: ListRequest = if params.is_null() {
                 ListRequest::default()
             } else {
-                serde_json::from_value(params)?
+                crate::handler_error::parse_request(params)?
             };
             handle_list(req, state).await
         })
@@ -144,7 +144,7 @@ pub const SHOW_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.trust/show"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let req: ShowRequest = serde_json::from_value(params)?;
+            let req: ShowRequest = crate::handler_error::parse_request(params)?;
             handle_show(req, state).await
         })
     },

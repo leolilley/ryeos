@@ -188,7 +188,80 @@ struct ThreadTreeSummary {
     parent_count: usize,
 }
 
+/// Which payload fields of a thread event a field fact carries, read from the
+/// signed config `config:ryeos/ui/field-event-attributes`. The size cap stays in
+/// code: it bounds what any config can make the reader emit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventAttributePolicy {
+    attributes: Vec<String>,
+    inline_payload_events: Vec<String>,
+}
+
+const EVENT_ATTRIBUTES_CONFIG_REF: &str = "config:ryeos/ui/field-event-attributes";
+const EVENT_ATTRIBUTES_CONFIG_PATH: &str = "ryeos/ui/field-event-attributes.yaml";
+const MAX_EVENT_ATTRIBUTE_KEYS: usize = 128;
+const MAX_EVENT_ATTRIBUTE_KEY_BYTES: usize = 64;
+/// Attribute names the reader writes itself; a config cannot list them.
+const RESERVED_EVENT_ATTRIBUTES: [&str; 4] = ["event_type", "timestamp", "thread", "payload"];
+
+impl EventAttributePolicy {
+    fn from_config(mut value: Value) -> Result<Self, String> {
+        if let Some(object) = value.as_object_mut() {
+            for envelope in ["category", "version", "description"] {
+                object.remove(envelope);
+            }
+        }
+        let policy: Self = serde_json::from_value(value)
+            .map_err(|error| format!("{EVENT_ATTRIBUTES_CONFIG_REF} is invalid: {error}"))?;
+        if policy.attributes.len() > MAX_EVENT_ATTRIBUTE_KEYS {
+            return Err(format!(
+                "{EVENT_ATTRIBUTES_CONFIG_REF} lists more than {MAX_EVENT_ATTRIBUTE_KEYS} attributes"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for key in &policy.attributes {
+            if key.is_empty()
+                || key.len() > MAX_EVENT_ATTRIBUTE_KEY_BYTES
+                || RESERVED_EVENT_ATTRIBUTES.contains(&key.as_str())
+                || !seen.insert(key.as_str())
+            {
+                return Err(format!(
+                    "{EVENT_ATTRIBUTES_CONFIG_REF}: attribute `{key}` is empty, too long, \
+                     reserved or listed twice"
+                ));
+            }
+        }
+        if policy.inline_payload_events.len() > MAX_EVENT_ATTRIBUTE_KEYS
+            || policy.inline_payload_events.iter().any(String::is_empty)
+        {
+            return Err(format!(
+                "{EVENT_ATTRIBUTES_CONFIG_REF}: inline_payload_events is too long or has an empty name"
+            ));
+        }
+        Ok(policy)
+    }
+
+    fn load(state: &AppState) -> Result<Self> {
+        let value = super::ui_attention::load_signed_config(
+            state,
+            EVENT_ATTRIBUTES_CONFIG_PATH,
+            EVENT_ATTRIBUTES_CONFIG_REF,
+        )?;
+        Ok(Self::from_config(value).map_err(HandlerError::Internal)?)
+    }
+
+    #[cfg(test)]
+    fn shipped() -> Self {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/config/ryeos/ui/field-event-attributes.yaml");
+        let value: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        Self::from_config(value).unwrap()
+    }
+}
+
 struct ExecutionAssembler {
+    event_attributes: EventAttributePolicy,
     builder: FieldFactsBuilder,
     thread_facets: BTreeMap<String, BTreeMap<String, String>>,
     graph_runs: BTreeMap<(String, String), GraphRunFact>,
@@ -327,7 +400,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         definition_ref: None,
         effective_definition_digest: None,
     };
-    let mut assembler = ExecutionAssembler::new(subject);
+    let mut assembler = ExecutionAssembler::new(subject, EventAttributePolicy::load(&state)?);
     // Signed subject and positive-edge proofs do not prove that a rebuildable
     // tree projection contains every signed branch. Keep coverage honest even
     // when the bounded projection itself reports no truncation.
@@ -938,8 +1011,9 @@ fn tree_position_cmp(
 }
 
 impl ExecutionAssembler {
-    fn new(subject: FieldFactSubject) -> Self {
+    fn new(subject: FieldFactSubject, event_attributes: EventAttributePolicy) -> Self {
         Self {
+            event_attributes,
             builder: FieldFactsBuilder::new("execution", SERVICE_REF, subject),
             thread_facets: BTreeMap::new(),
             graph_runs: BTreeMap::new(),
@@ -1142,7 +1216,7 @@ impl ExecutionAssembler {
         let event_ref = field_event_ref(&event)?;
         let event_id = event_entity_id(&event_ref);
         let thread_context = self.thread_context(&event.thread_id);
-        let mut attributes = bounded_event_attributes(&event)?;
+        let mut attributes = bounded_event_attributes(&event, &self.event_attributes)?;
         attributes
             .as_object_mut()
             .expect("event attributes are an object")
@@ -2796,47 +2870,20 @@ fn require_execution_event_scope(
     Ok(())
 }
 
-fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
+fn bounded_event_attributes(
+    event: &PersistedEventRecord,
+    policy: &EventAttributePolicy,
+) -> Result<Value> {
     let mut attributes = Map::new();
     attributes.insert("event_type".to_string(), json!(event.event_type));
     attributes.insert("timestamp".to_string(), json!(event.ts));
-    const ALLOWED: &[&str] = &[
-        "graph_id",
-        "graph_run_id",
-        "definition_ref",
-        "effective_definition_digest",
-        "node",
-        "node_ref",
-        "step",
-        "status",
-        "target",
-        "target_node_ref",
-        "attempt",
-        "attempts",
-        "iteration",
-        "delay_ms",
-        "total",
-        "parallel",
-        "max_concurrency",
-        "detach",
-        "item_id",
-        "child_thread_id",
-        "successor_thread_id",
-        "relation",
-        "purpose",
-        "kind",
-    ];
-    for key in ALLOWED {
-        if let Some(value) = event.payload.get(*key) {
-            attributes.insert((*key).to_string(), value.clone());
+    for key in &policy.attributes {
+        if let Some(value) = event.payload.get(key.as_str()) {
+            attributes.insert(key.clone(), value.clone());
         }
     }
-    if matches!(
-        event.event_type.as_str(),
-        ryeos_state::event_types::MILESTONE
-            | ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
-            | ryeos_state::event_types::HOOK_FAILED
-    ) && let Some(payload) = event.payload.get("payload")
+    if policy.inline_payload_events.contains(&event.event_type)
+        && let Some(payload) = event.payload.get("payload")
     {
         attributes.insert("payload".to_string(), bounded_inline_value(payload.clone()));
     }
@@ -3019,12 +3066,15 @@ mod tests {
 
     #[test]
     fn execution_detail_limit_retains_earlier_facts_and_withholds_later_details() {
-        let mut assembler = ExecutionAssembler::new(FieldFactSubject {
-            kind: "thread".to_string(),
-            id: "T-root".to_string(),
-            definition_ref: None,
-            effective_definition_digest: None,
-        });
+        let mut assembler = ExecutionAssembler::new(
+            FieldFactSubject {
+                kind: "thread".to_string(),
+                id: "T-root".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+            EventAttributePolicy::shipped(),
+        );
         let artifact = |artifact_id| ThreadArtifactRecord {
             artifact_id,
             artifact_type: "test_artifact".to_string(),
@@ -3079,12 +3129,15 @@ mod tests {
 
     #[test]
     fn execution_result_overflow_retains_prior_thread_detail_and_marks_truncation() {
-        let mut assembler = ExecutionAssembler::new(FieldFactSubject {
-            kind: "thread".to_string(),
-            id: "T-root".to_string(),
-            definition_ref: None,
-            effective_definition_digest: None,
-        });
+        let mut assembler = ExecutionAssembler::new(
+            FieldFactSubject {
+                kind: "thread".to_string(),
+                id: "T-root".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+            EventAttributePolicy::shipped(),
+        );
         let mut budget = DetailBudget::default();
         assert!(
             assembler
@@ -3515,13 +3568,100 @@ mod tests {
         )
     }
 
+    fn event_with(event_type: &str, payload: Value) -> PersistedEventRecord {
+        PersistedEventRecord {
+            event_id: 0,
+            event_hash: None,
+            chain_root_id: String::new(),
+            chain_seq: 0,
+            thread_id: String::new(),
+            thread_seq: 0,
+            event_type: event_type.to_string(),
+            storage_class: "indexed".to_string(),
+            ts: "t".to_string(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
+            payload,
+        }
+    }
+
+    #[test]
+    fn the_shipped_attribute_config_names_the_graph_fields_views_read() {
+        let policy = EventAttributePolicy::shipped();
+        for key in [
+            "node",
+            "step",
+            "attempt",
+            "iteration",
+            "status",
+            "child_thread_id",
+        ] {
+            assert!(policy.attributes.iter().any(|name| name == key), "{key}");
+        }
+        assert!(
+            policy
+                .inline_payload_events
+                .iter()
+                .any(|name| name == ryeos_state::event_types::MILESTONE)
+        );
+    }
+
+    #[test]
+    fn only_the_configured_payload_fields_reach_a_view() {
+        let policy = EventAttributePolicy {
+            attributes: vec!["step".to_string()],
+            inline_payload_events: vec!["milestone".to_string()],
+        };
+        let kept = bounded_event_attributes(
+            &event_with("graph_step_started", json!({"step": 3, "secret": "x"})),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(kept["step"], json!(3));
+        assert!(kept.get("secret").is_none());
+        assert!(kept.get("payload").is_none(), "not an inline-payload event");
+        let inline = bounded_event_attributes(
+            &event_with("milestone", json!({"payload": {"a": 1}})),
+            &policy,
+        )
+        .unwrap();
+        assert!(inline.get("payload").is_some());
+    }
+
+    #[test]
+    fn an_attribute_config_that_could_overwrite_the_readers_own_fields_is_refused() {
+        let bad = |attributes: Value| {
+            EventAttributePolicy::from_config(
+                json!({"attributes": attributes, "inline_payload_events": []}),
+            )
+            .is_err()
+        };
+        assert!(bad(json!(["event_type"])));
+        assert!(bad(json!(["thread"])));
+        assert!(bad(json!(["payload"])));
+        assert!(bad(json!(["step", "step"])));
+        assert!(bad(json!([""])));
+        assert!(bad(json!(["x".repeat(65)])));
+        assert!(EventAttributePolicy::from_config(json!({"attributes": []})).is_err());
+        assert!(
+            EventAttributePolicy::from_config(
+                json!({"attributes": ["step"], "inline_payload_events": [], "other": 1})
+            )
+            .is_err(),
+            "unknown fields are refused"
+        );
+    }
+
     fn assembler() -> ExecutionAssembler {
-        let mut assembler = ExecutionAssembler::new(FieldFactSubject {
-            kind: "thread".to_string(),
-            id: "T-root".to_string(),
-            definition_ref: None,
-            effective_definition_digest: None,
-        });
+        let mut assembler = ExecutionAssembler::new(
+            FieldFactSubject {
+                kind: "thread".to_string(),
+                id: "T-root".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+            EventAttributePolicy::shipped(),
+        );
         assembler
             .thread_facets
             .insert("T-root".to_string(), BTreeMap::new());

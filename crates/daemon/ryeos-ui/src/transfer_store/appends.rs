@@ -45,7 +45,10 @@ use super::reader::{
 /// unchanged anchor under the publication locks.
 pub struct TransferSeatContext<'a> {
     pub anchor: &'a AuthoritativeThreadEventReadAnchor,
-    pub owner: &'a str,
+    /// The key that launched the seat: its signed `requested_by`.
+    pub launcher: &'a str,
+    /// The browser session holding the seat's lease.
+    pub holder: &'a str,
     pub surface: &'a str,
     pub client_ref: &'a str,
     pub presentation_id: &'a str,
@@ -164,7 +167,7 @@ fn require_exact_seat_roots(
 fn snapshot_is_seat(
     snapshot: &ryeos_state::objects::ThreadSnapshot,
     seat: &TransferSeat,
-    owner: &str,
+    launcher: &str,
     surface: &str,
     client_ref: &str,
     seat_kind: &str,
@@ -173,7 +176,7 @@ fn snapshot_is_seat(
         && snapshot.chain_root_id == seat.chain_root_id
         && snapshot.kind_name == seat_kind
         && snapshot.status == ThreadStatus::Running
-        && snapshot.requested_by.as_deref() == Some(owner)
+        && snapshot.requested_by.as_deref() == Some(launcher)
         && snapshot.item_ref == surface
         && snapshot.executor_ref == client_ref
 }
@@ -225,14 +228,14 @@ fn publish_between_seats(
         if !snapshot_is_seat(
             view.target,
             target_seat,
-            target.owner,
+            target.launcher,
             target.surface,
             target.client_ref,
             seat_kind,
         ) || !snapshot_is_seat(
             other,
             counterpart_seat,
-            counterpart.owner,
+            counterpart.launcher,
             counterpart.surface,
             counterpart.client_ref,
             seat_kind,
@@ -1031,7 +1034,8 @@ pub struct PreparationInputs<'a> {
 fn seat_of<'a>(seat: &'a TransferSeat, context: &'a TransferSeatContext<'a>) -> ExactSeat<'a> {
     ExactSeat {
         root_id: &seat.chain_root_id,
-        owner: context.owner,
+        launcher: context.launcher,
+        holder: context.holder,
         item_ref: context.surface,
         executor_ref: context.client_ref,
     }
@@ -1129,14 +1133,14 @@ pub fn append_transfer_preparation_pair(
             if !snapshot_is_seat(
                 view.first,
                 &transfer.destination,
-                destination.owner,
+                destination.launcher,
                 destination.surface,
                 destination.client_ref,
                 seat_kind,
             ) || !snapshot_is_seat(
                 view.second,
                 &transfer.source,
-                source.owner,
+                source.launcher,
                 source.surface,
                 source.client_ref,
                 seat_kind,

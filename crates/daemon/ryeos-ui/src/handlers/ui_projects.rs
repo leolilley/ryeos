@@ -783,6 +783,20 @@ pub async fn handle_projects_resolve(
     Ok(json!({ "project": project_view(project, None, true) }))
 }
 
+/// The row of one principal's own registry for `local_id`. The registry a
+/// store loads is that principal's alone, so another principal's row, or an
+/// id nobody registered, is absent here and opens nothing.
+fn registered_project(
+    projects: ProjectsFile,
+    local_id: &str,
+) -> std::result::Result<ProjectEntry, HandlerError> {
+    projects
+        .projects
+        .into_iter()
+        .find(|entry| entry.local_id == local_id)
+        .ok_or(HandlerError::NotFound)
+}
+
 pub async fn handle_projects_open(
     params: Value,
     ctx: HandlerContext,
@@ -855,12 +869,7 @@ pub async fn handle_projects_open(
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project = {
         let store = locked_principal_store(&ctx, &state).await?;
-        store
-            .load_projects()?
-            .projects
-            .into_iter()
-            .find(|entry| entry.local_id == req.local_id)
-            .ok_or(HandlerError::NotFound)?
+        registered_project(store.load_projects()?, &req.local_id)?
     };
     let canonical = canonical_project_root(&project.root, &state.config.app_root)?;
     let root = canonical.display().to_string();
@@ -916,6 +925,7 @@ pub async fn handle_projects_open(
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = completed_admission_append_limit(&state)?;
     let mut admitted_result = None;
+    let mut journal_failure: Option<HandlerError> = None;
     let root_resolution = root_attachment
         .project_authority
         .as_ref()
@@ -995,11 +1005,40 @@ pub async fn handle_projects_open(
                             });
                             validate_completed_admission_size(&result,&producer,&req.creation_request_id,
                                 request_bounds.max_request_bytes,append_limit.min(request_bounds.max_seat_append_bytes))?;
+                            // The node's own record, written before the grant is
+                            // observable: a node that cannot journal it admits
+                            // nothing. The seat rows are producer-authored and
+                            // do not stand in for it.
+                            let attachment_id = attachment.coordinate().binding_attachment_id;
+                            if let Err(error) = ryeos_node::node_journal::NodeJournal::for_app_root(
+                                &state.config.app_root,
+                                (*state.identity).clone(),
+                            )
+                            .record_project_attachment_opened(
+                                &ryeos_node::node_journal::ProjectAttachmentFacts {
+                                    principal: session.principal_id.as_str(),
+                                    local_id: &project.local_id,
+                                    root: &root,
+                                    session_id: &session.session_id,
+                                    presentation_id: &producer.presentation_id,
+                                    requesting_attachment_id: &origin
+                                        .coordinate()
+                                        .binding_attachment_id,
+                                    attachment_id: &attachment_id,
+                                    creation_request_id: &req.creation_request_id,
+                                },
+                            ) {
+                                journal_failure = Some(journal_write_refusal(&error));
+                                return Err(crate::browser_session::AttachmentStoreError::PresentationInvalid);
+                            }
                             admitted_result = Some(result);
                             Ok(())
                         },
                     )
-                    .map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+                    .map_err(|error| match journal_failure.take() {
+                        Some(refusal) => anyhow::Error::from(refusal),
+                        None => anyhow::Error::from(HandlerError::Conflict(error.to_string())),
+                    })
                     })?;
                 published.ok_or_else(|| anyhow::Error::from(HandlerError::Conflict("seat action anchor changed before publication".into())))
             })?
@@ -1427,7 +1466,10 @@ fn resolve_particular_work(
     let lineage = state.threads.continuation_lineage(chain_root_id)?;
     let root = lineage.first().ok_or(HandlerError::NotFound)?;
     let head = lineage.last().ok_or(HandlerError::NotFound)?;
-    if root.thread.thread_id != chain_root_id {
+    // A seat is the UI's own session thread, never particular work.
+    if root.thread.thread_id != chain_root_id
+        || root.thread.kind == crate::handlers::ui_seat::seat_kind(state)?
+    {
         return Err(HandlerError::NotFound.into());
     }
     for placement in &lineage {
@@ -2058,13 +2100,6 @@ descriptor!(
     handle_projects_resolve
 );
 descriptor!(
-    UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/projects/open",
-    "ui.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
-);
-descriptor!(
     RYEOS_UI_PROJECTS_LIST_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/list",
     "ui.ryeos.projects.list",
@@ -2088,13 +2123,6 @@ descriptor!(
     "service:ui/ryeos-ui/projects/resolve",
     "ui.ryeos.projects.resolve",
     handle_projects_resolve
-);
-descriptor!(
-    RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/ryeos-ui/projects/open",
-    "ui.ryeos.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,
@@ -2136,8 +2164,49 @@ descriptor!(
     &["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 );
 
+/// The typed refusal for a project open the node could not journal. The cause
+/// names which half failed: the retained chain does not verify, or the record
+/// could not be written (disk, permissions). Nothing was admitted.
+fn journal_write_refusal(error: &ryeos_node::node_journal::JournalError) -> HandlerError {
+    let cause = match error {
+        ryeos_node::node_journal::JournalError::Integrity(_) => "chain_integrity",
+        ryeos_node::node_journal::JournalError::Write(_) => "write",
+    };
+    HandlerError::Structured {
+        code: "journal_write_failed".into(),
+        status: 500,
+        body: serde_json::json!({
+            "code": "journal_write_failed",
+            "cause": cause,
+            "error": format!("the project was not opened: {error}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_journal_failure_refuses_the_open_with_a_typed_cause() {
+        use ryeos_node::node_journal::JournalError;
+        for (error, cause) in [
+            (
+                JournalError::Integrity(anyhow::anyhow!("bad chain")),
+                "chain_integrity",
+            ),
+            (JournalError::Write(anyhow::anyhow!("disk full")), "write"),
+        ] {
+            match journal_write_refusal(&error) {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, "journal_write_failed");
+                    assert_eq!(status, 500);
+                    assert_eq!(body["cause"], cause);
+                    assert!(body["error"].as_str().unwrap().contains("not opened"));
+                }
+                other => panic!("expected the typed refusal, got {other:?}"),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2147,8 +2216,6 @@ mod tests {
             (&UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&RYEOS_UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
             (&CONFIG_UPDATE_DESCRIPTOR, "ui/ryeos-ui/config/update"),
             (
                 &PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
@@ -2222,6 +2289,54 @@ mod tests {
         assert!(
             validate_completed_admission_size(&result, &producer, &operation, 0, 65536).is_err()
         );
+    }
+
+    #[test]
+    fn a_project_opens_only_from_the_callers_own_registry() {
+        let app_root = tempfile::tempdir().unwrap();
+        let resolver = HostedPrincipalResolver::for_app_root(app_root.path());
+        let owner =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "a".repeat(64))).unwrap();
+        let caller =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "b".repeat(64))).unwrap();
+        let row = |local_id: &str, root: &str| ProjectEntry {
+            local_id: local_id.into(),
+            name: local_id.into(),
+            root: root.into(),
+            added_at: "2026-11-22T00:00:00Z".into(),
+            tags: Vec::new(),
+        };
+        ryeos_app::principal::write_yaml_atomic(
+            &owner.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("owned-by-other", "/srv/other")],
+            },
+        )
+        .unwrap();
+        ryeos_app::principal::write_yaml_atomic(
+            &caller.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("mine", "/srv/mine")],
+            },
+        )
+        .unwrap();
+
+        let found = registered_project(caller.load_projects().unwrap(), "mine").unwrap();
+        assert_eq!(found.root, "/srv/mine");
+        // Another principal's row, and an id nobody registered, are both absent.
+        for local_id in ["owned-by-other", "never-registered"] {
+            assert!(
+                matches!(
+                    registered_project(caller.load_projects().unwrap(), local_id),
+                    Err(HandlerError::NotFound)
+                ),
+                "{local_id} must not open for a caller that did not register it"
+            );
+        }
+        // The other principal's own registry still holds its row.
+        assert!(registered_project(owner.load_projects().unwrap(), "owned-by-other").is_ok());
     }
 
     #[test]

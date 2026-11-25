@@ -1853,13 +1853,18 @@ impl Engine {
             })
     }
 
+    /// The engine's trust store, paired with this engine's kind registry: the
+    /// kinds whose schema allows a standing endorsement are the ones this
+    /// registry says, so the gate and the registry always change together.
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
-        self.trust_store = trust_store;
+        self.trust_store = trust_store.with_standing_kinds(self.kinds.standing_endorsement_kinds());
         self
     }
 
+    /// As [`Self::with_trust_store`], for the node's own trust store.
     pub fn with_node_trust_store(mut self, trust_store: TrustStore) -> Self {
-        self.node_trust_store = trust_store;
+        self.node_trust_store =
+            trust_store.with_standing_kinds(self.kinds.standing_endorsement_kinds());
         self
     }
 

@@ -615,20 +615,26 @@ pub async fn handle_detach(
     let Some(_attachment) = attachment else {
         return Ok(json!({"detached":false,"attachment":coordinate}));
     };
-    let owner = format!("session:{session_id}");
+    // The session holds its seats' leases; the key it was minted for launched
+    // them.
+    let holder = format!("session:{session_id}");
+    let launcher = ui
+        .browser_sessions
+        .live_session_principal(&session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
     let exact_client_ref = client_ref(&coordinate);
     // The lease table is keyed by every seat thread and queried without a
     // presentation limit, so cleanup cannot silently omit an older seat.
     for thread_id in state
         .state_store
-        .seat_leases_for_owner_client(&owner, &exact_client_ref)?
+        .seat_leases_for_owner_client(&holder, &exact_client_ref)?
     {
         let detail = state
             .state_store
             .get_thread(&thread_id)?
             .ok_or_else(|| HandlerError::Internal("leased seat thread disappeared".into()))?;
         if detail.kind != seat_kind(&state)?
-            || detail.requested_by.as_deref() != Some(owner.as_str())
+            || detail.requested_by.as_deref() != Some(launcher.as_str())
             || detail.executor_ref != exact_client_ref
         {
             return Err(HandlerError::Internal(

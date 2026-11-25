@@ -108,7 +108,7 @@ impl ThreadHintFanout {
             return;
         };
         for (session_id, attachments) in ui.browser_sessions.hint_audiences() {
-            if SessionObserver::new(&attachments).observes(&subject) {
+            if SessionObserver::new(&attachments).observes(state, &subject) {
                 ui.session_bus
                     .publish(&session_id, HINT_EVENT, payload.clone());
             }
@@ -141,7 +141,7 @@ impl ThreadHintFanout {
             let mut thread_ids = Vec::new();
             let mut event_count = 0u64;
             for (thread_id, subject) in &subjects {
-                if observer.observes(subject) {
+                if observer.observes(state, subject) {
                     thread_ids.push(*thread_id);
                     event_count += counts[*thread_id].1;
                 }

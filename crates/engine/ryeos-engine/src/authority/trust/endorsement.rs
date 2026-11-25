@@ -9,8 +9,13 @@
 //!   digest of the signed bytes after the signature line, which is what the
 //!   engine recomputes when it verifies the item), so one changed byte
 //!   returns the item to untrusted;
-//! * a standing endorsement names kinds within one project, optionally until a
-//!   time, and covers whatever the authoring key signs of those kinds there.
+//! * a standing endorsement names kinds within one project, until a time at
+//!   most [`MAX_STANDING_LIFETIME_SECS`] after it was made, and covers
+//!   whatever the authoring key signs of those kinds there. Only kinds whose
+//!   signed schema says `standing_endorsement: allowed` can be named: a
+//!   standing grant trusts everything the authoring key will ever sign of the
+//!   kind, so it is safe only for kinds that never execute or act. Executing
+//!   kinds are endorsed one change at a time.
 //!
 //! The body is signed by the endorser's own key, client side. The node never
 //! holds that key: it checks the signature against its signer registry (the
@@ -59,6 +64,9 @@ pub const REVOKED_DIR: &str = "revoked";
 pub const MAX_ENDORSED_ITEMS: usize = 256;
 /// Most kinds one standing endorsement names.
 pub const MAX_STANDING_KINDS: usize = 64;
+/// Longest a standing endorsement may last, counted from the moment it was
+/// made. A standing grant that never ends is the riskiest default.
+pub const MAX_STANDING_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 /// Longest item ref or kind an endorsement carries, in bytes.
 pub const MAX_ENDORSEMENT_FIELD_BYTES: usize = 512;
 /// Longest revocation reason, in bytes.
@@ -119,6 +127,24 @@ pub enum EndorsementRefusal {
     )]
     Unknown { digest: String },
     #[error(
+        "endorsement_kind_not_standing: kind `{kind}` cannot be endorsed as a standing grant: \
+         its signed schema does not say `standing_endorsement: allowed`, and a standing \
+         grant would trust everything the authoring key signs of it from now on. Endorse its \
+         items one change at a time with `ryeos endorse --item <ref>`"
+    )]
+    KindNotStanding { kind: String },
+    #[error(
+        "endorsement_standing_lifetime_required: a standing endorsement must end. Give it a \
+         lifetime (`--lifetime-secs`, at most {MAX_STANDING_LIFETIME_SECS} seconds)"
+    )]
+    StandingLifetimeRequired,
+    #[error(
+        "endorsement_standing_lifetime_too_long: a standing endorsement lasts at most \
+         {MAX_STANDING_LIFETIME_SECS} seconds from the moment it is made. Give it a shorter \
+         lifetime and endorse again when it ends"
+    )]
+    StandingLifetimeTooLong,
+    #[error(
         "endorsement_project_not_endorsers: project {project} is not owned by the principal \
          the endorser {endorser} speaks for on this node. An operator endorses only its own \
          projects"
@@ -140,6 +166,9 @@ impl EndorsementRefusal {
             Self::LedgerMoved { .. } => "endorsement_ledger_moved",
             Self::TimeOutOfWindow { .. } => "endorsement_time_out_of_window",
             Self::Unknown { .. } => "endorsement_unknown",
+            Self::KindNotStanding { .. } => "endorsement_kind_not_standing",
+            Self::StandingLifetimeRequired => "endorsement_standing_lifetime_required",
+            Self::StandingLifetimeTooLong => "endorsement_standing_lifetime_too_long",
             Self::Store(_) => "endorsement_store_unavailable",
         }
     }
@@ -411,6 +440,27 @@ impl EndorsementBody {
         Ok(self.digest()?.into_bytes())
     }
 
+    /// Why a standing endorsement's lifetime is not acceptable: it has no end,
+    /// or ends more than [`MAX_STANDING_LIFETIME_SECS`] after it was made.
+    /// `None` for a per-change endorsement and for a standing one that ends in
+    /// time.
+    pub fn lifetime_fault(&self) -> Option<InertReason> {
+        let EndorsementTarget::Standing { not_after, .. } = &self.target else {
+            return None;
+        };
+        let Some(limit) = not_after
+            .as_deref()
+            .and_then(lillux::time::unix_secs_from_iso8601)
+        else {
+            return Some(InertReason::LifetimeUnbounded);
+        };
+        let Some(made) = lillux::time::unix_secs_from_iso8601(&self.endorsed_at) else {
+            return Some(InertReason::LifetimeUnbounded);
+        };
+        (limit.saturating_sub(made) > MAX_STANDING_LIFETIME_SECS)
+            .then_some(InertReason::LifetimeTooLong)
+    }
+
     /// Whether the body covers one item's `(kind, digest)` at `now`.
     fn covers(&self, kind: &str, digest: &str, now: u64) -> bool {
         match &self.target {
@@ -422,9 +472,93 @@ impl EndorsementBody {
                     && not_after
                         .as_deref()
                         .and_then(lillux::time::unix_secs_from_iso8601)
-                        .is_none_or(|limit| now <= limit)
+                        .is_some_and(|limit| now <= limit)
             }
         }
+    }
+}
+
+/// Why a stored endorsement covers nothing although the node still holds it.
+/// Every reason fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InertReason {
+    /// A standing endorsement names a kind whose schema does not allow one.
+    KindNotStanding,
+    /// A standing endorsement has no end.
+    LifetimeUnbounded,
+    /// A standing endorsement lasts longer than the maximum.
+    LifetimeTooLong,
+    /// The node has not yet been told which kinds allow a standing
+    /// endorsement, so no standing endorsement is honoured.
+    GateUnset,
+}
+
+impl InertReason {
+    /// Stable machine-readable code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::KindNotStanding => "kind_not_standing",
+            Self::LifetimeUnbounded => "lifetime_unbounded",
+            Self::LifetimeTooLong => "lifetime_too_long",
+            Self::GateUnset => "standing_gate_unset",
+        }
+    }
+}
+
+/// Which kinds a standing endorsement may name, as the node's installed and
+/// verified kind registry declares them. It never reads project space: the
+/// registry it comes from is the node's, so a checkout cannot change it.
+#[derive(Debug, Clone, Default)]
+pub enum StandingGate {
+    /// Not yet told. No standing endorsement is honoured.
+    #[default]
+    Unset,
+    /// The index was already judged where the gate is known (a launch's
+    /// snapshot carries only endorsements the daemon found live).
+    Prejudged,
+    /// The kinds that allow a standing endorsement.
+    Kinds(Arc<BTreeSet<String>>),
+}
+
+impl StandingGate {
+    /// The gate for a node whose registry allows exactly `kinds`.
+    pub fn of_kinds(kinds: impl IntoIterator<Item = String>) -> Self {
+        Self::Kinds(Arc::new(kinds.into_iter().collect()))
+    }
+
+    /// Whether a standing endorsement may name `kind`.
+    pub fn allows(&self, kind: &str) -> bool {
+        match self {
+            Self::Unset => false,
+            Self::Prejudged => true,
+            Self::Kinds(kinds) => kinds.contains(kind),
+        }
+    }
+
+    /// The kinds that allow one, sorted; empty when unset or prejudged.
+    pub fn kinds(&self) -> Vec<String> {
+        match self {
+            Self::Kinds(kinds) => kinds.iter().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Why `body` covers nothing under this gate, or `None` when it is live.
+    /// A per-change endorsement is never inert here.
+    pub fn inert_reason(&self, body: &EndorsementBody) -> Option<InertReason> {
+        let EndorsementTarget::Standing { kinds, .. } = &body.target else {
+            return None;
+        };
+        if matches!(self, Self::Prejudged) {
+            return None;
+        }
+        if matches!(self, Self::Unset) {
+            return Some(InertReason::GateUnset);
+        }
+        if kinds.iter().any(|kind| !self.allows(kind)) {
+            return Some(InertReason::KindNotStanding);
+        }
+        body.lifetime_fault()
     }
 }
 
@@ -742,28 +876,49 @@ impl EndorsementIndex {
 
     /// Whether a live endorsement covers an item of `kind` with content
     /// `digest` in `project` at `now` (unix seconds).
+    ///
+    /// A standing endorsement that is inert under `gate` covers nothing.
     pub fn covers(
         &self,
+        gate: &StandingGate,
         project: &ryeos_state::project_identity::ProjectIdentity,
         kind: &str,
         digest: &str,
         now: u64,
     ) -> bool {
+        self.entries.iter().any(|entry| {
+            &entry.body.project == project
+                && gate.inert_reason(&entry.body).is_none()
+                && entry.body.covers(kind, digest, now)
+        })
+    }
+
+    /// The endorsements that cover nothing under `gate`, by digest, with why.
+    pub fn inert(&self, gate: &StandingGate) -> Vec<(String, InertReason)> {
         self.entries
             .iter()
-            .any(|entry| &entry.body.project == project && entry.body.covers(kind, digest, now))
+            .filter_map(|entry| {
+                gate.inert_reason(&entry.body)
+                    .map(|reason| (entry.digest.clone(), reason))
+            })
+            .collect()
     }
 
     /// The live endorsements of `project`, for a launch's signer list. `None`
     /// when none apply.
+    ///
+    /// Only endorsements that are live under `gate` are carried, so a runtime
+    /// never receives one the daemon would not honour.
     pub fn snapshot_for(
         &self,
+        gate: &StandingGate,
         project: &ryeos_state::project_identity::ProjectIdentity,
     ) -> Option<EndorsementSnapshot> {
         let endorsements: Vec<StoredEndorsement> = self
             .entries
             .iter()
             .filter(|entry| &entry.body.project == project)
+            .filter(|entry| gate.inert_reason(&entry.body).is_none())
             .map(|entry| entry.stored.clone())
             .collect();
         if endorsements.is_empty() {
@@ -787,6 +942,13 @@ impl EndorsementIndex {
         for stored in &snapshot.endorsements {
             let body = &stored.endorsement.body;
             body.validate_shape().map_err(|e| e.to_string())?;
+            if let Some(fault) = body.lifetime_fault() {
+                return Err(format!(
+                    "endorsement {} is not acceptable in a launch: {}",
+                    stored.digest,
+                    fault.code()
+                ));
+            }
             let digest = stored.endorsement.digest().map_err(|e| e.to_string())?;
             if digest != stored.digest || body.project != snapshot.project || body.via.is_some() {
                 return Err(format!(
@@ -846,9 +1008,12 @@ impl EndorsementIndex {
     /// have not lapsed. It joins the trust store's fingerprint, so a request
     /// cache keyed on it retires when an endorsement is added, revoked or
     /// expires.
-    pub fn identity(&self, now: u64) -> String {
+    pub fn identity(&self, gate: &StandingGate, now: u64) -> String {
         let mut text = String::from("ryeos/endorsement-index/v1\n");
         for entry in &self.entries {
+            if gate.inert_reason(&entry.body).is_some() {
+                continue;
+            }
             let lapsed = matches!(
                 &entry.body.target,
                 EndorsementTarget::Standing { not_after: Some(limit), .. }
@@ -870,30 +1035,61 @@ impl EndorsementIndex {
 /// follows without a restart. Every request takes a [`snapshot`](Self::snapshot)
 /// and sees one index for its whole life.
 #[derive(Debug, Clone)]
-pub(super) enum EndorsementView {
+pub(super) struct EndorsementView {
+    slot: Slot,
+    /// Which kinds a standing endorsement may name. It belongs to this store
+    /// value, not to the shared slot: a store paired with one kind registry
+    /// never sees the gate of another generation's registry.
+    gate: StandingGate,
+}
+
+#[derive(Debug, Clone)]
+enum Slot {
     Frozen(Arc<EndorsementIndex>),
     Live(Arc<RwLock<Arc<EndorsementIndex>>>),
 }
 
 impl Default for EndorsementView {
     fn default() -> Self {
-        Self::Frozen(Arc::new(EndorsementIndex::empty()))
+        Self {
+            slot: Slot::Frozen(Arc::new(EndorsementIndex::empty())),
+            gate: StandingGate::Unset,
+        }
     }
 }
 
 impl EndorsementView {
+    /// A live view over a ledger's index. No standing endorsement is honoured
+    /// until [`with_gate`](Self::with_gate) says which kinds allow one.
     pub(super) fn live(index: EndorsementIndex) -> Self {
-        Self::Live(Arc::new(RwLock::new(Arc::new(index))))
+        Self {
+            slot: Slot::Live(Arc::new(RwLock::new(Arc::new(index)))),
+            gate: StandingGate::Unset,
+        }
     }
 
+    /// A view that never changes over an index that was already judged: a
+    /// launch's snapshot, or an index built in memory.
     pub(super) fn frozen(index: EndorsementIndex) -> Self {
-        Self::Frozen(Arc::new(index))
+        Self {
+            slot: Slot::Frozen(Arc::new(index)),
+            gate: StandingGate::Prejudged,
+        }
+    }
+
+    pub(super) fn with_gate(mut self, gate: StandingGate) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    pub(super) fn gate(&self) -> &StandingGate {
+        &self.gate
     }
 
     pub(super) fn current(&self) -> Arc<EndorsementIndex> {
-        match self {
-            Self::Frozen(index) => Arc::clone(index),
-            Self::Live(slot) => match slot.read() {
+        match &self.slot {
+            Slot::Frozen(index) => Arc::clone(index),
+            Slot::Live(slot) => match slot.read() {
                 Ok(guard) => Arc::clone(&guard),
                 Err(poisoned) => Arc::clone(&poisoned.into_inner()),
             },
@@ -901,14 +1097,17 @@ impl EndorsementView {
     }
 
     pub(super) fn snapshot(&self) -> Self {
-        Self::Frozen(self.current())
+        Self {
+            slot: Slot::Frozen(self.current()),
+            gate: self.gate.clone(),
+        }
     }
 
     /// Replace the index of a live view. A frozen view never changes.
     pub(super) fn replace(&self, index: EndorsementIndex) -> bool {
-        match self {
-            Self::Frozen(_) => false,
-            Self::Live(slot) => {
+        match &self.slot {
+            Slot::Frozen(_) => false,
+            Slot::Live(slot) => {
                 let mut guard = match slot.write() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
@@ -975,8 +1174,11 @@ pub struct Recorded {
 /// The endorser must be an active operator in `trust`; the signature must
 /// verify under that operator's pinned key; the body's time must be within the
 /// clock skew of `now`; and the body must have been signed against the ledger
-/// head as it stands. The caller serializes recording and revoking: this
-/// function reads the ledger and writes without holding it.
+/// head as it stands. A standing endorsement must also name only kinds the
+/// store's gate allows (the node's registry says which) and must end within
+/// [`MAX_STANDING_LIFETIME_SECS`] of when it was made. The caller serializes
+/// recording and revoking: this function reads the ledger and writes without
+/// holding it.
 pub fn record_endorsement(
     app_root: &Path,
     node_key: &SigningKey,
@@ -988,6 +1190,19 @@ pub fn record_endorsement(
     body.validate_shape()?;
     if let Some(via) = &body.via {
         return Err(EndorsementRefusal::DelegationUnsupported { via: via.clone() });
+    }
+    if let EndorsementTarget::Standing { kinds, .. } = &body.target {
+        let gate = trust.standing_gate();
+        if let Some(kind) = kinds.iter().find(|kind| !gate.allows(kind)) {
+            return Err(EndorsementRefusal::KindNotStanding { kind: kind.clone() });
+        }
+        match body.lifetime_fault() {
+            Some(InertReason::LifetimeUnbounded) => {
+                return Err(EndorsementRefusal::StandingLifetimeRequired);
+            }
+            Some(_) => return Err(EndorsementRefusal::StandingLifetimeTooLong),
+            None => {}
+        }
     }
     let endorser = body.endorser_fingerprint()?.to_owned();
     let not_operator = || EndorsementRefusal::EndorserNotOperator {
