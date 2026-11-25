@@ -284,3 +284,105 @@ fn pipeline_runs_against_live_bundle_kinds_form_b() {
         composed_body
     );
 }
+
+// ── Effect and workspace `none` declarations ─────────────────────────
+
+#[test]
+fn shipped_directive_and_graph_declare_no_direct_effect_or_workspace_where_intended() {
+    use ryeos_app::callback_token::{
+        THREAD_CEILING_NO_DECLARED_PROJECTION, authorize_thread_ceiling,
+    };
+    use ryeos_effect_contract::EffectClass;
+    use ryeos_engine::kind_registry::{
+        EffectClassConstant, EffectClassSource, ProjectedEffectClass, ProjectedWorkspaceAccess,
+    };
+    use ryeos_state::objects::{
+        ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+    };
+
+    let registry = KindRegistry::load_base(&live_kinds_dirs(), &fixture_trust_store())
+        .expect("live bundle kind registry loads with the shipped declarations");
+    let execution = |kind: &str| {
+        registry
+            .get(kind)
+            .and_then(|schema| schema.execution.as_ref())
+            .unwrap_or_else(|| panic!("`{kind}` has no execution block"))
+    };
+    let bounded = |max_effect_class| ThreadWorkloadCeiling::Bounded {
+        max_effect_class,
+        workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+    };
+
+    // A directive declares neither a direct effect nor a direct workspace use.
+    let directive = execution("directive");
+    assert_eq!(
+        directive
+            .effect_class_ceiling
+            .as_ref()
+            .map(|d| d.source.clone()),
+        Some(EffectClassSource::Constant(
+            EffectClassConstant::NoDirectEffect
+        ))
+    );
+    assert_eq!(
+        directive
+            .project_workspace_access(&serde_json::json!({}))
+            .unwrap(),
+        ProjectedWorkspaceAccess::NoDirect
+    );
+    // A graph declares no direct workspace use and keeps its authored
+    // effect-class path, so a graph that omits `effects` stays undeclared.
+    let graph = execution("graph");
+    let graph_effect = graph
+        .effect_class_ceiling
+        .as_ref()
+        .expect("graph effects path");
+    assert_eq!(
+        graph_effect.source,
+        EffectClassSource::Path(vec!["effects".to_owned()])
+    );
+    assert_eq!(graph_effect.unproven_max, Some(EffectClass::Recorded));
+    assert_eq!(
+        graph
+            .project_workspace_access(&serde_json::json!({}))
+            .unwrap(),
+        ProjectedWorkspaceAccess::NoDirect
+    );
+    // The tool kind is unchanged: both declarations are authored paths.
+    let tool = execution("tool");
+    assert!(matches!(
+        tool.effect_class_ceiling.as_ref().map(|d| &d.source),
+        Some(EffectClassSource::Path(_))
+    ));
+    assert_eq!(
+        tool.project_workspace_access(&serde_json::json!({}))
+            .unwrap(),
+        ProjectedWorkspaceAccess::Undeclared
+    );
+
+    // Under a Bounded ceiling the directive's declarations pass the
+    // projection gates, and a kind that declares nothing is refused.
+    let recorded = bounded(ThreadEffectCeiling::Recorded);
+    authorize_thread_ceiling(
+        &recorded,
+        ProjectedEffectClass::NoDirectEffect,
+        ProjectedWorkspaceAccess::NoDirect,
+    )
+    .unwrap();
+    authorize_thread_ceiling(
+        &recorded,
+        ProjectedEffectClass::Undeclared,
+        ProjectedWorkspaceAccess::NoDirect,
+    )
+    .expect_err("an undeclared effect class is refused under a ceiling");
+    assert_eq!(
+        authorize_thread_ceiling(
+            &recorded,
+            ProjectedEffectClass::Undeclared,
+            ProjectedWorkspaceAccess::Undeclared,
+        )
+        .unwrap_err()
+        .code,
+        THREAD_CEILING_NO_DECLARED_PROJECTION
+    );
+}

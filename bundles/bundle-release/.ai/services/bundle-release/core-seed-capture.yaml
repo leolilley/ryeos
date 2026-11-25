@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:e0e7bee703818c9d4957eee1abb38814d052a23dd7a15fbbcb35cdb393a3cfa3:45mz8VyG7AZoLUqJRubBfGuHbxsfKt7pXBqkWayaIHbP179vRnmUcnyRwlvAnzQbWGgEJsBGrXrYPyVxSgo3Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:625c4eec1ecb320730c8e59011c6a1ab127ff539c6fd10d39b1a782a36395d37:69oiO6azHyy9Kb+rOF25usrhqFFdGiM1XhC919bwaKjSdFcRih3fo2KXLKLlsglgpqYW7OmB/0v/1S4NAnieCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-capture
 version: "1.0.0"
@@ -21,3 +21,5 @@ schema:
   build_recipe_raw_digest: string
   materialization_result_hash: string
   signed_tree_manifest_hash: string
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

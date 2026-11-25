@@ -106,6 +106,11 @@ pub struct ExecutionContext {
     /// validation reads the args here. `None`/empty → the kind's default
     /// method. Ignored for terminator/delegate paths.
     pub requested_call: Option<ryeos_engine::method_call::MethodCall>,
+    /// How much of a service's answer this caller may see. Classified by the
+    /// key that acts (the configured operator key, another admitted key, or no
+    /// key), never by what kind of client holds it. Every construction names
+    /// it; there is no default.
+    pub disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass,
 }
 
 impl ExecutionContext {
@@ -427,6 +432,189 @@ fn confirm_recorded_service_terminal(
     Ok(())
 }
 
+/// What the caller of a service receives of its outcome. The operator gets
+/// the outcome whole. Any other caller gets the item's declared tier of an
+/// answer, or a refusal when the item declares none, and a failure shows only
+/// a stable code and a fixed sentence: the failure's own text can carry a
+/// path, probe output or a key.
+fn disclose_service_result(
+    class: ryeos_node_runtime::disclosure::DisclosureClass,
+    disclosure: Option<&ryeos_node_runtime::disclosure::ServiceDisclosure>,
+    result: Result<Value>,
+) -> Result<Value> {
+    use ryeos_app::handler_error::HandlerError;
+    if class.is_operator() {
+        return result;
+    }
+    match result {
+        Ok(value) => ryeos_node_runtime::disclosure::shape_result(
+            class,
+            disclosure,
+            value,
+            disclosure.map_or_else(Default::default, |declared| declared.bounds()),
+        )
+        .map_err(|refusal| {
+            tracing::warn!(
+                code = refusal.code(),
+                "service answer withheld from a non-operator caller"
+            );
+            anyhow::Error::new(HandlerError::Structured {
+                code: refusal.code().to_owned(),
+                status: 403,
+                body: serde_json::json!({
+                    "code": refusal.code(),
+                    "error": refusal.to_string(),
+                    "retryable": false,
+                }),
+            })
+        }),
+        Err(error) => {
+            if error
+                .downcast_ref::<crate::dispatch_error::DispatchError>()
+                .is_some()
+            {
+                return Err(error);
+            }
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "service failure withheld from a non-operator caller"
+            );
+            Err(
+                match ryeos_app::handler_error::extract_handler_error(&error) {
+                    Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
+                    // A message that begins with a stable `code:` keeps that
+                    // code and its status; the rest of the sentence is
+                    // withheld. A message with no code is replaced by a fixed
+                    // sentence of the same status.
+                    Some(HandlerError::Forbidden(message)) => coded_or_fixed(
+                        &message,
+                        403,
+                        HandlerError::Forbidden("the service refused the request".to_owned()),
+                    ),
+                    Some(HandlerError::BadRequest(message)) => coded_or_fixed(
+                        &message,
+                        400,
+                        HandlerError::BadRequest("the request was not valid".to_owned()),
+                    ),
+                    Some(HandlerError::Conflict(message)) => coded_or_fixed(
+                        &message,
+                        409,
+                        HandlerError::Conflict(
+                            "the request conflicts with current state".to_owned(),
+                        ),
+                    ),
+                    // A typed refusal keeps its code and status, which are
+                    // part of the contract a client branches on. Its body
+                    // can carry a path or a key, so only the stable code, the
+                    // retry flag and a fixed sentence reach a non-operator.
+                    Some(HandlerError::Structured { code, status, body }) => {
+                        anyhow::Error::new(HandlerError::Structured {
+                            body: redact_refusal_body(&body),
+                            code,
+                            status,
+                        })
+                    }
+                    _ => {
+                        let (code, sentence) =
+                            ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
+                        anyhow::Error::new(HandlerError::Structured {
+                            status: 500,
+                            body: serde_json::json!({"error": {"code": code, "message": sentence}}),
+                            code,
+                        })
+                    }
+                },
+            )
+        }
+    }
+}
+
+/// A refusal whose message begins with a stable `code:` keeps the code and its
+/// status, with a fixed sentence; any other message becomes the fixed form.
+fn coded_or_fixed(
+    message: &str,
+    status: u16,
+    fixed: ryeos_app::handler_error::HandlerError,
+) -> anyhow::Error {
+    let code = message
+        .split_once(':')
+        .map(|(prefix, _)| prefix.trim())
+        .filter(|prefix| {
+            !prefix.is_empty()
+                && prefix.len() <= 64
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    match code {
+        Some(code) => anyhow::Error::new(ryeos_app::handler_error::HandlerError::Structured {
+            code: code.to_owned(),
+            status,
+            body: serde_json::json!({
+                "code": code,
+                "error": "the service refused the request",
+                "retryable": false,
+            }),
+        }),
+        None => anyhow::Error::new(fixed),
+    }
+}
+
+/// What a non-operator caller is told of a typed refusal's body: the same
+/// shape the client already reads (`code`, `error_code`, a nested `error`
+/// object, `retryable`, `outcome`), with every value reduced to a stable code,
+/// a flag, an enum, or the fixed sentence. Free text, paths and detail fields
+/// are dropped, so nothing the refusal carried can leak.
+fn redact_refusal_body(body: &Value) -> Value {
+    const FIXED: &str = "the service refused the request";
+    let safe_code = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    let Value::Object(map) = body else {
+        return serde_json::json!({"error": FIXED});
+    };
+    let mut shown = serde_json::Map::new();
+    for (key, value) in map {
+        match (key.as_str(), value) {
+            ("code" | "error_code", Value::String(text)) if safe_code(text) => {
+                shown.insert(key.clone(), value.clone());
+            }
+            // A capability name (`ryeos.…`) is policy vocabulary the caller
+            // needs to be told it lacks; only a plain one passes.
+            ("capability", Value::String(text))
+                if text.starts_with("ryeos.")
+                    && text.len() <= 128
+                    && text.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:/-*".contains(&b)
+                    }) =>
+            {
+                shown.insert(key.clone(), value.clone());
+            }
+            ("retryable", Value::Bool(_)) => {
+                shown.insert(key.clone(), value.clone());
+            }
+            // `outcome` is a two-valued enum a client branches on ("unknown"
+            // means do not resubmit a mutation that may have happened). It
+            // passes only when it is exactly one of the two.
+            ("outcome", Value::String(text)) if matches!(text.as_str(), "refused" | "unknown") => {
+                shown.insert(key.clone(), value.clone());
+            }
+            ("error" | "message", Value::String(_)) => {
+                shown.insert(key.clone(), Value::from(FIXED));
+            }
+            ("error", Value::Object(_)) => {
+                shown.insert(key.clone(), redact_refusal_body(value));
+            }
+            _ => {}
+        }
+    }
+    Value::Object(shown)
+}
+
 /// Build the exact daemon-owned terminal that the recorded service path will
 /// commit. The handler's live result remains untouched for its caller; only
 /// this durable terminal projection applies the frozen, kind-declared policy.
@@ -439,6 +627,10 @@ fn recorded_service_terminal_projection(
     Option<anyhow::Error>,
 ) {
     let (durable_result, durable_error, result_retention_error) = match dispatch_result {
+        // An answer that is `null` (an acknowledgement a non-operator tier
+        // leaves empty) is stored as no result, the way the thread store
+        // reads it back.
+        Ok(Value::Null) => (None, None, None),
         Ok(value) => {
             match ryeos_app::thread_lifecycle::retained_thread_result(value, result_policy) {
                 Ok(value) => (Some(value), None, None),
@@ -836,6 +1028,22 @@ pub async fn execute_service_verified(
         Vec::new()
     };
 
+    // 5b. Disclosure: a caller other than the operator receives only the
+    // tiers the service item declares. Parsed here so a malformed block
+    // refuses the call before anything is recorded.
+    let disclosure_class = ctx.disclosure_class;
+    let disclosure = if disclosure_class.is_operator() {
+        None
+    } else {
+        verified
+            .resolved
+            .metadata
+            .extra
+            .get("disclosure")
+            .map(ryeos_node_runtime::disclosure::ServiceDisclosure::parse)
+            .transpose()?
+    };
+
     // 7a. Create audit record BEFORE dispatch.
     // Honor a caller-supplied thread id when provided so external
     // subscribers (route SSE sources) registered against the id see
@@ -1008,6 +1216,25 @@ pub async fn execute_service_verified(
             || invocation_id.clone(),
             |parent| parent.chain_root_id.clone(),
         );
+        // A service called from inside an execution records, on every launch
+        // its handler makes, the chain that execution originated from: the
+        // callback parent's own sealed origin when it has one, else the
+        // parent's chain. A direct invocation was made by no execution and
+        // records none.
+        let service_launch_origin = inline_parent
+            .as_ref()
+            .map(|parent| -> Result<String> {
+                let sealed_origin = state
+                    .state_store
+                    .get_launch_metadata(&parent.thread_id)?
+                    .and_then(|metadata| metadata.resume_context)
+                    .and_then(|resume| resume.evaluator_origin_chain);
+                Ok(ryeos_app::launch_metadata::child_launch_origin_chain(
+                    sealed_origin.as_deref(),
+                    &parent.chain_root_id,
+                ))
+            })
+            .transpose()?;
         // Registration precedes publication, while launch metadata and the
         // created→running transition commit atomically with the birth.
         let mut lifecycle_guard =
@@ -1065,11 +1292,13 @@ pub async fn execute_service_verified(
         let task_endpoint = endpoint.clone();
         let task_service_ref = service_ref.to_string();
         let task_invocation_id = invocation_id.clone();
+        let task_launch_origin = service_launch_origin;
         let task_principal = ctx.principal_fingerprint.clone();
         let task_scopes = ctx.caller_scopes.clone();
         let task_current_site_id = ctx.plan_ctx.current_site_id.clone();
         let task_origin_site_id = ctx.plan_ctx.origin_site_id.clone();
         let task_metadata = verified.resolved.metadata.extra.clone();
+        let task_disclosure = disclosure.clone();
         let task_params = params.clone();
         let task = tokio::spawn(async move {
             let dispatch_result: Result<Value> = async {
@@ -1081,7 +1310,8 @@ pub async fn execute_service_verified(
                     &task_current_site_id,
                     &task_origin_site_id,
                 )?
-                .with_recorded_service_root_id(task_invocation_id.clone())?;
+                .with_recorded_service_root_id(task_invocation_id.clone())?
+                .with_launch_origin_chain(task_launch_origin);
                 let handler = task_state
                     .services
                     .get(&task_endpoint)
@@ -1099,6 +1329,13 @@ pub async fn execute_service_verified(
                 result
             }
             .await;
+            // Shaped before it is recorded, so the durable result and the
+            // caller's answer are the same disclosed value.
+            let dispatch_result = disclose_service_result(
+                disclosure_class,
+                task_disclosure.as_ref(),
+                dispatch_result,
+            );
 
             let (terminal, result_retention_error) = recorded_service_terminal_projection(
                 &task_invocation_id,
@@ -1182,7 +1419,7 @@ pub async fn execute_service_verified(
             .clone();
         let result = handler(params, hctx, Arc::new(state.clone())).await;
         drop(handler);
-        result
+        disclose_service_result(disclosure_class, disclosure.as_ref(), result)
     };
 
     let value = dispatch_result.map_err(|e| {
@@ -1242,6 +1479,193 @@ pub async fn execute_service_verified(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn principal_tier(pointers: &[&str]) -> ryeos_node_runtime::disclosure::ServiceDisclosure {
+        ryeos_node_runtime::disclosure::ServiceDisclosure::parse(&serde_json::json!({
+            "principal": pointers,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_principal_receives_the_tier_and_never_an_unlisted_field() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let tier = principal_tier(&["/id", "/items/*/name"]);
+        let answer = serde_json::json!({
+            "id": "x",
+            "path": "/home/someone/secret",
+            "items": [{"name": "a", "path": "/etc/passwd"}],
+            "added_later": 1,
+        });
+        let shaped =
+            disclose_service_result(DisclosureClass::Principal, Some(&tier), Ok(answer.clone()))
+                .unwrap();
+        assert_eq!(
+            shaped,
+            serde_json::json!({"id": "x", "items": [{"name": "a"}]})
+        );
+        let operator =
+            disclose_service_result(DisclosureClass::Operator, Some(&tier), Ok(answer.clone()))
+                .unwrap();
+        assert_eq!(operator, answer);
+    }
+
+    #[test]
+    fn a_service_without_a_block_is_refused_to_a_principal_but_not_the_operator() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let answer = serde_json::json!({"id": "x"});
+        let refused = disclose_service_result(DisclosureClass::Principal, None, Ok(answer.clone()))
+            .unwrap_err();
+        // The refusal is typed: a 403 that keeps its stable `read_*` code.
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&refused),
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status: 403, .. })
+                if code == "read_not_disclosable"
+        ));
+        assert_eq!(
+            disclose_service_result(DisclosureClass::Operator, None, Ok(answer.clone())).unwrap(),
+            answer
+        );
+    }
+
+    #[test]
+    fn a_typed_refusal_keeps_its_code_and_status_for_a_principal_without_its_body() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let refused = disclose_service_result(
+            DisclosureClass::Principal,
+            None,
+            Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::Structured {
+                    code: "ui_binding_stale".to_owned(),
+                    status: 409,
+                    body: serde_json::json!({
+                        "code": "ui_binding_stale",
+                        "error": "item /home/someone/x changed",
+                        "retryable": false,
+                    }),
+                },
+            )),
+        )
+        .unwrap_err();
+        match ryeos_app::handler_error::extract_handler_error(&refused) {
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
+                assert_eq!((code.as_str(), status), ("ui_binding_stale", 409));
+                assert!(!body.to_string().contains("/home/someone"), "{body}");
+                assert_eq!(body["retryable"], false);
+            }
+            other => panic!("typed refusal lost: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_message_with_a_stable_code_keeps_the_code_and_a_bare_one_the_status() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let refused = |error: ryeos_app::handler_error::HandlerError| {
+            disclose_service_result(
+                DisclosureClass::Principal,
+                None,
+                Err(anyhow::Error::new(error)),
+            )
+            .unwrap_err()
+        };
+        let coded = refused(ryeos_app::handler_error::HandlerError::Forbidden(
+            "records_unverified_requires_capability: ask with the capability /srv/x".to_owned(),
+        ));
+        match ryeos_app::handler_error::extract_handler_error(&coded) {
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
+                assert_eq!(
+                    (code.as_str(), status),
+                    ("records_unverified_requires_capability", 403)
+                );
+                assert!(!body.to_string().contains("/srv/x"), "{body}");
+            }
+            other => panic!("code lost: {other:?}"),
+        }
+        let bare = refused(ryeos_app::handler_error::HandlerError::Conflict(
+            "head moved on /srv/x".to_owned(),
+        ));
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&bare),
+            Some(ryeos_app::handler_error::HandlerError::Conflict(text)) if !text.contains("/srv/x")
+        ));
+    }
+
+    #[test]
+    fn a_redacted_refusal_keeps_the_wire_shape_the_client_reads() {
+        let shown = redact_refusal_body(&serde_json::json!({
+            "error_code": "grant_renewal_not_permitted",
+            "error": {"code": "grant_renewal_not_permitted", "message": "granter fp:abc at /home/x"},
+            "retryable": false,
+            "hint": "/home/x",
+            "details": {"path": "/home/x"},
+        }));
+        assert_eq!(
+            shown,
+            serde_json::json!({
+                "error_code": "grant_renewal_not_permitted",
+                "error": {
+                    "code": "grant_renewal_not_permitted",
+                    "message": "the service refused the request"
+                },
+                "retryable": false,
+            })
+        );
+        // A code that is not a plain code never reaches the caller.
+        let odd = redact_refusal_body(&serde_json::json!({"code": "has /path in it"}));
+        assert_eq!(odd, serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_refusal_outcome_passes_only_as_its_two_enum_values() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let shown = |outcome: serde_json::Value| {
+            let refused = disclose_service_result(
+                DisclosureClass::Principal,
+                None,
+                Err(anyhow::Error::new(
+                    ryeos_app::handler_error::HandlerError::Structured {
+                        code: "write_unconfirmed".to_owned(),
+                        status: 502,
+                        body: serde_json::json!({"outcome": outcome, "detail": "/srv/private"}),
+                    },
+                )),
+            )
+            .unwrap_err();
+            match ryeos_app::handler_error::extract_handler_error(&refused) {
+                Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body,
+                other => panic!("typed refusal lost: {other:?}"),
+            }
+        };
+        assert_eq!(shown(serde_json::json!("unknown"))["outcome"], "unknown");
+        assert_eq!(shown(serde_json::json!("refused"))["outcome"], "refused");
+        for other in [
+            serde_json::json!("failed"),
+            serde_json::json!("/srv/private/path"),
+            serde_json::json!(7),
+            serde_json::json!({"a": "unknown"}),
+        ] {
+            let body = shown(other);
+            assert!(body.get("outcome").is_none(), "{body}");
+            assert!(!body.to_string().contains("/srv/private"), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_failure_reaches_a_principal_as_a_fixed_sentence_without_its_text() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        let tier = principal_tier(&["/id"]);
+        let failed = disclose_service_result(
+            DisclosureClass::Principal,
+            Some(&tier),
+            Err(anyhow::anyhow!(
+                "read_failed: could not read /home/someone/secret"
+            )),
+        )
+        .unwrap_err();
+        let shown = format!("{failed:#}");
+        assert!(!shown.contains("/home/someone"), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
+    }
 
     #[test]
     fn service_invocation_identity_is_a_distinct_strict_coordinate() {

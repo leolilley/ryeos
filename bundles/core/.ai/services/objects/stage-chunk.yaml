@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T05:18:13Z:01edd8cd7173d3af0b86a5beada9209a215f171e5ac1dc3464c9afee7fc75f64:oar+5AK8MchQo9ARSyMCU294/jicSug/p+gZiEEqapIXu32iTRx/ZXbfMy7WBJ2rE2nrIwG1KqPpwfVZ3laBDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:5c062b00124c51d5b08d2804780a0fa002d74ef1b82df89cad8af51a844dfed9:4yfOOsDJtAqK49jFSbAnXMUrYGPzanXktrQzqenOAua+fm/hIXfrRTxrD4ccuYgHbULe1UXHn9wK86jxCjeYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.stage-chunk
 required_caps: ["ryeos.execute.service.objects/stage-chunk"]
@@ -11,3 +11,10 @@ schema:
   data: string
   manifest_hash: string?
 description: "Stage one bounded chunk (base64, at most 512 KiB decoded) of a blob or a large object into an owned durable stage; resumable, and returns {staging_id, namespace, hash, staged_bytes, complete}"
+disclosure:
+  principal:
+    - "/staging_id"
+    - "/namespace"
+    - "/hash"
+    - "/staged_bytes"
+    - "/complete"

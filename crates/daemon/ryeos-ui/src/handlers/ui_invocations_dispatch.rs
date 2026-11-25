@@ -1604,6 +1604,7 @@ pub(crate) fn prepare_item_ref(
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(state, ctx),
     };
 
     Ok(PreparedInvocation {
@@ -1763,7 +1764,26 @@ async fn execute_prepared_item_ref(
         &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
-    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+    .map_err(|error| {
+        // The refusal names the capability the seat lacks. It travels as a
+        // typed field so a non-operator seat reads it too: a capability name
+        // is policy vocabulary, not a path or a secret.
+        let message = format!("{error:#}");
+        let capability = ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY;
+        let mut body = json!({
+            "code": "capability_required",
+            "error": message,
+            "retryable": false,
+        });
+        if message.contains(capability) {
+            body["capability"] = json!(capability);
+        }
+        HandlerError::Structured {
+            code: "capability_required".to_owned(),
+            status: 403,
+            body,
+        }
+    })?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_root.clone(),
         exec_ctx.engine.clone(),
@@ -2142,7 +2162,7 @@ mod tests {
         let descriptor = |id: &str, root_ref: &str, definition: Value| {
             json!({
                 "binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64),
-                "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+                "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
                 "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":1024,"max_seat_append_bytes":65536},
                 "presentation":{"definition":definition,"views":{"view:test/work":{"widget":"rows"}}}
             })
@@ -2260,7 +2280,7 @@ mod tests {
         let presentation = "11111111-1111-4111-8111-111111111111";
         let binding = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11"});
         let attachment = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11",
-            "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"saved-surface","library_revision":1,"record_digest":"ab".repeat(32)},
@@ -2354,7 +2374,7 @@ mod tests {
         let presentation = "11111111-1111-4111-8111-111111111111";
         let binding = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32)});
         let attachment = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32),
-            "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"reusable","library_revision":2,"record_digest":"ab".repeat(32)},"active_view_set_id":"set-one",
@@ -2434,7 +2454,7 @@ mod tests {
             "binding_attachment_id":"origin","binding_generation":2,"binding_digest":"ab".repeat(32),
             "root_ref":"surface:test/base","root_generation":"cd".repeat(32),
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
-            "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":65536}
         })).unwrap();
         let coordinate = UiBindingAttachmentCoordinate {
@@ -2522,7 +2542,7 @@ mod tests {
                 "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
                 "project_path": null,
                 "subject": {"kind":"projectless"},
-                "posture": "observation_only",
+                "posture": "observation_only","seat_project":{"state":"projectless"},
                 "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
             }
         });
@@ -2637,7 +2657,7 @@ mod tests {
                 "presentation_id": "11111111-1111-4111-8111-111111111111",
                 "creation_request_id": "33333333-3333-4333-8333-333333333333",
                 "surface": {"surface_instance_id":"22222222-2222-4222-8222-222222222222", "ordinal":1, "title":"Fixture", "binding":{"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11"}},
-                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","named_items": [], "binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
+                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},"named_items": [], "binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
             }
         });
         result["ui_transition"]["attachment"]["presentation"]["views"] =
@@ -2718,7 +2738,7 @@ mod tests {
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
             "project_path": null,
             "subject": {"kind":"projectless"},
-            "posture": "observation_only",
+            "posture": "observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
         });
         assert!(

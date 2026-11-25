@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-26T07:04:25Z:2eef52d93a8a0cbd5d9fd3e27ed02d75d67862a01620fd19fb5e56b12c79e728:6XUNkqQrGMlZ3ek/jb4mAVJyrbiqoWzeoljMI7S4yFsjDdrYR3YdqgyM+YX3ozVEp65CRW9tT7iCVzCLLl/iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:f38aadaad228ede8ccaa368802500def889f0e016d3b7346b33057c19096101c:JP/cY3PKSi/Gc6UG02btliprLot+96Bpq4tgWR6Djv3qBExmZgfgUhZhSpR0pBCh0RB2Is/wDJ24PFvTsGX2CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.compose-product
 required_caps: ["ryeos.execute.service.external-content/compose-product"]
@@ -8,3 +8,5 @@ schema:
   selections: array
   maximum_bytes: integer
 description: Bind a complete bounded product selection to one exact signed consumer using an explicit nullable project context (null means projectless)
+# Composes a product selection under the admitted operator's grant; operator-only.
+disclosure: {}

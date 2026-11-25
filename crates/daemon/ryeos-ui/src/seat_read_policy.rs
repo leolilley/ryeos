@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use ryeos_node_runtime::disclosure::{longest_array, project};
 use serde_json::{Map, Value};
 
 use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
@@ -353,73 +354,6 @@ fn resolve_pin(value: &Value, session: SessionFacts<'_>) -> Option<Value> {
                 .map_or(Value::Null, |root| Value::String(root.to_owned())),
         ),
         other => Some(other.clone()),
-    }
-}
-
-/// The part of `value` the pointers retain. A pointer that ends retains the
-/// whole value it reaches; objects and arrays on the way keep their kind even
-/// when nothing under them is retained, so an empty list stays an empty list.
-/// `None` only when a scalar is reached with pointer left to follow.
-fn project(value: &Value, paths: &[&[KeepSegment]]) -> Option<Value> {
-    if paths.iter().any(|path| path.is_empty()) {
-        return Some(value.clone());
-    }
-    match value {
-        Value::Object(map) => {
-            let mut kept = Map::new();
-            for (key, child) in map {
-                let rest: Vec<&[KeepSegment]> = paths
-                    .iter()
-                    .filter_map(|path| match path.split_first() {
-                        Some((KeepSegment::Any, rest)) => Some(rest),
-                        Some((KeepSegment::Key(name), rest)) if name == key => Some(rest),
-                        _ => None,
-                    })
-                    .collect();
-                if rest.is_empty() {
-                    continue;
-                }
-                if let Some(child) = project(child, &rest) {
-                    kept.insert(key.clone(), child);
-                }
-            }
-            Some(Value::Object(kept))
-        }
-        Value::Array(items) => {
-            let mut kept = Vec::new();
-            for (index, child) in items.iter().enumerate() {
-                let position = index.to_string();
-                let rest: Vec<&[KeepSegment]> = paths
-                    .iter()
-                    .filter_map(|path| match path.split_first() {
-                        Some((KeepSegment::Any, rest)) => Some(rest),
-                        Some((KeepSegment::Key(name), rest)) if *name == position => Some(rest),
-                        _ => None,
-                    })
-                    .collect();
-                if rest.is_empty() {
-                    continue;
-                }
-                if let Some(child) = project(child, &rest) {
-                    kept.push(child);
-                }
-            }
-            Some(Value::Array(kept))
-        }
-        _ => None,
-    }
-}
-
-fn longest_array(value: &Value) -> usize {
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .map(longest_array)
-            .max()
-            .unwrap_or(0)
-            .max(items.len()),
-        Value::Object(map) => map.values().map(longest_array).max().unwrap_or(0),
-        _ => 0,
     }
 }
 

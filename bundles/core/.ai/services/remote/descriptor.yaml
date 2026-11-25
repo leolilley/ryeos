@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T21:47:42Z:bede0810925aa23389c8e4312ad3dfde9cf2c154881f8b6f5c2dc583946b56d0:HZ+wsQlneO/gCeVRQjfsGb8/jJcoM9sYMhGYSESmR2qYrY0dgdstEj+TdKDvqbDQZjs7o3cgnqfwa8kB4PTzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:27cccc949f928bd8c03236692d342e7d9d387af9e232c4b4e2e31eb418069533:SRWMJSza7K2N2eOIkwU1Jsu/nWNPcy1tyaqer9xf4ZsGtcKKWCjWPdkUvE/RDVzNN+KG8W0JKTI9Tux/QpsNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.descriptor
 required_caps: ["ryeos.execute.service.remote/descriptor"]
@@ -9,3 +9,18 @@ schema:
   admission_mode: string?
   provider_name: string?
 description: "Export this node's signed remote descriptor; read-only, signed by the node key inside the daemon"
+disclosure:
+  principal:
+    - "/descriptor/version"
+    - "/descriptor/name"
+    - "/descriptor/url"
+    - "/descriptor/site_id"
+    - "/descriptor/vault_fingerprint"
+    - "/descriptor/node/public_key"
+    - "/descriptor/node/fingerprint"
+    - "/descriptor/capabilities"
+    - "/descriptor/admission/mode"
+    - "/descriptor/provider/name"
+  free_text:
+    - "/descriptor/ingest_ignore"
+    - "/yaml"

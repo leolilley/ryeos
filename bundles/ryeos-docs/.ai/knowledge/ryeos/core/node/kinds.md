@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T01:55:10Z:91a138253599f03e4253978f8a44c98c116c4e1959f5c48d174f9afe39a2ccfd:hrixXES41Nt03iBI+x+ovGEK30vc/H+LOhhlZbQ/Ed0CVsT62xZ8Y7FAiqcGDMWOpdU1h94nFj/g7EDnsquXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T06:55:13Z:d24fee4f6521c0b1912f50c5b59b31cb72e74fc344ff011b685fc619d3701e52:AW61HVSzsmufqs3IKXnJRD9apnxwyiysEsg6kZmXHxq9H/Tmv8b1PxL8/KQqmIRKPeGHzpSQpGpzqwKRHh3WDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
@@ -151,3 +151,31 @@ Each kind-schema YAML defines:
 | `composer`         | Which handler handles composition                |
 | `execution`        | How the kind is executed (subprocess, in-process, delegated) |
 | `metadata.rules`   | Which metadata fields to extract                 |
+
+### Effect and workspace declarations: `constant: none`
+
+Under `execution`, `effect_class_ceiling` and `workspace_access` each take
+either a `path` (an authored field of the composed item) or a `constant`,
+never both and never neither; either mistake, an unknown constant or an
+unknown key refuses the kind schema at load. `effect_class_ceiling` accepts the
+constants `none`, `recorded`, `sealed` and `live`; `workspace_access` accepts
+`none`.
+
+`none` means "no direct tool-call effect or workspace use of its own", and
+nothing wider. It does not cover anything the item dispatches: each dispatched
+tool is judged against its own declaration at the call. It does not cover a
+model call either: a directive's provider calls are judged at launch by the
+sealed external-effect authority against any thread ceiling, so a `none`
+directive whose launch seals a `sealed` authority is still refused under a
+`recorded` ceiling. A declaration is also different from silence: a kind or
+item that declares nothing is refused under a thread ceiling and by a detached
+launch, while a declared `none` passes. `none` is a preflight judgement only;
+capsules and receipts still name only `recorded` or `sealed`, so a durable
+request against a `none` subject is ineligible. Only a signed kind schema can
+declare `none`; an item that authors `none` at a path declaration is refused.
+Kind schemas load only from installed node bundles, each signature-checked against
+the trust store, and the first one found for a kind wins; there is no project
+overlay and no separate check that the signer is the core publisher. So any
+installed bundle from a trusted signer can declare `none` for its own kind: it
+is that kind author's claim, and trust in it follows the pinned publisher and
+the installed bundle.

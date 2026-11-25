@@ -13,6 +13,7 @@ use crate::remote::client::{
 };
 use crate::remote::config;
 use crate::remote::import::{self, VerifiedRemoteImportRequest};
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{
@@ -74,21 +75,39 @@ struct SyncJobIds {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if req.policy.is_empty() {
-        anyhow::bail!("admission policy must not be empty");
+        return Err(typed_refusal(
+            "admission_policy_empty",
+            400,
+            "admission policy must not be empty",
+        )
+        .into());
     }
     if req.limit == 0 || req.limit > 500 {
-        anyhow::bail!("limit must be between 1 and 500");
+        return Err(
+            typed_refusal("limit_out_of_range", 400, "limit must be between 1 and 500").into(),
+        );
     }
     if matches!(req.max_imports, Some(0)) {
-        anyhow::bail!("max_imports must be greater than zero when supplied");
+        return Err(typed_refusal(
+            "max_imports_invalid",
+            400,
+            "max_imports must be greater than zero when supplied",
+        )
+        .into());
     }
     if matches!(req.max_imports, Some(max) if max > MAX_IMPORTS) {
-        anyhow::bail!("max_imports must be less than or equal to {MAX_IMPORTS}");
+        return Err(typed_refusal(
+            "max_imports_invalid",
+            400,
+            format!("max_imports must be less than or equal to {MAX_IMPORTS}"),
+        )
+        .into());
     }
 
     let remote_cfg = {
         let remotes = config::load_remotes(&state.config.app_root)?;
-        config::get_remote(&remotes, &req.remote)?
+        config::get_remote(&remotes, &req.remote)
+            .map_err(|e| typed_refusal("remote_not_found", 404, format!("{e:#}")))?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let expected_key = remote_cfg.pinned_signing_key().with_context(|| {
@@ -109,7 +128,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             .federation_heads_list(&prefix, Some(req.limit), &expected_signer, &expected_key)
             .await?;
         if heads.truncated {
-            anyhow::bail!("remote returned a truncated admission head list for policy '{}'; increase limit or sync a narrower policy shard", req.policy);
+            return Err(typed_refusal(
+                "admission_head_list_truncated",
+                422,
+                format!("remote returned a truncated admission head list for policy '{}'; increase limit or sync a narrower policy shard", req.policy),
+            )
+            .into());
         }
 
         let candidates = heads
@@ -449,11 +473,14 @@ fn admission_subject_from_head(head: &FederationHeadRemoteRecord, policy: &str) 
         .strip_prefix(&expected_prefix)
         .and_then(|rest| rest.strip_suffix("/head"))
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "head {} is not an admission head for policy {}",
-                head.ref_path,
-                policy
-            )
+            anyhow::Error::new(typed_refusal(
+                "admission_head_invalid",
+                422,
+                format!(
+                    "head {} is not an admission head for policy {}",
+                    head.ref_path, policy
+                ),
+            ))
         })?;
     validate_subject_hash(suffix)
         .with_context(|| format!("admission head {} has invalid subject hash", head.ref_path))?;
@@ -462,7 +489,12 @@ fn admission_subject_from_head(head: &FederationHeadRemoteRecord, policy: &str) 
 
 fn validate_subject_hash(subject_hash: &str) -> Result<()> {
     if !lillux::valid_hash(subject_hash) || subject_hash.bytes().any(|b| b.is_ascii_uppercase()) {
-        anyhow::bail!("invalid admission subject hash: {subject_hash}");
+        return Err(typed_refusal(
+            "admission_subject_hash_invalid",
+            422,
+            format!("invalid admission subject hash: {subject_hash}"),
+        )
+        .into());
     }
     Ok(())
 }

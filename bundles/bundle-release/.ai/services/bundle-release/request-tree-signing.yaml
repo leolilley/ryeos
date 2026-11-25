@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:98a751d9c81cd6b6ee5c96533c1e5ff7f9834f9cf7bfc8c18f1a7711c52a07f4:RtygCgPf5jdm2cEB1CZS4Zxf9D/ziQBGu6lXqe2KHnp48HcDd0LErwDuzv+9KzI7D/SjTi6lJYXJ3zWG47skDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:6a26675b01e64b00d8da2f44e1b55d57d69de31b9f77eba86fed668f5e08d254:83TVizC/iHGmzgqm0b6kmRjlEU1bNdIxFjxaO8O0S90Y0iklgG6/UiU/xaWUsXThciXK1Z7Z9TOCUmFXE7fjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: request-tree-signing
 version: "1.0.0"
@@ -11,3 +11,5 @@ schema:
   selected_product_identity: string
   selected_product_witness: string
   input_content_manifest_hash: string
+# Release authority operation: run by the node operator's release graph only; a principal is served nothing.
+disclosure: {}

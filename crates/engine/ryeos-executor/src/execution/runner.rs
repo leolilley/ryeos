@@ -135,6 +135,11 @@ pub struct ExecutionParams {
     /// launch's thread tree. A callback-dispatched tool carries its parent's
     /// ceiling; only a launch with no parent execution context is unbounded.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Chain this launch originated from, sealed into its launch identity: the
+    /// stamp of the execution that launched it (a callback parent's context or
+    /// the service call that made the launch), `None` for a person's root
+    /// launch, and the sealed value for a launch rebuilt from its identity.
+    pub evaluator_origin_chain: Option<String>,
 }
 
 /// Bound a callback-dispatched tool's process timeout by its caller's hard
@@ -3744,11 +3749,23 @@ fn select_process_input_root(
     isolation_enforced: bool,
     candidate_integration: bool,
     restore_outputs: bool,
+    by_hash_workspace_input: bool,
 ) -> ProcessInputRootSelection {
     if candidate_integration {
         return ProcessInputRootSelection::CandidateIntegrationPrivate;
     }
-    if restore_outputs {
+    // A detached child's workspace input is data: it is materialized by hash
+    // into a private root whatever the child's own project class, so the
+    // process never reaches the parent's workspace or a shared checkout.
+    //
+    // Which authority describes which: the child's recorded project authority
+    // (a copy-on-write pinned workspace that discards at the end) belongs to
+    // the child's own pinned workspace, which the process is never given. The
+    // private by-hash root chosen here is an ephemeral scratch copy, and it is
+    // what the process sees. Both discard and neither writes back. The sealed
+    // `workspace_input` generation is the reader's record of what the process
+    // saw.
+    if restore_outputs || by_hash_workspace_input {
         return ProcessInputRootSelection::PinnedReadOnlyPrivate;
     }
     match (project, has_bindings, isolation_enforced) {
@@ -3958,20 +3975,21 @@ mod process_input_selection_tests {
     #[test]
     fn exact_input_root_selection_matrix_is_closed() {
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::Live, false, false, false, false),
+            select_process_input_root(ProcessProjectClass::Live, false, false, false, false, false),
             ProcessInputRootSelection::Existing
         );
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::Live, true, false, false, false),
+            select_process_input_root(ProcessProjectClass::Live, true, false, false, false, false),
             ProcessInputRootSelection::SparsePrivate
         );
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::Live, true, true, false, false),
+            select_process_input_root(ProcessProjectClass::Live, true, true, false, false, false),
             ProcessInputRootSelection::SparsePrivate
         );
         assert_eq!(
             select_process_input_root(
                 ProcessProjectClass::PinnedReadOnly,
+                false,
                 false,
                 false,
                 false,
@@ -3986,15 +4004,30 @@ mod process_input_selection_tests {
                 true,
                 false,
                 false,
+                false,
             ),
             ProcessInputRootSelection::Existing
         );
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::PinnedCow, true, false, false, false),
+            select_process_input_root(
+                ProcessProjectClass::PinnedCow,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
             ProcessInputRootSelection::Existing
         );
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::PinnedCow, true, true, true, false),
+            select_process_input_root(
+                ProcessProjectClass::PinnedCow,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             ProcessInputRootSelection::CandidateIntegrationPrivate
         );
         assert_eq!(
@@ -4004,8 +4037,52 @@ mod process_input_selection_tests {
                 false,
                 false,
                 true,
+                false,
             ),
             ProcessInputRootSelection::PinnedReadOnlyPrivate
+        );
+    }
+
+    /// A detached child's workspace input is data mounted by hash into a
+    /// private root, whatever the child's own project class or tool shape:
+    /// the process never receives the parent's workspace, an existing
+    /// checkout, or the live project.
+    #[test]
+    fn a_workspace_input_forces_a_private_by_hash_root_for_every_project_class() {
+        for project in [
+            ProcessProjectClass::Live,
+            ProcessProjectClass::Projectless,
+            ProcessProjectClass::PinnedReadOnly,
+            ProcessProjectClass::PinnedCow,
+        ] {
+            for has_bindings in [false, true] {
+                for isolation_enforced in [false, true] {
+                    assert_eq!(
+                        select_process_input_root(
+                            project,
+                            has_bindings,
+                            isolation_enforced,
+                            false,
+                            false,
+                            true,
+                        ),
+                        ProcessInputRootSelection::PinnedReadOnlyPrivate,
+                        "{project:?} bindings={has_bindings} enforced={isolation_enforced}"
+                    );
+                }
+            }
+        }
+        // Without an input the child's own class still decides.
+        assert_eq!(
+            select_process_input_root(
+                ProcessProjectClass::PinnedCow,
+                true,
+                true,
+                false,
+                false,
+                false
+            ),
+            ProcessInputRootSelection::Existing
         );
     }
 
@@ -4056,7 +4133,7 @@ mod process_input_selection_tests {
         let resolution = sourced_python_tool_resolution(true);
         // The refusal applies exactly where the selection is SparsePrivate.
         assert_eq!(
-            select_process_input_root(ProcessProjectClass::Live, true, false, false, false),
+            select_process_input_root(ProcessProjectClass::Live, true, false, false, false, false),
             ProcessInputRootSelection::SparsePrivate
         );
         for access in [
@@ -4101,12 +4178,12 @@ mod process_input_selection_tests {
             ProcessProjectClass::PinnedCow,
         ] {
             assert_ne!(
-                select_process_input_root(project, true, false, false, false),
+                select_process_input_root(project, true, false, false, false, false),
                 ProcessInputRootSelection::SparsePrivate
             );
         }
         assert_ne!(
-            select_process_input_root(ProcessProjectClass::Live, false, false, false, false),
+            select_process_input_root(ProcessProjectClass::Live, false, false, false, false, false),
             ProcessInputRootSelection::SparsePrivate
         );
     }
@@ -4292,6 +4369,17 @@ pub(crate) fn prepare_process_inputs(
         )?;
     }
     let immutable_input_generation = provenance.immutable_workspace_input_generation();
+    // Only a pinned root carries a detached child's workspace input; an
+    // immutable borrowed child already runs from its own input materialization.
+    // The process sees this input as a private scratch copy, not as the
+    // child's own pinned workspace (see `select_process_input_root`).
+    let by_hash_workspace_input = matches!(
+        provenance,
+        ExecutionProvenance::RootPinnedGeneration {
+            workspace_input: Some(_),
+            ..
+        }
+    );
     if let Some(generation) = &immutable_input_generation {
         generation.validate()?;
         if generation.output_capture_hash.is_some() && workspace_outputs.is_none() {
@@ -4313,6 +4401,9 @@ pub(crate) fn prepare_process_inputs(
                     .and_then(|outputs| outputs.capture_hash.clone()),
             },
         }),
+        ProcessProjectClass::PinnedCow if by_hash_workspace_input => {
+            immutable_input_generation.clone()
+        }
         ProcessProjectClass::Live
         | ProcessProjectClass::Projectless
         | ProcessProjectClass::PinnedCow => None,
@@ -4337,6 +4428,7 @@ pub(crate) fn prepare_process_inputs(
         isolation.is_enforced(),
         candidate_integration,
         restore_outputs,
+        by_hash_workspace_input,
     );
     let live_private_root = root_selection == ProcessInputRootSelection::SparsePrivate;
     // A request that explicitly demanded the live project (`--live-project`,
@@ -4669,6 +4761,8 @@ fn admitted_root_launch_metadata(
         effective_caps: params.effective_caps.clone(),
         parent_delegation_caps: None,
         thread_ceiling: params.thread_ceiling,
+        workspace_input: None,
+        evaluator_origin_chain: params.evaluator_origin_chain.clone(),
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
@@ -8348,6 +8442,22 @@ fn decide_resume_provenance(resume: &ResumeContext) -> ResumeProvenanceDecision<
     }
 }
 
+/// A detached child's sealed workspace input is part of its launch authority:
+/// recovery re-attaches the exact generation to the rebuilt root, and a launch
+/// that cannot carry one (a live or projectless root) is refused rather than
+/// run without the data it was admitted with.
+fn reattach_resumed_workspace_input(
+    provenance: ExecutionProvenance,
+    resume: &ResumeContext,
+) -> Result<ExecutionProvenance> {
+    match &resume.workspace_input {
+        Some(input) => provenance
+            .with_detached_workspace_input(input.clone())
+            .context("resume: re-attach the sealed workspace input"),
+        None => Ok(provenance),
+    }
+}
+
 fn execution_provenance_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,
@@ -8374,6 +8484,7 @@ fn execution_provenance_from_resume_context(
                 resume.project_authority.clone(),
             )?
             .with_state_root(resume.state_root.clone());
+            let provenance = reattach_resumed_workspace_input(provenance, resume)?;
             Ok((provenance, ProjectContext::LocalPath { path: canonical }))
         }
         ResumeProvenanceDecision::Projectless => {
@@ -8393,6 +8504,7 @@ fn execution_provenance_from_resume_context(
                 lifeline,
                 resume.project_authority.clone(),
             )?;
+            let provenance = reattach_resumed_workspace_input(provenance, resume)?;
             Ok((provenance, ProjectContext::None))
         }
         ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
@@ -8435,6 +8547,7 @@ fn execution_provenance_from_resume_context(
                 effective_path = %effective_path.display(),
                 "resume: rebuilt pushed-head checkout + overlay engine"
             );
+            let provenance = reattach_resumed_workspace_input(provenance, resume)?;
             Ok((
                 provenance,
                 ProjectContext::LocalPath {
@@ -8484,6 +8597,7 @@ fn execution_provenance_from_resume_context(
                 effective_path = %effective_path.display(),
                 "resume: rebuilt pinned local snapshot as a daemon runtime workspace"
             );
+            let provenance = reattach_resumed_workspace_input(provenance, resume)?;
             Ok((
                 provenance,
                 ProjectContext::LocalPath {
@@ -8842,6 +8956,18 @@ pub fn execution_params_from_sealed_root_request(
             resume.item_ref
         );
     }
+    let carried_workspace_input = match &provenance {
+        ExecutionProvenance::RootPinnedGeneration {
+            workspace_input, ..
+        } => workspace_input.as_ref(),
+        _ => None,
+    };
+    if carried_workspace_input != resume.workspace_input.as_ref() {
+        anyhow::bail!(
+            "created-root provenance carries a different workspace input than its sealed resume authority for {}",
+            resume.item_ref
+        );
+    }
     let resolved = if sealed.qualification_purpose().is_some_and(|purpose| matches!(
         purpose.subject,
         ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }
@@ -8908,6 +9034,8 @@ pub fn execution_params_from_sealed_root_request(
         deadline_end_at_ms: None,
         // The ceiling sealed with the original launch.
         thread_ceiling: operational_resume.thread_ceiling,
+        // The origin sealed with the original launch.
+        evaluator_origin_chain: operational_resume.evaluator_origin_chain.clone(),
     })
 }
 
@@ -9961,6 +10089,35 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn recovery_carries_the_sealed_workspace_input_or_refuses_a_root_that_cannot() {
+        let (temp, _store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        let path = temp.path().to_path_buf();
+        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
+            &path,
+            state.isolation.as_ref(),
+            ryeos_engine::execution_contract::LiveIntent::Default,
+        )
+        .unwrap();
+        let provenance =
+            ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority)
+                .unwrap();
+        let mut resume = resume_record(ProjectContext::LocalPath { path }, None);
+        // A context that sealed no input rebuilds exactly the root it was given.
+        let unchanged = reattach_resumed_workspace_input(provenance.clone(), &resume).unwrap();
+        assert_eq!(unchanged.immutable_workspace_input_generation(), None);
+        // A context that sealed an input never runs without it: a live root
+        // cannot carry one, so recovery refuses rather than drop the data.
+        resume.workspace_input = Some(ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: None,
+        });
+        assert!(reattach_resumed_workspace_input(provenance, &resume).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn partial_credential_mint_unwind_revokes_exact_pair_and_preserves_error() {
         let (temp, _store_owner, state) =
             crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
@@ -10641,6 +10798,8 @@ mod tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: None,
             runtime_ref: None,
         }

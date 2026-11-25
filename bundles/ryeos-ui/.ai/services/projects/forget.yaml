@@ -1,7 +1,10 @@
-# ryeos:signed:2026-07-06T08:36:51Z:e6f293532b144c95c655882ae4d4dbc673d93aa8e0f07b59f7c6390157f92f6b:XhMQ/LMmGURFfdI/1IPgAkAIqsuyJpxqwNsEpZBSDwl5VG8K/gQyBZFEbYpiR0BtFoJBeiPomqAxneBFBffnCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:46a051747d6983a92598cf36f68ec956cbf5388612a0f5165579f16be7bbf839:HjTR+0zWm8Hc/iVCGNtE9QG4PNxKy+5CxiJ0BiNOzVo401ULdUCk2YwIGq7B3W0lD/OsH+1NSvGlubDlgr20Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/forget
 version: "1.0.0"
 description: Forget a project registry entry and prune corresponding recent state.
 endpoint: projects.forget
 availability: daemon_only
+disclosure:
+  principal:
+    - "/removed"

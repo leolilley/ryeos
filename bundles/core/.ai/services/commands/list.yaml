@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:10Z:8f0735eff8bfb8164200e552d975ab5bd3f9a27e3265b02cfd5d95cf7a5894aa:FGsSMuKfHr8hw0Ximmw2YlMKUJXLb5jXSAZR5pRhz6GzLYfANp+cBgNhGCKNLgxtqdfUGkpwGMKBx0OqgA/gAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:5cafaa4bd633e295937e029fd3c4509cf59adb0ef8471ba8016af00a413a58da:uc3jNEHh1QmDMW1eCHdYplKHhmL+jNgqrU91vUE3WokVM4WOwOwWeKlDqJmPh3QIlT++Bn3wfvczbwLfDEq0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "list"
 kind: service
@@ -9,3 +9,17 @@ record_thread: false
 required_caps: []
 schema: {}
 description: "Node command records with per-session invocability (completion data: the grammar shown is the grammar held)"
+disclosure:
+  principal:
+    - "/commands/*/name"
+    - "/commands/*/tokens"
+    - "/commands/*/description"
+    - "/commands/*/arguments"
+    - "/commands/*/forms"
+    - "/commands/*/defaults"
+    - "/commands/*/parameter_binding"
+    - "/commands/*/control_flags"
+    - "/commands/*/project"
+    - "/commands/*/invocable"
+  max_items: 4096
+  max_result_bytes: 4194304

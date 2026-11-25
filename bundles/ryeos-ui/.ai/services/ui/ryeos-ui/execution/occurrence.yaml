@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T05:20:52Z:94dc515ec8764514d24f67cc642db1c83ac34aa998ffaf5fa5d186fd30c14bdb:BJOtXnlcHm2L9yX1YBug9VJ6Geu/7G/Advmx4If6ClLwVjeyHZgQf1304VwxBPV+0745zF9NGEsVWFyq0kEQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:24b5389c6b0d1227d47fbd74bed5038c57d7684d73f3076a2d8d6958f46c0181:ZKbs1nS2rkIca/OjTzhQKtfIjZMJL/biaIDMGyagLE0CwnXM4KUBSyG4cnkMElt4S1/RSqi7QQcZWXFQYV3/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/execution/occurrence
 version: "1.0.0"
@@ -8,3 +8,50 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/schema_version"
+    - "/subject"
+    - "/cursor"
+    - "/occurrence/*/id"
+    - "/occurrence/*/kind"
+    - "/occurrence/*/label"
+    - "/occurrence/*/parent_id"
+    - "/occurrence/*/status"
+    - "/occurrence/*/canonical_ref"
+    - "/occurrence/*/source_content_digest"
+    - "/occurrence/*/effective_definition_digest"
+    - "/occurrence/*/admitted_launch_capsule_hash"
+    - "/occurrence/*/event_ref"
+    - "/occurrence/*/artifact_ref"
+    - "/occurrence/*/provenance"
+    - "/evidence/*/id"
+    - "/evidence/*/kind"
+    - "/evidence/*/label"
+    - "/evidence/*/parent_id"
+    - "/evidence/*/status"
+    - "/evidence/*/canonical_ref"
+    - "/evidence/*/source_content_digest"
+    - "/evidence/*/effective_definition_digest"
+    - "/evidence/*/admitted_launch_capsule_hash"
+    - "/evidence/*/event_ref"
+    - "/evidence/*/artifact_ref"
+    - "/evidence/*/provenance"
+    - "/relations/*/id"
+    - "/relations/*/kind"
+    - "/relations/*/source_id"
+    - "/relations/*/target_id"
+    - "/relations/*/status"
+    - "/relations/*/directed"
+    - "/relations/*/provenance"
+    - "/coverage/*/state"
+    - "/coverage/*/truncated"
+    - "/coverage/*/warning_count"
+  free_text:
+    - "/occurrence/*/attributes"
+    - "/relations/*/attributes"
+  interim_free_text:
+    - "/evidence/*/attributes"  # removed by: per-chain publication
+    - "/coverage/*/warnings"  # removed by: per-chain publication
+  max_items: 12000
+  max_result_bytes: 4194304

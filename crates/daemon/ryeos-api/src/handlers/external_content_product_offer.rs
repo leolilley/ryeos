@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
@@ -46,24 +47,44 @@ impl Request {
     fn validate(&self) -> Result<()> {
         for hash in [&self.witness_hash, &self.origin_admission_hash] {
             if !is_canonical_hash(hash) {
-                bail!("product offer requires exact canonical witness and admission hashes");
+                return Err(typed_refusal(
+                    "product_offer_hashes_invalid",
+                    400,
+                    "product offer requires exact canonical witness and admission hashes",
+                )
+                .into());
             }
         }
         if self.maximum_bytes == 0 {
-            bail!("product offer requires a positive byte bound");
+            return Err(typed_refusal(
+                "product_offer_byte_bound_invalid",
+                400,
+                "product offer requires a positive byte bound",
+            )
+            .into());
         }
         if self.objects.len() > MAX_OFFERED_OBJECTS {
-            bail!(
-                "product offer carries {} objects; the per-call bound is {MAX_OFFERED_OBJECTS}",
-                self.objects.len()
-            );
+            return Err(typed_refusal(
+                "product_offer_too_many_objects",
+                422,
+                format!(
+                    "product offer carries {} objects; the per-call bound is {MAX_OFFERED_OBJECTS}",
+                    self.objects.len()
+                ),
+            )
+            .into());
         }
         if self
             .staging_id
             .as_deref()
             .is_some_and(|id| id.is_empty() || id.len() > 256)
         {
-            bail!("product offer staging_id is not a server-issued capability");
+            return Err(typed_refusal(
+                "product_offer_staging_id_invalid",
+                400,
+                "product offer staging_id is not a server-issued capability",
+            )
+            .into());
         }
         Ok(())
     }
@@ -94,15 +115,23 @@ pub(crate) fn authenticate_push_origin(
         state,
         &ctx.fingerprint,
     )?;
-    let site_id = ctx
-        .authenticated_origin_site_id
-        .as_deref()
-        .context("product push requires an authenticated origin site")?;
+    let site_id = ctx.authenticated_origin_site_id.as_deref().ok_or_else(|| {
+        typed_refusal(
+            "origin_site_required",
+            403,
+            "product push requires an authenticated origin site",
+        )
+    })?;
     if authority.origin_site_id != site_id {
-        bail!(
-            "operator grant is bound to origin site {}, not the authenticated site {site_id}",
-            authority.origin_site_id
-        );
+        return Err(typed_refusal(
+            "origin_site_mismatch",
+            403,
+            format!(
+                "operator grant is bound to origin site {}, not the authenticated site {site_id}",
+                authority.origin_site_id
+            ),
+        )
+        .into());
     }
     let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let (origin_key, expected_issuer) = resolve_push_origin(&remotes, site_id)?;
@@ -119,8 +148,21 @@ fn resolve_push_origin(
     remotes: &std::collections::HashMap<String, RemoteConfig>,
     site_id: &str,
 ) -> Result<(lillux::crypto::VerifyingKey, String)> {
-    let resolved = resolve_remote_by_site_id(remotes, site_id)
-        .with_context(|| format!("no configured remote for origin site {site_id}"))?;
+    let resolved = match resolve_remote_by_site_id(remotes, site_id) {
+        Ok(resolved) => resolved,
+        Err(error @ crate::remote::config::TargetSiteError::UnknownSite { .. }) => {
+            return Err(typed_refusal(
+                "origin_site_not_configured",
+                403,
+                format!("no configured remote for origin site {site_id}: {error:#}"),
+            )
+            .into());
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("no configured remote for origin site {site_id}")));
+        }
+    };
     let key = resolved
         .remote
         .pinned_signing_key()
@@ -136,14 +178,23 @@ fn verify_offered_admission(
     authority: &PushAuthority,
 ) -> Result<AdmissionAttestationRemoteRecord> {
     let record: AdmissionAttestationRemoteRecord =
-        serde_json::from_value(req.origin_admission.clone())
-            .context("offered origin admission is not an admission attestation record")?;
+        serde_json::from_value(req.origin_admission.clone()).map_err(|error| {
+            typed_refusal(
+                "origin_admission_malformed",
+                400,
+                format!("offered origin admission is not an admission attestation record: {error}"),
+            )
+        })?;
     if record.attestation_hash != req.origin_admission_hash {
-        bail!(
-            "offered origin admission is {}, not the named {}",
-            record.attestation_hash,
-            req.origin_admission_hash
-        );
+        return Err(typed_refusal(
+            "origin_admission_hash_mismatch",
+            400,
+            format!(
+                "offered origin admission is {}, not the named {}",
+                record.attestation_hash, req.origin_admission_hash
+            ),
+        )
+        .into());
     }
     verify_remote_attestation_record(
         &record,
@@ -151,7 +202,8 @@ fn verify_offered_admission(
         ryeos_state::admission::LOCAL_ADMISSION_POLICY,
         &authority.expected_issuer,
         &authority.origin_key,
-    )?;
+    )
+    .map_err(|error| typed_refusal("origin_admission_unverified", 403, format!("{error:#}")))?;
     Ok(record)
 }
 
@@ -178,7 +230,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .node_policy
         .require::<ExternalContentImportPolicyRecord>()?;
     if req.maximum_bytes > policy.limits.max_total_bytes {
-        bail!("product offer byte bound exceeds current import policy");
+        return Err(typed_refusal(
+            "product_offer_byte_bound_exceeds_policy",
+            422,
+            "product offer byte bound exceeds current import policy",
+        )
+        .into());
     }
     // Nothing is stored until the admission is proven.
     let record = verify_offered_admission(&req, &authority)?;
@@ -236,7 +293,12 @@ fn stage_offer(
         )?,
     };
     if let Some(target) = stage.admitted_target_hash() {
-        bail!("durable upload stage is already admitted for publication target {target}");
+        return Err(typed_refusal(
+            "upload_stage_already_admitted",
+            409,
+            format!("durable upload stage is already admitted for publication target {target}"),
+        )
+        .into());
     }
 
     // The verified admission object itself, then the offered closure objects.
@@ -245,8 +307,13 @@ fn stage_offer(
         bail!("stored origin admission {admission_hash} differs from the named hash");
     }
     for object in &req.objects {
-        lillux::canonical_json_bounded(object, object_ceiling)
-            .context("offered object is not bounded canonical JSON")?;
+        lillux::canonical_json_bounded(object, object_ceiling).map_err(|error| {
+            typed_refusal(
+                "offered_object_not_canonical_json",
+                400,
+                format!("offered object is not bounded canonical JSON: {error:#}"),
+            )
+        })?;
         stage.store_object(&guard, &cas, object)?;
     }
 
@@ -256,11 +323,16 @@ fn stage_offer(
         limits,
     )?;
     if !report.malformed_objects.is_empty() || !report.unsupported_objects.is_empty() {
-        bail!(
-            "offered closure has {} malformed and {} unsupported objects",
-            report.malformed_objects.len(),
-            report.unsupported_objects.len()
-        );
+        return Err(typed_refusal(
+            "offered_closure_invalid",
+            422,
+            format!(
+                "offered closure has {} malformed and {} unsupported objects",
+                report.malformed_objects.len(),
+                report.unsupported_objects.len()
+            ),
+        )
+        .into());
     }
     stage.protect_cas_closure(
         &guard,
@@ -289,7 +361,13 @@ fn stage_offer(
             continue;
         }
         let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)
-            .with_context(|| format!("large-content manifest {hash} is invalid"))?;
+            .map_err(|error| {
+                typed_refusal(
+                    "large_content_manifest_invalid",
+                    422,
+                    format!("large-content manifest {hash} is invalid: {error:#}"),
+                )
+            })?;
         for entry in &manifest.entries {
             if let (Some(file_sha256), Some(size), Some(chunk_size)) =
                 (&entry.file_sha256, entry.size, entry.chunk_size)
@@ -297,15 +375,28 @@ fn stage_offer(
                     .insert(file_sha256.clone(), (size, chunk_size))
                     .is_some_and(|prior| prior != (size, chunk_size))
             {
-                bail!("manifests declare conflicting sealed shapes for large object {file_sha256}");
+                return Err(typed_refusal(
+                    "large_object_shape_conflict",
+                    422,
+                    format!(
+                        "manifests declare conflicting sealed shapes for large object {file_sha256}"
+                    ),
+                )
+                .into());
             }
         }
     }
     let mut large_objects = Vec::with_capacity(report.large_object_hashes.len());
     let mut declared_bytes = 0_u64;
     for file_sha256 in &report.large_object_hashes {
-        let (size, chunk_size) = declared.get(file_sha256).copied().with_context(|| {
-            format!("closure names large object {file_sha256} that no present manifest declares")
+        let (size, chunk_size) = declared.get(file_sha256).copied().ok_or_else(|| {
+            typed_refusal(
+                "large_object_undeclared",
+                422,
+                format!(
+                    "closure names large object {file_sha256} that no present manifest declares"
+                ),
+            )
         })?;
         declared_bytes = declared_bytes
             .checked_add(size)
@@ -338,13 +429,23 @@ fn stage_offer(
         }));
     }
     if declared_bytes > req.maximum_bytes {
-        bail!(
-            "offered large objects total {declared_bytes} bytes, over the {} byte bound",
-            req.maximum_bytes
-        );
+        return Err(typed_refusal(
+            "offered_large_objects_over_bound",
+            422,
+            format!(
+                "offered large objects total {declared_bytes} bytes, over the {} byte bound",
+                req.maximum_bytes
+            ),
+        )
+        .into());
     }
     if declared_bytes > policy.limits.max_total_bytes {
-        bail!("offered large objects exceed the current import policy total");
+        return Err(typed_refusal(
+            "offered_large_objects_exceed_policy",
+            422,
+            "offered large objects exceed the current import policy total",
+        )
+        .into());
     }
 
     let missing_blobs = report
@@ -385,6 +486,16 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sentence a typed refusal carries, or the error's own text.
+    fn refusal_text(error: &anyhow::Error) -> String {
+        match ryeos_app::handler_error::extract_handler_error(error) {
+            Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body["error"]
+                .as_str()
+                .map_or_else(|| error.to_string(), str::to_owned),
+            _ => format!("{error:#}"),
+        }
+    }
 
     #[test]
     fn authored_service_schema_matches_the_typed_request() {
@@ -639,9 +750,7 @@ mod tests {
         let (key, issuer) = resolve_push_origin(&remotes, "site:origin").unwrap();
         assert_eq!(key.as_bytes(), origin.key().as_bytes());
         assert_eq!(issuer, format!("fp:{}", origin.fingerprint()));
-        let error = resolve_push_origin(&remotes, "site:unknown")
-            .unwrap_err()
-            .to_string();
+        let error = refusal_text(&resolve_push_origin(&remotes, "site:unknown").unwrap_err());
         assert!(
             error.contains("no configured remote for origin site"),
             "{error}"
@@ -673,16 +782,13 @@ mod tests {
         // A matching key with a different expected issuer is refused.
         let mut wrong_issuer = authority_for(&origin);
         wrong_issuer.expected_issuer = format!("fp:{}", impostor.fingerprint());
-        let error = verify_offered_admission(&request, &wrong_issuer)
-            .unwrap_err()
-            .to_string();
+        let error = refusal_text(&verify_offered_admission(&request, &wrong_issuer).unwrap_err());
         assert!(error.contains("issuer mismatch"), "{error}");
 
         // The record must be the one the request names.
         let named_elsewhere = request_for(&witness, &"cd".repeat(32), record.clone());
-        let error = verify_offered_admission(&named_elsewhere, &authority)
-            .unwrap_err()
-            .to_string();
+        let error =
+            refusal_text(&verify_offered_admission(&named_elsewhere, &authority).unwrap_err());
         assert!(error.contains("not the named"), "{error}");
 
         // The record must be about the named witness.

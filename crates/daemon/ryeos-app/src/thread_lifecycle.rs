@@ -5159,6 +5159,7 @@ impl ThreadLifecycleService {
         // by signal, which never drains its own command) reaches finalization
         // HERE, not through `finalize_thread_inner`.
         self.settle_open_commands(thread_id, terminal_status);
+        self.nudge_parent_end_stop(thread_id, terminal_status);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -5688,6 +5689,7 @@ impl ThreadLifecycleService {
         // `commands.wait` blocked on them — otherwise the await rides to its
         // timeout. Best-effort: a failure here must not fail finalization.
         self.settle_open_commands(&params.thread_id, terminal_status);
+        self.nudge_parent_end_stop(&params.thread_id, terminal_status);
 
         let finalized = self
             .get_thread(&params.thread_id)?
@@ -5706,6 +5708,59 @@ impl ThreadLifecycleService {
         );
 
         Ok(finalized)
+    }
+
+    /// After a thread's terminal commit: when it has flagged detached children
+    /// still live, wake the daemon's recovery pass, whose sweep stops them (see
+    /// `cascade::stop_flagged_children_of_ended_parents`). The stop runs in that
+    /// pass, never here, so a finalizing session never waits on its own
+    /// children, on its own hosted-operation gate, or on a grace period. A
+    /// continued segment is not an end. Best-effort: a failure here is logged
+    /// and never fails finalization; the periodic sweep finds the same
+    /// children.
+    fn nudge_parent_end_stop(&self, thread_id: &str, terminal_status: &str) {
+        if terminal_status == ThreadStatus::Continued.as_str() {
+            return;
+        }
+        // The session ends with its tail: a chain that has not ended, or one
+        // with no flagged child in any segment, has nothing to wake.
+        match crate::cascade::session_chain_has_ended(&self.state_store, thread_id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to resolve the ended session's chain; the periodic sweep retries"
+                );
+                return;
+            }
+        }
+        let children = match crate::cascade::session_flagged_dispatch_children(
+            &self.state_store,
+            thread_id,
+        ) {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to list the ended session's flagged children; the periodic sweep retries"
+                );
+                return;
+            }
+        };
+        for child in children {
+            let live = match self.state_store.get_thread(&child) {
+                Ok(Some(thread)) => !crate::state_store::is_terminal_status(&thread.status),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            if live {
+                crate::recovery_nudge::nudge();
+                return;
+            }
+        }
     }
 
     /// Reject any commands still open for a finalized thread and wake blocked
@@ -6790,16 +6845,26 @@ impl ThreadLifecycleService {
             .ok_or_else(|| {
                 anyhow!("child thread {child_thread_id} has no recorded link to its parent")
             })?;
+        let mut payload = json!({
+            "child_thread_id": child_thread_id,
+            "item_id": child.item_ref,
+            "operation_id": intent.operation_id,
+            "spawn_reason": relation,
+        });
+        // A link recorded to cancel its child when the parent ends says so in
+        // the session chain, before the child runs, beside the edge itself.
+        if self
+            .state_store
+            .child_link_cancel_on_parent_end(child_thread_id)?
+            == Some(true)
+        {
+            payload["cancel_on_parent_end"] = json!(true);
+        }
         let outcome = self.append_child_thread_spawned_once(
             &parent.chain_root_id,
             parent_thread_id,
             child_thread_id,
-            json!({
-                "child_thread_id": child_thread_id,
-                "item_id": child.item_ref,
-                "operation_id": intent.operation_id,
-                "spawn_reason": relation,
-            }),
+            payload,
         )?;
         Ok(DispatchChildLineage::Recorded(outcome))
     }

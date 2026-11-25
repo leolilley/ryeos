@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T06:24:45Z:da39da64bec8664e642cc2114dc0550946ade4733b5af0cd8f3eca9e0cfe98d6:kc7pe/Xw+RwrIzNOZLApW3l3f3gUqfd32e3JyHmQtqc3Kg6ibALKvuFAX5AMCrKHYkEw0m1oPv9/oYZPG2slBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:0ec56edce7ae48b8e761d66e504c7d545007ab370947f3173564a8d8f7c1f1e8:ujOwd2hhLrSWHOx1iwcsX1wEmcD/zb9U0rYn5ZxqYos2bp1S18QsxTiTvTjmcsn/j/bsINpBYenGMz6lzejTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote-worker-workflows.start
 availability: daemon_only
@@ -13,3 +13,5 @@ schema:
   source_snapshot_hash: string?
   target_product_selections: array
 description: "Start one source-owned bounded remote-worker workflow through target launch acceptance using an optional already-pushed source snapshot that must exactly match the project tree and policy independently captured at admission, plus an explicit canonical destination-local product-selection batch. Returns source_work_id and allowed_next_action=resume; it does not discover products, infer target completion, or pull a candidate."
+# Starting a remote-worker workflow requires the local configured operator; no principal is served.
+disclosure: {}

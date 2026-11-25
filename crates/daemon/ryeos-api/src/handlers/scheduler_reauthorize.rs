@@ -175,7 +175,10 @@ pub async fn handle(
     })?;
     let principal_grant_hash = current_grant.principal_grant_hash.clone();
     let rec = super::scheduler_register::rewrite_schedule_authority(&scheduler, &spec, current)
-        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+        .map_err(|e| {
+            crate::handler_error::extract_handler_error(&e)
+                .unwrap_or_else(|| HandlerError::Internal(format!("{e:#}")))
+        })?;
     scheduler_db
         .upsert_spec(&rec)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;

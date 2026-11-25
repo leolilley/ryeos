@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T06:15:34Z:82f7347ebf9e18df1fde7b40d53d56574e2bd08b2137db6ec7565f3d3daab3da:baR1CnE9cDKT8/F62QN5ep5KIWP8hPq1ipkiVt2QMqtlOTOfry3I90FIZMZaPJpic2jm+o+exhJN7nOs/SlJCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:0fadb13942bb75ffb0d1e58bbdb4c7549add0eaf0e0793b8e3f1de9a50ac1efc:8CmIz/0YEaQVg7KDQ7FiyKYvRBs13YjMts4KaPTDduR3LDmXANhHd84N7kXTwgnsDeessh2HpQj9VIMyeFu+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: session-attachment-detach
 version: "1.0.0"
@@ -8,3 +8,7 @@ endpoint: ui.session.attachments.detach
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/detached"
+    - "/attachment"

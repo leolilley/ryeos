@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T07:56:08Z:f225768b604c978190ace50133c7e157bf3f387c25f74c2811c130b0ae890b9a:63h7Xf5kdj5GrEutMSt8Hr4+57JlToRB8bNeITrQoTp8690PHWBgsZjLfvSJ6B7+rnF+RXeB4ENdQrHvIAlRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T03:51:26Z:7a97f426d3b29ab198a2623bfe40d0d834f51bbb7bd2d50974f6b394f3b6677c:ylzw3NedysVP9iNaIXF12TbmFwuhoaCZoGbZ1ask2btLOXviSpX2g+Bqd5z6TmvSfrL3i034smSVJ+8951uLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/ryeos-ui/view-sets/resume"]
 name: ryeos-ui/view-sets/resume
@@ -14,3 +14,15 @@ schema:
   expected_revision: integer
   surface_ref: string
   creation_request_id: string
+disclosure:
+  principal:
+    - /ui_transition/kind
+    - /ui_transition/presentation_id
+    - /ui_transition/creation_request_id
+  interim_free_text:
+    - /particular_view_set  # removed by: m4
+    - /particular_selection  # removed by: m4
+    - /ui_transition/surface  # removed by: m4
+    - /ui_transition/attachment  # removed by: m4
+    - /ui_transition/tab_attachments  # removed by: m4
+    - /ui_transition/opening  # removed by: m4

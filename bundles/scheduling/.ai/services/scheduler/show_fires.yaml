@@ -1,7 +1,29 @@
-# ryeos:signed:2026-08-11T02:28:45Z:5bd7fc1342eac18862c099dada9d94703ac1d67f714609d8b29d7799c23bc36e:FnjboeUPUUxI7MMQAo8F7a7dq1O8Y00T1DaNi8LgJOydVoWlRExXIVPLmE592n2eKvR0iQpj1CXNidqTJN//AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9b35a2504669263d4a5cbefc61e87fe84f570780b2c6f3fd8811c419c7a8029e:RtmQlTWwjHuGDyQQ31zC+k7JNfEZGPDJxqc29OAqBlwiZea96tra02LF1EKnAb3wRF4eiEDguheGltV92PQWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "show_fires"
 kind: service
 endpoint: scheduler.show_fires
 required_caps: []
 description: "Show fire history for a schedule"
+disclosure:
+  principal:
+    - /schedule_id
+    - /total
+    - /returned
+    - /fires/*/schedule_id
+    - /fires/*/fire_id
+    - /fires/*/scheduled_at
+    - /fires/*/reserved_at
+    - /fires/*/dispatched_at
+    - /fires/*/completed_at
+    - /fires/*/thread_id
+    - /fires/*/status
+    - /fires/*/trigger_reason
+    - /fires/*/outcome
+    - /fires/*/schedule_spec_hash
+    - /fires/*/admitted_capsule_hash
+  free_text:
+    - /fires/*/signer_fingerprint
+    - /fires/*/project_authority
+  max_items: 512
+  max_result_bytes: 1048576

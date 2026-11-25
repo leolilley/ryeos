@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:ba46d70e82c37acb2cadc8dd8c4a0aac0c84971500034ec2fb652df1e82f2609:/eczqb7xOMqty02Zq1MCFHvmeK/2ZEDrpx/8Hc7rRXCjHRQ5UanQqCvvxVw/rTWNw9rocP7u7xjb/jdLl+niAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:5f8cfb2b42a1a55c9f0183dbcfe709c317cbbf626e893382ce0fb4dec2dcbe07:cmveNzL4Ugc6/T0FDtlK/Nk4Vqs1V/99jqLwdf4McV89S/2i0uDFdYYJnj6qlHBzQqYgeG+8KlF+TLYkez8vCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-capture
 version: "1.0.0"
@@ -23,3 +23,5 @@ schema:
   build_recipe_raw_digest: string
   materialization_result_hash: string
   signed_tree_manifest_hash: string
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

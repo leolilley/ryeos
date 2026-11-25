@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:23Z:2cc9cc65385c34664f8a3d16241731893db337f10ac434b0270b11f2eae3fb1d:tBrnTHbKMeF/wcSDyD/xWrRtWIPZZJvawzOlOzGbHTw6uqIMsgQJghY1KN5Yor+uKULBnkU3nrH72BQqWtNzAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:62f3a0dcaef640005db9698cbf8ae2b9d19ce7687dd1d86362457810ec2c4e7d:qZiq+tldGZaisfoF3Hqql3tAYdedOoZCn1e8Q5DQ5sBtDfdYjPHMGTaq0kXLC8riq1IGg67R/XyxXqRpgtyjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: start-candidate-evaluation
 kind: service
@@ -6,3 +6,20 @@ endpoint: worker-executions.start-candidate-evaluation
 required_caps: ["ryeos.execute.service.worker-executions/start-candidate-evaluation"]
 schema: {chain_root_id: string, candidate_snapshot_hash: string, candidate_validation_hash: string, evaluator_item_ref: string, evaluator_parameters: object?, evaluator_ref_bindings: object?, integration: object?, launch_id: string}
 description: Launch an evaluator resolved from the exact immutable base against one exact retained candidate view without publication authority.
+disclosure:
+  principal:
+    - "/launch_id"
+    - "/thread_id"
+    - "/chain_root_id"
+    - "/idempotent"
+    - "/candidate_operation/schema_version"
+    - "/candidate_operation/source_chain_root_id"
+    - "/candidate_operation/source_placement_thread_id"
+    - "/candidate_operation/base_snapshot_hash"
+    - "/candidate_operation/candidate_snapshot_hash"
+    - "/candidate_operation/candidate_validation_hash"
+    - "/candidate_operation/integration_operation_hash"
+    - "/candidate_operation/integration_launch_id"
+    - "/candidate_operation/purpose"
+  free_text:
+    - "/candidate_operation/owner_principal"

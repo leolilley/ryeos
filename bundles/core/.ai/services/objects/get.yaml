@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T20:05:09Z:4aadaf730a8884cb78778c8c541cdb8081bc574ee3fde30a308afd5a5836f974:W/ftIKOv2Wxm1xRPW2bFoRb58xKaBHP6/4uu4sY1VWSUjrTltXDOSnu+4WfoSg6QgTv+MXbNPt2JJAwFRUXXAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:b7937534f56c94b19819ea91a6cf0cc29f5b462c97efa38cfac7c844732ed8ce:ftEK4O2JL95p9D0hb3Et0npynEkHoR7upBA7+U0Qu2ur3Av0KS1RUpc2XudXoAs46vgv6afo6hcE/WKtTUZhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.get
 required_caps: ["ryeos.execute.service.objects/get"]
@@ -9,3 +9,24 @@ schema:
   blob_chunk: object?
   large_object_chunk: object?
 description: "Retrieve typed CAS object/blob batches, one bounded blob chunk, or one bounded large-object chunk served from the large-object tier, only for hashes reachable from the named root (project_head, thread_result, bundle_export, placement, admitted_subject or catalog_publication); refuses anything else with object_not_in_scope"
+disclosure:
+  principal:
+    - "/entries/*/hash"
+    - "/entries/*/kind"
+    - "/blob_chunk/hash"
+    - "/blob_chunk/kind"
+    - "/blob_chunk/offset"
+    - "/blob_chunk/total_size"
+    - "/blob_chunk/eof"
+    - "/large_object_chunk/hash"
+    - "/large_object_chunk/kind"
+    - "/large_object_chunk/offset"
+    - "/large_object_chunk/total_size"
+    - "/large_object_chunk/eof"
+  interim_free_text:
+    - "/entries/*/value"  # removed by: m4
+    - "/entries/*/data"  # removed by: m4
+    - "/blob_chunk/data"  # removed by: m4
+    - "/large_object_chunk/data"  # removed by: m4
+  max_items: 4096
+  max_result_bytes: 8388608

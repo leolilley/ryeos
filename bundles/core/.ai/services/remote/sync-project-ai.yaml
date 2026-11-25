@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:18Z:d9ceeb209e055ba68a434d42399d82bb456b6362b1fc68e699d3da29a19c647f:n1sDmJRa5ThSuHZ2fz5sJ7XuMvmrqUxALN4MWhNKlaTTOtu/pceqeEaxvGJmwQD8LTIIOGHOd3OcK6dKChcqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:3d7fb33195c7f6b6c05088c298eb5a7342fa37db450a831c36d86a0889dbd801:ViWwgLEMH3Y/nH0YpquZKlcfQYFbSZt3T0MjPuS+oa1VbQMj6g3JctR79x9UdJx6NJYIc2MCUEBO9U34X15OAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-project-ai
 required_caps: ["ryeos.execute.service.remote/sync-project-ai"]
@@ -7,3 +7,29 @@ schema:
   project: string
   expected_deployed_hash: string?
 description: "Sync managed project .ai content to a remote node and apply it"
+disclosure:
+  principal:
+    - "/remote"
+    - "/push/snapshot_hash"
+    - "/push/tree_hash"
+    - "/push/tree_entries"
+    - "/push/blobs_uploaded"
+    - "/push/blobs_skipped"
+    - "/expected_deployed_hash"
+    - "/apply/project_hash"
+    - "/apply/snapshot_hash"
+    - "/apply/previous_deployed_hash"
+    - "/apply/project_sync_scope"
+    - "/apply/tree_entries"
+    - "/apply/idempotent"
+    - "/apply/files_materialized"
+    - "/apply/surfaces_replaced"
+    - "/apply/surfaces_deleted"
+    - "/apply/schedules/declared"
+    - "/apply/schedules/created"
+    - "/apply/schedules/updated"
+    - "/apply/schedules/deleted"
+  free_text:
+    - "/local_project_path"
+    - "/remote_project_path"
+    - "/apply/project_path"

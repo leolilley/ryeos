@@ -1,5 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:19Z:56c24db026b7106ba71401919842f47350328a8fd4f4d2d733aa52982717eb38:/tVs9xyh7At9883z5emS6NyfKa2o81BKQtBszbpKeoI158cHEfNpDRLBU37BYPdyt2gRj2+N7271TiG6AMKvDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:15e2ef7e1783d1c60587defacb806d6c8c2a6b99c0bd53e233c2dc555bbea955:N1VkBJKymK5UXhsvWDZv15bavLU90AvdC69rok2WACdHR3ShDPFQYlxqwoyW0Du3EhjhcmOBpd10DJBHlHZdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: vault.list
 required_caps: ["ryeos.execute.service.vault/list"]
 description: "List secret key names in the node vault"
+disclosure:
+  principal:
+    - "/secrets"

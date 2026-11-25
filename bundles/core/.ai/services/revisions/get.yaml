@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:ca1eb1494ada73d95985d6392bed0f3dd97f9b60553c0b2ce4829d0dd071ac96:uBZhfClY0x9l93jZKK4gmQ8yNXZBv9MaxTknDV0jdRKbZ2Co5nzFfUW7f78UGDhOeT4hxl0DBuhvvRfqZP5rDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:1b53f2302f8619c19ab42939e119d58c36dc8862a9a23c4ccf050a80386f48a3:+ivP+Wb5U9GPkEy/vXip8CVeoySt4y+avcuHUNbGPQjGFcgsu2Q7K+sppqCe35zTEBYZ86/dDJKAUPFFuuaDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.get
 availability: both
@@ -12,3 +12,40 @@ schema:
   seq: integer
   include_unverified: boolean?
 description: "Read one signed revision record of a project item with its signed item bytes and what was checked. A record that fails verification is withheld"
+disclosure:
+  principal:
+    - "/item_ref"
+    - "/total"
+    - "/sound"
+    - "/head/status"
+    - "/head/seq"
+    - "/head/head_seq"
+    - "/head/tip_seq"
+    - "/record/seq"
+    - "/record/hash"
+    - "/record/verify/status"
+    - "/record/verify/scheme"
+    - "/record/verify/signer"
+    - "/record/unrecorded_change_before"
+    - "/record/tombstone"
+    - "/record/recorded_at"
+    - "/record/actor/fingerprint"
+    - "/record/actor/role"
+    - "/record/before_digest"
+    - "/record/after_digest"
+    - "/record/file_ext"
+    - "/record/provenance/authored_by"
+    - "/record/provenance/action"
+    - "/record/provenance/thread_id"
+    - "/record/provenance/invocation_id"
+    - "/record/provenance/parent_item_ref"
+    - "/record/provenance/authoring_capability"
+    - "/record/provenance/target_ref"
+    - "/record/provenance/content_digest"
+  free_text:
+    - "/file"
+    - "/record/verify/reason"
+    - "/record/body/previous"
+    - "/record/body/content"
+  max_items: 256
+  max_result_bytes: 524288

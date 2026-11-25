@@ -1,7 +1,9 @@
-# ryeos:signed:2026-08-26T10:09:18Z:bbe32c060a8532014afc9f886bace73431c01bc4ac4a5c290f92d1e26bb2af24:IxiM3R8/4YOTZypJy8YzJ0cnFAapowycbtFPem+2Pp8VPmgBUWRC/UrdpfjsmFM9TY5tRrPEIQGfi7TJ7ujzBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:083f7df361b15aff2f0bc6f7b2fd3ec69b5248c6e9ffa96fd84862772075b7cd:ku4Y2SmD2LSAvVjYZemi2MzIHxAuNyEX3gjtBMCoPDx59sJHY0dn9u8AJ7OVpHHINVqYHIPEgDwFuxHGwkwsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.command
 required_caps: ["ryeos.execute.service.worker-executions/command"]
 result_retention: digest_only
 schema: {chain_root_id: string, idempotency_key: string, route_id: string, payload: object}
 description: Send one idempotent opaque command through a session worker ledger.
+# The handler resolves the hosted session through the admitted-operator check.
+disclosure: {}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:50Z:c687d29b122829f40bfc8eea58eb30723698b663fd54df1c2c2c2401e1d8462a:VL4XAzeT57Kv4tV3IWSfCUTrZ4CRO8eX1YlagOamDTEyz/c0GIQ3ASg8XahWy4jzCyb/OzcyvPBk0YJRKlQBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:2963b1705e76212c6427fddc9e6f734131c04b846a8191c01cedee4a3d99b6f8:40Ouu0I2kJtvxc6UjYsCKgoZfgjCNlrLnBrXWC5U45Qm/XtW565bczUP/J1TPkkMZk6C/vKcp+lSYDWaqJ8tBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: verify
 availability: local
@@ -9,3 +9,5 @@ schema:
   item_refs: string[]?
   project_path: string?
 description: "Resolve and trust-verify one or more items via the engine"
+# Local-only trust verification tool that resolves items on the node's disk; the node operator only.
+disclosure: {}

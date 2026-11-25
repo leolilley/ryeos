@@ -39,11 +39,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // nodes are keyed by it.
     let project_name = ryeos_state::project_identity::ProjectDeclaration::declared_name(&local)?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest; add one before binding it",
-                local.display(),
-                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
-            )
+            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                "project_manifest_missing",
+                422,
+                format!(
+                    "project_manifest_missing: {} has no {}; a project's name is the `name:` of its manifest; add one before binding it",
+                    local.display(),
+                    ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+                ),
+            ))
         })?;
     let app_root = state.config.runtime_root();
     // The remote reports the project owner it resolves for the outbound key

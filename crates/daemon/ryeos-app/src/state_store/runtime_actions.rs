@@ -1,6 +1,35 @@
 //! Hook dispatch, runtime action intents and workspace operations.
 use super::*;
 
+/// How old an unsealed detached intent without a child must be before it is
+/// retired, when the node does not state one. A constant, not signed policy.
+pub const ABANDONED_DETACHED_INTENT_AGE_DEFAULT: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+
+/// Hard ceiling on that age; a larger value is clamped to it.
+pub const ABANDONED_DETACHED_INTENT_AGE_MAX: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The age to apply for a configured value: the default when none is
+/// configured, otherwise the value clamped to
+/// [`ABANDONED_DETACHED_INTENT_AGE_MAX`].
+pub fn abandoned_detached_intent_age(
+    configured: Option<std::time::Duration>,
+) -> std::time::Duration {
+    configured.map_or(ABANDONED_DETACHED_INTENT_AGE_DEFAULT, |age| {
+        age.min(ABANDONED_DETACHED_INTENT_AGE_MAX)
+    })
+}
+
+/// What [`StateStore::retire_abandoned_detached_intents`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AbandonedDetachedIntents {
+    /// Operation ids of the intents deleted.
+    pub retired: Vec<String>,
+    /// Child ids whose link carries a spend draw nothing has released.
+    pub draw_bearing_links: Vec<String>,
+}
+
 impl StateStore {
     pub fn complete_hook_dispatch(
         &self,
@@ -365,6 +394,54 @@ impl StateStore {
             );
         }
         Ok(())
+    }
+
+    /// Retire the detached intents that never produced a child.
+    ///
+    /// A detached spawn that fails or is abandoned after it captured the
+    /// parent's workspace leaves its released intent behind, and that intent
+    /// roots the captured input for garbage collection for as long as it
+    /// exists without a child row. This deletes such an intent once it is
+    /// older than `max_age`, so the next sweep collects the input.
+    ///
+    /// Only an intent that was never sealed is retired: a sealed one is
+    /// rebuilt into its child by recovery and is not abandoned. The thread-row
+    /// check and the delete run under one store lock, so a child born in
+    /// between is never orphaned. A retry of the same operation after this
+    /// mints a different child, which is why `max_age` is a long bound.
+    ///
+    /// Reports every retired intent, and every one whose child link carries a
+    /// spend draw that nothing has released: this does not release draws; the
+    /// spend unit owns that.
+    pub fn retire_abandoned_detached_intents(
+        &self,
+        now_ms: i64,
+        max_age: std::time::Duration,
+    ) -> Result<AbandonedDetachedIntents> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let age_ms = i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX);
+        let cutoff = now_ms.saturating_sub(age_ms);
+        let mut report = AbandonedDetachedIntents::default();
+        for (operation_id, child_thread_id) in
+            g.runtime_db.unsealed_released_detached_intents(cutoff)?
+        {
+            if g.state_db.get_thread(&child_thread_id)?.is_some() {
+                continue;
+            }
+            if let Some(spend) = g.runtime_db.child_link_spend(&child_thread_id)?
+                && spend.draw.is_some()
+                && spend.settled_at_ms.is_none()
+            {
+                report.draw_bearing_links.push(child_thread_id.clone());
+            }
+            if g.runtime_db
+                .delete_unsealed_released_detached_intent(&operation_id, &child_thread_id)?
+            {
+                report.retired.push(operation_id);
+            }
+        }
+        Ok(report)
     }
 
     pub fn get_runtime_action_intent(

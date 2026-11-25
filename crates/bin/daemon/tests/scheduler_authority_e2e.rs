@@ -441,10 +441,8 @@ async fn rewritten_grant_then_reauthorize_restores_fires() {
             .contains("schedule_reauthorize_not_covered"),
         "{body:#}"
     );
-    assert!(
-        body.to_string().contains("ryeos.read.project.live"),
-        "{body:#}"
-    );
+    // The capability the grant lacks is named for the operator; the schedule's
+    // owner reads the stable code above.
 
     // A covering grant re-pins it; resume then fires again.
     owner.revoke(&h);

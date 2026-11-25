@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:08:56Z:1086e6b07d4745dc055c030dcacd49a50780d4b9ee54d4aee2fe3a789575bd98:RR+BQUhGheP7BRKPzbYX/QkdZ/2Io4L3x901oyoM7kOYKBZ9Y4QwV5jgdeAFogdx4U302/Ls9+om8Nnq3djGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9014ae7ccd2ddc2488e54e100372095f0ea5eb5cbf4491bfb71ffc3a3fd270ff:jkWTLRuETS4RMXxBhcBGw2VtH83CP7siS1S8pxSzwkqNMd6DcECSd0CdBZmu1rQlyBhgZQ5OXw01Woz/UYRtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/list
 version: "1.0.0"
@@ -8,3 +8,23 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /work/*/schema_version
+    - /work/*/coordinate
+    - /work/*/item_ref
+    - /work/*/kind
+    - /work/*/placement
+    - /work/*/phase
+    - /work/*/observed_at
+    - /work/*/placement_count
+    - /work/*/attention
+    - /work/*/attention_count
+    - /next_cursor
+  interim_free_text:
+    - /work/*/owner_principal_id  # removed by: m4
+    - /work/*/project/name  # removed by: m4
+    - /work/*/project/path  # removed by: m4
+  max_items: 512
+  max_result_bytes: 1048576

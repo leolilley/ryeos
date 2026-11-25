@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T16:27:42Z:a608e02013972e519083c3cb567cd369d9de5c9e8d644a2dfaa3889460d3fa0d:uIw8s4Zic7RPkImq9jB3X0w0D8bP8RuMxmrwfORmMIqAO+T6OQKMLrLDrdlbci95KpVuniORDj8lqhWYtB44CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:6a9341fd99a2557c6486812edef714cfcf102a9bd33ebe1b6e752859fb5860ff:GP+gJRQ4KS/KpnjHUhWQ4X+GEFhKmLTTZwhwJvQafWR/7AsBhKb7kUSJylcvG/aDOxV2rPV+Tidv0i3vfb1HCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.prepare
 required_caps: ["ryeos.execute.service.worker-placements/prepare"]
@@ -17,3 +17,49 @@ schema:
   follow_delivery_reservation_attestation_hash: string?
   source_accounting_frontier: object?
 description: Finally admit one exact target-local placement under its completed non-final preflight.
+disclosure:
+  principal:
+    - "/operation_id"
+    - "/placement_attestation_hash"
+    - "/target_runtime_seed_hash"
+    - "/target_launch_capsule_hash"
+    - "/credential_reservation/generation"
+    - "/credential_reservation/reservation_id"
+    - "/credential_reservation/subject_contract_digest"
+    - "/credential_reservation/subject_digest"
+    - "/placement/schema"
+    - "/placement/operation_type"
+    - "/placement/operation_id"
+    - "/placement/preflight_id"
+    - "/placement/preflight_attestation_hash"
+    - "/placement/follow_delivery_reservation_attestation_hash"
+    - "/placement/chain_root_id"
+    - "/placement/origin_site_id"
+    - "/placement/source_site_id"
+    - "/placement/target_site_id"
+    - "/placement/source_placement_thread_id"
+    - "/placement/successor_placement_thread_id"
+    - "/placement/source_chain_head_hash"
+    - "/placement/source_last_event_hash"
+    - "/placement/checkpoint_manifest_hash"
+    - "/placement/outer_exact_program_hash"
+    - "/placement/persistent_dependency_programs"
+    - "/placement/target_persistent_session_capsules"
+    - "/placement/target_execution_realization_hash"
+    - "/placement/target_launch_capsule_hash"
+    - "/placement/target_runtime_seed_hash"
+    - "/placement/credential_reservation/generation"
+    - "/placement/credential_reservation/reservation_id"
+    - "/placement/credential_reservation/subject_contract_digest"
+    - "/placement/credential_reservation/subject_digest"
+  interim_free_text:
+    - "/credential_reservation/profile_id"  # removed by: m4
+    - "/credential_reservation/owner_principal"  # removed by: m4
+    - "/credential_reservation/upstream_session_id"  # removed by: m4
+    - "/placement/credential_reservation/profile_id"  # removed by: m4
+    - "/placement/credential_reservation/owner_principal"  # removed by: m4
+    - "/placement/credential_reservation/upstream_session_id"  # removed by: m4
+    - "/placement/owner_principal"  # removed by: m4
+    - "/placement/target_operator_authority"  # removed by: m4
+    - "/placement/project_rebind"  # removed by: m4
+    - "/placement/accounting"  # removed by: m4

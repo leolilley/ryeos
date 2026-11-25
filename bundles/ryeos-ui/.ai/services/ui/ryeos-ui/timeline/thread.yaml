@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T07:56:53Z:ab3921d33b1decb16b16dd3b21b9316f27e4759d0879e0e33a313db9d63f0912:WbarEqJQIze/VhFSitFEl7owPi6fvID2uKw75e/kZNbFdN3lZ+9JXIRSs8lzTFc87a4BPJxAAuqJ0WhmWSSACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T06:59:45Z:a155bf82331d33cb0bf9e31c42bdeb0741ebf05d9d088e6835f7854ca9ebc51d:UuVVEl5QD1I+QsFRcFme+sin9gkvcZ9vZ/snvW5RTl/tP+4PF/DzYwcHzVTuQbBFQCTfnhML/EXw3/WCBeZMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/timeline/thread
 version: "1.0.0"
@@ -8,3 +8,21 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /timeline_contract
+    - /chain_root_id
+    - /definition_ref
+    - /definition_digest
+    - /highest_chain_seq
+    - /older
+    - /next_limit
+    - /summary
+    - /notice_noun
+    - /lane
+  interim_free_text:
+    - /items  # removed by: per-chain publication
+    - /order  # removed by: per-chain publication
+    - /undeclared  # removed by: per-chain publication
+  max_items: 4096
+  max_result_bytes: 8388608

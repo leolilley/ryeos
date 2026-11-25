@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T20:05:09Z:49466f2ca9976972b15e6c7fe70d353ab67ec75f500d268e233e763c894e3582:oWsjXrvQCGwkk61685SpgJKvwRykPUlhGhMmxJl4z0oaB48yQxncem31Z18BAro1/1Mo3t5iRMVsoz03POe1Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:77957305f40be9a272bbb915a6080992a4d0d9e9bac22b9541193f17400b7101:v+Io3J0K82dkKZUSouBkH5osAprnmFiYL2JrNAyfxB6Ss9mpOaeGAyoES1aJDreO8uWnfIzQWgbNks6TxqpDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.closure.get
 required_caps: ["ryeos.execute.service.objects/closure/get"]
@@ -17,3 +17,35 @@ schema:
   allow_incomplete: boolean?
   allow_untransported_large_objects: boolean?
 description: "Retrieve every present object and blob in a schema-defined CAS closure within node object_closure policy"
+disclosure:
+  principal:
+    - "/closure/roots"
+    - "/closure/complete"
+    - "/closure/object_hashes"
+    - "/closure/blob_hashes"
+    - "/closure/large_object_hashes"
+    - "/closure/missing_objects/*/hash"
+    - "/closure/missing_objects/*/referenced_by"
+    - "/closure/missing_blobs/*/hash"
+    - "/closure/missing_blobs/*/referenced_by"
+    - "/closure/malformed_objects/*/hash"
+    - "/closure/unsupported_objects/*/hash"
+    - "/closure/unsupported_objects/*/kind"
+    - "/closure/counts/objects"
+    - "/closure/counts/blobs"
+    - "/closure/counts/large_objects"
+    - "/closure/counts/missing_objects"
+    - "/closure/counts/missing_blobs"
+    - "/closure/counts/malformed_objects"
+    - "/closure/counts/unsupported_objects"
+    - "/object_bytes"
+    - "/blob_bytes"
+    - "/entries/*/hash"
+    - "/entries/*/kind"
+  free_text:
+    - "/closure/malformed_objects/*/reason"
+  interim_free_text:
+    - "/entries/*/value"  # removed by: m4
+    - "/entries/*/data"  # removed by: m4
+  max_items: 4096
+  max_result_bytes: 8388608

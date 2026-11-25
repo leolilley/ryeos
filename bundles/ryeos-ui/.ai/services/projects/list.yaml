@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:a8784f7d7e9f40992153e1a2a7d9282571d5523eb78392a89391b48cbd808cd0:8eUQg/5XHcjyuhyMYwNfSBizcD2rJI9DiOMI6KfBTHuqJjHcO4m2UzkvdD+en8gXTDqMz9lGNfzzNr1cTYgqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:c87ce68447ca2cea01247a576e503f97b3537b592c782569694cd391bd1f4eb2:tLmTuLvKMfKIHKTrQ493zNy3HDGX4S6md9uVqdM6I67fggysnfudZLGLX0Q/m4CF+fmZmmLHr/ZWbrwOzSKJBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/list
 version: "1.0.0"
@@ -8,3 +8,17 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/version"
+    - "/projects/*/local_id"
+    - "/projects/*/name"
+    - "/projects/*/added_at"
+    - "/projects/*/tags"
+    - "/projects/*/exists"
+    - "/projects/*/current"
+    - "/projects/*/registered"
+  interim_free_text:
+    - "/projects/*/root"  # removed by: m4
+  max_items: 1024
+  max_result_bytes: 1048576

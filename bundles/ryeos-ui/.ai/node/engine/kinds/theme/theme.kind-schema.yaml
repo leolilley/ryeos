@@ -1,0 +1,67 @@
+# ryeos:signed:2026-11-23T21:25:55Z:0ba0df29ced7af3af5aebd6efec4c39bd47aace1d76b0ffeae7ef7a7991ebc7e:qlL8IybLdOLCTzRcEb2OpSCa/CR/J5WZ8GWog4reFadF1VjzNBU8LoJhZm8yQTKF79/5EOY47Z3jWWdp6FAYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/theme"
+version: "1.0.0"
+# A project file may not take the ref of a theme an installed bundle
+# supplies, so a project can never replace the node's look or its pictures.
+project_shadowing: refuse
+location:
+  directory: themes
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# A theme is a signed, non-executable record of how an installation looks:
+# its colours (`palette`) and its pictures (`grounds`, `surface_grounds`).
+# A principal's stored preference names a theme by ref, or `system`, which a
+# signed config maps to one dark and one light theme.
+#
+#   id            the file name, e.g. `night` for `theme:ryeos/night`
+#   title         what a person reads in a theme list
+#   palette       the six colours every opacity step is derived from, each
+#                 a `#rrggbb` hex string
+#   grounds       picture choice by slot: `<slot>: [{picture, role?}]`. A slot
+#                 is an opaque word that a view's `art_slot` meets by string
+#                 equality; the picture for a subject is the list entry at
+#                 sha256(subject key) mod list length
+#   surface_grounds
+#                 the picture drawn behind a named Surface:
+#                 `<surface ref>: {picture, role?}`
+#
+# A picture is named by its `picture:` item ref and an optional rendition
+# role, never by hash: the daemon resolves the ref to the signed picture
+# record and supplies the hash.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    id: { type: single, prim: string }
+    title: { type: single, prim: string }
+    palette:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          bg: { type: single, prim: string }
+          ink: { type: single, prim: string }
+          accent: { type: single, prim: string }
+          good: { type: single, prim: string }
+          warn: { type: single, prim: string }
+          danger: { type: single, prim: string }
+        optional: {}
+  optional:
+    grounds: { type: single, prim: mapping }
+    surface_grounds: { type: single, prim: mapping }
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    category:
+      from: relative_dir
+      required: true

@@ -112,6 +112,22 @@ pub enum ExecutionProvenance {
         project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         candidate_evaluation:
             Option<Arc<crate::thread_lifecycle::CandidateEvaluationExecutionScope>>,
+        /// Parent workspace generation a detached child reads as data, set
+        /// only through [`ExecutionProvenance::with_detached_workspace_input`].
+        /// The process sees it as a private copy materialized by hash; it is
+        /// never an item-resolution source, and a borrowed child derived from
+        /// this root does not inherit it.
+        ///
+        /// Two isolation authorities meet here and describe different things.
+        /// The child's recorded project authority (a copy-on-write pinned
+        /// workspace whose terminal publication discards) is the child's OWN
+        /// pinned workspace, which its process is never given as input. The
+        /// ephemeral scratch copy materialized by hash from this generation is
+        /// what the process actually sees. Both discard everything and write
+        /// nothing back, so they do not disagree about write-back; they name
+        /// different roots. This generation, as sealed in the capsule, is the
+        /// record of what the process saw.
+        workspace_input: Option<ryeos_state::objects::WorkspaceGenerationPair>,
         __seal: ProvenanceSeal,
     },
 
@@ -549,9 +565,40 @@ impl ExecutionProvenance {
             ),
             project_authority,
             candidate_evaluation: None,
+            workspace_input: None,
             __seal: ProvenanceSeal(()),
         }
         .validate_project_authority_binding()
+    }
+
+    /// Give a fresh pinned root the parent workspace generation it reads as
+    /// data. The generation is validated here and is carried only by the root
+    /// variant: it does not change the root's own pinned snapshot, project
+    /// authority, or item resolution.
+    pub fn with_detached_workspace_input(
+        mut self,
+        input: ryeos_state::objects::WorkspaceGenerationPair,
+    ) -> anyhow::Result<Self> {
+        input.validate()?;
+        match &mut self {
+            Self::RootPinnedGeneration {
+                workspace_input: slot,
+                ..
+            } => {
+                if slot.is_some() {
+                    anyhow::bail!("pinned root already carries a workspace input");
+                }
+                *slot = Some(input);
+            }
+            Self::Projectless { .. }
+            | Self::RootLiveProject { .. }
+            | Self::ChildLiveProject { .. }
+            | Self::ChildPinnedGeneration { .. }
+            | Self::ChildImmutableWorkspaceInput { .. } => {
+                anyhow::bail!("a workspace input attaches only to a pinned root provenance")
+            }
+        }
+        Ok(self)
     }
 
     /// Condition a fresh, non-borrowed pinned root with its exact prepared
@@ -620,6 +667,7 @@ impl ExecutionProvenance {
             pinned_materialization: PinnedMaterializationAuthority::Fixture,
             project_authority,
             candidate_evaluation: None,
+            workspace_input: None,
             __seal: ProvenanceSeal(()),
         }
         .validate_project_authority_binding()
@@ -1428,6 +1476,7 @@ impl ExecutionProvenance {
             ),
             project_authority,
             candidate_evaluation: self.candidate_evaluation_scope().cloned(),
+            workspace_input: None,
             __seal: ProvenanceSeal(()),
         };
         provenance.project_authority().validate()?;
@@ -1523,6 +1572,11 @@ impl ExecutionProvenance {
                 input_snapshot_hash,
                 ..
             } => Some(input_snapshot_hash),
+            Self::RootPinnedGeneration {
+                workspace_input, ..
+            } => workspace_input
+                .as_ref()
+                .map(|input| input.snapshot_hash.as_str()),
             _ => None,
         }
     }
@@ -1542,6 +1596,9 @@ impl ExecutionProvenance {
                 snapshot_hash: input_snapshot_hash.clone(),
                 output_capture_hash: input_output_capture_hash.clone(),
             }),
+            Self::RootPinnedGeneration {
+                workspace_input, ..
+            } => workspace_input.clone(),
             _ => None,
         }
     }
@@ -2579,5 +2636,63 @@ mod tests {
             }
             other => panic!("expected RootPinnedGeneration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_detached_workspace_input_attaches_to_a_pinned_root_and_is_not_inherited() {
+        let dir = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(dir.path().to_path_buf()));
+        let root = ExecutionProvenance::root_pushed_head_for_test(
+            dir.path().to_path_buf(),
+            PathBuf::from("/laptop"),
+            engine(),
+            lifeline,
+            "a".repeat(64),
+            pinned(Path::new("/laptop"), &"a".repeat(64)),
+        )
+        .unwrap();
+        assert_eq!(root.immutable_workspace_input_generation(), None);
+        assert_eq!(root.immutable_workspace_input_snapshot_hash(), None);
+
+        let input = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: Some("d".repeat(64)),
+        };
+        assert!(
+            root.clone()
+                .with_detached_workspace_input(ryeos_state::objects::WorkspaceGenerationPair {
+                    snapshot_hash: "not-a-hash".to_owned(),
+                    output_capture_hash: None,
+                })
+                .is_err()
+        );
+        let carrying = root.with_detached_workspace_input(input.clone()).unwrap();
+        assert_eq!(
+            carrying.immutable_workspace_input_generation(),
+            Some(input.clone())
+        );
+        assert_eq!(
+            carrying.immutable_workspace_input_snapshot_hash(),
+            Some(input.snapshot_hash.as_str())
+        );
+        // The root's own pinned snapshot is untouched: the input is data.
+        assert_eq!(
+            carrying.pinned_snapshot_hash(),
+            Some("a".repeat(64).as_str())
+        );
+        // A second input is refused, and a nested inline call gets none.
+        assert!(
+            carrying
+                .clone()
+                .with_detached_workspace_input(input.clone())
+                .is_err()
+        );
+        let nested = carrying.clone_for_borrowed_child();
+        assert_eq!(nested.immutable_workspace_input_generation(), None);
+        assert_eq!(nested.immutable_workspace_input_snapshot_hash(), None);
+        assert!(
+            nested.clone().with_detached_workspace_input(input).is_err(),
+            "a borrowed child is not a root"
+        );
     }
 }

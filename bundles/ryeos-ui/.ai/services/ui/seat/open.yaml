@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:f9eca6ef9209125eedbb6d064948f3d455bad7ba4b6226f00490a416d9284533:oQxoFR1X/08J6CCnH98p/PREF1xqNWS3iSLvi++yMzaXZKHUGiYd1xVcKbmhwKQuUNDE+EzKV1zADlUxzYb6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:8c11f39b8882b236167a63944580d96038ddf2eeb2aa3d85892b2da40838266d:YEXj8//LHxfIqmPsNvS+w83/oLE1EOYZoi33YpoMwoFArjhC/u4tJaavIhPKUXZWeFrKfN0yiZNOcmo8qY0wCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-open
 version: "1.0.0"
@@ -9,3 +9,16 @@ endpoint: ui.seat.open
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/presentation_id"
+    - "/thread_id"
+    - "/chain_root_id"
+    - "/operation_id"
+    - "/producer_incarnation"
+    - "/state"
+    - "/next_engine_seq"
+    - "/root_binding"
+    - "/control_predecessor"
+    - "/producer"
+    - "/revision"

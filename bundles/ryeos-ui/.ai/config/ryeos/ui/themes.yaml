@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-22T00:22:30Z:f6c3d5594947eb47c563e5cc1a8fef027985dad6d7952c5f8b5c61b13a3ae38f:an5ygaN7LpUNqGq2UChl2X2c6YAAetavuxy7kkll+0ZrNEXXWIGySsSlc8y3q+ZBCenjUZIggQwHBrRZYRQjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: Which themes `system` follows, and the theme a node uses when nothing else names one.
+# A principal's stored theme preference is a `theme:` item ref or `system`.
+# `system` follows the platform's light or dark preference through the two
+# themes below. `default` is the theme used where no platform preference is
+# known. Each ref must name an installed theme.
+system:
+  dark: "theme:ryeos/night"
+  light: "theme:ryeos/paper"
+default: "theme:ryeos/night"
