@@ -1292,6 +1292,34 @@ mod tests {
     }
 
     #[test]
+    fn every_name_and_provider_the_host_reports_is_a_plain_identifier() {
+        // A seat reads these as typed leaves, so a name or provider with a
+        // space, a path or a URL would be free text in a typed place.
+        fn plain(text: &str) -> bool {
+            !text.is_empty()
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b":_.-".contains(&b))
+        }
+        let host = HostFacts::observe(0, Path::new("/"));
+        let view = host.capabilities();
+        for (name, proof) in view.provided.iter() {
+            assert!(plain(name), "capability name `{name}`");
+            assert!(
+                plain(&proof.provider),
+                "provider `{}` of `{name}`",
+                proof.provider
+            );
+        }
+        for name in view.missing.keys() {
+            assert!(plain(name), "missing capability name `{name}`");
+        }
+        for capability in lillux::ProcessScopeCapability::ALL {
+            assert!(plain(capability.capability_name()));
+        }
+    }
+
+    #[test]
     fn every_name_the_node_reports_fits_the_view_bounds() {
         // The host decides its own names; the node adds the per-scope names,
         // the scope limit, the provider environment and the credential home.
