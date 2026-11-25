@@ -2149,7 +2149,9 @@ mod tests {
                     project,
                     &endorser,
                     vec!["config".to_string()],
-                    None,
+                    Some(lillux::time::iso8601_from_unix_secs(
+                        lillux::time::unix_secs_now() + 3600,
+                    )),
                     &at,
                     &nonce,
                     &head,
@@ -2158,7 +2160,12 @@ mod tests {
             let recorded = record_endorsement(
                 &self.app_root,
                 &self.node,
-                &self.trust,
+                // The test judges the loader, not the kind registry: allow the
+                // kind the standing endorsement names.
+                &self
+                    .trust
+                    .clone()
+                    .with_standing_kinds(["config".to_string()]),
                 SignedEndorsement::sign(body, &self.operator).unwrap(),
                 lillux::time::unix_secs_now(),
             )
