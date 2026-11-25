@@ -1495,9 +1495,11 @@ mod tests {
         let answer = serde_json::json!({"id": "x"});
         let refused = disclose_service_result(DisclosureClass::Principal, None, Ok(answer.clone()))
             .unwrap_err();
+        // The refusal is typed: a 403 that keeps its stable `read_*` code.
         assert!(matches!(
             ryeos_app::handler_error::extract_handler_error(&refused),
-            Some(ryeos_app::handler_error::HandlerError::Forbidden(_))
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status: 403, .. })
+                if code == "read_not_disclosable"
         ));
         assert_eq!(
             disclose_service_result(DisclosureClass::Operator, None, Ok(answer.clone())).unwrap(),
