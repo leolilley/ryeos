@@ -1,6 +1,7 @@
-# ryeos:signed:2026-11-25T03:41:20Z:0d5684f7dff9b5bbd13572ec7df2f5ca97d01ba5676f87679159c896ce03c489:9VfEMzmR+pqIg1DAS/uVHYSyf9er8LcyLQIQYCKtREIo7NaPBc/Z3h/qPfOC/f2ggGRm4cbxrRZBbvi3zSoZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T22:07:10Z:75d7c9f355502ef2fa2006a686faf8481d39f9bb2da3559fcddca574262e2d45:232h0HDWRzuPM0Qxho72LNB441bhiYibcMlOSDrqR/b4+S+dNZCzO6pGi2cM5IPDwZbZfT3ayJOmZY3qMbtMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: publication.list
 required_caps: ["ryeos.execute.service.publication/list"]
 schema: {}
 description: "List the publications recorded on this node with their status: live, expired, retired, or signer_not_operator."
+disclosure: {}
