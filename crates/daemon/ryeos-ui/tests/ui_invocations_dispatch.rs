@@ -530,7 +530,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             }
             }
         }),
-        ctx,
+        ctx.clone(),
         state.clone(),
     )
     .await
