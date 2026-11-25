@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T02:54:45Z:ce706f586040b83e39c4b821004e3a5c13948a2f993dfe820435d40d111f1a53:Tymxf9rp7aQTrHwcgF3bK1lctV18D8HB0pmCMweDigrOCpkQsxzHmimK4kfOX+ccmNHNGIqk//zi9LljTHEEDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:b14588afc9bfffd142ce48098ffbcb5cd15840e9e309741cd1ee49bc3aa7f439:a+K5iijhwmkUiIapelnAmF1y8tNQLZhAXQE+vSVHirtp0Uynk9nXo3kFH+VWHuq95soLMxVCJZSwjCwcsHFyDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.bindings
 required_caps: ["ryeos.execute.service.external-content/bindings"]
@@ -10,3 +10,5 @@ schema:
   product_selections: array?
   product_owner_principal: string?
 description: "List one consumer's content bindings, say whether each still authorizes the consumer resolved at the given generation, and name the prior binding for each declaration that has none; read only"
+# Operator-only: the handler requires the admitted (or local configured) operator.
+disclosure: {}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:2978519995f6e11681a057d13fd9549bbfed0cb19646b5ed20abc03de48c48b5:hq1tnRKtLGwPYnbzNXINh9zTqTscwqALB9IjihuGVKt4XgWSEl/tFenBhOd07VHCDshnzwgQ+fhV7tI/mitAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:1f6ffe8e2d85f64fc3dc44fde2027bf2c55a3d3e32a564594adc58980cceb0bf:H9jWX4xj7fIMKDkLFcTHPawPm1QOccTOd/zh81yju/BhvAtVXVu/TWk87uA5Pbo4yAOWaHRIXP2oMy45bu1nDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: set-compose
 version: "1.0.0"
@@ -13,3 +13,5 @@ schema:
   predecessor_set_hash: string
   replacement: object
   substrate_protocol: integer
+# Release composition tool: only the node operator composes a bundle set.
+disclosure: {}

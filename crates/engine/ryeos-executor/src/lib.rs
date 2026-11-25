@@ -279,6 +279,7 @@ pub mod test_support {
                 scheduled_fire: None,
                 validate_only: false,
             },
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         };
         let verified = crate::executor::resolve_and_verify(

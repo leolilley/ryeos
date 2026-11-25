@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:44:48Z:3897508721d558c1f6974e5f7cd1dc697baf825df3bad9cbbddc8bb70ca08069:E6tepDQA0uMHu13kRZg13Dpf8K6r8VWatnHLzh8VK5moyPGsaniGYC+rR60jficHhO2D5u8RCEgXFmd2e2oCAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:e226c47066065ce84863ef02b71662c6a4848f893aa15c2b730159872c3ea29f:WqNrZiqYwgk93SFhE9JNHDvvSkg+CJP4zetVNovH4XJtO+yQ4VybcT1inULvNxHoMz9YCda68ozGyXt5eM5lBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "input"
 kind: service
@@ -10,3 +10,15 @@ schema:
   intent: string?
   title: string?
 description: "Deliver operator input to a fresh execution identity or an existing thread target"
+disclosure:
+  principal:
+    - "/thread_id"
+    - "/delivery"
+    - "/notice"
+    - "/pending"
+    - "/execution/supports_continuation"
+    - "/execution/supports_operator_followup"
+    - "/rebind/applied"
+    - "/rebind/reason"
+  free_text:
+    - "/rebind/names"

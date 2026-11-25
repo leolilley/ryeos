@@ -20,8 +20,9 @@
 //!
 //! Growing the table: a new role is a new group in the space it is measured in;
 //! a group gains fields without any reader changing, because readers name the
-//! fields they use. A per-column signed priority replaces [`ColumnTable::drop_rank`]'s
-//! role ranking by passing the signed value through the same method; a
+//! fields they use. The role ranks in [`ColumnTable::drop_rank`] are the kind's
+//! default drop order; a per-column signed priority overrides it for that
+//! column by passing the signed value through the same method; a
 //! breakpoint table (the widths at which a page changes shape, and the steps
 //! its type and spacing shrink by) is one more group of `f32` and `usize`
 //! fields beside the existing ones.
@@ -150,10 +151,25 @@ impl ColumnTable {
 
     /// When a tile is too narrow for every column, columns go in this order,
     /// lowest first; `None` never goes. A status says what happened to a row
-    /// and never goes. With `keep_kind_and_item` an id goes after the text
-    /// columns, since the item says what the row is, and a time goes first of
-    /// the data columns.
-    pub fn drop_rank(&self, role: ColumnRole) -> Option<u8> {
+    /// and an action is the row's one affordance; neither ever goes, whatever
+    /// priority is passed.
+    ///
+    /// The role ranks below are the default drop order. With
+    /// `keep_kind_and_item` an id goes after the text columns, since the item
+    /// says what the row is, and a time goes first of the data columns.
+    ///
+    /// A column's signed `priority` (`0..=15`, higher stays longer) overrides
+    /// its role's rank: the priority is the rank, so a signed column and an
+    /// unsigned one compare on the same scale. An absent priority leaves the
+    /// role rank exactly as above. A priority only orders the columns that
+    /// may go; it never makes a status or action droppable.
+    pub fn drop_rank(&self, role: ColumnRole, priority: Option<u8>) -> Option<u8> {
+        if matches!(role, ColumnRole::Status | ColumnRole::Action) {
+            return None;
+        }
+        if let Some(priority) = priority {
+            return Some(priority);
+        }
         match (role, self.keep_kind_and_item) {
             (ColumnRole::Hash, _) => Some(0),
             (ColumnRole::Time, true) => Some(1),
@@ -1064,14 +1080,99 @@ mod tests {
         ));
     }
 
+    const ROLES: [ColumnRole; 10] = [
+        ColumnRole::Text,
+        ColumnRole::Id,
+        ColumnRole::Ref,
+        ColumnRole::Path,
+        ColumnRole::Kind,
+        ColumnRole::Status,
+        ColumnRole::Time,
+        ColumnRole::Count,
+        ColumnRole::Hash,
+        ColumnRole::Action,
+    ];
+
     #[test]
     fn a_status_never_leaves_and_the_drop_order_follows_the_pair() {
         let mut columns = LAYOUT.px.table.columns;
-        assert_eq!(columns.drop_rank(ColumnRole::Status), None);
-        assert_eq!(columns.drop_rank(ColumnRole::Action), None);
-        assert!(columns.drop_rank(ColumnRole::Time) < columns.drop_rank(ColumnRole::Id));
+        assert_eq!(columns.drop_rank(ColumnRole::Status, None), None);
+        assert_eq!(columns.drop_rank(ColumnRole::Action, None), None);
+        assert!(
+            columns.drop_rank(ColumnRole::Time, None) < columns.drop_rank(ColumnRole::Id, None)
+        );
         columns.keep_kind_and_item = false;
-        assert!(columns.drop_rank(ColumnRole::Kind) < columns.drop_rank(ColumnRole::Time));
+        assert!(
+            columns.drop_rank(ColumnRole::Kind, None) < columns.drop_rank(ColumnRole::Time, None)
+        );
+    }
+
+    #[test]
+    fn an_unsigned_column_keeps_its_role_rank_in_both_modes() {
+        let expected = |keep: bool| -> [Option<u8>; 10] {
+            // In ROLES order.
+            if keep {
+                [
+                    Some(3),
+                    Some(3),
+                    Some(6),
+                    Some(5),
+                    Some(4),
+                    None,
+                    Some(1),
+                    Some(2),
+                    Some(0),
+                    None,
+                ]
+            } else {
+                [
+                    Some(3),
+                    Some(6),
+                    Some(1),
+                    Some(1),
+                    Some(1),
+                    None,
+                    Some(5),
+                    Some(2),
+                    Some(0),
+                    None,
+                ]
+            }
+        };
+        for keep in [true, false] {
+            let mut columns = LAYOUT.px.table.columns;
+            columns.keep_kind_and_item = keep;
+            let ranks: Vec<Option<u8>> = ROLES
+                .iter()
+                .map(|role| columns.drop_rank(*role, None))
+                .collect();
+            assert_eq!(ranks, expected(keep), "keep_kind_and_item = {keep}");
+        }
+    }
+
+    #[test]
+    fn a_signed_priority_wins_over_the_role_and_never_frees_a_status_or_action() {
+        for keep in [true, false] {
+            let mut columns = LAYOUT.px.table.columns;
+            columns.keep_kind_and_item = keep;
+            for role in ROLES {
+                let signed = columns.drop_rank(role, Some(9));
+                if matches!(role, ColumnRole::Status | ColumnRole::Action) {
+                    assert_eq!(signed, None, "{role:?} never goes");
+                } else {
+                    assert_eq!(signed, Some(9), "{role:?} signed");
+                }
+            }
+            // Higher stays longer, whatever the role says.
+            assert!(
+                columns.drop_rank(ColumnRole::Id, Some(1))
+                    < columns.drop_rank(ColumnRole::Time, Some(9))
+            );
+            assert!(
+                columns.drop_rank(ColumnRole::Time, Some(1))
+                    < columns.drop_rank(ColumnRole::Id, Some(9))
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:46Z:b51c51fc1663343d2fc9bb60d44a2a6842e9fdc9c3f991456b9285c14f50ddb7:TUfbF/cm7GTIWsjIGA25IRoRf0s5xy+CUgOmZdG8tZaw/xvFO7N424YApwEaue7Ff6l+BCP2HzRfN/SbYryHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:18e95645fabd1fcb7cee6875159e979b8aab17d8734756cb99dde8652b8d3cf8:cGSiviYIxatZecobyjGuvWA2Wvc5ILs+nDU+YmVgMtdEHWoREsyWXjMCjtGOTHqeyzh05VSVLoIm8roz/or3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "receipts"
 kind: service
@@ -8,3 +8,24 @@ required_caps: []
 schema:
   thread_id: string
 description: "Per-node graph receipts (node, step, error, cache_hit, elapsed_ms) sorted by step"
+disclosure:
+  principal:
+    - "/thread_id"
+    - "/count"
+    - "/receipts/*/node"
+    - "/receipts/*/step"
+    - "/receipts/*/definition_ref"
+    - "/receipts/*/effective_definition_digest"
+    - "/receipts/*/graph_run_id"
+    - "/receipts/*/node_result_hash"
+    - "/receipts/*/cache_hit"
+    - "/receipts/*/elapsed_ms"
+    - "/receipts/*/timestamp"
+    - "/receipts/*/replayed_from"
+    - "/receipts/*/cost/input_tokens"
+    - "/receipts/*/cost/output_tokens"
+    - "/receipts/*/cost/total_usd"
+  free_text:
+    - "/receipts/*/error"
+    - "/receipts/*/dispatch"
+    - "/receipts/*/fanout"

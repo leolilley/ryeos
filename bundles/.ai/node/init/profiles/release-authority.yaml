@@ -1,4 +1,8 @@
-# ryeos:signed:2026-11-25T06:49:09Z:4602be63deb3e69036cea3130b4b34ffd125908f4286c35f2814c6d64c2977f3:1GryedBLC9LEAkVChlEoy6plA/hT7x5c8JJzGmAHGcznu9XqkuMLOp610y/zy5vJIIib62CwPb7Q3xIKCflbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:29:29Z:89bb272ec3e9d1002bf1bfc1a61d6d08014d0477acd736d0ceac675795236ab6:z9MZtv6Mz1z14B8TeRVx8MX/rUOHHUO+rqMq9go1XGf5YMlZp8NL/Q4i/NlpSqYyVuGY7M7N2wimgZUTarLtAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<<<<<<< HEAD
+||||||| 75da0dcd2
+=======
+>>>>>>> origin/work/publication
 schema: 1
 exact_bundles:
   - bundle-release
@@ -508,7 +512,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -542,6 +546,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

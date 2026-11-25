@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:48Z:18e0c6e2d66376ddf6deb3128a3c8dbf41dbcfe7dfd426cf933e78a65e372e72:dZVji8xAHVLseTRGZsh1731rwN62KFq9CaGFtlzVtlmpXiE2wKuuvBvzX1npEjqjx+Oogbwht3bzI99+8CyqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:182101467dfe319d674186cf2bbda1540bb1959108600e7b3545c623cf23c435:QLlbfQ/sMoBL/BSHbrKL16KCZo8kJQhf3IocVV5/5ZrJrz0TPRbnMkZqcnnb5+mgeJgZx2CLS/zZLufGwDDgCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: projection.rebuild
 availability: stopped_node
@@ -7,3 +7,5 @@ state_access: projection_rebuild
 required_caps: ["ryeos.execute.service.projection/rebuild"]
 schema: {}
 description: "Rebuild the thread projection into a fresh generation-selected instance from trusted signed heads and CAS, publish it atomically, then strictly verify it. Requires stopped-node authority."
+# Stopped-node maintenance tool; no principal can reach it.
+disclosure: {}

@@ -197,6 +197,13 @@ pub struct HandlerContext {
     /// input or portable authority.
     #[serde(skip)]
     recorded_service_root_id: Option<String>,
+    /// Chain a launch made by this handler records as its origin, when the
+    /// service call itself was made from inside an execution (an inline child
+    /// of a callback parent). `None` for a call no execution made. Local
+    /// dispatch context only: never serialized and never caller input; it
+    /// survives narrowing, so a nested launch still names where it came from.
+    #[serde(skip)]
+    launch_origin_chain: Option<String>,
     /// Original managed caller budget. Service audit-root birth and JSON
     /// deserialization cannot create, locate or renew this authority.
     #[serde(skip)]
@@ -204,6 +211,18 @@ pub struct HandlerContext {
     /// Task-scoped dispatcher authority the handler's task re-enters.
     #[serde(skip)]
     task_scope: Option<HandlerTaskScope>,
+    /// The node-minted grant of a live browser session that authenticated this
+    /// call. Set only by the session verifier from the session it loaded; it
+    /// is never request input, and it carries no signed key.
+    #[serde(skip)]
+    minted_session_grant: Option<MintedSessionGrant>,
+}
+
+/// The grant a live browser session was minted with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedSessionGrant {
+    pub session_id: String,
+    pub granted_caps: Vec<String>,
 }
 
 impl HandlerContext {
@@ -219,8 +238,10 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -240,8 +261,10 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -262,8 +285,10 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -285,9 +310,22 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
+    }
+
+    /// Record the live browser session grant that authenticated this call.
+    pub fn with_minted_session_grant(mut self, grant: Option<MintedSessionGrant>) -> Self {
+        self.minted_session_grant = grant;
+        self
+    }
+
+    /// The live browser session grant behind this call, if any.
+    pub fn minted_session_grant(&self) -> Option<&MintedSessionGrant> {
+        self.minted_session_grant.as_ref()
     }
 
     /// Bind the daemon-minted recorded thread of this service call (a chain
@@ -310,6 +348,19 @@ impl HandlerContext {
             anyhow::bail!("recorded service handler context already has an invocation root");
         }
         Ok(self)
+    }
+
+    /// Bind the origin chain launches made by this handler record. Set by the
+    /// executor only for a service call made from inside an execution.
+    pub fn with_launch_origin_chain(mut self, origin_chain: Option<String>) -> Self {
+        self.launch_origin_chain = origin_chain;
+        self
+    }
+
+    /// Origin chain launches made by this handler record, if the call was made
+    /// from inside an execution.
+    pub fn launch_origin_chain(&self) -> Option<&str> {
+        self.launch_origin_chain.as_deref()
     }
 
     /// Record the content hash of the signed request that authenticated this
@@ -1126,6 +1177,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_service_calls_launch_origin_survives_narrowing_for_a_nested_launch() {
+        let direct = HandlerContext::new("fp".into(), vec!["cap".into()], true);
+        assert_eq!(direct.launch_origin_chain(), None);
+        let from_inside = direct.with_launch_origin_chain(Some("T-session".into()));
+        let narrowed = from_inside
+            .narrowed_for_execution(vec!["cap".into()], "site:a", "site:a")
+            .unwrap();
+        assert_eq!(narrowed.launch_origin_chain(), Some("T-session"));
+        assert_eq!(
+            narrowed.recorded_service_root_id(),
+            None,
+            "the service's own root never crosses, its origin does"
+        );
+    }
+
+    #[test]
     fn verified_remote_origin_is_authoritative() {
         let context = HandlerContext::new_with_origin(
             "fp:remote".to_string(),
@@ -1229,6 +1296,8 @@ mod tests {
             effect_classes: vec!["live".into()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
+            collect: false,
         };
         let grant = crate::callback_token::AdmittedWorkloadClientGrant {
             schema: crate::callback_token::AdmittedWorkloadClientGrant::SCHEMA,

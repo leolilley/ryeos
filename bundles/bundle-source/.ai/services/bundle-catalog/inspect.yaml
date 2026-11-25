@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:2542ed60d23415b860e33efe5dac05bd8e988d8b162293afbca807ddd08b155e:RRU87NQaKFDxW36j6p28kN9jf1k4XwskNZwPapy86wxyhi9Gv8Gxkc9JAa6kfAK+TGelpfoGuTH+q5wb5dxbCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:f24d849d87f8a62b54d225c69f95ec6f44a84bddaaeddc28f8d841c69703ddb2:y42+VnwASA42z6mPnhd1uclYZJb+s11vt83w0zFGgfaKg/Q4NjHqYyw/30Ju/4pqI/esH15T12wI41an22tRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle-catalog.inspect
 required_caps: ["ryeos.execute.service.bundle-catalog/inspect"]
@@ -7,3 +7,25 @@ schema:
   catalog_namespace: string
   catalog_publication_attestation_hash: string?
 description: "Inspect one exact catalog publication without resolving floating state"
+disclosure:
+  principal:
+    - "/catalog_namespace"
+    - "/catalog_publication_attestation_hash"
+    - "/current"
+    - "/publication/schema"
+    - "/publication/kind"
+    - "/publication/catalog_namespace"
+    - "/publication/snapshot_hash"
+    - "/publication/previous_publication_attestation_hash"
+    - "/publication/sequence"
+    - "/snapshot/schema"
+    - "/snapshot/kind"
+    - "/snapshot/bundle_channels/*/bundle_name"
+    - "/snapshot/bundle_channels/*/channel"
+    - "/snapshot/bundle_channels/*/generation_attestation_hash"
+    - "/snapshot/set_channels/*/set_name"
+    - "/snapshot/set_channels/*/channel"
+    - "/snapshot/set_channels/*/set_attestation_hash"
+  free_text:
+    - "/snapshot/publisher"
+  max_items: 4096

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:4f2e968d8e844029d192f11ff11c5e9c9aef33f9f3401f1a6e51e932fffcdfa3:y0RMXE4npOjBvXM4SpNccOgykA1gcveXh3249EeOI9ut3eE1Dio1rpE4uLmAlxYERYnRGfTDtwxM0WUPc3QnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:2b83f2cf96369838568b72958f6fb0a5ecbc3f6d04e10d38f5ae65d79aab3ab1:2OaDYp+T3GhEX4iP+tJnOVKsaOC2giMVfOHFdXbNGfO26OZmmSIZML9SwBTXvznZJ9hQ2bpTwDKFukEIKOk/CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/add"]
 name: ryeos-ui/projects/add
@@ -6,3 +6,15 @@ version: "1.0.0"
 description: Add or update a canonical local project root in the per-principal RyeOS UI registry.
 endpoint: ui.ryeos.projects.add
 availability: daemon_only
+disclosure:
+  principal:
+    - /created
+    - /project/local_id
+    - /project/added_at
+    - /project/exists
+    - /project/current
+    - /project/registered
+  free_text:
+    - /project/name
+    - /project/root
+    - /project/tags

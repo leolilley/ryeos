@@ -1,7 +1,9 @@
-# ryeos:signed:2026-08-18T23:03:53Z:b752fae2724c00aa4d28fc337fb3fbb8a1ab2aaa710eb19f63acd71bdd54b6fe:14v5mARENurOjrB+8lDVy2Eik1kqlbStsaWhv3jaHQpdmWr0zotWkJ4pnzPSEnqJWmU+DJr6/6gk8HziisXyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:429f538e4edce80f693fb2b667015b6a61ae1150e5ccad99b103ff762080490f:z9UrZSegtlurlfGutxeUmWh30Gz2/eyXuPSijEp1Nh7GGEfW96lSpwUV5zTbtZq1zgj5VMm0a0hufWorIPBPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: credential-profiles.get
 required_caps: ["ryeos.execute.service.credential-profiles/get"]
 schema:
   profile_id: string
 description: "Read sanitized owner-bound credential-profile metadata"
+# Credential profiles are served only to the admitted operator (the handler requires it).
+disclosure: {}

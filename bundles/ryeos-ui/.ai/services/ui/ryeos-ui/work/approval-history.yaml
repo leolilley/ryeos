@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:50:41Z:0d37424871f98ebb18b1552de5ea25807cfbad47f2b2ef3d707026cdc2af7ff5:WNA8+lk7N8fzSL6CnoKg6qsyY+/P32dFzmjFgG01F2mv4yb8csMehtDukbBYF4FdVH0G3pOBaLksYX0kmLHvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:8de9d8c945af1649badf763dfeb1d9d38e9a874124903b0f3f5c0ba5b1c88844:wTefA+Deor2EAq1RF+kLLg68Pf/Gp0Kgo4ss3x2JuEy4Nexnia0WHzQoYl0CYK4MCr1dtz/QExVkO7R6uKnQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/approval-history
 version: "1.0.0"
@@ -8,3 +8,22 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /history/*/schema_version
+    - /history/*/kind
+    - /history/*/chain_root_id
+    - /history/*/placement_thread_id
+    - /history/*/approval_id
+    - /history/*/worker_boot_epoch
+    - /history/*/request_digest
+    - /history/*/operation_class
+    - /history/*/state
+    - /history/*/decision
+    - /history/*/created_at_ms
+    - /history/*/resolved_at_ms
+    - /history/*/delivery_settled_at_ms
+  interim_free_text:
+    - /history/*/requested_authority  # removed by: per-chain publication
+    - /history/*/decision_principal  # removed by: per-chain publication

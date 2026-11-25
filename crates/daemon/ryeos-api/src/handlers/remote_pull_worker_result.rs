@@ -256,9 +256,13 @@ impl PullOperation {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    ryeos_runtime::validate_runtime_thread_id(&req.chain_root_id)
-        .map_err(|error| anyhow::anyhow!(error))
-        .context("hosted worker-result chain root is not canonical")?;
+    ryeos_runtime::validate_runtime_thread_id(&req.chain_root_id).map_err(|error| {
+        anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "chain_root_invalid",
+            400,
+            format!("hosted worker-result chain root is not canonical: {error}"),
+        ))
+    })?;
     let delegator_fingerprint = crate::remote::client::delegator_fingerprint(&ctx)?;
     let (local_project_path, remote, target_project_path, project_name, remote_owner) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
@@ -656,7 +660,11 @@ fn resolve_initial_route(
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
-        bail!("hosted worker-result pull requires a full_project remote binding");
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "remote_binding_not_full_project",
+            409,
+            "hosted worker-result pull requires a full_project remote binding",
+        )));
     }
     Ok((
         local_project_path,

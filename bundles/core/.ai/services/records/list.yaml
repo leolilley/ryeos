@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:48:38Z:8a6c1642b6dbfbd0158271bdab94bd218e87476f54739920a8ab93048b015f6c:Z/eOS+CWBxwNnVCTXjwuoZ96ExnYRvCW0k7aX4yzHoDJ/98P03GRC8z3cZ6zCPDFawhWEfOr3x6W8NsWT4aeDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:27aaae3a0316f7c158652be3c8c566518dda697ac0c8e1a73953602608097541:afzCyUWfXbjFeYRTjqTjMCyCIe6hJlvLOeYrJJlKJq+m9E02h8QOQRZHO/RWLLW1Muz9Th6/KbmNlU70O+uXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.list
 availability: both
@@ -7,3 +7,28 @@ state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.records/list"]
 description: "List the signed records of one declared kind, each with its key, hash, declared summary and verification"
+disclosure:
+  principal:
+    - "/record_kind"
+    - "/next_cursor"
+    - "/records/*/key"
+    - "/records/*/hash"
+    - "/records/*/verify/status"
+    - "/records/*/verify/scheme"
+    - "/records/*/verify/fresh"
+    - "/key"
+    - "/hash"
+    - "/verify/status"
+    - "/verify/scheme"
+    - "/verify/fresh"
+    - "/stored_as"
+    - "/bytes"
+    - "/truncated"
+  free_text:
+    - "/records/*/summary"
+    - "/records/*/verify/signer"
+    - "/records/*/verify/reason"
+    - "/records/*/verify/detail"
+    - "/verify/signer"
+    - "/verify/reason"
+    - "/verify/detail"

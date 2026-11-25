@@ -434,6 +434,31 @@ pub fn authorize_secret_delivery(
     Ok(ryeos_engine::contracts::DeliveredSecretEnv::from_authorized(present))
 }
 
+/// Every secret value the node holds, for the exact-match output floor on
+/// what a worker session may read back (see the collect path). It is the
+/// whole sealed operator store, including the entries the node keeps under
+/// its own internal prefixes, plus every provider-environment value captured
+/// at startup. It is deliberately not narrowed to what any one launch
+/// received: a floor over everything the node can hold never depends on
+/// reconstructing a launch's admitted authority.
+///
+/// Not covered: values a project supplies in its own `.env` overlay, values a
+/// child fetched at run time from outside the node, and any credential held
+/// outside the sealed store. A store that cannot be read is an error, so a
+/// caller fails closed.
+pub fn node_held_secret_values(
+    sources: &SecretSources<'_>,
+) -> std::result::Result<Vec<zeroize::Zeroizing<String>>, VaultReadError> {
+    let mut values: Vec<zeroize::Zeroizing<String>> = sources
+        .vault
+        .read_all()?
+        .into_values()
+        .map(zeroize::Zeroizing::new)
+        .collect();
+    values.extend(sources.provider_env.all_values());
+    Ok(values)
+}
+
 /// Names-only preflight over the same authority as
 /// [`authorize_secret_delivery`]. Values are read, zeroized and discarded.
 pub fn check_secret_availability(

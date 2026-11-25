@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:6fde223994feae808f038f38bc04b664aeca6a41b62f9ce0c9d51b784f3724b2:mMy2SqPeT2Pa2rs2ipDMchtur1IvcyJQ1PWagzLkbNpqyc52AkXbGgoHsUBHmqKECxoHK1rB3GKQoM6Y3791Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:9d81ba230bc441b269b6b0d0c0e30f41822dbaf1bf658fc21dc82ddb4175d878:/6xcZUK1fmvANT9V3zIbjknULutffrbKAuCyDy15L/nZLY9BAjJ2QU8MoW2zjEhpy493aBaCEUzVSB0wkaelAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-inspect
 version: "1.0.0"
@@ -16,3 +16,5 @@ schema:
   target: object
   build_profile: string
   catalog_namespace: string
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

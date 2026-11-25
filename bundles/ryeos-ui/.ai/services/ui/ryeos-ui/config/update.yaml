@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:ae94d43d54b12d717ffda281996cc70eba29fdeae7972a26b9e91114d768e0bf:kmuljhvHVq7zsbmGYB7UjRTalWMqzMD0VxGREbF3XJawxIKikc20pH6U8SeraM8bBnjKS9kpBFNx3BmaH9OfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:0c6129390ac4138a104b579e84f3e94bfe0a8ced74912d005043688bcbf4e70c:CYer9HsnprcpKdW6MHRVl8V7klYlcRQZQXC0u4DoKpPGZroBrkDfef5y4fW+54MMGQCnum8k38LlENhNU7OvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/ryeos-ui/config/update"]
 name: ryeos-ui/config/update
@@ -6,3 +6,17 @@ version: "1.0.0"
 description: Update principal-owned UI preferences and reusable/particular view-set and Surface libraries with independent expected revisions. Saved Surface records do not grant authority or resume live sessions.
 endpoint: ui.ryeos.config.update
 availability: daemon_only
+disclosure:
+  principal:
+    - "/version"
+    - "/theme"
+    - "/landing_view"
+    - "/view_set_library_revision"
+    - "/particular_view_set_library_revision"
+    - "/reusable_surface_library_revision"
+    - "/particular_surface_library_revision"
+  free_text:
+    - "/saved_view_sets"
+    - "/particular_view_sets"
+    - "/reusable_surfaces"
+    - "/particular_surfaces"

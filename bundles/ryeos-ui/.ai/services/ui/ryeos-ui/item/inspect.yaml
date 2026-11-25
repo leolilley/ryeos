@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:289b54eaba44a164f9f081669335b7f7c000f61f3929501dba8c60494754aa7a:gRfzuTB4mnIe6HvnVmg8M/oodLwT6APJULZbpKdWPR0N5Zyvx/oQ1AfrNeW03g6PwouRWqg1zJFVQ8KwM7dWBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:0b829f736d4271789935f496809fd0586766bdce5bdbe9ae5d46d448fb25fa92:qO+gqxi8ld1c8+vHpmlt33puwqc6RlIurPWnNC8g7DMOLuZEEgTQM5hSYryEOIQ/snXeF4rbEk1uwO/CL4sLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/item/inspect
 version: "1.0.0"
@@ -8,3 +8,22 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /item/canonical_ref
+    - /item/item_kind
+    - /item/bare_id
+    - /item/space
+    - /item/title_source
+    - /item/executable
+    - /item/trust/class
+  free_text:
+    - /item/source_path
+    - /raw
+  interim_free_text:
+    - /item/title  # removed by: m4
+    - /item/trust/signer  # removed by: m4
+    - /item/trust/reason  # removed by: m4
+    - /item/shadowed  # removed by: m4
+    - /effective  # removed by: m4

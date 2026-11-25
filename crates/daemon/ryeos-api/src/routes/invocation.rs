@@ -45,6 +45,9 @@ pub struct RoutePrincipal {
     pub authenticated_origin_site_id: Option<String>,
     pub authenticated_grant_authority:
         Option<ryeos_engine::principal_contract::AuthenticatedGrantAuthority>,
+    /// The grant of the live browser session this principal was admitted
+    /// from. Only the session verifier sets it, from the session it loaded.
+    pub minted_session_grant: Option<ryeos_app::handler_context::MintedSessionGrant>,
     /// Verifier-supplied metadata for downstream consumption.
     ///
     /// `BTreeMap` for deterministic JSON serialization order.
@@ -70,6 +73,7 @@ impl RoutePrincipal {
             authorized_key_class: None,
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
+            minted_session_grant: None,
             metadata: BTreeMap::new(),
         }
     }
@@ -104,6 +108,7 @@ impl RoutePrincipal {
             ),
         };
         context
+            .with_minted_session_grant(self.minted_session_grant.clone())
             .with_signed_request_digest(signed_request_digest)
             .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
     }

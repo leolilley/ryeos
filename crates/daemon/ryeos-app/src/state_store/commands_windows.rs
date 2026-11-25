@@ -186,6 +186,86 @@ impl StateStore {
         g.runtime_db.child_link_relation(child_thread_id)
     }
 
+    /// The `(parent thread, relation)` recorded for `child_thread_id`, or
+    /// `None` when no link has been recorded.
+    pub fn child_link_parent_and_relation(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let g = self.lock()?;
+        g.runtime_db.child_link_parent_and_relation(child_thread_id)
+    }
+
+    /// Whether the child's link asks that it be cancelled when its parent
+    /// ends, or `None` when no link has been recorded.
+    pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .child_link_cancel_on_parent_end(child_thread_id)
+    }
+
+    /// The direct flagged `dispatch` children of `parent_thread_id`, in spawn
+    /// order; see [`runtime_db::RuntimeDb::flagged_dispatch_children`].
+    pub fn flagged_dispatch_children(&self, parent_thread_id: &str) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.flagged_dispatch_children(parent_thread_id)
+    }
+
+    /// The parent of a flagged `dispatch` child, else `None`; see
+    /// [`runtime_db::RuntimeDb::flagged_dispatch_parent`].
+    pub fn flagged_dispatch_parent(&self, child_thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db.flagged_dispatch_parent(child_thread_id)
+    }
+
+    /// The stored origin of the thread's durable stop, or `None` when no stop
+    /// was requested; see [`runtime_db::RuntimeDb::thread_stop_origin`].
+    pub fn thread_stop_origin(&self, thread_id: &str) -> Result<Option<runtime_db::StopOrigin>> {
+        let g = self.lock()?;
+        g.runtime_db.thread_stop_origin(thread_id)
+    }
+
+    /// The spend columns of the child's link, or `None` when no link has been
+    /// recorded.
+    pub fn child_link_spend(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<runtime_db::ChildLinkSpend>> {
+        let g = self.lock()?;
+        g.runtime_db.child_link_spend(child_thread_id)
+    }
+
+    /// Settle the child's link, releasing `released_usd_nanos` of its draw.
+    /// Only after the child's accounting settlement is durable; see
+    /// [`runtime_db::RuntimeDb::release_child_link_draw`].
+    pub fn release_child_link_draw(
+        &self,
+        child_thread_id: &str,
+        released_usd_nanos: i64,
+        settled_at_ms: i64,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .release_child_link_draw(child_thread_id, released_usd_nanos, settled_at_ms)
+    }
+
+    /// Settle a child's link that carries no spend draw; see
+    /// [`runtime_db::RuntimeDb::settle_child_link`].
+    pub fn settle_child_link(&self, child_thread_id: &str, settled_at_ms: i64) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .settle_child_link(child_thread_id, settled_at_ms)
+    }
+
+    /// Up to `limit` children whose links are unsettled, in child id order,
+    /// strictly after `after` (empty for the first page).
+    pub fn unsettled_child_links(&self, after: &str, limit: usize) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.unsettled_child_links(after, limit)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was
@@ -200,6 +280,21 @@ impl StateStore {
         parent_thread_id: &str,
         child_thread_id: &str,
         relation: &str,
+    ) -> Result<Option<StopIntent>> {
+        self.record_child_link_with_cancel_flag(parent_thread_id, child_thread_id, relation, false)
+    }
+
+    /// As [`Self::record_child_link`], also recording in the link's own
+    /// transaction whether the child is to be cancelled when its parent ends.
+    /// A detached spawn from a grant-bearing parent passes `true`; the flag is
+    /// recorded before the child is launched; the parent's end stops the
+    /// children it flags (see `cascade::stop_flagged_children_on_parent_end`).
+    pub fn record_child_link_with_cancel_flag(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+        cancel_on_parent_end: bool,
     ) -> Result<Option<StopIntent>> {
         let _permit = self.acquire_write_permit()?;
         let active = self
@@ -236,13 +331,19 @@ impl StateStore {
             // before it reached this second durable mutation. Tombstone the child
             // first so no later attach can win, then preserve operational lineage
             // on a best-effort basis.
-            let stopped = g
-                .runtime_db
-                .request_thread_stop(child_thread_id, StopIntent::Cancel)?;
-            if let Err(error) =
-                g.runtime_db
-                    .record_child_link(parent_thread_id, child_thread_id, relation)
-            {
+            let stopped = g.runtime_db.request_thread_stop(
+                child_thread_id,
+                StopIntent::Cancel,
+                crate::runtime_db::StopOrigin::Explicit,
+            )?;
+            if let Err(error) = g.runtime_db.record_child_link_with_options(
+                parent_thread_id,
+                child_thread_id,
+                relation,
+                runtime_db::ChildLinkStopPolicy::None,
+                cancel_on_parent_end,
+                None,
+            ) {
                 tracing::warn!(
                     parent_thread_id,
                     child_thread_id,
@@ -313,11 +414,13 @@ impl StateStore {
                 bail!("{}", refusal.message(child_thread_id));
             }
         }
-        let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
+        let (_, effective_stop) = g.runtime_db.record_child_link_with_options(
             parent_thread_id,
             child_thread_id,
             effective_relation,
             stop_policy,
+            cancel_on_parent_end,
+            None,
         )?;
         Ok(effective_stop)
     }

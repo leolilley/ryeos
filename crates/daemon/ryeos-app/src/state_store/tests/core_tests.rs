@@ -2983,3 +2983,52 @@ fn concurrent_reader_never_sees_listed_and_identity_out_of_step() {
         });
     }
 }
+
+/// A child's terminal state settles its link when the link has no spend draw;
+/// a link with a draw stays unsettled, because only the release settles it.
+/// Substitution: the links are written through the runtime database directly,
+/// since the store has no draw-writing wrapper.
+#[test]
+fn finalizing_a_child_settles_a_no_draw_link_and_leaves_a_draw_link() {
+    let store = test_store();
+    for child in ["T-link-bare", "T-link-drawn"] {
+        store
+            .create_thread_for_test(&thread_record(child, child))
+            .unwrap();
+        store
+            .claim_thread_launch_active(child, &format!("claim-{child}"), "daemon:link-test")
+            .unwrap()
+            .unwrap();
+    }
+    {
+        let g = store.lock().unwrap();
+        let draw = runtime_db::ChildSpendDraw {
+            usd_nanos: 50,
+            session_key: "session-1".to_owned(),
+        };
+        for (child, spend) in [("T-link-bare", None), ("T-link-drawn", Some(&draw))] {
+            g.runtime_db
+                .record_child_link_with_options(
+                    "T-link-parent",
+                    child,
+                    "dispatch",
+                    runtime_db::ChildLinkStopPolicy::None,
+                    true,
+                    spend,
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(store.unsettled_child_links("", 10).unwrap().len(), 2);
+    finish_workspace_test_thread(&store, "T-link-bare");
+    finish_workspace_test_thread(&store, "T-link-drawn");
+    let bare = store.child_link_spend("T-link-bare").unwrap().unwrap();
+    assert!(bare.settled_at_ms.is_some());
+    let drawn = store.child_link_spend("T-link-drawn").unwrap().unwrap();
+    assert_eq!(drawn.settled_at_ms, None);
+    assert_eq!(drawn.released_usd_nanos, None);
+    assert_eq!(
+        store.unsettled_child_links("", 10).unwrap(),
+        vec!["T-link-drawn".to_owned()]
+    );
+}

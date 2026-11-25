@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T20:05:09Z:9a73aea379edb57826c84459ade6334f274bcfbe7d1730d1f37f13277b53f433:iVCLvtofxr9TPDoAuw+48XQ+zsBSLvjaeY2ugYXOU0jgMrVoeO7lJ4BZKUoqvMo/ilpAIyAvw2iUU1+rM5G1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:9d814d06a46babf16e691497c160a8949c00d145c14a49890eedf6df8b83dd92:FvZitQ1Sj3TnaE5XTKEQU497+2AKfAvVdzKqca7/1TuFOwhAs+EM4tLY8OwFCTNWlEXxpFMstRtXYsoFiypUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.has
 required_caps: ["ryeos.execute.service.objects/has"]
@@ -7,3 +7,10 @@ schema:
   object_hashes: array
   blob_hashes: array
 description: "Check object and blob CAS namespaces independently, answering present only for hashes reachable from the named root and absent for everything else"
+disclosure:
+  principal:
+    - "/found_object_hashes"
+    - "/missing_object_hashes"
+    - "/found_blob_hashes"
+    - "/missing_blob_hashes"
+  max_items: 4096

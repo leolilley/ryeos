@@ -1049,6 +1049,7 @@ pub fn verify_node_signed_document(
 /// the pattern in `crates/bin/daemon/src/auth.rs` and `crates/bin/daemon/src/identity.rs`.
 #[tracing::instrument(
     name = "engine:trust_verify",
+    level = "debug",
     skip(content, trust_store, context),
     fields(signer = ?header.signer_fingerprint)
 )]

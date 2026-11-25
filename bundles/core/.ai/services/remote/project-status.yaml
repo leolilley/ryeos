@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:17Z:77304a8cb49a96cb91fa96626b66f093ce085b0c55819b1007ee3e8fa709ee54:ugIws4rEmkt3E/vNZTYx5o8PTBKjYZceJSCXUJ2SspQcyZboVNO/lzWVLSaeaEII8v/yIxvqbXcfAKHh5wSNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:9918d9c0918f2e8e4e444947b9cd5d91a14fc0f8ca5db8385577f4858029de6b:94Vg6teJjXEj9BXBrm6PCay+0ROfOK0Z4fDy28Fq9L9ZOa+yamLFB6+8fjjWZCZxwvcH5OEEI2aS7g3TO1ODAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.project-status
 required_caps: ["ryeos.execute.service.remote/project-status"]
@@ -6,3 +6,20 @@ schema:
   remote: string?
   project: string
 description: "Report deployed status for a bound remote project"
+disclosure:
+  principal:
+    - "/remote"
+    - "/status/project_hash"
+    - "/status/deployed"
+    - "/status/deployed_snapshot_hash"
+    - "/status/deployed_at"
+    - "/status/project_sync_scope"
+    - "/status/project_tree_hash"
+    - "/status/effective_policy_hash"
+    - "/status/tree_entries"
+    - "/status/snapshot_created_at"
+  free_text:
+    - "/local_project_path"
+    - "/remote_project_path"
+    - "/status/project_path"
+    - "/status/snapshot_source"

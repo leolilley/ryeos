@@ -327,6 +327,34 @@ fn owner_base_head_key(
     ))
 }
 
+/// Refusal code for an evaluator whose launch ancestry reaches the session
+/// whose candidate it judges. Qualification, integration and publication
+/// (which re-prove the retained evaluator every time) all refuse with it.
+const EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION: &str = "evaluator_lineage_reaches_source_session";
+
+/// Refuse an evaluator that was launched from inside the session it judges, at
+/// any depth: its origin chain is read from its sealed capsule (never from a
+/// runtime claim) and walked up the dispatch links; reaching the source
+/// session's chain refuses. An ancestry that cannot be resolved refuses too.
+fn require_evaluator_outside_session_lineage(
+    state: &AppState,
+    evaluator_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    source_chain_root_id: &str,
+) -> Result<(), HandlerError> {
+    match state
+        .state_store
+        .sealed_origin_reaches_chain(evaluator_capsule, source_chain_root_id)
+    {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(HandlerError::Conflict(format!(
+            "{EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION}: the evaluator was launched from inside the session whose candidate it judges"
+        ))),
+        Err(error) => Err(HandlerError::Conflict(format!(
+            "{EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION}: the evaluator's launch ancestry could not be resolved: {error:#}"
+        ))),
+    }
+}
+
 /// A pinned generation that sealed an owner+name identity at admission must
 /// name exactly the head integration and publication target. `Absent` seals
 /// nothing and is allowed: the head comes from the base and the fresh owner.
@@ -8498,6 +8526,7 @@ fn verify_candidate_evaluation_testimony(
             "candidate evaluator capsule contradicts its terminal authority",
         ));
     }
+    require_evaluator_outside_session_lineage(state, &evaluator_capsule, &session.chain_root_id)?;
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
             &evaluator_capsule,
@@ -10105,6 +10134,7 @@ async fn qualify_candidate(
             "evaluator capsule contradicts its authoritative terminal snapshot",
         ));
     }
+    require_evaluator_outside_session_lineage(&state, &evaluator_capsule, &session.chain_root_id)?;
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
             &evaluator_capsule,

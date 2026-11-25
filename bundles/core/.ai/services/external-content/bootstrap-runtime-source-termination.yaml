@@ -1,7 +1,9 @@
-# ryeos:signed:2026-10-10T04:34:12Z:d73888c46359375e5c08ef12a99971201514e1bbe3951f5bfe59d34a3beb069d:LKTraELVRXwXfRUArM4uhG9hARiVpy7pBzKqQeMszWm2Dui4XkRXNLDNCyttSNh3fW01w/IZgV3iJ1psRFzeBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:e997d7b43ddfdc909e4ed187a2a972fd88a0a111e057ca0fcd3aeaebdc026692:LQmq+FNv9j1e0v4a0ZJetLcym9acctp3iq4eV0XvAG+8fPRDSoz6J5Fwqx34zmM2rwcAZI1tOeBTlz0oHVzGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.bootstrap-runtime-source-termination
 required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source-termination"]
 schema:
   operation_id: string
 description: Read the exact retained termination of a runtime-source sandbox
+# The handler requires the admitted node operator (external content acquisition and qualification).
+disclosure: {}

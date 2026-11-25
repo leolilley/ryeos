@@ -1,4 +1,8 @@
-# ryeos:signed:2026-11-25T06:49:09Z:cd88ad0ba596a0e7a9cdfa9f992970c887b4e98d406d25a569ca6a729fd61e53:TcnK9oI2NFUN7Gt0RTbfsBbVSNkMfF+wC9CRKQzKBXHc4KTC5dpsdpXvVKEhKPTXmbq/IePdwc5wPX5Few1LAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:29:29Z:af2573334b6b828b6c7baefd05143ed76533d9e525ee48a2be3653f70be734bd:e/qk1VXXqiKY5D/4tDtrc+riPJ4WxNrzZx57TCRyBVe6KU+tXAoG4HKhUVLZjuz6KfjsnHqfpJJHnUo5XBUfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<<<<<<< HEAD
+||||||| 75da0dcd2
+=======
+>>>>>>> origin/work/publication
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -527,7 +531,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -557,6 +561,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T06:49:09Z:e1066c51afa4d33e707d3be059f2551becfd1058f14b08b15c1756503389d074:jjgmfx0tF0Wmtv6l+J2ByNc8gj6f/vwZPDz00t0yJkICKXonR8dMRb0mg0pZc93b1V7YFqbJHHJlYZ91b1H2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:29:29Z:3b5435c8fe8ebd0447838aa59f26367ac3f0094f73de33f7442a7e4d560839a3:17wxnJ4Fsyk+7MNI+wzn2joPoHk1hSkzV0pZizQ3E1gSXOMEI6iarooDc/SAkOjr5XqMoqGWdh0x960CLlZ/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -245,9 +245,6 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
-    # Most /published requests worked at once, node-wide; one past it is
-    # answered publication_busy before any read.
-    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
@@ -570,7 +567,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -604,6 +601,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

@@ -1,4 +1,8 @@
-# ryeos:signed:2026-11-25T06:49:09Z:d0318401d8d18a8fee5fbf65f2e46ef5d08e095471eea1f2abce762dcca828a0:SRwvKqU2PHNsS6zsXePk20W56l+4fJZgWDh07vtd2z9M6qeEVjir9qvsp+RMTd08vM0b8VHSPG3DARzhRO0HAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:29:29Z:a36156918762b75095465c75b8c6113d037887f665f6f00f8325043cf5aa69e2:XB5p3bpcWz3g3cvSij3J53Ve7EjVYhddSIluwa6Qd/I+yg9LGVDl5qsd+L5oxrgGpI697HKP2EjAUA10JNGCBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<<<<<<< HEAD
+||||||| 75da0dcd2
+=======
+>>>>>>> origin/work/publication
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -460,7 +464,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -494,6 +498,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

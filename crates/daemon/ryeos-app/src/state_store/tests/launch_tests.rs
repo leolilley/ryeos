@@ -1932,7 +1932,7 @@ fn primary_stop_boundary_rejects_cancel_and_kill_for_active_in_process_owner() {
     );
     for intent in [StopIntent::Cancel, StopIntent::Kill] {
         let error = store
-            .request_thread_stop(thread_id, intent)
+            .request_thread_stop(thread_id, intent, crate::runtime_db::StopOrigin::Explicit)
             .expect_err("active in-process owner has no admitted stop contract");
         assert!(
             error
@@ -2448,7 +2448,11 @@ fn pre_release_attachment_is_strict_and_release_observes_stop_tombstone() {
         .authorize_attached_process_release(thread_id, &identity, None)
         .expect("release exact attached identity");
     store
-        .request_thread_stop(thread_id, StopIntent::Cancel)
+        .request_thread_stop(
+            thread_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("persist stop tombstone");
     let stopped = store
         .authorize_attached_process_release(thread_id, &identity, None)

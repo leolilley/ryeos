@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:15:43Z:602494fa012e1051db45a23a497c8ad700413feb6bd2a43eca19206fe2ddf10c:3cKw5lzjKOlxqEKjj4LiH9ZdwCaKHCbhlCtBreRztjdtK/mnlJalO1WxqteXPujgiKR9Vg399Vzfu+ktL1owBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:f83505d3fd2ef9c366f2d2119c32474c8a36304364a30e76b1fcf3742a815fd2:TSju1O1OGb0/2sTMlDaM9g+uhSmbFWuGj9Y3kbBeoVgv9GQNPAn0vk2ZJVdMjKu5/SBWno4ftBomBDyIHVAfCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: credential-profiles.create
 required_caps: ["ryeos.execute.service.credential-profiles/create"]
@@ -6,3 +6,13 @@ schema:
   profile_id: string
   activation: object
 description: "Create one owner-bound node-private credential profile; the required activation fixes how it becomes usable (a login ceremony, or the delivered secrets it names)"
+disclosure:
+  principal:
+    - "/profile_id"
+    - "/credential_generation"
+    - "/state"
+    - "/activation/kind"
+    - "/activation/names/*"
+    - "/idempotent"
+  free_text:
+    - "/home_id"

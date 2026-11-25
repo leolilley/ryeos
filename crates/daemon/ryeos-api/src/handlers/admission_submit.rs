@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -40,13 +41,28 @@ fn default_claim() -> String {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if !is_canonical_hash(&req.subject_hash) {
-        bail!("invalid admission subject hash: {}", req.subject_hash);
+        return Err(typed_refusal(
+            "invalid_admission_subject_hash",
+            400,
+            format!("invalid admission subject hash: {}", req.subject_hash),
+        )
+        .into());
     }
     if req.policy != LOCAL_ADMISSION_POLICY {
-        bail!("unsupported admission policy: {}", req.policy);
+        return Err(typed_refusal(
+            "unsupported_admission_policy",
+            400,
+            format!("unsupported admission policy: {}", req.policy),
+        )
+        .into());
     }
     if req.claim != "accepted" {
-        bail!("unsupported admission claim: {}", req.claim);
+        return Err(typed_refusal(
+            "unsupported_admission_claim",
+            400,
+            format!("unsupported admission claim: {}", req.claim),
+        )
+        .into());
     }
     let policy = state
         .node_policy

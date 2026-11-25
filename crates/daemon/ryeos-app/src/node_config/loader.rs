@@ -62,6 +62,10 @@ enum NodeConfigSource {
     Bundle {
         name: String,
         command_registration_caps: Vec<String>,
+        /// False when the node policy has no entry for this bundle. An
+        /// unnamed bundle holds no command-registration authority at all and
+        /// may register no command; the policy entry `[]` is not the same.
+        named: bool,
     },
 }
 
@@ -77,6 +81,7 @@ impl NodeConfigSource {
             Self::Bundle {
                 name,
                 command_registration_caps,
+                ..
             } => {
                 if name.is_empty() {
                     bail!("bundle source coordinate has an empty name");
@@ -88,6 +93,21 @@ impl NodeConfigSource {
             }
         }
     }
+}
+
+/// A bundle the command-registration policy does not name carries a command
+/// item. Typed so the install path can show the cure.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "bundle_command_registration_not_authorized: bundle `{bundle}` contains a command \
+     registration ({source_file}), and the node's command-registration policy has no entry \
+     for it, so it holds no command-registration authority. Nothing from the bundle was \
+     loaded. To let it register commands, name it in the policy with `ryeos node policy-apply \
+     command_registration <source.yaml>`"
+)]
+pub struct UnnamedBundleCommand {
+    pub bundle: String,
+    pub source_file: PathBuf,
 }
 
 pub(crate) struct NodeConfigAdmission {
@@ -142,6 +162,16 @@ impl NodeConfigSnapshotBuilder {
         source: &NodeConfigSource,
     ) -> Result<()> {
         let context = verified.context();
+        if record.section_name() == super::sections::command::SECTION_NAME
+            && let NodeConfigSource::Bundle {
+                name, named: false, ..
+            } = source
+        {
+            return Err(anyhow::Error::new(UnnamedBundleCommand {
+                bundle: name.clone(),
+                source_file: context.source_file.clone(),
+            }));
+        }
         if record.section_name() != context.section {
             bail!(
                 "node-config compiler `{}` returned record for section `{}`",
@@ -270,8 +300,6 @@ impl<'a> NodeConfigLoader<'a> {
     ) -> Result<NodeConfigSnapshot> {
         let node_fingerprint =
             ryeos_node_runtime::identity::node_identity_fingerprint(self.app_root)?;
-        command_registration_authority
-            .require_bundle_sources(bundles.iter().map(|bundle| bundle.name.as_str()))?;
         let mut builder =
             NodeConfigSnapshotBuilder::new(bundles, command_registration_authority.clone())?;
         reject_disallowed_bundle_section_contributions(config_table, policy_table, bundles)?;
@@ -388,21 +416,15 @@ fn bundle_scan_root(
     bundle: &BundleRecord,
     policy: &CommandRegistrationAuthority,
 ) -> Result<NodeConfigScanRoot> {
-    let command_registration_caps = policy
-        .bundle_source_caps
-        .get(&bundle.name)
-        .with_context(|| {
-            format!(
-                "command registration policy has no explicit authority for active bundle `{}`",
-                bundle.name
-            )
-        })?
-        .clone();
+    // No entry means no authority, and `admit` refuses any command item the
+    // bundle carries. Init still requires an entry for the bundles it selects.
+    let named_caps = policy.bundle_source_caps.get(&bundle.name);
     Ok(NodeConfigScanRoot {
         path: bundle.path.clone(),
         source: NodeConfigSource::Bundle {
             name: bundle.name.clone(),
-            command_registration_caps,
+            command_registration_caps: named_caps.cloned().unwrap_or_default(),
+            named: named_caps.is_some(),
         },
     })
 }
@@ -1594,6 +1616,73 @@ mod tests {
             } else {
                 fs::copy(&source_path, &target_path).unwrap();
             }
+        }
+    }
+
+    fn load_one_bundle(
+        bundle_name: &str,
+        section: &str,
+        policy: &CommandRegistrationAuthority,
+    ) -> Result<NodeConfigSnapshot> {
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .to_path_buf();
+        let trust_store = ryeos_engine::test_support::live_trust_store();
+        let system = temp_system_with_command_registration_policy(&workspace);
+        let bundle =
+            temp_bundle_with_node_section(&workspace.join("bundles").join(bundle_name), section);
+        let bundles = vec![BundleRecord {
+            name: bundle_name.into(),
+            path: bundle.path().to_path_buf(),
+            source_file: system
+                .path()
+                .join(format!(".ai/node/bundles/{bundle_name}.yaml")),
+        }];
+        NodeConfigLoader {
+            app_root: system.path(),
+            trust_store: &trust_store,
+        }
+        .load_full(
+            &NodeConfigTable::new(),
+            &bundles,
+            policy,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+    }
+
+    #[test]
+    fn an_unnamed_bundle_without_commands_loads() {
+        let snapshot = load_one_bundle("ryeos-ui", "routes", &command_policy([]))
+            .expect("an unnamed bundle with no command registration loads");
+        assert!(snapshot.commands.is_empty());
+        assert!(snapshot.routes.iter().any(|route| route.path == "/ui"));
+    }
+
+    #[test]
+    fn an_unnamed_bundle_with_a_command_is_refused_typed_and_loads_nothing() {
+        let error = load_one_bundle("knowledge", "commands", &command_policy([]))
+            .expect_err("an unnamed bundle must not register a command");
+        let typed = error
+            .downcast_ref::<UnnamedBundleCommand>()
+            .unwrap_or_else(|| panic!("not the typed refusal: {error:#}"));
+        assert_eq!(typed.bundle, "knowledge");
+        let text = error.to_string();
+        assert!(text.contains("bundle_command_registration_not_authorized"));
+        assert!(text.contains("ryeos node policy-apply command_registration"));
+    }
+
+    #[test]
+    fn a_named_bundle_registers_commands_as_before() {
+        for caps in [Vec::new(), vec!["ryeos.register.command.*".to_owned()]] {
+            let snapshot = load_one_bundle(
+                "knowledge",
+                "commands",
+                &command_policy([("knowledge", caps)]),
+            )
+            .expect("a named bundle loads its commands");
+            assert!(!snapshot.commands.is_empty());
         }
     }
 

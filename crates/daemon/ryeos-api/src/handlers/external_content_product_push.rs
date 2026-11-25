@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use serde::Deserialize;
@@ -27,11 +28,21 @@ pub struct Request {
 impl Request {
     fn validate(&self) -> Result<()> {
         if self.remote.is_empty() || self.remote.len() > 256 || self.maximum_bytes == Some(0) {
-            bail!("product push requires an exact remote and positive byte bound");
+            return Err(typed_refusal(
+                "product_push_remote_or_bound_invalid",
+                400,
+                "product push requires an exact remote and positive byte bound",
+            )
+            .into());
         }
         for hash in [&self.witness_hash, &self.origin_admission_hash] {
             if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
-                bail!("product push requires exact canonical witness and admission hashes");
+                return Err(typed_refusal(
+                    "product_push_hashes_invalid",
+                    400,
+                    "product push requires exact canonical witness and admission hashes",
+                )
+                .into());
             }
         }
         Ok(())

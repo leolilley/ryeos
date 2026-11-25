@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T01:55:23Z:81869958735eaace5f0488809da077ec236a04fe37973c0c7ab735bf82bcd25f:2pj4MTyHSVoZ8NfJzMLH8n2iouqJzKOhmfenOTPO9xApURjiQ7wmRPv2iimawDmHe2UFxHF/TnxDMtIVprNkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:24:06Z:110bf560164bb8fa0da135aad0c9239baf775c2ae47b7869540e3f85ffc5c78f:ADnz1P4gjOINylOjXAD3W6zfZkhuajS9mAjG7i2HLTDEf61LvdZyKVxo9kJpJgX96GHgsfduWx+lBOQ1x8UwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
@@ -54,7 +54,8 @@ precisely. Do not apply marketing-scale headlines to every operational view.
 
 ## Colour: preserve Gruvbox
 
-Use the existing renderer token owner, not a parallel theme system.
+Use the signed theme items through the renderer's token owner, not a parallel
+theme system.
 
 | Role | Baseline |
 |---|---|
@@ -248,8 +249,11 @@ do not silently persist sensitive message text with a saved arrangement.
 | Contributor design/implementation rules | Root development knowledge |
 | Implemented user-facing UI contract | UI bundle knowledge |
 
-The current theme VM has an ID and tone, not a full signed token configuration.
-Do not introduce a theme registry or node policy to change font size or spacing.
+The theme VM carries the stored preference, the tone and, once the daemon has
+delivered it, the catalogue of signed `theme` items: palettes are those items,
+not renderer constants, and a new palette is a new signed theme. Do not use a
+theme or a node policy to change font size or spacing: a theme carries colours
+and pictures only.
 Layout schema bounds belong to its existing compiler; authority limits belong
 to existing admission owners. Product choices belong in authored definitions.
 

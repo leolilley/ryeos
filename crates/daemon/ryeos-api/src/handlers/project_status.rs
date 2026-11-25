@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use ryeos_app::handler_error::typed_refusal;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
@@ -25,7 +26,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     )?;
     let canonical_project_path = canonical
         .to_str()
-        .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?
+        .ok_or_else(|| {
+            typed_refusal(
+                "project_path_not_utf8",
+                400,
+                "canonical project_path is not valid UTF-8",
+            )
+        })?
         .to_owned();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
     let cas_read = state.acquire_cas_read()?;

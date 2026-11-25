@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:34:37Z:da47787605b36c49415308a7fba0247fdaa121421953ad6d9d1c40b93374bb8d:MCQYdBAbaKbtZinGa1AckIeOIS4YFqR3bXQWyRdZzdsdJuvtCZoiNcbh/K0jPM2nNdzjfkd3nt+ySnzsE/XeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:2a14f54952e9f4dead9327608d7ce7ea5286ae34872c5c189717df583df9d915:PKj0bSW3/fb+9b6ZfOG/qeEdAXGv+SimeFn7q0RppcI2r68e7i5pzFNrjl4IP08ysAWfmMCqaqZjdtIlw+hsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/attention
 version: "1.0.0"
@@ -8,3 +8,52 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /attention/*/schema_version
+    - /attention/*/id
+    - /attention/*/kind
+    - /attention/*/subject
+    - /attention/*/title
+    - /attention/*/tone
+    - /attention/*/state
+    - /attention/*/since_ms
+    - /attention/*/expires_at_ms
+    - /attention/*/actions
+    - /attention/*/detail/approval_id
+    - /attention/*/detail/worker_boot_epoch
+    - /attention/*/detail/request_digest
+    - /attention/*/detail/operation_class
+    - /attention/*/detail/candidate_snapshot_hash
+    - /attention/*/detail/candidate_validation_hash
+    - /attention/*/detail/candidate_evaluation_hash
+    - /attention/*/detail/item_ref
+    - /attention/*/detail/status
+    - /counts/total
+    - /counts/by_kind
+    - /counts/chains
+    - /counts/chains_truncated
+    - /running/count
+    - /running/label
+    - /running/tone
+    - /running/chains
+    - /running/chains_truncated
+    - /running/items/*/id
+    - /running/items/*/title
+    - /running/items/*/tone
+    - /running/items/*/item_ref
+    - /running/items/*/subject
+    - /running/items/*/state
+    - /running/items/*/since_ms
+  interim_free_text:
+    - /attention/*/project_root  # removed by: m4
+    - /attention/*/detail/summary  # removed by: per-chain publication
+    - /attention/*/detail/requested_authority  # removed by: per-chain publication
+    - /attention/*/detail/publication_result  # removed by: per-chain publication
+    - /attention/*/detail/project_root  # removed by: m4
+    - /counts/by_project  # removed by: m4
+    - /running/by_project  # removed by: m4
+    - /running/items/*/project_root  # removed by: m4
+  max_items: 512
+  max_result_bytes: 2097152
