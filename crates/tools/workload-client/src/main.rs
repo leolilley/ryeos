@@ -79,6 +79,9 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        WorkloadClientOutcome::Collected { .. } => {
+            bail!("workload-client received a collect response to an execute request");
+        }
         WorkloadClientOutcome::Failed {
             code,
             message,

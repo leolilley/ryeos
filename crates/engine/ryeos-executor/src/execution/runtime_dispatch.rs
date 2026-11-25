@@ -521,9 +521,14 @@ async fn prepare_callback_dispatch(
             let authority = ryeos_effect_contract::PreparedEffectDispatchAuthority {
                 authorization,
                 action_digest: ryeos_runtime::callback::dispatch_action_digest(&params.action)?,
-                subject_effect_class_ceiling: preflight.effect_class_ceiling.ok_or_else(|| {
-                    anyhow::anyhow!("durable effect preflight lost its admitted subject ceiling")
-                })?,
+                subject_effect_class_ceiling: preflight
+                    .effect_class_ceiling
+                    .durable_class()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "durable effect preflight lost its admitted subject ceiling"
+                        )
+                    })?,
             };
             authority.validate()?;
             Ok::<_, anyhow::Error>(authority)
@@ -1016,8 +1021,8 @@ pub(crate) fn enforce_thread_ceiling_on_preflight(
 /// calling thread's workload ceiling. An unbounded ceiling admits everything.
 fn enforce_thread_ceiling(
     ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
-    effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
-    workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    effect_class_ceiling: ryeos_engine::kind_registry::ProjectedEffectClass,
+    workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
 ) -> Result<()> {
     ryeos_app::callback_token::authorize_thread_ceiling(
         ceiling,
@@ -3760,6 +3765,7 @@ pub(crate) mod tests {
             depth: 4,
             accounting_scope: None,
             thread_ceiling,
+            evaluator_origin_chain: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
@@ -3786,6 +3792,54 @@ pub(crate) mod tests {
         let persisted = ctx.persisted();
         assert_eq!(persisted.parent_thread_id, "T-parent");
         assert_eq!(persisted.thread_ceiling, bounded_test_ceiling());
+    }
+
+    #[test]
+    fn every_spawn_context_records_where_the_launching_execution_came_from() {
+        use crate::dispatch::ParentExecutionContext;
+        let (_project, mut cap) = ceilinged_test_capability(bounded_test_ceiling());
+        let handler =
+            ryeos_app::handler_context::HandlerContext::new("fp".into(), Vec::new(), true)
+                .with_launch_origin_chain(Some("T-service-origin".into()));
+
+        // A launching thread with no origin of its own stamps its own chain,
+        // through every builder an inline, detached or follow spawn uses.
+        for context in [
+            parent_execution_context_from_capability(&cap),
+            super::super::spawn_detached_child::detached_child_parent_context(&cap, None),
+            super::super::spawn_follow_child::follow_child_parent_context(&cap),
+        ] {
+            assert_eq!(context.evaluator_origin_chain.as_deref(), Some("T-parent"));
+            assert_eq!(
+                ParentExecutionContext::launch_origin(Some(&context), Some(&handler)).as_deref(),
+                Some("T-parent"),
+                "the callback parent's stamp wins over a service call's"
+            );
+        }
+
+        // A launching thread that itself originated elsewhere passes that on.
+        cap.evaluator_origin_chain = Some("T-session".to_owned());
+        for context in [
+            parent_execution_context_from_capability(&cap),
+            super::super::spawn_detached_child::detached_child_parent_context(&cap, None),
+            super::super::spawn_follow_child::follow_child_parent_context(&cap),
+        ] {
+            assert_eq!(context.evaluator_origin_chain.as_deref(), Some("T-session"));
+        }
+
+        // A launch made by a service called from inside an execution (the
+        // evaluator launch path) records that call's origin; a launch no
+        // execution made records none.
+        assert_eq!(
+            ParentExecutionContext::launch_origin(None, Some(&handler)).as_deref(),
+            Some("T-service-origin")
+        );
+        let direct = ryeos_app::handler_context::HandlerContext::new("fp".into(), Vec::new(), true);
+        assert_eq!(
+            ParentExecutionContext::launch_origin(None, Some(&direct)),
+            None
+        );
+        assert_eq!(ParentExecutionContext::launch_origin(None, None), None);
     }
 
     #[test]
@@ -3856,6 +3910,7 @@ pub(crate) mod tests {
                     workspace_access:
                         ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
                     detached: true,
+                    collect: false,
                 },
             ],
             execution_product_selections: std::collections::BTreeMap::new(),
@@ -4046,28 +4101,42 @@ pub(crate) mod tests {
     #[test]
     fn thread_ceiling_refuses_a_tool_above_it_at_the_call() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         let ceiling = bounded_test_ceiling();
-        let immutable = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+        let immutable = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
 
-        enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), immutable).unwrap();
+        enforce_thread_ceiling(&ceiling, Effect::Class(EffectClass::Recorded), immutable).unwrap();
         assert_eq!(
             ceiling_refusal_code(
-                enforce_thread_ceiling(&ceiling, Some(EffectClass::Sealed), immutable).unwrap_err()
+                enforce_thread_ceiling(&ceiling, Effect::Class(EffectClass::Sealed), immutable)
+                    .unwrap_err()
             ),
             "thread_ceiling_effect_class_exceeded"
         );
         assert_eq!(
-            ceiling_refusal_code(enforce_thread_ceiling(&ceiling, None, immutable).unwrap_err()),
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Effect::Live, immutable).unwrap_err()
+            ),
             "thread_ceiling_effect_class_exceeded",
-            "a tool that declares no durable class runs live"
+            "a tool that declares live runs live"
         );
+        assert_eq!(
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Effect::Undeclared, immutable).unwrap_err()
+            ),
+            "thread_ceiling_no_declared_projection",
+            "a child whose effect class is undeclared is refused, not read as live"
+        );
+        enforce_thread_ceiling(&ceiling, Effect::NoDirectEffect, immutable).unwrap();
+        enforce_thread_ceiling(&ceiling, Effect::NoDirectEffect, Workspace::NoDirect).unwrap();
         assert_eq!(
             ceiling_refusal_code(
                 enforce_thread_ceiling(
                     &ceiling,
-                    Some(EffectClass::Recorded),
-                    Some(WorkspaceAccess::SharedExclusive)
+                    Effect::Class(EffectClass::Recorded),
+                    Workspace::Access(WorkspaceAccess::SharedExclusive)
                 )
                 .unwrap_err()
             ),
@@ -4075,14 +4144,19 @@ pub(crate) mod tests {
         );
         assert_eq!(
             ceiling_refusal_code(
-                enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), None).unwrap_err()
+                enforce_thread_ceiling(
+                    &ceiling,
+                    Effect::Class(EffectClass::Recorded),
+                    Workspace::Undeclared
+                )
+                .unwrap_err()
             ),
             "thread_ceiling_no_declared_projection"
         );
         enforce_thread_ceiling(
             &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
-            None,
-            None,
+            Effect::Undeclared,
+            Workspace::Undeclared,
         )
         .unwrap();
     }

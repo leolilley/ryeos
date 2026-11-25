@@ -4091,6 +4091,9 @@ fn render_workload_invocation_result(
     let success = outcome.succeeded();
     let result = match outcome {
         WorkloadClientOutcome::Dispatched { response } => response.result,
+        // This client never sends a collect; a collected child is rendered as
+        // data and never counts as an execution success.
+        WorkloadClientOutcome::Collected { child } => serde_json::to_value(child)?,
         WorkloadClientOutcome::Failed {
             code,
             message,

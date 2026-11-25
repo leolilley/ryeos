@@ -4321,6 +4321,24 @@ fn resolve_thread_ceiling(
     resolve_launch_ceiling(params.parent_execution_context, metadata_template)
 }
 
+/// The origin chain a managed launch seals. A launch that already has a sealed
+/// identity (a follow or detached child, a continuation, a recovery) carries
+/// that value unchanged; a fresh launch records the stamp of the execution that
+/// made it, from its parent context or its service call, and none when no
+/// execution did.
+fn resolve_evaluator_origin_chain(
+    params: &BuildAndLaunchParams<'_>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+) -> Option<String> {
+    match metadata_template.and_then(|template| template.resume_context.as_ref()) {
+        Some(resume) => resume.evaluator_origin_chain.clone(),
+        None => crate::dispatch::ParentExecutionContext::launch_origin(
+            params.parent_execution_context,
+            params.handler_context,
+        ),
+    }
+}
+
 fn resolve_launch_ceiling(
     parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
@@ -6103,6 +6121,13 @@ async fn prepare_managed_launch_authority_in_mode(
                     .and_then(|template| template.resume_context.as_ref())
                     .and_then(|resume| resume.parent_delegation_caps.clone()),
                 thread_ceiling: resolve_thread_ceiling(params, metadata_template),
+                // Sealed by the spawn that admitted the child and carried
+                // unchanged by every continuation of it; never derived from
+                // action params or any runtime-supplied field.
+                workspace_input: metadata_template
+                    .and_then(|template| template.resume_context.as_ref())
+                    .and_then(|resume| resume.workspace_input.clone()),
+                evaluator_origin_chain: resolve_evaluator_origin_chain(params, metadata_template),
                 executor_ref: Some(executor_ref.clone()),
                 runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
             });
@@ -7841,6 +7866,19 @@ async fn run_claimed_thread_row_inner(
             thread_id = %thread_id,
             "set_chain_root found no cap for the just-minted token; chain root left at default"
         );
+    }
+    // Carry the origin chain sealed with this launch, so every child launched
+    // through this bearer records where it came from.
+    if !state.callback_tokens.set_evaluator_origin_chain(
+        &cap.token,
+        launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+            .and_then(|resume| resume.evaluator_origin_chain.clone()),
+    ) {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "callback capability disappeared before origin-chain binding"
+        )));
     }
 
     // 6a½. Financial admission. A finite hard spend limit is enforceable only
@@ -9784,6 +9822,8 @@ async fn prepare_follow_child_launch_inner(
         thread_ceiling: operational_resume
             .thread_ceiling
             .meet(parent_context.thread_ceiling),
+        // The origin the child was seeded with at spawn.
+        evaluator_origin_chain: operational_resume.evaluator_origin_chain.clone(),
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
@@ -12227,6 +12267,10 @@ async fn launch_claimed_follow_child(
         .ok_or_else(|| {
             anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
         })?;
+    let sealed_origin_chain = metadata
+        .resume_context
+        .as_ref()
+        .and_then(|resume| resume.evaluator_origin_chain.clone());
     let persisted_parent_context =
         metadata
             .follow_parent_context
@@ -12236,6 +12280,7 @@ async fn launch_claimed_follow_child(
                 depth: p.depth,
                 accounting_scope: p.accounting_scope,
                 thread_ceiling: p.thread_ceiling,
+                evaluator_origin_chain: sealed_origin_chain,
             });
     let sealed_root_request = metadata.sealed_root_request.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no sealed root execution request")
@@ -15658,6 +15703,7 @@ mod tests {
             depth: 4,
             accounting_scope: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            evaluator_origin_chain: None,
         };
 
         let parent_limits = parent_limits_from_context(Some(&ctx))
@@ -15747,6 +15793,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             thread_ceiling,
+            evaluator_origin_chain: None,
         }
     }
 
@@ -15782,6 +15829,8 @@ mod tests {
                 effective_caps: Vec::new(),
                 parent_delegation_caps: None,
                 thread_ceiling,
+                workspace_input: None,
+                evaluator_origin_chain: None,
                 executor_ref: None,
                 runtime_ref: None,
             },
@@ -15858,6 +15907,40 @@ mod tests {
     }
 
     #[test]
+    fn a_none_declaration_does_not_cover_the_launchs_own_sealed_effect_authority() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace,
+        };
+        let recorded = recorded_bounded_ceiling();
+        // A directive that declares no direct effect and no direct workspace
+        // use passes the ceiling's projection gates...
+        ryeos_app::callback_token::authorize_thread_ceiling(
+            &recorded,
+            Effect::NoDirectEffect,
+            Workspace::NoDirect,
+        )
+        .unwrap();
+        // ...but its model calls are judged at launch by the sealed
+        // external-effect authority, which `none` does not cover.
+        let parent = ceiling_parent_context(recorded);
+        assert_eq!(
+            refusal_code_of(judge_launch_effect_under_ceiling(
+                Some(&parent),
+                None,
+                Some(&sealed_effect_authority(Some(EffectClass::Sealed)))
+            )),
+            ryeos_app::callback_token::THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED
+        );
+        judge_launch_effect_under_ceiling(
+            Some(&parent),
+            None,
+            Some(&sealed_effect_authority(Some(EffectClass::Recorded))),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn a_continued_successor_keeps_the_ceiling_and_is_judged_again_at_its_launch() {
         use ryeos_effect_contract::EffectClass;
         let recorded = recorded_bounded_ceiling();
@@ -15906,6 +15989,7 @@ mod tests {
             depth: 2,
             accounting_scope: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            evaluator_origin_chain: None,
         };
 
         assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
@@ -15920,6 +16004,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            evaluator_origin_chain: None,
         };
 
         let err = parent_limits_from_context(Some(&ctx)).unwrap_err();
