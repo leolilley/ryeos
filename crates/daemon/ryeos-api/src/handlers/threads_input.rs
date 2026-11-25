@@ -1258,6 +1258,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("executor:test/directive".to_string()),
             runtime_ref: Some("runtime:test/directive".to_string()),
         }

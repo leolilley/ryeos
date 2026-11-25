@@ -101,6 +101,19 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let cap = state
         .callback_tokens
         .validate_token_and_thread(&params.callback_token, &parent_thread_id)?;
+    // Follow children are launched without the exact child preflight a
+    // thread's workload ceiling is judged against, so a bounded thread cannot
+    // follow-spawn.
+    if cap.thread_ceiling.is_bounded() {
+        return Err(anyhow::Error::new(
+            crate::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                code: ryeos_app::callback_token::THREAD_CEILING_SPAWN_MODE_REFUSED.to_owned(),
+                message: "a thread under a workload ceiling may not spawn follow children"
+                    .to_owned(),
+                binding: None,
+            },
+        ));
+    }
     let launch_owner = cap
         .launch_owner
         .as_deref()
@@ -535,12 +548,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         reserved_child_ids.insert(item_index, child_thread_id);
     }
 
-    let expected_parent_context = PersistedParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-        accounting_scope: cap.accounting_scope.clone(),
-    };
+    let expected_parent_context =
+        crate::dispatch::ParentExecutionContext::for_child_of(&cap).persisted();
     let mut child_thread_ids = Vec::with_capacity(children.len());
     let mut queued_child_thread_ids = Vec::new();
     let mut fresh_indices = std::collections::BTreeSet::new();
@@ -1198,12 +1207,7 @@ async fn prepare_follow_children(
         fingerprint: acting_principal.to_owned(),
         scopes: cap.effective_caps.clone(),
     });
-    let launch_parent_context = crate::dispatch::ParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-        accounting_scope: cap.accounting_scope.clone(),
-    };
+    let launch_parent_context = crate::dispatch::ParentExecutionContext::for_child_of(cap);
     let mut child_metadata = std::collections::BTreeMap::new();
     let mut prepared_children = std::collections::BTreeMap::new();
     for (item_index, child) in children.iter().enumerate() {
@@ -1315,6 +1319,7 @@ async fn prepare_follow_children(
                             .into_iter()
                             .collect(),
                     ),
+                    thread_ceiling: cap.thread_ceiling,
                     executor_ref: Some(child_execution.executor_ref.clone()),
                     runtime_ref: Some(runtime_ref),
                 });

@@ -183,6 +183,7 @@ pub(super) fn rooted_bundle_proof_fixture(
         accounting_scope: None,
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         runtime_ref: "runtime:fixture".to_owned(),
         executor_ref: "tool:test/executor".to_owned(),
     }
@@ -1166,6 +1167,7 @@ pub(super) fn continuation_resume_context(
         scheduled_fire: None,
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         executor_ref: Some("native:test".to_string()),
         runtime_ref: None,
     }

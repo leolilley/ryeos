@@ -606,6 +606,8 @@ pub async fn run(
             None,
             serde_json::Value::Null,
             0,
+            // An augmentation child is its own root thread with no caps.
+            ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         );
         if !state
             .callback_tokens

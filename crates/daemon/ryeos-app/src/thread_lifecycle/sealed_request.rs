@@ -2209,6 +2209,7 @@ impl SealedRootExecutionRequest {
             scheduled_fire: source.scheduled_fire.clone(),
             effective_caps: capsule.effective_caps.clone(),
             parent_delegation_caps: capsule.parent_delegation_caps.clone(),
+            thread_ceiling: capsule.thread_ceiling,
             executor_ref: Some(capsule.executor_ref.clone()),
             runtime_ref: Some(capsule.runtime_ref.clone()),
         };
@@ -3324,6 +3325,7 @@ mod authority_tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:storage-fixture".to_string()),
             runtime_ref: Some("runtime:storage-fixture".to_string()),
         }
