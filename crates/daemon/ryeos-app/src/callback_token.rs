@@ -767,7 +767,7 @@ pub fn authorize_thread_ceiling_launch_effect(
         max_effect_class.admitted_labels(),
         authority.admitted_effect_class.map_or(
             ryeos_engine::kind_registry::ProjectedEffectClass::Live,
-            |class| ryeos_engine::kind_registry::ProjectedEffectClass::Class(class),
+            ryeos_engine::kind_registry::ProjectedEffectClass::Class,
         ),
     )
     .map_err(|error| ThreadCeilingRefusal {

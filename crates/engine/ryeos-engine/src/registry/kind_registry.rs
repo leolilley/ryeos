@@ -7052,7 +7052,7 @@ execution:
     #[test]
     fn workspace_access_accepts_the_none_constant() {
         let execution = parse_declaration("workspace_access", "    constant: none\n").unwrap();
-        let decl = execution.workspace_access.expect("declared");
+        let decl = execution.workspace_access.clone().expect("declared");
         assert_eq!(
             decl.source,
             WorkspaceAccessSource::Constant(WorkspaceAccessConstant::NoDirect)
