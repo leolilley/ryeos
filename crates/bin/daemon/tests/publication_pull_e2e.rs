@@ -41,10 +41,11 @@ async fn start_publisher() -> (DaemonHarness, FastFixture) {
 
 /// A second node with its own node and operator keys and only the core
 /// bundle: it has never seen the published bundle and has no remote.
-async fn start_puller() -> (DaemonHarness, FastFixture) {
+async fn start_puller(authorized_bundles: &[&str]) -> (DaemonHarness, FastFixture) {
     DaemonHarness::start_fast_core_only_with_node_and_user_keys(
         SigningKey::from_bytes(&[0x5b; 32]),
         SigningKey::from_bytes(&[0x5c; 32]),
+        authorized_bundles,
     )
     .await
     .expect("start the pulling node")
@@ -114,9 +115,29 @@ async fn pull(b: &DaemonHarness, url: &str, node: &str, expect: &str) -> (u16, V
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_pull_for_a_bundle_the_sealed_policy_does_not_name_is_refused_with_the_step() {
+    let (a, a_fixture) = start_publisher().await;
+    let (b, _b_fixture) = start_puller(&[]).await;
+    let publication = publish_on(&a, &a_fixture).await;
+    let node_pin = format!("fp:{}", publication.node_fingerprint);
+    let (status, refused) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
+    assert_eq!(status, 422, "{refused:#}");
+    let text = refused.to_string();
+    assert!(
+        text.contains("publication_bundle_not_authorized"),
+        "{refused:#}"
+    );
+    assert!(text.contains("bundle_source_caps"), "{refused:#}");
+    assert!(
+        !b.state_path.join(".ai/bundles").join(BUNDLE).exists(),
+        "a refused pull left a bundle behind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_pins() {
     let (a, a_fixture) = start_publisher().await;
-    let (b, _b_fixture) = start_puller().await;
+    let (b, _b_fixture) = start_puller(&[BUNDLE]).await;
     let publication = publish_on(&a, &a_fixture).await;
     let node_pin = format!("fp:{}", publication.node_fingerprint);
 
