@@ -306,6 +306,7 @@ pub(crate) fn load_manifest(
 
 // ── Answers ─────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct Refused {
     status: StatusCode,
     code: &'static str,
