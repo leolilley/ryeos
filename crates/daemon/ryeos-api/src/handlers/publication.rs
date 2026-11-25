@@ -15,9 +15,10 @@
 use std::sync::Arc;
 
 use ryeos_engine::trust::{
-    MAX_PUBLICATION_MANIFEST_BYTES, ManifestEntry, PUBLICATION_MANIFEST_SCHEMA, PublicationLedger,
-    PublicationManifest, PublicationReason, PublicationRecord, PublicationRefusal,
-    PublicationStatus, SignerRole, SignerStatus, publish_record, retire_publication,
+    MAX_PUBLICATION_MANIFEST_BYTES, ManifestEntry, PUBLICATION_MANIFEST_KIND,
+    PUBLICATION_MANIFEST_SCHEMA, PublicationLedger, PublicationManifest, PublicationReason,
+    PublicationRecord, PublicationRefusal, PublicationStatus, SignerRole, SignerStatus,
+    publish_record, retire_publication,
 };
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::publication::PublicationPolicy;
@@ -198,6 +199,7 @@ pub async fn freeze(
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     let largest = entries.iter().map(|entry| entry.size).max().unwrap_or(0);
     let manifest = PublicationManifest {
+        kind: PUBLICATION_MANIFEST_KIND.to_owned(),
         schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         bundle_name: req.bundle_name.clone(),
         bundle_manifest_digest: verified.body_digest,

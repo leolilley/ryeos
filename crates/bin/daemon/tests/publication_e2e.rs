@@ -326,3 +326,67 @@ async fn a_publication_stops_being_served_after_not_after() {
     let (_, listed) = get_json(&h, "/published").await;
     assert_eq!(listed["publications"], json!([]));
 }
+
+async fn gc(h: &DaemonHarness) -> Value {
+    let (status, body) = service(
+        h,
+        "service:maintenance/gc",
+        json!({ "dry_run": false, "compact": false }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body:#}");
+    body["result"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gc_pass_keeps_a_live_publication_and_reclaims_it_after_retire() {
+    let (h, fixture) = start().await;
+    let frozen = freeze(&h).await;
+    let record = record(&frozen, 0x31, 3600);
+    let id = record.id.clone();
+    let (status, published) = publish(&h, &record, &fixture.user).await;
+    assert_eq!(status, 200, "{published:#}");
+
+    // The frozen blobs are referenced by nothing else: a sweep that does not
+    // pin the publication would take them.
+    let swept = gc(&h).await;
+    let (status, body) = get(&h, &format!("/published/{id}")).await;
+    assert_eq!(status, 200, "after GC {swept:#}");
+    let described: Value = serde_json::from_slice(&body).unwrap();
+    let manifest: PublicationManifest =
+        serde_json::from_value(described["manifest"].clone()).unwrap();
+    let (status, bytes) = get(
+        &h,
+        &format!("/published/{id}/blob/{}", frozen.manifest_hash),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(lillux::sha256_hex(&bytes), frozen.manifest_hash);
+    for entry in &manifest.entries {
+        let (status, bytes) = get(&h, &format!("/published/{id}/blob/{}", entry.hash)).await;
+        assert_eq!(status, 200, "{} after GC {swept:#}", entry.path);
+        assert_eq!(lillux::sha256_hex(&bytes), entry.hash);
+    }
+
+    // Retire, then put the record file back byte for byte: the tombstone
+    // still wins.
+    let record_file = ryeos_engine::roots::RuntimeRoot::new(h.state_path.clone())
+        .state()
+        .join("publications")
+        .join(format!("{id}.json"));
+    let kept = std::fs::read(&record_file).expect("the stored record");
+    let (status, retired) = service(&h, "service:publication/retire", json!({ "id": id })).await;
+    assert_eq!(status, 200, "{retired:#}");
+    std::fs::remove_file(&record_file).unwrap();
+    std::fs::write(&record_file, &kept).unwrap();
+    let (status, gone) = get_json(&h, &format!("/published/{id}")).await;
+    assert_eq!(status, 410, "{gone:#}");
+    assert_eq!(gone["error"]["code"], "publication_retired");
+
+    // With the publication retired, a sweep may reclaim the closure.
+    let swept = gc(&h).await;
+    assert!(
+        swept["deleted_objects"].as_u64().unwrap() >= 1,
+        "the retired publication's manifest is no longer pinned: {swept:#}"
+    );
+}

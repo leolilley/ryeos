@@ -48,6 +48,9 @@ use crate::roots::RuntimeRoot;
 pub const PUBLICATION_SCHEMA: &str = "ryeos.publication/v1";
 /// Schema tag of the frozen export manifest.
 pub const PUBLICATION_MANIFEST_SCHEMA: &str = "ryeos.publication.bundle-export-manifest/v1";
+/// Object kind the frozen manifest carries, so the content store's
+/// reachability walk can follow its entries to their blobs.
+pub const PUBLICATION_MANIFEST_KIND: &str = "publication_manifest";
 /// Root kind of a publication that serves a frozen bundle export.
 pub const PUBLICATION_ROOT_BUNDLE_EXPORT: &str = "bundle_export";
 /// What every record states about retiring and copying.
@@ -430,6 +433,7 @@ pub struct ManifestEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationManifest {
+    pub kind: String,
     pub schema: String,
     pub bundle_name: String,
     pub bundle_manifest_digest: String,
@@ -479,8 +483,8 @@ impl Closure {
 impl PublicationManifest {
     pub fn validate_shape(&self) -> Result<(), PublicationRefusal> {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
-        if self.schema != PUBLICATION_MANIFEST_SCHEMA {
-            return malformed("manifest has an unknown schema");
+        if self.kind != PUBLICATION_MANIFEST_KIND || self.schema != PUBLICATION_MANIFEST_SCHEMA {
+            return malformed("manifest has an unknown kind or schema");
         }
         if self.entries.len() > MAX_PUBLICATION_MANIFEST_ENTRIES
             || self.file_count != self.entries.len() as u64
@@ -734,6 +738,28 @@ impl PublicationLedger {
             }
         }
         Ok(ledger)
+    }
+
+    /// Manifest hashes the content store must keep: those of publications that
+    /// are neither retired nor past `not_after` at `now`. A manifest object
+    /// reaches its entry blobs through its registered links, so these are the
+    /// only roots a sweep needs. A retired or expired publication stops being
+    /// a root, and its closure may be collected.
+    pub fn pinned_manifest_hashes(&self, now: u64) -> Vec<String> {
+        let mut hashes: Vec<String> = self
+            .publications
+            .iter()
+            .filter(|stored| {
+                matches!(
+                    self.state_of(&stored.record.id).status(now),
+                    PublicationStatus::Live(_)
+                )
+            })
+            .map(|stored| stored.record.root.manifest_hash.clone())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        hashes
     }
 
     pub fn state_of(&self, id: &str) -> PublicationState {

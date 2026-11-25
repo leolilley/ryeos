@@ -294,6 +294,7 @@ fn manifest_bytes(entries: &[(&str, &[u8])]) -> (String, Vec<u8>) {
         })
         .collect();
     let manifest = PublicationManifest {
+        kind: PUBLICATION_MANIFEST_KIND.to_owned(),
         schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         bundle_name: "fixture".to_owned(),
         bundle_manifest_digest: "b".repeat(64),
@@ -333,4 +334,35 @@ fn a_manifest_whose_bytes_do_not_match_its_hash_or_shape_is_refused() {
     assert!(PublicationManifest::from_object_bytes(&hash, &bytes).is_err());
     let (hash, bytes) = manifest_bytes(&[("a", b"x"), ("a", b"y")]);
     assert!(PublicationManifest::from_object_bytes(&hash, &bytes).is_err());
+}
+
+#[test]
+fn only_live_publications_pin_their_manifest() {
+    let node = Node::new();
+    let with_manifest = |digit: char, not_after: u64, manifest: char| {
+        let mut record = node.record(digit, not_after);
+        record.root.manifest_hash = manifest.to_string().repeat(64);
+        node.publish(record).unwrap().record.id
+    };
+    let _live = with_manifest('a', NOW + DAY, '1');
+    let retired = with_manifest('b', NOW + DAY, '2');
+    let _soon = with_manifest('c', NOW + 10, '3');
+    retire_publication(
+        node.root.path(),
+        &node.node,
+        &retired,
+        PublicationReason::Operator,
+        NOW + 1,
+    )
+    .unwrap();
+    let ledger = PublicationLedger::load(node.root.path(), &node.node.verifying_key()).unwrap();
+    assert_eq!(
+        ledger.pinned_manifest_hashes(NOW + 5),
+        vec!["1".repeat(64), "3".repeat(64)]
+    );
+    // Once a publication passes not_after, its manifest is no longer pinned.
+    assert_eq!(
+        ledger.pinned_manifest_hashes(NOW + 10),
+        vec!["1".repeat(64)]
+    );
 }
