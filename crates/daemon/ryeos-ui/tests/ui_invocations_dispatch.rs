@@ -515,7 +515,9 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             },
             "payload": {
                 "kind": "source_parameters",
-                "params": { "chain_root_id": owned_chain }
+                // The client resolves the signed `limit` default (`|200`) before
+                // it dispatches; the handler binds only what the client supplies.
+                "params": { "chain_root_id": owned_chain, "limit": 200 }
             }
             }
         }),
