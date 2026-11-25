@@ -2626,6 +2626,7 @@ strict_fields: warn
             launch_trust: None,
             project_shadowing: Default::default(),
             runtime_authoring: Default::default(),
+            standing_endorsement: Default::default(),
         }
     }
 

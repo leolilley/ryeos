@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:42c51e297f4570ea9178682f5e8579ade90c5f10eb51706b4713bbe2b2f1895f:u2fuD7U03e1cZplkpZgT3KwMeNKYH515maF8WKcUtyfQZRuQ7on05FMWuEqSFzVgsYj7FUpzdv6tcREfIRbDCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T03:51:26Z:7a7a57db56b01bd7a5d9365d0ab0b325b69c578123b16b4bfcfc98fd70d1a6c7:NfToY57C9tfxW6BTvKn/bHZdJ7dEDyJPXQ5j+dkgDEefiolsBgzI0Iuqpcyhx692IZOCzn6Zurif5P2yqQqECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/session/surfaces/open"]
 name: session/surfaces/open
@@ -6,13 +6,13 @@ version: "1.0.0"
 description: Admit an explicitly selected authored, reusable or composed Surface collection into a new Surface or exact existing Surface tab destination under fresh admission.
 endpoint: ui.session.surfaces.open
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: surface_opening
 schema:
   creation_request_id: string
   selection: object
   placement: object
-# Session-local transition: a principal gets the acknowledgement only; the descriptors carry titles, project paths and binding material.
 disclosure:
   principal:
     - /ui_transition/kind

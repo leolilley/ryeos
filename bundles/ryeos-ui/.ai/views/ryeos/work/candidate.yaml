@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T07:22:30Z:171b675d4f705356491278e4486c19711410a43b161b9bafe1d4a2a75f4ecc96:NpJ5T1//yoaY8skJ+7jVz1M6h2zNiOtCSrcYCU5sckQMBbtuwyaVYlnK/adVOg4ej+uvFeeX5SR7V7WyYzACAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T08:38:45Z:152afebfcce995433e21a0325c5234454d5e842aa03ce24d323b56d6691ab7e5:yZFGV1V3HVtinGAvMYTASq2ULMIzAymgNTG7y80QQsA8ouNls0IbSXxUqADQy95kgcZnHeuwjXfoPxo0i0OaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-candidate
 title: Candidate
 version: "1.0.0"
@@ -39,6 +39,7 @@ sections:
           - evaluator_item_ref
           - evaluator_definition_digest
           - evaluator_result_digest
+          - evaluator_evidence_scope
           - publication_result
           - terminal_reason
           - completion

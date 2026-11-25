@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-24T09:59:47Z:5eccfe87154abfadead7f12a15a13b690a865d93f1b43f0e87c5796f4014780b:QKOsBevhFlzEUbtUK5CpmCJnKvk6GECav/+2pTdZVquHEHI3rrJqqni4940Rii21vcj12ekIIBJS/jB4xxKvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, evaluate]
+description: "Start an independent evaluation of one frozen, validated candidate with an evaluator item you name; there is no default evaluator"
+help:
+  usage: "ryeos worker session evaluate <chain-root-id> <candidate-snapshot-hash> <candidate-validation-hash> <evaluator-item-ref> --input '<json object>'; the object carries launch_id (L- and 32 hex characters, minted by you) and, as evaluator_parameters, whatever the evaluator takes (the shipped unchecked evaluator takes the candidate and base snapshot hashes and refuses unless accept_unchecked is true)"
+  examples:
+    - "ryeos worker session evaluate T-1 <candidate> <validation> tool:ryeos/core/evaluate/unchecked --input '{\"launch_id\":\"L-<32 hex>\",\"evaluator_parameters\":{\"candidate_snapshot_hash\":\"<candidate>\",\"base_snapshot_hash\":\"<base>\",\"accept_unchecked\":true}}'"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: candidate_snapshot_hash
+      - field: candidate_validation_hash
+      - field: evaluator_item_ref
+        matcher: canonical_ref
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/start-candidate-evaluation
+  availability: daemon
