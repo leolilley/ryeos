@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T14:21:58Z:977251b824f58c29490d22ade57c6d04f7ce12a6f2708ea859d28c7568197147:e/zPJ4m9ES8uvDAxOLyEUuRuQPLs2H7f2n1wlWxmqRb/dsP9I35hbKluzrPFW1RlriWv9NGBjTFk31MVZygKCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:1c7549fcec96654a2cf75f51acf0a30d4fbc7303f98081ef5b336f2035afa148:VA9m2DdafzZ7VulZkEf/z3sSWa52X0qp0XnOqOE+1qKUUU4qy6XJOVxEoUZaoKbOtRbQ0FCi0IuWOwBs6vNmAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.capture-product
 required_caps: ["ryeos.execute.service.external-content/capture-product"]
@@ -8,3 +8,5 @@ schema:
   recipe_binding: string
   product_name: string
 description: Capture one named product from an exact successful retained producer using its admitted recipe; exact admitted operator owner only
+# Operator-only: the handler requires the admitted (or local configured) operator.
+disclosure: {}

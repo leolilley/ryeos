@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:40Z:61451f9e5772bb8c5907dd5ec2b375d1f103216fa1d93ac71cc1d5e1a499e0f8:tfbiCKGLOZdaKpIzgLcL2T9103/Esy1DwSxdBeQ6BByvKyYhk4qCNiH5IjsE97X92fJ036ykpffr6nlzrOFxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:31708def4a8b218550b3dc379d7c63d786e238f83c441a7d75a985c0e4af77d7:RetclD2kLp9z42pU9S57l4VFEXyAgiYzirDOF7rBcvzSkNGDmDKws7O+djZQKHxdKv3lfKUBI480njX5lFXXAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -84,6 +84,37 @@ composed_value_contract:
               root_type: mapping
               required:
                 terminal_for: { type: single, prim: string }
+    # What each caller class may see of this service's answer. The operator sees
+    # it whole; a field in no tier is the operator's alone. `free_text` lists
+    # leaves that can carry a path, probe output or a key and may not appear in
+    # a wider tier. `interim_free_text` names free-text leaves a principal still
+    # receives because the seat that owns the answer reads them today; each is a
+    # reviewed exception that a later milestone removes. A service with no block
+    # discloses nothing to another class.
+    disclosure:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        optional:
+          principal:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          public:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          free_text:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          interim_free_text:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          max_result_bytes: { type: single, prim: integer }
+          max_items: { type: single, prim: integer }
     ui_read_only: { type: single, prim: boolean }
     ui_dispatch:
       type: single
@@ -120,6 +151,9 @@ metadata:
     state_access:
       from: path
       key: state_access
+    disclosure:
+      from: path_value
+      key: disclosure
     ui_read_only:
       from: path_value
       key: ui_read_only

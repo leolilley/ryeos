@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T03:36:11Z:ce0af8a7d0c1d51607103cb91b3fd0773c09fabbdafe6f7cdbe8e7e8ba0d757b:3Pm6deJhZ26NFSUmcvEHLM/Nvx6CHMWJ5vVrbM3Bzt9teRORP0YlHPHR75RxdquVviTkutOOjhRWJJ5BMzyzDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:28:19Z:7d4de201ec28eab957df28772df91278062d7785ee8e65b12a1e975fd3bfac20:3IJXbmFxL8FoAM00zHDBL3JhekgXWF08W7ASmnwuVE5C1YETMBQVcGHkbQhwqC4ImWOs/ZwX1+06f58R1UnWCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -435,7 +435,7 @@ policies:
     schema: 1
     names: []
   ui_browser_sessions:
-    schema: 5
+    schema: 6
     session_ttl_secs: 28800
     session_idle_secs: 3600
     launch_token_ttl_secs: 60
@@ -469,6 +469,7 @@ policies:
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
     max_surface_instances_per_presentation: 16
+    max_art_grants: 256
     shared_presentation:
       max_declaration_bytes: 65536
       max_dialogs: 16

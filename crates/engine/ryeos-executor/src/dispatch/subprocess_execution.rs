@@ -1221,6 +1221,10 @@ async fn dispatch_tool_subprocess(
         )?;
     }
 
+    let evaluator_origin_chain = crate::dispatch::ParentExecutionContext::launch_origin(
+        request.parent_execution_context.as_ref(),
+        handler_context.as_ref(),
+    );
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
@@ -1246,6 +1250,7 @@ async fn dispatch_tool_subprocess(
         thread_ceiling: crate::dispatch::ParentExecutionContext::launch_ceiling(
             request.parent_execution_context.as_ref(),
         ),
+        evaluator_origin_chain,
     };
 
     if request.launch_mode == "detached" {

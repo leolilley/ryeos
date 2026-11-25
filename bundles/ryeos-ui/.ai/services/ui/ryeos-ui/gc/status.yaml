@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:9f26f0446eaeb32d416ac2620adaea57ec2793348a20b3c2ad35c884aa40e930:GUck3fpaGqb5FLdhsBZlkHRUYCkAcXrX7zSyYPxfNiG9DK61SBdiRYSUt8lt5yJx7ecu+StFbpxtwrSPNQefAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:5144b925fab97fbc3f7e1e3cde8eeaa271ba0865ec6d45d7b287c2529f377b1e:I5Brr7CCjuuZYfUSw85BYSu9yHPksvVGyT/rg6Q9AkAy0FC627vHgi0ItH4kBSp9PysOmvRzjlwMwbSswQQmBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/gc/status
 version: "1.0.0"
@@ -8,3 +8,16 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /activity
+    - /coverage
+    - /pending_head_transitions/pending
+    - /pending_head_transitions/pending_sets
+    - /pending_head_transitions/pending_removes
+    - /pending_head_transitions/oldest_prepared_at
+    - /pending_head_transitions/oldest_age_seconds
+  free_text:
+    - /state
+    - /recent_events

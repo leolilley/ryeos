@@ -472,6 +472,9 @@ fn preflight_dispatch_launch_core(
         engine: std::sync::Arc::clone(request.request_engine),
         plan_ctx,
         requested_call: request.call.cloned(),
+        // Admission planning resolves and verifies; it never runs a handler,
+        // so it holds the lowest class.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
     };
     let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
         request.request_engine,
@@ -711,6 +714,13 @@ fn spawn_dispatch_launch_inner(
     let root_dispatch_evidence = options.root_dispatch_evidence;
     let ref_bindings = options.ref_bindings;
     let product_selections = options.product_selections;
+    // The class of the key that launched this root. A launch with no ingress
+    // authority is node-internal (scheduler, recovery) and acts as the node's
+    // own operator authority; it is never upgraded from any other source.
+    let disclosure_class = match options.handler_context.as_ref() {
+        Some(context) => ryeos_app::operator_authority::disclosure_class_for(state, context),
+        None => ryeos_node_runtime::disclosure::DisclosureClass::Operator,
+    };
     let handler_context = options.handler_context;
     let captured_generation = options.captured_generation;
     let first_poll_timer = launch_timings.as_ref().map(|timings| {
@@ -754,6 +764,7 @@ fn spawn_dispatch_launch_inner(
             engine: request_engine,
             plan_ctx,
             requested_call: call,
+            disclosure_class,
         };
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {

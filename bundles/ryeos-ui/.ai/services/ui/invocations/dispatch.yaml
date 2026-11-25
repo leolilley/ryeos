@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:b5f042eff332c54417cd455a3b315a2d060ac96eba406f78f70e50660c619610:4OLyXXXzF+x/4vh4P/jYi3B7K2hi2UytvGR56UL7GHO33xlBiyfBU7hwzrlqTUi0f7M4nPDfNHt5IqcoYr1MDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:1fd7edbafba91556b4cadae9be008ce9ecd5dec23d4c6db94d9e0a6d215defc6:Qv3p5zMYn4oAoi9/m2Njj+zgzAjSYQQLZfSIFualKhu5l67jIeDN/0H91KXzqyPHx278hz1NG9XKiaLz8L1IBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: invocations/dispatch
 version: "1.0.0"
@@ -7,3 +7,16 @@ endpoint: ui.invocations.dispatch
 availability: daemon_only
 required_caps: []
 record_thread: false
+disclosure:
+  principal:
+    - "/status"
+    - "/target/kind"
+    - "/target/ref"
+    - "/invocation_id"
+    - "/binding_attachment_id"
+    - "/binding_generation"
+    - "/binding_digest"
+  interim_free_text:
+    - "/result"  # removed by: per-chain publication
+  max_items: 12000
+  max_result_bytes: 8388608

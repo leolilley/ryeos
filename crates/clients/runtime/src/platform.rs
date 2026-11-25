@@ -122,6 +122,11 @@ pub trait Transport {
     /// [`RuntimeError::Daemon`].
     async fn get(&self, path: &str) -> Result<String, RuntimeError>;
 
+    /// GET; the body as bytes, refused as [`RuntimeError::UnreadableResponse`]
+    /// when it is longer than `max_bytes`. A non-2xx answer is
+    /// [`RuntimeError::Daemon`]. For binary resources such as pictures.
+    async fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError>;
+
     /// The only POST: send `body` unchanged. Failure to deliver is
     /// [`RuntimeError::Network`]; an unreadable 2xx body is
     /// [`RuntimeError::UnreadableResponse`]; a non-2xx answer is

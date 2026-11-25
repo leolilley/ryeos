@@ -6624,7 +6624,11 @@ async fn durable_stop_cut_on_created_remote_adoption_settles_before_target_recov
             && target_store.dedicated_session(&successor_id)?.is_none(),
         "pre-attachment target cut already consumed or lost its reservation"
     );
-    let stopped = target_store.request_thread_stop(&successor_id, StopIntent::Cancel)?;
+    let stopped = target_store.request_thread_stop(
+        &successor_id,
+        StopIntent::Cancel,
+        ryeos_app::state_store::StopOrigin::Explicit,
+    )?;
     anyhow::ensure!(
         stopped.stop_requested_at_ms.is_some()
             && stopped.stop_intent == Some(StopIntent::Cancel)

@@ -352,6 +352,35 @@ impl StateStore {
             if let Some(pushed) = resume.original_pushed_head_ref {
                 roots.insert(pushed.snapshot_hash);
             }
+            // A detached child reads its parent's captured workspace as data
+            // for as long as it is live; the sealed input is its own root,
+            // independent of the operation that captured it.
+            if let Some(input) = resume.workspace_input {
+                roots.insert(input.snapshot_hash);
+                if let Some(capture) = input.output_capture_hash {
+                    roots.insert(capture);
+                }
+            }
+        }
+        // Between a detached capture and its child's birth the operation is
+        // already released (the parent's workspace is not fenced while the
+        // child is prepared) and no thread row carries the input yet. The
+        // released intent keeps the captured generation reachable until the
+        // child exists; from then on the child's own roots above hold it.
+        for intent in g.runtime_db.runtime_action_intents()? {
+            if !matches!(intent.mode, runtime_db::RuntimeActionMode::Detached) {
+                continue;
+            }
+            let Some(operation) = intent.workspace_operation else {
+                continue;
+            };
+            if operation.phase != runtime_db::RuntimeWorkspaceOperationPhase::Released
+                || g.state_db.get_thread(&intent.child_thread_id)?.is_some()
+            {
+                continue;
+            }
+            roots.extend(operation.input_snapshot_hash);
+            roots.extend(operation.input_output_capture_hash);
         }
         // Workspace reservation precedes thread birth so a crash cannot leave
         // an unjournaled mount. Those lower generations are therefore not

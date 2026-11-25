@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T22:16:16Z:50b25cfc0b688f5a4f939a5477c1f1b6644702a43500b4968e187a02fec213e0:FqvBwmzXAcalCkZB4rzCu64DhpYbXGDqo875vA4gB0N4+xADx80c56iPgeogwWnKP02CMLv+JuTFP+5WMSvIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:b489eca4da2556b62432bdfb67914aeaa93950437e30558ec3e5f3e2f4c7f5a4:kl2GLUSH+C9GzOmuCnptnQzHSekuNTCTy2J4/rBL0zSBARDYhnFxwm93l1HF6FOpMnTfEz/w34m3YPalKOLbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: items.revised
 required_caps: ["ryeos.execute.service.items/revised"]
@@ -7,3 +7,8 @@ schema:
   item_refs: array?
   endorsement: string?
 description: "Announce changes the operator made in their own process: revision records written by ryeos sign and ryeos item remove (named by item_refs), or an endorsement just recorded (named by its digest). The node verifies each against the revision chain or the endorsement ledger before announcing, so a request it cannot verify announces nothing. Operator only; no seat may call it."
+disclosure:
+  principal:
+    - "/announced/*/item_ref"
+    - "/announced/*/digest"
+    - "/announced/*/revision"

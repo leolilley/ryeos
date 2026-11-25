@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:58:46Z:7a3dd2cb1df243d037cf7919956ed779a0a9c5f7513ab2be17cd6208c851dfa3:SrdIZFxAphZaA75BNPsyC50twYowXqlxxIb6yE/CgZevqox64w3YTVJGcPgPQYNSRfhExwC9f2/sY9RRSGiHDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:c8d6f88f199c1bd9e34db9d7a8816d4c6a265f1d2f15bb8a529eb61f7a2be34a:vH7XMJNhfw3R8y4j9vRv7/IBMK6yulvVb/4MhKTvyYhpnM+thQFJ4CoNoWRgU+tROG98Wi+Z23hrk4kb7oE1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/coverage/wording
 version: "1.0.0"
@@ -10,3 +10,9 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/schema_version"
+    - "/fallback"
+    - "/states"
+    - "/reasons"

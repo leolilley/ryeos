@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:e0c58443802e8f1fa087de31ae2383968cd75760b46a47b2c98267ae37ecf138:Knr8m/ZCmPt4gk/lKluBDCKNagdquwb2n9CXLfS5g8igdVMBEC5zo2hg3B8dH+uqTfdtIW76Wt2cL8dEkUglDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:352e853e9a2bbb0fdde8d3925bce88da59d6bcb0448197ee46e1697050c0475e:E5/6iza62ZtlVNvzwtDFPnQKTi6sBAvW24WKazHXVSWJqHa2z+xzKhldRXSygVxElmIZigvPfRo6Hse86obYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-qualify
 version: "1.1.0"
@@ -19,3 +19,5 @@ schema:
   build_recipe_signed_config: string
   capture_recipe_signed_config: string
   capture_recipe_raw_digest: string
+# Release authority operation: run by the node operator's release graph only; a principal is served nothing.
+disclosure: {}

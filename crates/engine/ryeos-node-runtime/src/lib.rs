@@ -16,6 +16,7 @@ pub mod node_config_source;
 pub mod node_document;
 
 pub mod config;
+pub mod disclosure;
 
 pub mod engine_init;
 

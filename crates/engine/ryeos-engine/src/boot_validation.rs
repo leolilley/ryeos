@@ -1571,6 +1571,7 @@ composed_value_contract:
             required,
             optional: BTreeMap::new(),
             strict_fields: None,
+            rules: Vec::new(),
         }
     }
 
@@ -1775,6 +1776,7 @@ composed_value_contract:
             required,
             optional: BTreeMap::new(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let kinds = kinds_with_directive_contract(
             parser_ref,
@@ -1795,6 +1797,7 @@ composed_value_contract:
             required: p_required,
             optional: BTreeMap::new(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),

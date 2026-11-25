@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T14:29:21Z:d3b56f2d268ec362769e7dde53fd3b60dedb771a77095c7910c339572d1f03c4:NxObR33Hft1p4O72z1YFIh2xrBwgTVQjLNncjSVp91T77erAj7HOeTXKJrwdvLwBK0tIIboySRZlDd3lvDZSDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:3685f943066aff3c5cc26628a006375b042ebcbe6c5bf6c1b23a31eb534b37d8:RhABNKOpQ1FYaWEAWtrtvIVHX6EMh3do9T0+xJVNCsiHIQlaPm7JQkw0md0nSE2KatAxsKNzVP7lLOfjDBlCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.run
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -14,3 +14,18 @@ schema:
   execution_policy: object
   launch_id: string?
 description: "Execute an item on a configured remote using an explicit projectless or project-backed policy, as the caller under its signed delegation unless the caller is the node itself, and an optional caller-retained launch coordinate. Product selections explicitly name destination-local retained witnesses and qualifications; this operation does not transfer source-bound product authority."
+disclosure:
+  principal:
+    - "/remote"
+    - "/outbound_principal"
+    - "/sync_scope"
+    - "/result/status"
+    - "/result/launch_id"
+    - "/result/thread_id"
+    - "/result/thread/thread_id"
+    - "/result/thread/status"
+  free_text:
+    - "/local_project_path"
+    - "/remote_project_path"
+    - "/result/result"
+    - "/result/error"

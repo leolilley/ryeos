@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::operator_external_content::qualification_testimony::ContentExportSelection;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -55,14 +56,24 @@ impl ContentSelection {
                 .strip_prefix("config:")
                 .is_none_or(str::is_empty)
         {
-            bail!("content testimony export requires an exact config: activation ref");
+            return Err(typed_refusal(
+                "content_testimony_activation_ref_invalid",
+                400,
+                "content testimony export requires an exact config: activation ref",
+            )
+            .into());
         }
         for (field, value) in [
             ("coordinate_id", &self.coordinate_id),
             ("manifest_hash", &self.manifest_hash),
         ] {
             if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
-                bail!("content testimony export requires an exact canonical {field}");
+                return Err(typed_refusal(
+                    "content_testimony_coordinate_invalid",
+                    400,
+                    format!("content testimony export requires an exact canonical {field}"),
+                )
+                .into());
             }
         }
         Ok(())
@@ -72,7 +83,12 @@ impl ContentSelection {
 impl Request {
     fn validate(&self) -> Result<()> {
         if self.remote.is_empty() || self.remote.len() > 256 {
-            bail!("qualification testimony export requires an exact remote");
+            return Err(typed_refusal(
+                "qualification_testimony_remote_invalid",
+                400,
+                "qualification testimony export requires an exact remote",
+            )
+            .into());
         }
         if !lillux::valid_hash(&self.qualification_hash)
             || self
@@ -80,7 +96,12 @@ impl Request {
                 .bytes()
                 .any(|byte| byte.is_ascii_uppercase())
         {
-            bail!("qualification testimony export requires an exact canonical qualification hash");
+            return Err(typed_refusal(
+                "qualification_testimony_hash_invalid",
+                400,
+                "qualification testimony export requires an exact canonical qualification hash",
+            )
+            .into());
         }
         if self.acceptance_policy_ref.len() > 512
             || self
@@ -88,7 +109,12 @@ impl Request {
                 .strip_prefix("config:")
                 .is_none_or(str::is_empty)
         {
-            bail!("qualification testimony export requires an exact config: acceptance policy ref");
+            return Err(typed_refusal(
+                "qualification_testimony_policy_ref_invalid",
+                400,
+                "qualification testimony export requires an exact config: acceptance policy ref",
+            )
+            .into());
         }
         if let Some(content) = &self.content {
             content.validate()?;

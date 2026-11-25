@@ -1629,6 +1629,11 @@ pub async fn handle_open(
                                     SeatClass::of_session(session.user_principal_id.as_deref()),
                                 )?
                             };
+                            let seat_project = crate::seat_project::resolve_for_binding(
+                                &state,
+                                &compiled_binding,
+                                &session.granted_caps,
+                            )?;
                             candidates.push(crate::browser_session::InitialSurfaceCandidate {
                                 seed,
                                 candidate: crate::browser_session::BindingAttachmentCandidate {
@@ -1636,6 +1641,7 @@ pub async fn handle_open(
                                     compiled_binding: Arc::new(compiled_binding),
                                     presentation,
                                     project_authority: attachment.project_authority.clone(),
+                                    seat_project,
                                 },
                             });
                         }

@@ -1,7 +1,21 @@
-# ryeos:signed:2026-08-11T02:28:13Z:272ea6de8217efb2bc08a4034778fb4eb0dbf7fb9cbf31eebfe9cd9a0828eb8b:rJAW1EkFq48GwADDKYSka5ZvBL7wqR+GRYRFR1VEKm32QQPZPjUHuBi/RUP+fTxPAdGpm7Q+Rbm9FgUxU+0RAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:a49ef6f6bf522fb70cb0168503e0b0034d107df7521528636499bbcc745b5a9b:MLKr72yYermbpm7WHUcf4AK4CfutadfXo9m2cEgmcv7zXpFVZHoJcNBKkkN9VsCxCaFsMS+1EhCrRmmj8gomCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.export
 required_caps: ["ryeos.execute.service.bundle/export"]
 schema:
   bundle_name: string
 description: "Export an installed bundle as CAS objects. Walks the bundle directory tree, ingests every file into the node's CAS, and returns a manifest of file hashes."
+disclosure:
+  principal:
+    - "/bundle_name"
+    - "/file_count"
+    - "/total_bytes"
+    - "/entries/*/kind"
+    - "/entries/*/path"
+    - "/entries/*/hash"
+    - "/entries/*/size"
+    - "/entries/*/mode"
+  free_text:
+    - "/bundle_path"
+  max_items: 4096
+  max_result_bytes: 8388608

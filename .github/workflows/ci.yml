@@ -266,6 +266,9 @@ jobs:
       - name: Check worker capability ceilings name tools only
         run: python3 -B tests/development/test_worker_cap_ceilings.py
 
+      - name: Check no worker ceiling names a worker-execution service
+        run: python3 -B tests/development/test_worker_executions_not_in_ceilings.py
+
       - name: Check composition daemon features match their bundle sets
         run: |
           python3 -B scripts/release/test-check-composition-daemon-features.py

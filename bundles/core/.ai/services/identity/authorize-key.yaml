@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:53Z:e268faee6e327fb12bd50c91cefa38ed30852ba41576f0b9ab0a57752bcf615f:QEwh3J9J8NRfMoxfo+lOWP1SI7Ed6pzu+Jy44yYsAqpCRWYtG7WiSJLtHXgNNnuqkzpCbKFSZqaglayHW87NCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:79f65d24e0c04a1702082045254fbf47f93433b143937873572a10b1befb78bb:XqarxqbAylXOB9bjfvCK3/1M2qxkcd1UC1xG3H6la9Ayqc4qMjrf4Ml2SeykR5KXpgHDvUK7J9pSKI24Nbl0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: identity.authorize-key
@@ -9,3 +9,12 @@ schema:
   scopes: string[]
   lifetime_secs: number?
 description: "Authorize a public key with scoped capabilities"
+disclosure:
+  principal:
+    - "/fingerprint"
+    - "/scopes"
+    - "/granted_by"
+    - "/created_at"
+    - "/expires_at"
+  free_text:
+    - "/label"

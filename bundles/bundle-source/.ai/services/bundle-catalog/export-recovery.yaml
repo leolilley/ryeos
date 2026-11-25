@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:c686a1d3a9b8c773ad744769576ef14aa619f71cd053c1c89a31cedd59b798c9:SsbQ9yGZnuBLlJSiZ3w0PatJYUpgR34DWbxOny51s8uPsYDI7+xrlApc2dyS6IbNB+u6MaXnTVj5POv08cJ5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:4374b7bb07a08487a0b86bc26b9aeb9a6769433fa5e624bf46de294ea7ec59e6:QI4nLkG4QOMK48vMwJvA1PbZhzzYwAAuC64sYxm1YeHf4LhNeKRNn73Atx+TyRSufGlV9gTK50XgVFfG1HZQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: export-recovery
 version: "1.0.0"
@@ -8,3 +8,16 @@ availability: daemon_only
 required_caps: ["ryeos.execute.service.bundle-catalog/export-recovery"]
 schema:
   catalog_namespace: string
+disclosure:
+  principal:
+    - "/schema"
+    - "/kind"
+    - "/catalog_namespace"
+    - "/catalog_publication_attestation_hash"
+    - "/bundle_publication_policy_section_digest"
+    - "/node_policy_generation_digest"
+    - "/object_hashes"
+    - "/blob_hashes"
+    - "/large_object_hashes"
+  max_items: 4096
+  max_result_bytes: 8388608

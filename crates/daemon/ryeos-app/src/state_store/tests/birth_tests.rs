@@ -145,7 +145,11 @@ fn exact_child_link_replay_propagates_durable_parent_kill() {
         .record_child_link("T-parent", "T-child", "dispatch")
         .expect("initial child link");
     store
-        .request_thread_stop("T-parent", StopIntent::Kill)
+        .request_thread_stop(
+            "T-parent",
+            StopIntent::Kill,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("kill parent");
 
     assert_eq!(
@@ -185,7 +189,11 @@ fn inherited_child_stop_rejects_active_in_process_owner_without_linking_or_tombs
         )
         .expect("publish in-process child");
     store
-        .request_thread_stop(parent_id, StopIntent::Kill)
+        .request_thread_stop(
+            parent_id,
+            StopIntent::Kill,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("tombstone parent");
 
     let error = store
@@ -378,7 +386,11 @@ fn in_process_child_link_replay_inherits_a_stop_landed_after_birth() {
         None
     );
     store
-        .request_thread_stop(parent_id, StopIntent::Kill)
+        .request_thread_stop(
+            parent_id,
+            StopIntent::Kill,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("tombstone parent after the birth");
 
     // A plain link request is a replay only: without the birth's
@@ -430,7 +442,11 @@ fn in_process_child_born_under_a_stopped_parent_inherits_the_stop() {
         .create_thread_for_test(&thread_record(parent_id, parent_id))
         .expect("parent thread");
     store
-        .request_thread_stop(parent_id, StopIntent::Cancel)
+        .request_thread_stop(
+            parent_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("tombstone parent");
     let owner = store
         .register_in_process_handler(child_id)
@@ -582,7 +598,11 @@ fn in_process_child_interrupted_before_its_link_is_relinked_by_reconcile() {
             .expect("drop in-process child owner")
     );
     store
-        .request_thread_stop(parent_id, StopIntent::Kill)
+        .request_thread_stop(
+            parent_id,
+            StopIntent::Kill,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("tombstone parent");
 
     store

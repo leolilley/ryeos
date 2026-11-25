@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T10:09:18Z:c007916b38643dd822a6ca3a7c4f57704db7e0eab21e3a1206d636bbd3a71e1a:Ah0jZaSbjozs7EAOplucmqGZZyuJUpYPie1sYTYUKFSiVEsb0DdJn/CZeZCgBzRt31YiAaPgmCvDsbA2bbIdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:9a8a9039a1b36980a66400313985cd9ce3445edfa33c7efbfb7f6b2d74a94619:FW1SLWrFI4HPc3ls0ZxCCYhxsyopzuyaj1pnu3/FU0WP0UhB/rlQ5hKlf4QcVAs8UpVJRJF2Ts2uybnqLUmvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: resolve-approval
 kind: service
@@ -6,3 +6,11 @@ endpoint: worker-executions.resolve-approval
 description: Resolve one digest- and worker-epoch-fenced execution approval.
 required_caps: ["ryeos.execute.service.worker-executions/resolve-approval"]
 schema: {chain_root_id: string, approval_id: string, request_digest: string, accept: boolean}
+disclosure:
+  principal:
+    - "/chain_root_id"
+    - "/placement_thread_id"
+    - "/decision"
+    - "/delivery_state"
+  free_text:
+    - "/delivery"

@@ -1,7 +1,9 @@
-# ryeos:signed:2026-11-13T09:59:46Z:c3d754955ca977fbe5d4a2d7271887a2acced871ccc5f15ea6612bddc0abbb78:0JoPvObS4+yh2CPJ0FAxcX170KsDQ5coJlCkQvVKsMqD66K//NldzERkE7N5P9aWVsdpE6vyyMAmUyAlPgs3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:5efa8f2b4c106099f0d37ee930aac04fb5fe3c36300ffef4229ef2347f8c1131:BFNQp+9SKs0ALsk+8ZJA3ZeCPoarfeMSswIJ0mLferEpT0VH3Bk8RsRRfPQ5fjwYj7N8WN5DE/sL5PpHrINqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.observe-runtime-snapshot-qualification
 required_caps: ["ryeos.execute.service.external-content/observe-runtime-snapshot-qualification"]
 schema:
   qualification_operation_id: string
 description: Observe through one bounded read-only provider request whether the exact restored qualification Sandbox is running; claims no verifier attempt
+# Provider-contact observation; requires an admitted operator.
+disclosure: {}

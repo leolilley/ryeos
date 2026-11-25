@@ -345,6 +345,19 @@ impl Transport for ScriptedTransport {
         self.answer(path)
     }
 
+    async fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError> {
+        self.calls
+            .borrow_mut()
+            .push((path.to_owned(), String::new()));
+        let bytes = self.answer(path)?.into_bytes();
+        if bytes.len() > max_bytes {
+            return Err(RuntimeError::UnreadableResponse {
+                path: path.to_owned(),
+            });
+        }
+        Ok(bytes)
+    }
+
     async fn post_encoded(&self, path: &str, body: String) -> Result<String, RuntimeError> {
         self.calls.borrow_mut().push((path.to_owned(), body));
         self.answer(path)

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:48Z:b5b8470131dc0c52eddb6ce9c18d481eedf4c098ee111f90dde2174e45093768:70wp8Ai4wksm+YCkuGSuylb5SPt+AHTKcYhhEaDS3ChTvT/xNIbIJCG7OrZL5+oy4ehhp46dWtt01lfDJ5xZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:8fd9d82867802453747d441945cc2be39a6b8180f4dc69480df61792a6cf5c9b:vg9HQBzZXKrVRivUcbQO1S6oeeNX03VdeCsE4HsFxUiRjIUg/auidF8GoxZIx1JZSo1OdUAJDsCRrnM2DHtfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: projection.verify
 availability: stopped_node
@@ -7,3 +7,5 @@ state_access: read_only_existing
 required_caps: ["ryeos.execute.service.projection/verify"]
 schema: {}
 description: "Fail-only verification of the existing generation-selected thread projection against trusted signed heads and CAS. Never rebuilds or repairs. Requires stopped-node authority."
+# Stopped-node projection verification is an operator tool; nothing for a principal.
+disclosure: {}

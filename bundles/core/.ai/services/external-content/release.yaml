@@ -1,7 +1,9 @@
-# ryeos:signed:2026-09-05T00:45:15Z:129e70df20677046e3d1b5f7e3b1fa31c98511151b9a993ce3a89c5f308d1e8d:TBY7lmUVwlFiPK/sBBU/RZ0oVQZbw/vdGwL94RoQWcuzow4gKac1JhQFqYS7sd39AfEpyYjuLn325XHoS454Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:12352986fd7aabd84e85ed00898fd6463e1ebe449f66416fbbf28ad8c9eb6b4f:RkYd7qyG4yS8mwi9Remi0zXDOZL9u6y93idBTHj2xos05Gtwys7w17SzZNAurj7PYDWpHWTvO8qz7cCwwuD4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.release
 required_caps: ["ryeos.execute.service.external-content/release"]
 schema:
   binding_subject_id: string
 description: "Release a permanent external-content consumer binding for future launch admission"
+# Releases an operator's external-content binding; requires the local configured operator.
+disclosure: {}

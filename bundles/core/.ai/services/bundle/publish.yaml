@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:46Z:319433266a6e9d1204e2169988256ac971cbc25a4e98a41d81aba2c85fb4e004:zXYhmqLbg+bBsUF9FwaaCmoWsQkNZpnI+NQPfpIMRtQPkchA6wV2+RqYDrrB/TfjdL7y3unwQaVu3O1rzXxpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:689c26c569d710e7cc4802cc43dfad7043d7d0da911ac1d050367a6aae169cca:VBrcHa4KoFRuuI9AeSJ1K03aRratxUXCva+r4Z967SY25821XmWBfsGCT9lf1/6SV2xgXcpDw2TFETaUpvBIAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.publish
 availability: local
@@ -14,3 +14,5 @@ schema:
   allow_namespace_mismatch: boolean?
   no_trust_doc: boolean?
 description: "Full bundle release pipeline: bootstrap-sign, rebuild CAS, sign items, generate manifest, emit trust doc. When no registry root is supplied, installed bundle roots are used as dependencies."
+# Signing, publishing and node inspection are node-operator tools; a principal is served nothing.
+disclosure: {}

@@ -437,6 +437,8 @@ fn seed_auxiliary_qualification_in_context(
         effective_caps: vec![],
         parent_delegation_caps: None,
         thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         runtime_ref,
         executor_ref: request.executor_ref.clone(),
     };

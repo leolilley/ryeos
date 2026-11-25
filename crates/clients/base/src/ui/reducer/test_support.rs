@@ -176,6 +176,7 @@ pub(crate) fn session() -> BrowserSession {
             project_path: Some("/tmp/project".into()),
             subject: crate::ui::binding::UiBindingSubject::UnregisteredProject,
             posture: crate::ui::binding::UiEffectivePosture::ObservationOnly,
+            seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
             binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
                 max_request_bytes: 64 * 1024,
                 max_input_bytes: 16 * 1024,
@@ -215,6 +216,7 @@ fn install_fixture_membership(session: &mut BrowserSession) {
         project_path: Some("/tmp/project".into()),
         subject: crate::ui::binding::UiBindingSubject::UnregisteredProject,
         posture: crate::ui::binding::UiEffectivePosture::ObservationOnly,
+        seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
         binding_request_bounds: crate::ui::binding::UiBindingRequestBounds { max_request_bytes:64*1024,max_input_bytes:16*1024,
 max_seat_append_bytes:64*1024,
 },
@@ -385,6 +387,7 @@ pub(crate) fn fixture_attachment(
             crate::ui::binding::UiBindingSubject::Projectless
         },
         posture: crate::ui::binding::UiEffectivePosture::Interactive,
+        seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
         binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
             max_request_bytes: 64 * 1024,
             max_input_bytes: 16 * 1024,

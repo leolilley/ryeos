@@ -1995,6 +1995,7 @@ async fn admit_execution_with_publication(
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: request.call().cloned(),
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(&state, &principal),
     };
 
     ryeos_app::command_invocation::normalize_selected_parameters(
@@ -2082,6 +2083,7 @@ async fn admit_execution_with_publication(
             engine: exec_ctx.engine.clone(),
             plan_ctx: exec_ctx.plan_ctx.clone(),
             requested_call: exec_ctx.requested_call.clone(),
+            disclosure_class: exec_ctx.disclosure_class,
         };
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();

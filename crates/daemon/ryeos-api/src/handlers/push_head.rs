@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use ryeos_app::handler_error::typed_refusal;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
@@ -91,19 +92,29 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     if let Some(admitted_target) = stage.admitted_target_hash() {
         if admitted_target != req.snapshot_hash {
-            return Err(anyhow!(
-                "upload receipt is bound to publication target {admitted_target}, not {}",
-                req.snapshot_hash
-            ));
+            return Err(typed_refusal(
+                "push_head_receipt_target_mismatch",
+                409,
+                format!(
+                    "upload receipt is bound to publication target {admitted_target}, not {}",
+                    req.snapshot_hash
+                ),
+            )
+            .into());
         }
         let current = state
             .state_store
             .with_state_db(|db| db.read_project_head(&head_key))?;
         if current.as_deref() != Some(req.snapshot_hash.as_str()) {
-            return Err(anyhow!(
-                "upload receipt target {} is no longer the current project HEAD",
-                req.snapshot_hash
-            ));
+            return Err(typed_refusal(
+                "push_head_receipt_stale",
+                409,
+                format!(
+                    "upload receipt target {} is no longer the current project HEAD",
+                    req.snapshot_hash
+                ),
+            )
+            .into());
         }
         return Ok(serde_json::json!({
             "principal_key": principal_key,
@@ -120,13 +131,18 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
     )?;
     if !closure.is_complete() {
-        return Err(anyhow!(
-            "push-head closure is incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
-            closure.missing_objects.len(),
-            closure.missing_blobs.len(),
-            closure.malformed_objects.len(),
-            closure.unsupported_objects.len(),
-        ));
+        return Err(typed_refusal(
+            "push_head_closure_incomplete",
+            422,
+            format!(
+                "push-head closure is incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+                closure.missing_objects.len(),
+                closure.missing_blobs.len(),
+                closure.malformed_objects.len(),
+                closure.unsupported_objects.len(),
+            ),
+        )
+        .into());
     }
     stage.protect_cas_closure(
         &cas_guard,
@@ -134,15 +150,22 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         closure.blob_hashes.iter().map(String::as_str),
     )?;
 
-    let snap_obj = cas
-        .get_object(&req.snapshot_hash)?
-        .ok_or_else(|| anyhow!("project snapshot {} is missing", req.snapshot_hash))?;
+    let snap_obj = cas.get_object(&req.snapshot_hash)?.ok_or_else(|| {
+        typed_refusal(
+            "push_head_snapshot_missing",
+            404,
+            format!("project snapshot {} is missing", req.snapshot_hash),
+        )
+    })?;
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
     match expected_previous_hash {
         None if !snapshot.parent_hashes.is_empty() => {
-            return Err(anyhow!(
-                "initial push-head snapshot must not carry parent history"
-            ));
+            return Err(typed_refusal(
+                "push_head_initial_snapshot_has_parents",
+                422,
+                "initial push-head snapshot must not carry parent history",
+            )
+            .into());
         }
         Some(expected)
             if !crate::handlers::project_apply_snapshot::snapshot_history_contains(
@@ -151,10 +174,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 expected,
             )? =>
         {
-            return Err(anyhow!(
-                "push-head snapshot {} does not descend from expected HEAD {expected}",
-                req.snapshot_hash
-            ));
+            return Err(typed_refusal(
+                "push_head_not_descendant",
+                409,
+                format!(
+                    "push-head snapshot {} does not descend from expected HEAD {expected}",
+                    req.snapshot_hash
+                ),
+            )
+            .into());
         }
         Some(_) => {}
         None => {}
@@ -193,11 +221,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .with_state_db(|db| db.read_project_head(&head_key))?;
     if current.as_deref() != Some(req.snapshot_hash.as_str()) {
         if current.as_deref() != expected_previous_hash {
-            anyhow::bail!(
-                "push-head conflict: upload expected {:?}, current HEAD is {:?}",
-                expected_previous_hash,
-                current
-            );
+            return Err(typed_refusal(
+                "push_head_conflict",
+                409,
+                format!(
+                    "push-head conflict: upload expected {:?}, current HEAD is {:?}",
+                    expected_previous_hash, current
+                ),
+            )
+            .into());
         }
         let advancer =
             ryeos_app::project_owner::head_advancer(&state, &ctx.fingerprint, head_key.owner())?;

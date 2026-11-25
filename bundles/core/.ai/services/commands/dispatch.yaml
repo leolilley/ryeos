@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T08:20:40Z:69f7c673ce3128035cfd187341800bb360ba2e159c51f123bef53561e838c4b8:jDP1Bt84lBLM8PvwAdI5BhNOuCvWyK5cnwYaidWeV8Jb0oTd/7yXi13AbYeDF9a1INthLFef+IXS3v8mCdwiDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:fb5ad39d4ab20adb6518a2612471e799afcfb07f7f2235b9aac1c0da715b3d8c:dtfxyVuhjlKBqmQAsuOvJTKrValZcqCFGzBya01eSXs2P40ODXsvAV0XFbgxE0SZEbJKAYdItzgsEGB+gXDdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "dispatch"
 kind: service
@@ -11,3 +11,11 @@ schema:
   arguments: object?
   launch_id: string?
 description: "Resolve command tokens against the verified registry, bind tail parameters server-side, and dispatch (the one daemon invocation path)"
+disclosure:
+  principal:
+    - "/status"
+    - "/launch_id"
+    - "/thread_id"
+    - "/group"
+    - "/candidates/*/tokens"
+    - "/candidates/*/description"

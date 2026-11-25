@@ -687,6 +687,8 @@ mod rebind_tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             runtime_ref: "runtime:test/fixture".to_owned(),
             executor_ref: "executor:test/fixture".to_owned(),
         }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:24de5e3f6f5602558bcd2f632e1283630995f3247cea8a834cf499873b7268f6:9W0PT+T+LHEpKllKO2A9WcrsUQSIghmY4TnL+u0bMvQOBNg+e1HRrk9yi8IigYRsgrpS3NFjqbp9KOaE7XAADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:fcf78d89b94870e3d6f41c149ea280e89bbeb1cc7f70f3ad4c203af228f4b3b1:xxr/ZLxM8Odg2fetWPduEW3tJKveBYYMtZ68KJoQPDvfkPwaErZb75kMIIK6lse9DjvL5pGKaRnDdG8hXqT6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/dimension/get
 version: "1.0.0"
@@ -8,3 +8,26 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/schema_version"
+    - "/generated_at"
+    - "/session/session_id"
+    - "/session/surface_ref"
+    - "/session/binding_digest"
+    - "/session/posture"
+    - "/local_node/identity/principal_id"
+    - "/local_node/identity/fingerprint"
+    - "/local_node/health/status"
+    - "/threads/active_count"
+    - "/schedules/total"
+    - "/schedules/enabled"
+    - "/gc/running"
+  free_text:
+    - "/session/user_principal_id"
+    - "/local_node/status"
+    - "/local_node/spaces"
+    - "/local_node/bundles"
+    - "/project"
+    - "/remotes"
+    - "/gc/recent_events"

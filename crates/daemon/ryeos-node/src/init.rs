@@ -481,6 +481,28 @@ fn rebind_substrate_node_profile(app_root: &Path, node_profile: Option<&str>) ->
         .map_err(|error| anyhow!("rewrite substrate identity {}: {error}", path.display()))
 }
 
+/// A policy generation refused for a stale section schema, with the cure
+/// naming this node's own installed profile and host class from its recorded
+/// substrate identity. Any other error is returned unchanged. The identity is
+/// read only to fill in the command; a node whose identity cannot be read
+/// gets the command with placeholders.
+pub fn name_policy_generation_cure(app_root: &Path, error: anyhow::Error) -> anyhow::Error {
+    let Some(stale) = error
+        .chain()
+        .find_map(|cause| {
+            cause.downcast_ref::<ryeos_node_runtime::node_policy::generation::NodePolicySectionSchemaStale>()
+        })
+        .cloned()
+    else {
+        return error;
+    };
+    let (profile, host_class) = match load_substrate_identity_record(app_root) {
+        Ok(identity) => (identity.node_profile, identity.host_class),
+        Err(_) => (None, None),
+    };
+    stale.with_installed_profile(profile, host_class).into()
+}
+
 fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> {
     let path = substrate_identity_path(app_root);
     let bytes = lillux::read_regular_file_bounded_no_follow(&path, 16 * 1024)
@@ -1105,6 +1127,7 @@ fn run_init_under_lock_on_storage(
             &seed_trust_store,
             &policy_table,
         )
+        .map_err(|error| name_policy_generation_cure(&opts.app_root, error))
         .context("load current node policy generation")?
     };
     let selected_generation = selected_node_profile
@@ -2360,7 +2383,8 @@ fn verify_init_completion_checking_capacity(
         app_root,
         &trust_store,
         &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
-    )?;
+    )
+    .map_err(|error| name_policy_generation_cure(app_root, error))?;
     if generation.digest() != document.body.policy_generation_digest {
         bail!("node policy generation differs from the signed init completion record");
     }
@@ -4392,6 +4416,67 @@ mod tests {
             format!("{error:#}").contains("bundle registrations differ"),
             "{error:#}"
         );
+    }
+
+    /// Rewrite the installed `ui_browser_sessions` section as a node signed it
+    /// at schema 5, which had no `max_art_grants`.
+    fn install_schema_five_browser_session_policy(state: &Path) {
+        let trust_store = TrustStore::load_node_registry(state).expect("node trust store");
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            state,
+            &trust_store,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+        .expect("current policy generation");
+        let mut body = current.policies()["ui_browser_sessions"].clone();
+        body["schema"] = serde_json::json!(5);
+        body.as_object_mut().unwrap().remove("max_art_grants");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .expect("node identity");
+        let path = state.join(".ai/node/policies/ui_browser_sessions.yaml");
+        fs::remove_file(&path).unwrap();
+        fs::write(
+            &path,
+            ryeos_node_runtime::node_document::render_signed_item(
+                "ui_browser_sessions",
+                "policy",
+                &body,
+                &identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_schema_five_browser_session_policy_refuses_start_with_the_exact_cure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        install_schema_five_browser_session_policy(&state);
+
+        let error = verify_init_completion(&state)
+            .expect_err("a schema-5 browser-session section does not load");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(
+                "ryeos node reset policy-generation --node-profile standard --host-class local"
+            ) && rendered.contains("--confirm")
+                && rendered.contains("`ui_browser_sessions`")
+                && rendered.contains("schema 5")
+                && rendered.contains("schema 6"),
+            "{rendered}"
+        );
+
+        // The command it names, as the operator runs it, restores the node.
+        let reset = capacity_replacement(&state, &["ui_browser_sessions"]);
+        run_init(&reset).expect("the named replacement completes");
+        verify_init_completion(&state)
+            .expect("the replaced generation verifies")
+            .expect("replacement completion");
     }
 
     #[test]

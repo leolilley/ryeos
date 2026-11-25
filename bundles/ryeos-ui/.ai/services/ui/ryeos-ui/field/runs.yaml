@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:6b95046bd6f039864d26bdf0f83a3e689b21fcc0ad4885d20b71447a08e6fa04:ZE0Jqssod/uK2+4uPxotbFTFZQ05bN2cnesEEaqOv4H7Njcy1MyPFMEkpZgAKL/ow3tpKSXG/55R87pDCR4cDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:bc888f2966e9dd53f0dc8a8e2147318ee03a023c7c086d3118ab4c0fd5d08400:+KwuM69iliISO/pBkVzhvXbfrCz/pVfnscSmHLkt70Kiq2/cKyEzxyqJTU5E8OkcgOLmZKRIU1MMJfN2Qm+uCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/field/runs
 version: "1.0.0"
@@ -8,3 +8,40 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/schema_version"
+    - "/source"
+    - "/subject"
+    - "/revision"
+    - "/cursor"
+    - "/replay"
+    - "/truncated"
+    - "/expansions"
+    - "/entities/*/id"
+    - "/entities/*/kind"
+    - "/entities/*/label"
+    - "/entities/*/parent_id"
+    - "/entities/*/status"
+    - "/entities/*/canonical_ref"
+    - "/entities/*/source_content_digest"
+    - "/entities/*/effective_definition_digest"
+    - "/entities/*/admitted_launch_capsule_hash"
+    - "/entities/*/event_ref"
+    - "/entities/*/artifact_ref"
+    - "/entities/*/provenance"
+    - "/relations/*/id"
+    - "/relations/*/kind"
+    - "/relations/*/source_id"
+    - "/relations/*/target_id"
+    - "/relations/*/status"
+    - "/relations/*/directed"
+    - "/relations/*/provenance"
+  free_text:
+    - "/entities/*/attributes"
+    - "/relations/*/attributes"
+    - "/previews"
+    - "/metrics"
+    - "/warnings"
+  max_items: 12000
+  max_result_bytes: 4194304

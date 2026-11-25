@@ -1,7 +1,21 @@
-# ryeos:signed:2026-07-06T08:36:51Z:68227b9ededa58956969b5c41a5f591a61ae9019698aee4262010ea6c700dde8:/EOPbjen0910FnaFiPAIRL0GZmk4vfm8wo8nzDAAECQm+LDk8pi4y2YaOH+LNNEdvojE8EUBS5A4eeNEzfh9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:41048023259c4289f6ffe3e8ef7d26da560fb26d0c2999fc329aa8be5a973b2e:ojT/ohzpnUd/OCGi8rmDMjPi92xQEGG3YQ4kfb9NPe/bcBB9NkammU7gGY97UX/7Exa6JT9NtPJN7ANsFx+pBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/list
 version: "1.0.0"
 description: List registered project roots for the current UI operator.
 endpoint: ui.projects.list
 availability: daemon_only
+disclosure:
+  principal:
+    - "/version"
+    - "/projects/*/local_id"
+    - "/projects/*/added_at"
+    - "/projects/*/exists"
+    - "/projects/*/current"
+    - "/projects/*/registered"
+  free_text:
+    - "/projects/*/root"
+    - "/projects/*/name"
+    - "/projects/*/tags"
+  max_items: 4096
+  max_result_bytes: 1048576

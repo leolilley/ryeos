@@ -15,6 +15,7 @@
 //! construction, not reachable from the current head, so they are answered
 //! absent and sent; `objects/put` stays a write that never answers presence.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -79,10 +80,20 @@ fn validate_hashes(namespace: &str, hashes: &[String]) -> Result<()> {
     let mut seen = BTreeSet::new();
     for hash in hashes {
         if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            anyhow::bail!("objects/has contains an invalid {namespace} hash: {hash}");
+            return Err(typed_refusal(
+                "objects_has_hash_invalid",
+                400,
+                format!("objects/has contains an invalid {namespace} hash: {hash}"),
+            )
+            .into());
         }
         if !seen.insert(hash) {
-            anyhow::bail!("objects/has contains a duplicate {namespace} hash: {hash}");
+            return Err(typed_refusal(
+                "objects_has_hash_duplicate",
+                400,
+                format!("objects/has contains a duplicate {namespace} hash: {hash}"),
+            )
+            .into());
         }
     }
     Ok(())

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
@@ -35,11 +36,21 @@ pub struct Request {
 impl Request {
     fn validate(&self) -> Result<()> {
         if self.remote.is_empty() || self.remote.len() > 256 || self.maximum_bytes == 0 {
-            bail!("product receipt requires an exact remote and positive byte bound");
+            return Err(typed_refusal(
+                "product_receipt_remote_or_bound_invalid",
+                400,
+                "product receipt requires an exact remote and positive byte bound",
+            )
+            .into());
         }
         for hash in [&self.witness_hash, &self.origin_admission_hash] {
             if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
-                bail!("product receipt requires exact canonical witness and admission hashes");
+                return Err(typed_refusal(
+                    "product_receipt_hashes_invalid",
+                    400,
+                    "product receipt requires exact canonical witness and admission hashes",
+                )
+                .into());
             }
         }
         Ok(())
@@ -53,7 +64,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .node_policy
         .require::<ExternalContentImportPolicyRecord>()?;
     if req.maximum_bytes > policy.limits.max_total_bytes {
-        bail!("product receipt byte bound exceeds current import policy");
+        return Err(typed_refusal(
+            "product_receipt_byte_bound_exceeds_policy",
+            422,
+            "product receipt byte bound exceeds current import policy",
+        )
+        .into());
     }
     // This is node-owned receipt, not project-selected trust or a caller key
     // override. Recovery later retains the authenticated key in local testimony.

@@ -132,11 +132,15 @@ pub(crate) fn precheck_install(bundle_name: &str, state: &AppState) -> Result<Op
         return Ok(Some(report));
     }
     if local_target.exists() {
-        bail!(
-            "bundle '{}' already installed locally at {}",
-            bundle_name,
-            local_target.display()
-        );
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_already_installed",
+            409,
+            format!(
+                "bundle '{}' already installed locally at {}",
+                bundle_name,
+                local_target.display()
+            ),
+        )));
     }
     Ok(None)
 }
@@ -209,11 +213,15 @@ pub(crate) async fn install_entries<S: BlobSource>(
         return Ok(report);
     }
     if local_target.exists() {
-        bail!(
-            "bundle '{}' appeared during remote transfer at {}",
-            bundle_name,
-            local_target.display()
-        );
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_appeared_during_transfer",
+            409,
+            format!(
+                "bundle '{}' appeared during remote transfer at {}",
+                bundle_name,
+                local_target.display()
+            ),
+        )));
     }
 
     // The transfer is now protected by the node-wide mutation lock, so its

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:d4ef3de91d79964016d1a7808242f4fb337579c0ed6379af15293f9df83ff2e2:4m+ub/kQDnMr8UlnigKM2nXCXWvudblGBAkqWXLt6Sw0QHWIlqORthBtIrO2bSQO7mLjGuMH5fZybCtKjANbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:08f6062296254e5e337bfcf853d2eed93fed4ab0dbf78914eb70161ad43112bc:vun9rSwKuR3ydOSYlyPbyb5vFxU5LPI2pN/vEnR2N1y2GtkSAcLmwoPqgdhsbHVs9SU5NfHc3sDULYCI3v0vAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: stage-local
 version: "1.0.0"
@@ -10,3 +10,9 @@ schema:
   catalog_namespace: string
   candidate_publication_attestation_hash: string
   expected_catalog_head: string?
+disclosure:
+  principal:
+    - "/catalog_namespace"
+    - "/candidate_publication_attestation_hash"
+    - "/expected_catalog_head"
+    - "/upload_session_id"
