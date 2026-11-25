@@ -282,6 +282,7 @@ pub fn shape_result(
     if longest_array(&kept) > usize::try_from(bounds.max_items).unwrap_or(usize::MAX) {
         // Logged for the operator only; the caller's refusal carries no path.
         let (path, length) = longest_array_path(&kept);
+        *PROBE_LAST.lock().unwrap() = format!("{path} len={length} max={}", bounds.max_items);
         tracing::warn!(
             array_path = %path,
             array_length = length,
@@ -396,6 +397,9 @@ pub fn project(value: &Value, paths: &[&[KeepSegment]]) -> Option<Value> {
         _ => None,
     }
 }
+
+/// PROBE ONLY: the last refused array, read by the executor into the refusal.
+pub static PROBE_LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 /// The path (JSON pointer, `*` for an index) and length of the longest array
 /// anywhere in `value`, for the operator's log.

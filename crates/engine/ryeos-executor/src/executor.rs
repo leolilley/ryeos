@@ -465,6 +465,7 @@ fn disclose_service_result(
                     "code": refusal.code(),
                     "error": refusal.to_string(),
                     "retryable": false,
+                    "probe": ryeos_node_runtime::disclosure::PROBE_LAST.lock().unwrap().clone(),
                 }),
             })
         }),
@@ -592,6 +593,9 @@ fn redact_refusal_body(body: &Value) -> Value {
                         b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:/-*".contains(&b)
                     }) =>
             {
+                shown.insert(key.clone(), value.clone());
+            }
+            ("probe", Value::String(_)) => {
                 shown.insert(key.clone(), value.clone());
             }
             ("retryable", Value::Bool(_)) => {
