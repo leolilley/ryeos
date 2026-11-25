@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-28T09:42:59Z:60425059e4d60f8f7e4df2268c5ec79aa97e1b3a15aa2a5e34f29fa96eefbdc5:ljLV+Aaem6HpGIEttnh3Rw765dJYNvxxM6ZtgfFuv1d060oZPNfSuRDDuL766qfba9aNxLOXid072PcPTSGqBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:4ed830e5b48f9369aae786422635e288cc334a223ee8e2cf1dab5bd4c68cd365:tIzSF+qVVpX8dfQx20JAqD4gFfiL62no1u96YkptdGKCmPdgJlRHVI2glrpum0JQ49wDRzNnhNdp6Fgo6pNdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.create-runtime-snapshot-qualification
 required_caps: ["ryeos.execute.service.external-content/create-runtime-snapshot-qualification"]
@@ -6,3 +6,5 @@ schema:
   qualification_binding_id: string
   snapshot_operation_id: string
 description: Create one restored qualification Sandbox from an exact ready snapshot under the current signed qualification binding; admitted operator only
+# Requires the admitted or local configured operator; no principal is served.
+disclosure: {}

@@ -6736,6 +6736,8 @@ async fn condition_workspace_output_authority(
         engine: engine.clone(),
         plan_ctx: params.resolved.plan_context.clone(),
         requested_call: None,
+        // Preparing a launch contract resolves and verifies; no handler runs.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
     };
     let prepared = crate::dispatch::prepare_admitted_launch_contract(
         &crate::dispatch::LaunchContractApplicability::ManagedEnvelope {

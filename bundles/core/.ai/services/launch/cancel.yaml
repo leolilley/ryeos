@@ -1,7 +1,17 @@
-# ryeos:signed:2026-08-11T02:28:15Z:5562ce004e1b0d1a2545578cd61c7e7861a276cbc252f989e68e6815d3a94a18:VPE7Cvy5W9/XcxjDb44G8e2t2wSCx4kDA39FVeMdv6A5cZeD4TQrh5r1389pJIxFrmVXI51xBwRZrbBdlw8UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:8ee405b85d8df868199e89f411e0014039479ccf68e4896b382f4dd9a6162b54:9rmGwakf1n1tgYnhiua8p8AJLZzRS3N0WWhqkVPrDgTO8VwYsK/NhW2sDrnx0NMN8QBZAOdcBReXYhSoXXGDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: launch.cancel
 required_caps: ["ryeos.execute.service.launch/cancel"]
 schema:
   launch_id: string
 description: "Cancel a pending streamed execution launch"
+disclosure:
+  principal:
+    - "/launch_id"
+    - "/status"
+    - "/outcome_code"
+    - "/thread_id"
+    - "/requested_thread_id"
+  free_text:
+    - "/kill"
+    - "/cascade"

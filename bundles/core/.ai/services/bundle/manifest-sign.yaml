@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:46Z:4956a72acb648f8492139595398d6b69d7d59053f4d0ea4a8a4cd64e96f70fd2:gWmgzmj6iQ2pnXaMcmu5IfWkkNoPIT5UKE+nHGKuNpOAnIR14NmBOsuvee1Zal6xbGWs0aX5qwptW1MhHqcbDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:24a17ac41256b03e821ac1e344c26c0926fc57a348ad8bab2621ff301dbd8639:+kvPuIm3Rweq6Do+aYR7KPnsrKOKDYa2kFybl61UME/skZmR0lNxOANWV0Qiz4JPCcaTM9UFekfxs9xOdSZqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.manifest-sign
 availability: local
@@ -8,3 +8,5 @@ schema:
   source: string
   name: string?
 description: "Generate and sign .ai/manifest.yaml from .ai/manifest.source.yaml without running the full publish pipeline."
+# Signing, publishing and node inspection are node-operator tools; a principal is served nothing.
+disclosure: {}

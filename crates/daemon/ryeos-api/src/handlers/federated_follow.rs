@@ -20,6 +20,7 @@ use ryeos_app::federated_follow::{
     RemoteFollowTerminalEvidence,
 };
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -97,8 +98,8 @@ async fn deliver_locked(
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured target principal is not a fingerprint"))?;
     let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote)?;
-    let reservation_value =
-        load_local_object(&state, &req.reservation_attestation_hash).map_err(internal)?;
+    let reservation_value = load_local_object(&state, &req.reservation_attestation_hash)
+        .map_err(refusal_or_internal)?;
     let reservation_data = lillux::canonical_json(&reservation_value)
         .map_err(internal)?
         .into_bytes();
@@ -311,7 +312,8 @@ async fn deliver_locked(
             .get_follow_waiter_by_child_chain(&req.child_chain_root_id)
             .map_err(internal)?
         {
-            validate_waiter_tuple(&state, &reservation, &terminal, &waiter).map_err(internal)?;
+            validate_waiter_tuple(&state, &reservation, &terminal, &waiter)
+                .map_err(refusal_or_internal)?;
             state
                 .state_store
                 .mark_follow_child_terminal(
@@ -474,7 +476,9 @@ fn validate_waiter_tuple(
         || successor.upstream_thread_id.as_deref() != Some(reservation.parent_thread_id.as_str())
         || terminal.child_chain_root_id != reservation.child_chain_root_id
     {
-        bail!("live parent waiter differs from its signed delivery reservation");
+        return Err(anyhow::Error::new(HandlerError::Conflict(
+            "live parent waiter differs from its signed delivery reservation".into(),
+        )));
     }
     let stored_tuple = (
         child.terminal_thread_id.as_deref(),
@@ -489,7 +493,9 @@ fn validate_waiter_tuple(
                 || ryeos_state::objects::canonical_value_digest(envelope)?
                     != ryeos_state::objects::canonical_value_digest(&terminal.terminal_envelope)?
             {
-                bail!("parent waiter is already settled by another terminal delivery");
+                return Err(anyhow::Error::new(HandlerError::Conflict(
+                    "parent waiter is already settled by another terminal delivery".into(),
+                )));
             }
         }
         _ => bail!("parent waiter contains a partial terminal delivery tuple"),
@@ -499,15 +505,23 @@ fn validate_waiter_tuple(
 
 fn load_local_object(state: &AppState, hash: &str) -> Result<Value> {
     if !lillux::valid_hash(hash) {
-        bail!("local object hash is not canonical");
+        return Err(typed_refusal(
+            "local_object_hash_not_canonical",
+            400,
+            "local object hash is not canonical",
+        )
+        .into());
     }
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
-    let value = authority
-        .cas_store()?
-        .get_object(hash)?
-        .context("local object is absent from CAS")?;
+    let value = authority.cas_store()?.get_object(hash)?.ok_or_else(|| {
+        typed_refusal(
+            "local_object_absent",
+            404,
+            "local object is absent from CAS",
+        )
+    })?;
     if ryeos_state::objects::canonical_value_digest(&value)? != hash {
         bail!("local object changed digest");
     }
@@ -760,6 +774,12 @@ fn bounded_error(value: &str) -> String {
     } else {
         output.to_owned()
     }
+}
+
+/// A typed refusal inside the error keeps its code and status; any other
+/// failure is a fault of the node.
+fn refusal_or_internal(error: anyhow::Error) -> HandlerError {
+    crate::handler_error::extract_handler_error(&error).unwrap_or_else(|| internal(error))
 }
 
 fn internal(error: impl std::fmt::Display) -> HandlerError {

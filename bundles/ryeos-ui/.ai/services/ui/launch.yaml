@@ -1,7 +1,16 @@
-# ryeos:signed:2026-06-11T22:51:46Z:43b51d0009e9f4edef8b45ffe1f9251da31a9c233c53a7153ff1e870b810af0e:5S566scvNIRa07RYj9meW6MMuAsOpqy8Hf5Sxw6dTDP0jo5wzb4aGJEqUkLBegzfpKdWs207DXED8TeiaMezBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:ac9f272537f6e130cdcfbaa49cc0d25dc8aabc42cf75a8589f61ea03031f4e14:/gs6Zpd5ep5PiPbMl46MN3Z5oDI/9LyJNPUGLa0kZcf+n2YYCXi/0TJOsWNj1OyuPTAxDyvpMZbpBvzFhUp9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: launch
 version: "1.0.0"
 description: Consumes a launch token, establishes a browser session, sets a session cookie.
 endpoint: ui.launch
 availability: both
+disclosure:
+  principal:
+    - "/session_id"
+    - "/redirect"
+    - "/cookie"
+  public:
+    - "/session_id"
+    - "/redirect"
+    - "/cookie"

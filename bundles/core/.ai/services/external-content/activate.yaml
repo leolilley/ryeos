@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-01T00:15:48Z:e21751b4c2496aae135b1de36433145de54f5ef65bff48c16212ca6b036041cd:pnssepm5P2fDyqcYBFWfXFCYVIZc3lB+wZzWeZlQD9YiFdcWc52tSQ8JMpWbmKESJZALQtsBz2OQFHNJeD6yAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:51dfcd42e7b610a338898273efa4cf58d95e35e00324fe626aff5a65b5e7d41a:cCpaikP3sRy8FyGkTJT4F9ODGhyJJrqGTmmpdGr0ftAnunrWe2+x8y/m+4D80Fu7XxVfKUOr0YeXnRogHve2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.activate
 required_caps: ["ryeos.execute.service.external-content/activate"]
@@ -7,3 +7,5 @@ schema:
   mode: string
   offline_archive_root: string?
 description: "Submit restart-recoverable acquisition of exact bytes from a trusted signed recipe through the durable sync-job authority"
+# The handler requires the admitted node operator (external content acquisition and qualification).
+disclosure: {}

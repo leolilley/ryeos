@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:16Z:77c023eb1368f81f859b7aeabd7291c96064a15b40b4e4734b18901a13806abe:ZhAHOjG+l+e3KqVwJ/llBq3fjA+2COVXAS6uh2TeYXtCk5E2QiR4AS/qKiE7StoXHFUj5j5N0ORgUGsLCqydAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:480989eeec1905f5cc6915fc558e5077736f56a6d3e839395d1b86593d5d54d8:jwOFpvK3pyq6VikPReUBJH7l1Ls59tvxhFS6SbQzGFC4eMFMVtz5RmWMQ435tBEUpjz1k26XS3gQp01g5tsBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.bind-project
 required_caps: ["ryeos.execute.service.remote/bind-project"]
@@ -8,3 +8,5 @@ schema:
   remote_project: string
   sync_scope: string?
 description: "Bind a local project path to a remote project path"
+# Binding a project to a remote rewrites the node-signed pin record and requires the local configured operator.
+disclosure: {}

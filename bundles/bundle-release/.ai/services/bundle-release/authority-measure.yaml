@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:d148cc4401d2a5ba230f15daf8f35730bd42c494bb553161c22875dcd31e3026:MnDE+kGJkXlvJktwEw7U4RXA3fnvC4rfmUYmuHftC838ZpBys8N9gi+MD98aLD636pPZ2Yc14iQArNuQ20UyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:e66f9228ac1a4d48a608aae6c44e2efd0f72dc1e463b1e9b36c98f8c4f6c0616:bmu0yOuxEuQOPfKw0daT+Bx27FviH6IUIAY8DEaefESdal4O4gRa+ZnLooYm7qtEjU2dZo0E3rPy1g/wTvR6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-measure
 version: "1.0.0"
@@ -27,3 +27,5 @@ schema:
   substrate_build_witness_hash: string
   substrate_build_signer_fingerprint: string
   publisher_executable_path: string
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

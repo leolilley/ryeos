@@ -181,6 +181,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             .into());
         }
     };
+    // The project the seat states, judged now from the seat key's live
+    // registration. It rides the descriptor as display data; later acts
+    // judge the project again in their own checks.
+    let seat_project =
+        crate::seat_project::resolve_for_binding(&state, &compiled_binding, &granted_caps)?;
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
         presentation,
@@ -189,6 +194,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         user_principal_id,
         project_authority,
         registered_project_id,
+        seat_project,
     };
 
     let (session_id, token, attachment) = get_ui_state(&state)
@@ -754,6 +760,13 @@ pub(crate) fn compile_target(
         }
     });
     let declared_source_safe = extract_ui_read_only(metadata)?;
+    require_result_effect_lane(
+        target_ref,
+        result_effect.is_some(),
+        effective.trust_class,
+        dispatch_class,
+        declared_source_safe,
+    )?;
     let source_safe = match dispatch_class {
         CompiledUiDispatchClass::Verified => {
             declared_source_safe
@@ -794,6 +807,38 @@ pub(crate) fn compile_target(
         result_effect,
         parameter_schema,
     })
+}
+
+/// A declared session transition runs on the unrecorded daemon-service lane,
+/// so it is admitted only on a trusted-bundle, session-local service that is
+/// not also a read-only source. Anything else that declares one is refused
+/// when the target compiles, whatever else resolved for the ref.
+fn require_result_effect_lane(
+    target_ref: &str,
+    declares_effect: bool,
+    trust_class: ryeos_engine::resolution::TrustClass,
+    dispatch_class: CompiledUiDispatchClass,
+    declared_read_only: bool,
+) -> Result<()> {
+    if !declares_effect {
+        return Ok(());
+    }
+    if trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
+        anyhow::bail!(
+            "binding target `{target_ref}` declares a session transition but is not a trusted bundle service"
+        );
+    }
+    if dispatch_class != CompiledUiDispatchClass::SessionLocal {
+        anyhow::bail!(
+            "binding target `{target_ref}` declares a session transition but is not session-local"
+        );
+    }
+    if declared_read_only {
+        anyhow::bail!(
+            "binding target `{target_ref}` declares a session transition and is read-only"
+        );
+    }
+    Ok(())
 }
 
 fn require_current_binding_contract(advertised: &str) -> std::result::Result<(), HandlerError> {
@@ -951,7 +996,7 @@ mod tests {
             SeatPolicy, SharedPresentationPolicyLimits, UiBrowserSessionPolicy,
         };
         UiBrowserSessionPolicy {
-            schema: 5,
+            schema: 6,
             session_ttl_secs: 28800,
             session_idle_secs: 3600,
             launch_token_ttl_secs: 60,
@@ -960,6 +1005,7 @@ mod tests {
             max_live_binding_attachments_per_session: 16,
             max_presentations_per_session: 16,
             max_surface_instances_per_presentation: 16,
+            max_art_grants: 256,
             shared_presentation: SharedPresentationPolicyLimits {
                 max_declaration_bytes: 65536,
                 max_dialogs: 16,
@@ -1099,5 +1145,58 @@ mod tests {
         );
         assert!(require_current_binding_contract("ryeos.ui.binding.v2").is_err());
         assert!(require_current_binding_contract(crate::UI_BINDING_CONTRACT_REVISION).is_ok());
+    }
+
+    #[test]
+    fn a_session_transition_is_admitted_only_on_a_trusted_session_local_writer() {
+        use ryeos_engine::resolution::TrustClass;
+        let lane = |declares, trust, class, read_only| {
+            require_result_effect_lane("service:x", declares, trust, class, read_only)
+        };
+        assert!(
+            lane(
+                true,
+                TrustClass::TrustedBundle,
+                CompiledUiDispatchClass::SessionLocal,
+                false
+            )
+            .is_ok()
+        );
+        // No declaration: nothing about the lane applies.
+        for trust in [TrustClass::TrustedProject, TrustClass::Unsigned] {
+            assert!(
+                lane(false, trust, CompiledUiDispatchClass::Verified, true).is_ok(),
+                "a service without a declaration keeps its own lane"
+            );
+        }
+        for trust in [
+            TrustClass::TrustedProject,
+            TrustClass::TrustedNode,
+            TrustClass::UntrustedProject,
+            TrustClass::Unsigned,
+        ] {
+            assert!(
+                lane(true, trust, CompiledUiDispatchClass::SessionLocal, false).is_err(),
+                "{trust:?} must not reach the lane"
+            );
+        }
+        assert!(
+            lane(
+                true,
+                TrustClass::TrustedBundle,
+                CompiledUiDispatchClass::Verified,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            lane(
+                true,
+                TrustClass::TrustedBundle,
+                CompiledUiDispatchClass::SessionLocal,
+                true
+            )
+            .is_err()
+        );
     }
 }

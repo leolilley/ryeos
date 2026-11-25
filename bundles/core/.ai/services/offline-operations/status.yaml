@@ -1,5 +1,23 @@
-# ryeos:signed:2026-10-28T22:38:56Z:6435ae472e45c7ab35cdfa26c84c13f2a237f2cf5f294f9a5c8dff8940cc32da:EEUu3IwVVlu0JQgyoNga6mheJSAU/HmCClpdPagU0UWUTE2G+89lvceAE4sGydxEPRhsT2Uqw4uc6pWvQ/J8Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:b21d3caa390e3f7656c2c725ad68e834270a41bdaea9f779c078574d078508ed:/ZNbgcDd065+9RZnpIZCo4ILPpSH5qV+GUUUzzcHtCjuoW8pN9/QDPdX6VIyaZRlceiHFsuYYBKuN1TZgmB/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: offline-operations.status
 required_caps: ["ryeos.execute.service.offline-operations/status"]
 description: "The offline-operation ledger tip, the requests queued in the inbox, the newest receipts and the refusals on record"
+disclosure:
+  principal:
+    - "/node_fingerprint"
+    - "/ledger_head"
+    - "/ledger_sequence"
+    - "/queued/*/request_digest"
+    - "/queued/*/operation"
+    - "/queued/*/not_after"
+    - "/receipts/*/sequence"
+    - "/receipts/*/request_digest"
+    - "/receipts/*/operation"
+    - "/receipts/*/recorded_at"
+    - "/refusals/*/request_digest"
+    - "/refusals/*/reason"
+    - "/refusals/*/occurrences"
+    - "/refusals/*/last_seen"
+  free_text:
+    - "/queued/*/signer_fingerprint"

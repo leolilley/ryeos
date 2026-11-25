@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:cbc5701aedc1200678903e99d4a27c57302db4f60fc0fbfdcd2b5316740f7f3f:JesjQXf3q7U3tkXLk5yaa/GSFchjrNk1xR9qddVe14xqqPlE+CsUIgtcON3SKCnwLEhLrJEvc1sBaI8jOhRGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:103ce71af8103e85b2afb1cf873468167bb3373338ffcda6e0328c993345369e:xosBAMEy1DHubsHkcLIXMMeay+KNlmfbNoiApH7C6XobriYBiiXS+Q8LjTnDQSjZTYlzWvZ1Z3ogAcNw6qHTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-calibrate
 version: "1.1.0"
@@ -37,3 +37,5 @@ schema:
   project_path: string
   source_snapshot_hash: string
   execution_environment: object
+# Release calibration is a build and release tool run only by the local configured operator.
+disclosure: {}

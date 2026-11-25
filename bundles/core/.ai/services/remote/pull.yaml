@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T20:05:09Z:7e61aeddb726c0ff9e903c07d2079337cf7a0e811c9e529ded446a6a714cc241:e/8+2Wq48adRwDfVTGLifpe3penTpztad0Y0jKJQYXpG9V+VJ9rxZEYz5l8nUMw3ytwlwjQyw4k2hX2/osuPBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:f702c35c4ff7169b6d341207e5b11aa4a7963598efaa0a50e61db98d4fb50938:2UOIkfl/mU3rOYz5pBiBA1c3ZWXT5/LeQ0sGd/ZpPmoemH9OnvEFM79rpOEScU/LXJBwW+L1Il2op91Zzyp6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pull
 required_caps: ["ryeos.execute.service.remote/pull"]
@@ -9,3 +9,9 @@ schema:
   blob_hashes: string[]?
   output_dir: string
 description: "Fetch typed remote CAS artifacts into an explicit local directory"
+disclosure:
+  principal:
+    - "/fetched"
+    - "/requested"
+    - "/hashes"
+  max_items: 4096

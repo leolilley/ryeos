@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:22Z:6546553ecac49131fdf2113181d087a3affe6fbb49dcb7fb200f2990c80a69b2:3q8TrlFm/lDUYWy4+zlKxnpD/TqsOluWEuw5XkzovsKoXe97+isLHfSkJGaqElMRKqWgPvRQliBzcpO877yuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:13ffe94a0fecd5e9f0e9e31a8a56b35be256dc954f0ed18127246ce6c511050e:R7OmfdpMwUY9lflPvdF8Q5F7PkoB3vuQKpfe2kpHZCv8m7wli7AYrpwLicB8WKbWX57TEY/ybDuanqmAR//GCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.candidate-result
 required_caps: ["ryeos.execute.service.worker-executions/candidate-result"]
@@ -6,3 +6,5 @@ state_access: read_only_existing
 ui_read_only: true
 schema: {chain_root_id: string, source_site_id: string}
 description: "Return target-signed closure/base testimony for one owner-bound frozen, retained hosted-worker candidate; does not qualify, publish, or reopen its worker root"
+# Hosted worker executions are a single configured-operator trust domain; the handler requires the admitted operator, so no principal is served.
+disclosure: {}

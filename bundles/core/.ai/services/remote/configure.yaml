@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:41:47Z:be74287ff16215f617b38f34605c7d7137c265d40655d53f1efb97b07c11fd52:Cutzd+UmOAaHmew7hX/UbaG6tB9U+bw4mfeOPt3EisRRsphlrgfTQmyqtUhxxFvr6WY0pD4OCS14O/UyTRhdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:8d017ab62423f24dc7179eb3ec89aab30025973e6401049d185a949d1b54a0d4:Dgh5J3Vdl3fopvQ9al3l95CJWR6pnCVwVQoF4Q/4TsZhNM1jwqE+aDZqQvt+OnhRdZmjTwmQFNRgZ+kDXCC+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.configure
 required_caps: ["ryeos.execute.service.remote/configure"]
@@ -8,3 +8,5 @@ schema:
   descriptor: string?
   expect_fingerprint: string?
 description: "Add or update a remote node configuration; the remote key must be pinned by a descriptor or an expected fingerprint"
+# Remote configuration requires the local configured operator.
+disclosure: {}

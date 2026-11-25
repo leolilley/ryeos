@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T05:54:19Z:268aa8797a334e0b24e98e64fdea06ecefdc82ac4907fde9a98e881c5983dd31:QIfRrNNyrA1sDk41r288g/Xi23i6W6rtSneFO/jaHBDy7L+uUMMmj++P8aJOpaq5fsJgiwJzR6ACqVJwv5uCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:031214a6c515bb91a2a7169e7fe46aad8ed8084711a41d75ba753754ff888ba7:yPY2plQ6NcpVGI9frdVKEgKG1SIfAwe1kERwo2YLc8yMe0JhckHME31Y4FArIBbLWo087IZMIGXPwmhF2J0pBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.revoke
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -9,3 +9,23 @@ schema:
   leave_running: boolean?
   keep_delegates: boolean?
 description: "Revoke an authorized-key grant on a remote node"
+disclosure:
+  principal:
+    - "/fingerprint"
+    - "/revoked/*/fingerprint"
+    - "/revoked/*/grant_digest"
+    - "/revoked/*/revoked_at"
+    - "/revoked/*/already_revoked"
+    - "/revoked/*/cascaded_from"
+    - "/delegates_kept"
+    - "/schedules/resealed"
+    - "/schedules/paused/*/schedule_id"
+    - "/schedules/paused/*/reason"
+    - "/schedules/paused/*/already_paused"
+    - "/live_work/left_running"
+    - "/live_work/cancelled"
+    - "/live_work/failed/*/thread_id"
+  free_text:
+    - "/revoked/*/revoked_by"
+    - "/revoked/*/reason"
+    - "/live_work/failed/*/error"

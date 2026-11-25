@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:15:46Z:dce1582076e99cbeeb2a57c7d3b1e63bac8382523c445bbb6cede373e52bc5d1:MG/Jx/Or40e5ROWj00S8eK6qZrLsrBmnLSWZgYBO+xpwLVw15poyj387Kg2My4Mo4W7uay8cM4/DhiXKN/9xCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:386bc190c1c4bd20a39879eb6fc92438c236ce6e36f8865c98a8f4b5022eec69:MiKCMP00rdy5rXDZ/AxWk2ug4Gu2Qr5bLuGFVfBDlWt/9X+2K/06ElTaAc2KHSkueev+b56GfaK/mTpvQMQUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.locality
 ui_read_only: true
@@ -7,3 +7,11 @@ availability: daemon_only
 required_caps:
   - ryeos.execute.service.node/locality
 description: "This node's graded locality facts: its site id, when it measured, and a digest or an unknown with a reason key for each of boot, storage and account, so an operator can compare nodes without any node revealing a boot id, path, device or uid"
+disclosure:
+  principal:
+    - "/schema"
+    - "/site_id"
+    - "/as_of"
+    - "/relations/*/grade"
+    - "/relations/*/digest"
+    - "/relations/*/reason"

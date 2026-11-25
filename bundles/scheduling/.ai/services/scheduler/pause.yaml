@@ -1,7 +1,11 @@
-# ryeos:signed:2026-08-11T02:28:44Z:bcdc81ed0a42007e080a37df837ef521cd1d77f2d9cbf69319601d3b584dca6f:XG0f7lTqJ4iLWVtwwt70usik839ayej882ahfRjjLLFQP6GPpOrixWTyVVmFN8XY4pNxY79FI4A07/Tegz5ZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:c86bd5e9c7bd31eebe36c31479669a28451c57b1c24375f97094774cc6559ee9:NGOJ82PWU8ZRc1QD47GxMfRC74lYcbKYyczUkrWqOBL3S7M6OYwzojcgNnIIMVCHpYcXf+BZGkuRPY8qV/MFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "pause"
 kind: service
 endpoint: scheduler.pause
 required_caps: ["ryeos.execute.service.scheduler/pause"]
 description: "Pause a schedule"
+disclosure:
+  principal:
+    - "/schedule_id"
+    - "/enabled"

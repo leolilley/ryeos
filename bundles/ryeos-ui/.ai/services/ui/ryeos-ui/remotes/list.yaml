@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:9867873944f5a0648ccf369be699037454cf0584cfdb1a424ef6111125485612:GWEMofk0kqz8w2OcqC59CoyjhrZcFtnQ1eQfBIIkOSdIpE5oO2zE3nR4btYeR18BeHxgkMDHqXTrTAi1xGtfDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:e3507298c295bcb2b8f06ee416c325c76167f252450c2d8d39978fccb01635db:ZAGTphnsU4BAu+PXTKX8kMhDhy9PYaNExc41u/tf3zsIRMHWItoGii1uoWEwF9QPUi8rEdJWp9BEhO7pDiuBAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/remotes/list
 version: "1.0.0"
@@ -8,3 +8,19 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /remotes/*/name
+    - /remotes/*/pin_source
+    - /remotes/*/pinned_at
+    - /invalid_remotes/*/name
+    - /invalid_remotes/*/code
+  free_text:
+    - /remotes/*/url
+    - /remotes/*/principal_id
+    - /remotes/*/config_path
+    - /remotes/*/project_bindings
+    - /invalid_remotes/*/config_path
+    - /invalid_remotes/*/url
+    - /invalid_remotes/*/error
+    - /invalid_remotes/*/repair_hint

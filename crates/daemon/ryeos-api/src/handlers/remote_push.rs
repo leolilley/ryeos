@@ -110,6 +110,12 @@ fn default_remote() -> String {
     "default".to_string()
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(
     req: Request,
     context: crate::handler_context::HandlerContext,
@@ -117,18 +123,26 @@ pub async fn handle(
 ) -> Result<Value> {
     let path = &req.project;
     if !path.is_absolute() {
-        return Err(anyhow::anyhow!(
-            "project '{}' is not absolute: the CLI must canonicalize \
-             before sending. The daemon's cwd is irrelevant to the caller.",
-            path.display()
+        return Err(refuse(
+            "project_path_not_absolute",
+            400,
+            format!(
+                "project '{}' is not absolute: the CLI must canonicalize \
+                 before sending. The daemon's cwd is irrelevant to the caller.",
+                path.display()
+            ),
         ));
     }
     let canonical_abs = path.canonicalize().map_err(|e| {
-        anyhow::anyhow!(
-            "cannot canonicalize project '{}': {}. Ensure the path \
-             exists and is accessible.",
-            path.display(),
-            e
+        refuse(
+            "project_path_unavailable",
+            400,
+            format!(
+                "cannot canonicalize project '{}': {}. Ensure the path \
+                 exists and is accessible.",
+                path.display(),
+                e
+            ),
         )
     })?;
     let mut project_path_for_ref = config::local_project_identity(&canonical_abs)?.to_owned();
@@ -146,9 +160,13 @@ pub async fn handle(
         OutboundPrincipal::Node => RemoteClient::from_named_remote(&state, &req.remote)?,
         OutboundPrincipal::Delegated => {
             let remote = remote_cfg.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "configured remote '{}' is required for a delegated push",
-                    req.remote
+                refuse(
+                    "remote_not_configured",
+                    404,
+                    format!(
+                        "configured remote '{}' is required for a delegated push",
+                        req.remote
+                    ),
                 )
             })?;
             principal.client(&state, remote, &context)?

@@ -9495,6 +9495,9 @@ async fn run_service_standalone(
         engine,
         plan_ctx: standalone_plan_ctx,
         requested_call: None,
+        // Standalone service execution runs with the stopped node's own
+        // operator authority.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
     };
 
     let outcome = service_executor::execute_service_verified(

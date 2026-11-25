@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:25:00Z:da09988c13da2cc62aa64630624038bc254ce49267964f507ebf564639beea0b:fj0Dy3t0r24F/VphNtAppO+QnokcNslNSvF+qGblufG/mXKfemIdrPgVUz95KTVJu4db5bQkQ6yBEagBVk26CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:eb82d34c3aa02196aa5588b29d472ae866b3912f1db59ce802c3a9e0dcdbd119:lLEAaaS+dDCm74YsJHNi1oxaHggY0mLWa6scRDLN7OThAGB8WdJhNfCeshIQNOnYo1lKI/FYen9zoojqtzgZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: sessions-revoke
 version: "1.0.0"
@@ -7,3 +7,7 @@ endpoint: ui.sessions.revoke
 availability: daemon_only
 required_caps:
   - ryeos.execute.service.ui/sessions/revoke
+disclosure:
+  principal:
+    - "/session_id"
+    - "/revoked"

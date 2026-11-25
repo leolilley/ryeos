@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T14:44:07Z:38b4f6bd2ad8136093a77f603b6d43ac49d308f9f23dae9ad9564b8a73ad35a1:aAl/CwwSX5wdKWHYtZeA2Fet32sCNITaGXsQXJ2pb5yYnE3droX76jjaRHoKW75xqCBZVPqr/lp9WivEEKLPDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:318d23962bc3133e16de206a7358f126bdc12c3048fb78243f584d129b820d46:ScoS4w0jRe5hwomL52nXAlt3AWRKoZpWSUqi/VD+eEf1FJzXmSH8p+sHm8YrD8NzyX/xSvPY43DH/XZ7AZ/YBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.adopt
 required_caps: ["ryeos.execute.service.worker-placements/adopt"]
@@ -9,3 +9,24 @@ schema:
   placement_attestation_hash: string
   writer_grant_hash: string
 description: Adopt and attach one source-authorized configured-operator worker placement.
+disclosure:
+  principal:
+    - "/outcome"
+    - "/terminal_attestation_hash"
+    - "/response/operation_id"
+    - "/response/chain_root_id"
+    - "/response/placement_thread_id"
+    - "/response/target_chain_head_hash"
+    - "/response/delivery"
+    - "/failure/operation_id"
+    - "/failure/chain_root_id"
+    - "/failure/placement_thread_id"
+    - "/failure/target_chain_head_hash"
+    - "/failure/terminal_status"
+    - "/failure/credential_disposition"
+    - "/completion/operation_id"
+    - "/completion/chain_root_id"
+    - "/completion/placement_thread_id"
+    - "/completion/target_chain_head_hash"
+    - "/completion/terminal_status"
+    - "/completion/credential_disposition"

@@ -211,6 +211,18 @@ pub struct HandlerContext {
     /// Task-scoped dispatcher authority the handler's task re-enters.
     #[serde(skip)]
     task_scope: Option<HandlerTaskScope>,
+    /// The node-minted grant of a live browser session that authenticated this
+    /// call. Set only by the session verifier from the session it loaded; it
+    /// is never request input, and it carries no signed key.
+    #[serde(skip)]
+    minted_session_grant: Option<MintedSessionGrant>,
+}
+
+/// The grant a live browser session was minted with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedSessionGrant {
+    pub session_id: String,
+    pub granted_caps: Vec<String>,
 }
 
 impl HandlerContext {
@@ -229,6 +241,7 @@ impl HandlerContext {
             launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -251,6 +264,7 @@ impl HandlerContext {
             launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -274,6 +288,7 @@ impl HandlerContext {
             launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
     }
 
@@ -298,7 +313,19 @@ impl HandlerContext {
             launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
+            minted_session_grant: None,
         }
+    }
+
+    /// Record the live browser session grant that authenticated this call.
+    pub fn with_minted_session_grant(mut self, grant: Option<MintedSessionGrant>) -> Self {
+        self.minted_session_grant = grant;
+        self
+    }
+
+    /// The live browser session grant behind this call, if any.
+    pub fn minted_session_grant(&self) -> Option<&MintedSessionGrant> {
+        self.minted_session_grant.as_ref()
     }
 
     /// Bind the daemon-minted recorded thread of this service call (a chain

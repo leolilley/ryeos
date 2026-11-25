@@ -138,12 +138,15 @@ fn session_context(
     context
 }
 
+/// The context the real route verifier hands a service for a live browser
+/// session: no signed key, no scopes of its own, and the session's minted grant.
 fn handler_context(session_id: &str) -> HandlerContext {
-    HandlerContext::new(
-        format!("session:{session_id}"),
-        vec!["ui.read".into()],
-        false,
+    ryeos_ui::invokers::browser_session_invocation::session_route_principal(
+        session_id,
+        None,
+        &["ui.read".to_owned()],
     )
+    .handler_context()
 }
 
 fn activate(state: &ryeos_app::state::AppState) -> String {
@@ -182,6 +185,19 @@ async fn route(
     input: Value,
 ) -> anyhow::Result<Value> {
     invoke_seat_route(descriptor, input, handler_context(session), state.clone()).await
+}
+
+#[tokio::test]
+async fn a_live_browser_session_receives_its_principal_tier_through_the_real_route() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let prepared = prepare(&state, &session).await;
+    for leaf in ["presentation_id", "thread_id", "chain_root_id"] {
+        assert!(prepared[leaf].is_string(), "{leaf} in {prepared}");
+    }
+    // The tier names no field beyond the seat protocol's own.
+    assert!(prepared.get("uds_path").is_none(), "{prepared}");
 }
 
 async fn prepare(state: &Arc<ryeos_app::state::AppState>, session: &str) -> Value {

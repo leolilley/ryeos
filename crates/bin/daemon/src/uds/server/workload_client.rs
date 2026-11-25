@@ -507,6 +507,9 @@ fn present_admitted_executions(
         caller_scopes: scopes.to_vec(),
         engine: provenance.request_engine().clone(),
         requested_call: None,
+        // A validate-only presentation of what a worker may launch; no
+        // handler runs.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
         plan_ctx: PlanContext {
             logical_project: provenance.signer_project(),
             requested_by: EffectivePrincipal::Local(Principal {

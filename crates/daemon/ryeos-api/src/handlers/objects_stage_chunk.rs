@@ -16,6 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
@@ -64,49 +65,81 @@ impl Request {
     /// Shape checks that need no store. Returns the decoded chunk.
     fn validate(&self) -> Result<Vec<u8>> {
         if self.staging_id.is_empty() || self.staging_id.len() > 256 {
-            bail!("objects/stage-chunk requires a staging_id issued by the server");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(
+                    "objects/stage-chunk requires a staging_id issued by the server".into(),
+                ),
+            ));
         }
         if !is_canonical_hash(&self.hash) {
-            bail!("objects/stage-chunk hash is not canonical SHA-256");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(
+                    "objects/stage-chunk hash is not canonical SHA-256".into(),
+                ),
+            ));
         }
         if self.total_size == 0 {
-            bail!("objects/stage-chunk total_size must be positive");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(
+                    "objects/stage-chunk total_size must be positive".into(),
+                ),
+            ));
         }
         match (self.namespace, self.manifest_hash.as_deref()) {
             (Namespace::Blob, Some(_)) => {
-                bail!(
-                    "objects/stage-chunk manifest_hash is valid only for the large_object namespace"
-                )
+                return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest("objects/stage-chunk manifest_hash is valid only for the large_object namespace".into())))
             }
             (Namespace::LargeObject, None) => {
-                bail!("objects/stage-chunk large_object chunks require a manifest_hash")
+                return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest("objects/stage-chunk large_object chunks require a manifest_hash".into())))
             }
             (Namespace::LargeObject, Some(manifest)) if !is_canonical_hash(manifest) => {
-                bail!("objects/stage-chunk manifest_hash is not canonical SHA-256")
+                return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest("objects/stage-chunk manifest_hash is not canonical SHA-256".into())))
             }
             _ => {}
         }
         if self.namespace == Namespace::Blob && self.total_size > super::objects_put::MAX_BLOB_BYTES
         {
-            bail!(
-                "blob exceeds the {} byte per-blob limit",
-                super::objects_put::MAX_BLOB_BYTES
-            );
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                    "blob exceeds the {} byte per-blob limit",
+                    super::objects_put::MAX_BLOB_BYTES
+                )),
+            ));
         }
         if self.data.len() > MAX_STAGE_CHUNK_BYTES.saturating_mul(2) {
-            bail!("encoded stage chunk exceeds the route-safe bound");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(
+                    "encoded stage chunk exceeds the route-safe bound".into(),
+                ),
+            ));
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.data)
-            .map_err(|error| anyhow::anyhow!("invalid base64 in stage chunk: {error}"))?;
+            .map_err(|error| bad_request(format!("invalid base64 in stage chunk: {error}")))?;
         if bytes.is_empty() {
-            bail!("objects/stage-chunk carries an empty chunk");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(
+                    "objects/stage-chunk carries an empty chunk".into(),
+                ),
+            ));
         }
         if bytes.len() > MAX_STAGE_CHUNK_BYTES {
-            bail!("stage chunk exceeds {MAX_STAGE_CHUNK_BYTES} bytes");
+            return Err(anyhow::Error::new(
+                ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                    "stage chunk exceeds {MAX_STAGE_CHUNK_BYTES} bytes"
+                )),
+            ));
         }
         Ok(bytes)
     }
+}
+
+/// A refusal of the caller's own request. The reason stays in the error's
+/// display text.
+fn bad_request(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest(
+        message.into(),
+    ))
 }
 
 fn is_canonical_hash(hash: &str) -> bool {
@@ -143,9 +176,11 @@ fn stage_chunk_blocking(
     // principal is refused by the reopen itself.
     let mut stage = recovery.open_durable_cas_upload_admitted(&guard, &req.staging_id, owner)?;
     if let Some(target) = stage.admitted_target_hash() {
-        bail!(
-            "durable upload stage is already admitted for publication target {target}; it accepts no further chunks"
-        );
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "durable upload stage is already admitted for publication target {target}; it accepts no further chunks"
+            )),
+        ));
     }
     let length = u64::try_from(bytes.len())?;
     let (staged_bytes, complete) = match req.namespace {
@@ -178,17 +213,29 @@ fn stage_chunk_blocking(
                 stage.publication_key(),
                 ryeos_state::DurableCasPublicationKey::ExternalContentImport { .. }
             ) {
-                anyhow::bail!("large-object chunks are staged only into a product-offer stage");
+                return Err(anyhow::Error::new(
+                    ryeos_app::handler_error::HandlerError::Conflict(
+                        "large-object chunks are staged only into a product-offer stage".into(),
+                    ),
+                ));
             }
             stage.ensure_protects_object(manifest_hash)?;
-            let manifest_value = cas
-                .get_object(manifest_hash)?
-                .with_context(|| format!("staged manifest {manifest_hash} is absent"))?;
+            let manifest_value = cas.get_object(manifest_hash)?.ok_or_else(|| {
+                typed_refusal(
+                    "staged_manifest_absent",
+                    404,
+                    format!("staged manifest {manifest_hash} is absent"),
+                )
+            })?;
             let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(
                 &manifest_value,
             )
-            .with_context(|| {
-                format!("staged object {manifest_hash} is not a large-content manifest")
+            .map_err(|_| {
+                typed_refusal(
+                    "staged_object_not_manifest",
+                    422,
+                    format!("staged object {manifest_hash} is not a large-content manifest"),
+                )
             })?;
             let expectation = expectation_for(&manifest, &req.hash, req.total_size)?;
             let store = authority.large_object_store()?;
@@ -239,16 +286,24 @@ fn expectation_for(
         .entries
         .iter()
         .find(|entry| entry.file_sha256.as_deref() == Some(file_sha256))
-        .with_context(|| {
-            format!("the staged manifest has no large-object entry with file_sha256 {file_sha256}")
+        .ok_or_else(|| {
+            bad_request(format!(
+                "the staged manifest has no large-object entry with file_sha256 {file_sha256}"
+            ))
         })?;
     let (Some(size), Some(chunk_size)) = (entry.size, entry.chunk_size) else {
-        bail!("the manifest entry for {file_sha256} carries no size or sidecar chunk size");
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                "the manifest entry for {file_sha256} carries no size or sidecar chunk size"
+            )),
+        ));
     };
     if size != total_size {
-        bail!(
-            "stage chunk total_size {total_size} contradicts the manifest size {size} for {file_sha256}"
-        );
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::BadRequest(format!(
+                "stage chunk total_size {total_size} contradicts the manifest size {size} for {file_sha256}"
+            )),
+        ));
     }
     Ok(LargeObjectExpectation {
         size,
@@ -273,19 +328,23 @@ fn require_store_room(
         .checked_add(incoming_bytes)
         .context("large-store budget overflow")?;
     if after > store_budget_bytes {
-        bail!(
-            "large object of {incoming_bytes} bytes would take the store to {after} bytes, over the {store_budget_bytes} byte budget"
-        );
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "large object of {incoming_bytes} bytes would take the store to {after} bytes, over the {store_budget_bytes} byte budget"
+            )),
+        ));
     }
     let capacity = store.filesystem_capacity()?;
     let required = minimum_free_bytes
         .checked_add(incoming_bytes)
         .context("large-store free-space requirement overflow")?;
     if capacity.available_bytes < required {
-        bail!(
-            "large object of {incoming_bytes} bytes needs {required} available bytes including the reserve, observed {}",
-            capacity.available_bytes
-        );
+        return Err(anyhow::Error::new(
+            ryeos_app::handler_error::HandlerError::Conflict(format!(
+                "large object of {incoming_bytes} bytes needs {required} available bytes including the reserve, observed {}",
+                capacity.available_bytes
+            )),
+        ));
     }
     Ok(())
 }

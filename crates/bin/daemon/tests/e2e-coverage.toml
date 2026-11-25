@@ -425,6 +425,10 @@ covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "
 covers = ["ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/engine/ryeos-engine/src/authority/**", "crates/state/ryeos-state/src/signer.rs"]
 
+[tests.ui_live_rebind_e2e]
+covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]
+
 [tests.ui_session_auth_e2e]
 covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]
 paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:7f392f737a7412e2d6ae538bde0f6f3ee3d03b7a468cae2e8269896cb0e623ad:QWWa/DFvsp6NkUHrL0v9vplzQEg/oQDXZ9qTDp6DHBx9VI6xa49+xE4iyrtrV7l+HgvQIPUxv82v1A4aQLo3CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:72f6335c07ea0f2a1cc3c5c9bcd86dfffc3b6cb493b393e2632b6c668de12340:9N7yO0uQ005RXJ0TcKUfJVOoktM4BhqKJBoWhsVetxSrwJUFeS7TJMvmE1YcMa1LFVT6KPUnsseo920CxwnjAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-build
 version: "1.0.0"
@@ -22,3 +22,5 @@ schema:
   trust_epoch: integer
   core_generation_hash: string
   core_generation_attestation_hash: string
+# Release authority operation: run by the node operator's release graph only; a principal is served nothing.
+disclosure: {}

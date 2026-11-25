@@ -238,11 +238,12 @@ fn session_context_and_root(
         .get_session(id)
         .unwrap();
     let root = session.attachments[&session.root_attachment_id].coordinate();
-    let ctx = ryeos_app::handler_context::HandlerContext::new(
-        format!("session:{id}"),
-        session.granted_caps.clone(),
-        false,
-    );
+    let ctx = crate::invokers::browser_session_invocation::session_route_principal(
+        id,
+        session.user_principal_id.as_deref(),
+        &session.granted_caps,
+    )
+    .handler_context();
     (ctx, root)
 }
 
@@ -450,6 +451,7 @@ pub fn launch_context(
             )
         }),
         registered_project_id: None,
+        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
     }
 }
 
@@ -531,7 +533,7 @@ fn test_node_policy(
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 5,
+                        schema: 6,
                         session_ttl_secs: 28800,
                         session_idle_secs: 3600,
                         launch_token_ttl_secs: 60,
@@ -540,6 +542,7 @@ fn test_node_policy(
                         max_live_binding_attachments_per_session: 16,
                         max_presentations_per_session: 16,
                         max_surface_instances_per_presentation: 16,
+                        max_art_grants: 256,
                         shared_presentation: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SharedPresentationPolicyLimits {
                             max_declaration_bytes: 65536,
                             max_dialogs: 16,

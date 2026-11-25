@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T14:51:24Z:2645a805b09d259aedcce5db1ee51d3a845b720e790cded8570815da583f3526:sHFvX0T3ETAGdX5bZPWU48bvd5GLlhH+1wjVPck68i5f86OYUiGhAMKhX0L9pY7VQJWTTHhuNpYLAq2mdB+nAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:3ee22efe44a7de30d53eb8b4be09d23938529d923555d72106a79a2e39a9c01b:Q+aI/Lw++KnNmaJncWkXgu/Hemmp5mbJsGyZrp4g0V2Cz/zKFDp3E848fIlOKasI5DtUwMHnYvHlIkxGoeQUCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "timeline"
 kind: service
@@ -14,3 +14,26 @@ schema:
   since_chain_seq: integer?
   definition: string?
 description: "A chain's events folded into timeline items by the installed timeline definition (by chain_root_id); with since_chain_seq, the upsert since that seq"
+disclosure:
+  principal:
+    - "/timeline_contract"
+    - "/chain_root_id"
+    - "/definition_ref"
+    - "/definition_digest"
+    - "/highest_chain_seq"
+    - "/older"
+    - "/next_limit"
+    - "/summary/status"
+    - "/summary/input_tokens"
+    - "/summary/output_tokens"
+    - "/summary/spend_usd"
+    - "/summary/turns"
+    - "/undeclared"
+    - "/lane/label"
+    - "/lane/entry"
+    - "/order"
+  free_text:
+    - "/items"
+    - "/notice_noun"
+  max_items: 1024
+  max_result_bytes: 2097152

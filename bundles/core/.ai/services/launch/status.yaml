@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:d0051824e973ac90140a29e86293232e16b491a0fcb7da9dfac454ce81af222c:hFEs/2uk0cx2rOY8HMRhjLtsl73BDt5gQEBCZVdaiPQtz46lPymtyr+DVFykVuVwNXPmtaTWtcKJTjaSXffhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:59cc19f1cdb94fd8c480e2b9832d4fc5ee799af3547f93a5d39778839d3b80bc:ZBnx6XGiB9vdmvwpUJX6VfmNc3UP2Xk/7GcQRCXy5ogALm7F0601ZrZ1URGLRGx4rPFxFeYV+xjiCKbm/DAjBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: launch.status
 ui_read_only: true
@@ -8,3 +8,9 @@ required_caps: []
 schema:
   launch_id: string
 description: "Read one exact owner-bound accepted launch coordinate"
+disclosure:
+  principal:
+    - "/launch_id"
+    - "/thread_id"
+    - "/status"
+    - "/outcome_code"

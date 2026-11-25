@@ -542,6 +542,7 @@ mod tests {
             root_ref: "surface:ryeos/ui/base-observe".into(),
             project_query_identity: None,
             project_authority: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         })
     }
 
@@ -680,6 +681,7 @@ mod tests {
             user_principal_id: None,
             project_authority: None,
             registered_project_id: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         };
         let (id, token, retained) = store
             .mint_token(launch, 8, &"22".repeat(32))

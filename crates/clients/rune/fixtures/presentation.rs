@@ -420,6 +420,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         project_path: Some(file.session.project_path.clone()),
         subject: UiBindingSubject::UnregisteredProject,
         posture: Default::default(),
+        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         binding_request_bounds: UiBindingRequestBounds {
             max_request_bytes: 4096,
             max_input_bytes: 1024,

@@ -488,6 +488,44 @@ impl Running {
         &self.core
     }
 
+    /// Fetch each granted picture with the session's own transport and report
+    /// the bytes (or the failure) to `arrived`, waking the app when it has.
+    /// A hash that is not a hash is skipped; only a browser host fetches.
+    #[cfg(target_arch = "wasm32")]
+    pub fn fetch_pictures(
+        &self,
+        hashes: Vec<String>,
+        arrived: crate::pictures::Arrived,
+        wake: WakeFn,
+    ) {
+        use ryeos_client_runtime::platform::Transport;
+        for hash in hashes {
+            let Some(path) = crate::pictures::art_path(&hash) else {
+                continue;
+            };
+            let (platform, arrived, wake) = (self.platform.clone(), arrived.clone(), wake.clone());
+            wasm_bindgen_futures::spawn_local(async move {
+                let outcome = platform
+                    .transport()
+                    .get_bytes(&path, crate::pictures::MAX_PICTURE_BYTES)
+                    .await
+                    .map_err(|error| error.to_string());
+                arrived.borrow_mut().push((hash, outcome));
+                wake();
+            });
+        }
+    }
+
+    /// The headless host renders fixtures with no daemon, so it fetches nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn fetch_pictures(
+        &self,
+        _hashes: Vec<String>,
+        _arrived: crate::pictures::Arrived,
+        _wake: WakeFn,
+    ) {
+    }
+
     /// The presentation documents offered as links, each with the absolute
     /// URL that opens it once it is prepared.
     pub fn document_offers(&self) -> Vec<(DocumentOffer, Option<String>)> {

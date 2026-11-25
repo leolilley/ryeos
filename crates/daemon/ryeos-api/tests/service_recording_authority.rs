@@ -48,7 +48,7 @@ fn route_handler(
     _context: HandlerContext,
     _state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> {
-    Box::pin(async { Ok(json!({"route": "ok"})) })
+    Box::pin(async { Ok(json!({"protocol": "ok"})) })
 }
 
 fn failing_route_handler(
@@ -93,6 +93,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
             scheduled_fire: None,
             validate_only: false,
         },
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
         requested_call: None,
     };
 
@@ -142,6 +143,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
         authorized_key_class: None,
         authenticated_origin_site_id: None,
         authenticated_grant_authority: None,
+        minted_session_grant: None,
         metadata: Default::default(),
     };
     let result = invoker
@@ -165,7 +167,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
     let RouteInvocationResult::Json { value, thread_id } = result else {
         panic!("compiled service route did not return JSON");
     };
-    assert_eq!(value, json!({"route": "ok"}));
+    assert_eq!(value, json!({"protocol": "ok"}));
     let thread_id = thread_id.expect("recorded route must return its durable thread id");
 
     let thread = state
@@ -389,6 +391,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
                 authorized_key_class: None,
                 authenticated_origin_site_id: None,
                 authenticated_grant_authority: None,
+                minted_session_grant: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,
@@ -435,6 +438,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                 ),
                 authenticated_origin_site_id: None,
                 authenticated_grant_authority: None,
+                minted_session_grant: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,

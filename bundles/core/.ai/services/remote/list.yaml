@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T04:33:06Z:2e789c3a57b94ef44c834eb4503d273279786ac074a6532d8fb01780c7e8d4af:+UdEMga5K3yntS9bueo9zCBSIEg0Brn82Ct+fuyOXpPhHa3XlGV/vukplGiPqmOo5V8JLhgTYPSwtOPZJqdpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:56ce557efc426f17982660dd0fc8dbb2904ee207c3f78d94e46d3710a1849e1a:8Vt3qNQS5kfdAuk4185O7dibgAD8XisqJJ03eXwqGCS9LCqmoycU2V/piLfK6PWoLMmd4Po6mQFlB+xTKLMKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.list
 required_caps: ["ryeos.execute.service.remote/list"]
@@ -6,3 +6,19 @@ schema:
   project: string?
   no_project: boolean?
 description: "List configured remote nodes"
+disclosure:
+  principal:
+    - "/remotes/*/name"
+    - "/remotes/*/url"
+    - "/remotes/*/principal_id"
+    - "/remotes/*/site_id"
+    - "/remotes/*/pin_source"
+    - "/remotes/*/pinned_at"
+    - "/invalid_remotes/*/name"
+    - "/invalid_remotes/*/code"
+  free_text:
+    - "/remotes/*/config_path"
+    - "/invalid_remotes/*/config_path"
+    - "/invalid_remotes/*/url"
+    - "/invalid_remotes/*/error"
+    - "/invalid_remotes/*/repair_hint"

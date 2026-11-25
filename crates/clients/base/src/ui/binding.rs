@@ -793,6 +793,11 @@ pub struct UiBindingAttachment {
     pub project_path: Option<String>,
     pub subject: UiBindingSubject,
     pub posture: UiEffectivePosture,
+    /// The project this seat states, as the daemon judged it when it
+    /// admitted this binding generation. Display data: the daemon computes
+    /// it, never reads it back as authority, and a descriptor without it is
+    /// refused. A later generation carries a later judgement.
+    pub seat_project: super::seat_project::UiSeatProject,
     pub binding_request_bounds: UiBindingRequestBounds,
     /// Every item the daemon resolved this binding from: the Surface, its
     /// views and view sets, and their extends-chain members. The daemon
@@ -1072,7 +1077,7 @@ mod tests {
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "test"}}, "views": {}},
             "project_path": null,
             "subject": {"kind":"projectless"},
-            "posture": "observation_only",
+            "posture": "observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
         });
         assert!(
@@ -1084,6 +1089,15 @@ mod tests {
         let mut missing_subject = valid.clone();
         missing_subject.as_object_mut().unwrap().remove("subject");
         assert!(serde_json::from_value::<UiBindingAttachment>(missing_subject).is_err());
+        let mut missing_seat_project = valid.clone();
+        missing_seat_project
+            .as_object_mut()
+            .unwrap()
+            .remove("seat_project");
+        assert!(
+            serde_json::from_value::<UiBindingAttachment>(missing_seat_project).is_err(),
+            "a descriptor with no seat project is refused, never defaulted"
+        );
         let mut project = valid.clone();
         project["project_path"] = serde_json::json!("/project");
         assert!(
@@ -1161,7 +1175,7 @@ mod tests {
             "binding_digest": "digest-one", "root_ref": "config:test",
             "root_generation": "generation-one",
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "test"}}, "views": {}},
-            "project_path": null, "subject":{"kind":"projectless"}, "posture": "observation_only",
+            "project_path": null, "subject":{"kind":"projectless"}, "posture": "observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
         });
         assert!(

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T04:33:06Z:bbd6b81fcc66ce6143334a90aa5e5c37b0f29d16a972de6124e4b922c6672cc2:3O/cJkd5/x8ksKYrmKt0r78XIXJiC1XlVVa1NbZAiWrD0mldo7/AkkVgzGCByrIqQDck1AN6IASsVRffjAvNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:52edeecad0f761124f7731319cdbfa486085ba24b02267c79f2713d328e34b86:P+3EYWofe6KXL0PP4PLzFQ6wdOxseQJqU+5tc2+ghLuGPWsyV65avWC10MVLeIZglAdNEbmu3itD9KGaimwYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.status
 required_caps: ["ryeos.execute.service.remote/status"]
@@ -7,3 +7,27 @@ schema:
   project: string?
   no_project: boolean?
 description: "Check a remote node's status and public key"
+disclosure:
+  principal:
+    - "/remote/name"
+    - "/remote/url"
+    - "/remote/principal_id"
+    - "/remote/configured_principal_matches"
+    - "/remote/site_id"
+    - "/remote/configured_site_matches"
+    - "/remote/configured_vault_matches"
+    - "/remote/pinned_identity_matches"
+    - "/auth/signed_probe"
+    - "/auth/authorized"
+  free_text:
+    - "/remote/health"
+    - "/remote/configured_principal_id"
+    - "/remote/fingerprint"
+    - "/remote/configured_site_id"
+    - "/remote/vault_fingerprint"
+    - "/remote/configured_vault_fingerprint"
+    - "/remote/identity_error"
+    - "/local_identity"
+    - "/auth/detail"
+    - "/project_bindings"
+    - "/next_step"

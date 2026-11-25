@@ -42,7 +42,7 @@ pub use init::{
     InitAuthority, InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions,
     InitPhase, InitProgress, InitReport, OfflineInitCompletionSigner, ProspectiveInitCompletion,
     ProspectiveInitCompletionInput, SubstrateIdentity, SubstrateImageReplacement,
-    load_trusted_init_node_profile, load_verified_substrate_identity,
+    load_trusted_init_node_profile, load_verified_substrate_identity, name_policy_generation_cure,
     preflight_existing_policy_generation, prepare_bundle_set_init_completion,
     prepare_prospective_init_completion, prospective_replacement_policy_digest, run_init,
     run_init_under_lock, run_init_with_operator_ceremony, run_init_with_progress,

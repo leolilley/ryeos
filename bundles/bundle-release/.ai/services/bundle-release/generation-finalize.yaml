@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:a306dfdb0fa9649803a12efc045cd92944fa0c4eafb7d75e4d78372dfbffd216:afEPShSmumBeoqPXXFNWBF66DQwTRFA16VcG42mVpY3PyV0vU4SdoV1iWL332BQS3qZdoaWNTgeZntK67AYJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:707a76f7da0f2f627649370cb12695256787e48c0dfb06f362f19bdb9b9cbed0:wSAEgNEqifE7PofqElKq2McA4Uz8wgojEzcwBIJwZsEEOXkw0lf+yZsvRYONoPcotXUBxVBIEIPar6iuL1AdDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-finalize
 version: "1.0.0"
@@ -11,3 +11,5 @@ schema:
   catalog_namespace: string
   bundle_publication_policy_section_digest: string
   trust_epoch: integer
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

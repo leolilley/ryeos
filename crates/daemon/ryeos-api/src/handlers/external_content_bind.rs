@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -118,10 +119,22 @@ pub(crate) async fn prepare_consumer(
                     preparation
                         .project_snapshot_hash
                         .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("pinned-project consumer requires a snapshot"))?,
+                        .ok_or_else(|| {
+                            anyhow::Error::new(typed_refusal(
+                                "consumer_snapshot_required",
+                                400,
+                                "pinned-project consumer requires a snapshot",
+                            ))
+                        })?,
                     preparation
                         .project_path
-                        .ok_or_else(|| anyhow::anyhow!("pinned-project consumer requires a project path"))?,
+                        .ok_or_else(|| {
+                            anyhow::Error::new(typed_refusal(
+                                "consumer_project_path_required",
+                                400,
+                                "pinned-project consumer requires a project path",
+                            ))
+                        })?,
                     preparation_context.fingerprint.clone(),
                     preparation_context.scopes.clone(),
                     &checkout_id,
@@ -133,7 +146,13 @@ pub(crate) async fn prepare_consumer(
                 &preparation_state,
                 product_owner_context
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("selected consumer requires a product owner"))?,
+                    .ok_or_else(|| {
+                        anyhow::Error::new(typed_refusal(
+                            "consumer_product_owner_required",
+                            400,
+                            "selected consumer requires a product owner",
+                        ))
+                    })?,
                 selections,
                 qualification_project_context_resolver,
             )?;
