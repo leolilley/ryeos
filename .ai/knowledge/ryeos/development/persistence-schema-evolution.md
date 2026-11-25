@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-25T22:23:18Z:5a305a27efd4313f18bc4bc778ac52ecc913566d330fe2f962aa15229395815f:JbwMbZot1bvN3cs8rS3qYG4fMEwBYlBKir3so7NAw5pYMFzV/IkdqwLn5MXvZsRzm4DARI6HWuaWA5+N9dYTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T23:30:06Z:7020c287dbaea4c086db6b7a5f4ba2c740068be10045eca166b2457d0e46a44b:oDTBcZCvXcWTOsL9GZzCDKHcbKDN5tKjpseSMLq6OuXK7k1+T03qzHkKGgBi3MSO+0KPeftaAt0a3a01evXpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -333,22 +333,19 @@ startup never rewrites it.
 
 `operational.sqlite3` owns stable credential-profile ownership, lifecycle,
 confirmed account evidence, generation, and tombstones in addition to its
-other non-reconstructable records. Its explicit atomic v4-to-v5 forward
-migration creates that authority table; a monotonic profile revision repairs a
-crash gap against RuntimeDb's live session/lease projection. The store must
-never be silently reset or archived. Schema v6 retains each remote sync job's
-immutable typed operation. Its v5-to-v6 migration proves the exact predecessor
-table, gives legacy jobs an explicit non-authoritative recovery envelope, and
-atomically rebuilds the table into the same column order and SQL as a fresh v6
-store. The exact appended-column intermediate produced by the original v6
-migrator is also recognized and repaired; no unknown layout is modified.
+other non-reconstructable records. Its schema is exact: startup accepts only
+the current version (7) and refuses any other with a typed error that says this
+binary has no migration. The error names the sidecar files an operator removes,
+with the node stopped and the old file preserved, to start a fresh store; the
+store is never silently reset or archived. A monotonic profile revision repairs
+a crash gap against RuntimeDb's live session/lease projection. Each remote sync
+job retains its immutable typed operation in the same current schema.
 
 Replay indexes inside that stable database have their own clean-cut epoch,
-currently epoch 10. Epoch 10 binds dispatch-effect replay to admitted launch
-capsule schema 25, including retained receiving-kind content ceilings and
-explicit fixed-parent live filesystem authority.
-An epoch-9 record cannot prove that authority and
-is therefore retired rather than reinterpreted.
+currently epoch 20. Epoch 20 binds dispatch-effect replay to admitted launch
+capsule schema 41, which carries the thread workload ceiling, the detached
+workspace input and the evaluator origin chain. An epoch-19 record cannot prove
+that authority and is therefore retired rather than reinterpreted.
 They are not authority-compatible merely because the surrounding SQLite schema
 is current: a dispatch-effect record retains its complete admitted execution
 closure, including the exact admitted-launch-capsule schema. When that closure
