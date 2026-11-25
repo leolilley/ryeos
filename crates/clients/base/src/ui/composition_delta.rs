@@ -408,15 +408,13 @@ mod tests {
             stage_composition_delta(&composition, &request, 0, frontier, &descriptors, 65536)
                 .is_ok()
         );
-        // Once that generation is retained, an update at the source's own or
-        // an older generation is not a successor, whatever state it carries.
-        let mut retained = descriptors.clone();
-        retained.insert(to.binding_attachment_id.clone(), newer.clone());
+        // An update staged at the source's own generation is not a
+        // successor, whatever seat project it carries. It is a fresh
+        // attachment id, so no retained descriptor can be the reason it is
+        // refused.
         let mut late = newer.clone();
+        late.binding_attachment_id = "late-update".into();
         late.binding_generation = descriptors[&from.binding_attachment_id].binding_generation;
-        late.seat_project = descriptors[&from.binding_attachment_id]
-            .seat_project
-            .clone();
         let mut late_request = request.clone();
         late_request.mutation = CompositionMutation::RebindAttachment {
             from,
@@ -427,10 +425,16 @@ mod tests {
             },
             descriptor: Box::new(late),
         };
-        assert!(
-            stage_composition_delta(&composition, &late_request, 0, frontier, &retained, 65536)
-                .is_err()
-        );
+        let refusal = stage_composition_delta(
+            &composition,
+            &late_request,
+            0,
+            frontier,
+            &descriptors,
+            65536,
+        )
+        .expect_err("a rebind at the source's generation is refused");
+        assert!(refusal.contains("successor"), "{refusal}");
     }
     #[test]
     fn rebind_closes_a_tile_whose_view_left_the_successor() {
