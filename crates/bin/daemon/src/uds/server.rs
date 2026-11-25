@@ -455,6 +455,22 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
 
     if let Some(cap) = callback_cap.as_ref() {
         cap.runtime_method_surface.authorize(method)?;
+        // A thread under a workload ceiling reaches only the callback methods
+        // classified as judged or bookkeeping; every other method, including
+        // one added later, is refused before its body runs.
+        ryeos_app::callback_token::authorize_runtime_method_under_thread_ceiling(
+            &cap.thread_ceiling,
+            method,
+        )
+        .map_err(|refusal| {
+            anyhow::Error::new(
+                ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                    code: refusal.code.to_owned(),
+                    message: refusal.message,
+                    binding: None,
+                },
+            )
+        })?;
         if matches!(
             method,
             "runtime.consumer_verification_inputs"
@@ -535,8 +551,10 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
             ))
             .await
         }
-        "runtime.append_event" => handle_append_event(&clean_params, state),
-        "runtime.append_events" => handle_append_event_batch(&clean_params, state),
+        "runtime.append_event" => handle_append_event(&clean_params, state, callback_cap.as_ref()),
+        "runtime.append_events" => {
+            handle_append_event_batch(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
         "runtime.read_attachment" => {
             handle_read_attachment(&clean_params, state, callback_cap.as_ref())
@@ -1551,9 +1569,38 @@ fn thread_attachments_policy(
     >()
 }
 
-fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+/// Refuse event types a thread under a workload ceiling may not append,
+/// before anything is written.
+fn authorize_append_under_thread_ceiling<'a>(
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    event_types: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let Some(cap) = cap else {
+        return Ok(());
+    };
+    ryeos_app::callback_token::authorize_event_types_under_thread_ceiling(
+        &cap.thread_ceiling,
+        event_types,
+    )
+    .map_err(|refusal| {
+        anyhow::Error::new(
+            ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                code: refusal.code.to_owned(),
+                message: refusal.message,
+                binding: None,
+            },
+        )
+    })
+}
+
+fn handle_append_event(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
+    authorize_append_under_thread_ceiling(cap, [params.event.event_type.as_str()])?;
     let persisted = state.events.append(
         &params,
         event_storage_policy(state)?,
@@ -1571,9 +1618,14 @@ fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<s
 fn handle_append_event_batch(
     params: &serde_json::Value,
     state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
+    authorize_append_under_thread_ceiling(
+        cap,
+        params.events.iter().map(|event| event.event_type.as_str()),
+    )?;
     let result = state.events.append_batch(
         &params,
         event_storage_policy(state)?,
@@ -7039,6 +7091,108 @@ mod tests {
     }
 
     #[test]
+    fn every_runtime_method_the_server_names_is_classified_for_thread_ceilings() {
+        use ryeos_app::callback_token::{
+            THREAD_CEILING_ALLOWED_RUNTIME_METHODS, THREAD_CEILING_REFUSED_RUNTIME_METHODS,
+        };
+        // Production half of this file: everything before the test module.
+        let source = include_str!("server.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("split yields a first part");
+        let mut named = std::collections::BTreeSet::new();
+        let mut rest = production;
+        while let Some(start) = rest.find("\"runtime.") {
+            let after = &rest[start + 1..];
+            let end = after
+                .find(|c: char| !(c.is_ascii_lowercase() || c == '_' || c == '.'))
+                .unwrap_or(after.len());
+            if after[end..].starts_with('"') && &after[..end] != "runtime." {
+                named.insert(after[..end].to_owned());
+            }
+            rest = &rest[start + 1..];
+        }
+        assert!(
+            named.len() > 40,
+            "the scan found too few method names: {named:?}"
+        );
+        for method in &named {
+            assert!(
+                THREAD_CEILING_ALLOWED_RUNTIME_METHODS.contains(&method.as_str())
+                    ^ THREAD_CEILING_REFUSED_RUNTIME_METHODS.contains(&method.as_str()),
+                "callback method `{method}` is not classified exactly once for thread ceilings"
+            );
+        }
+        for method in THREAD_CEILING_ALLOWED_RUNTIME_METHODS
+            .iter()
+            .chain(THREAD_CEILING_REFUSED_RUNTIME_METHODS)
+        {
+            assert!(
+                named.contains(*method),
+                "classified method `{method}` is not a callback method of this server"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body() {
+        on_daemon_worker_stack(
+            bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body_body,
+        );
+    }
+
+    async fn bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ceilinged-vault");
+        let cbt = bind_test_callback_owner(
+            &state,
+            state.callback_tokens.generate_with_context(
+                "T-ceilinged-vault",
+                std::path::PathBuf::from("/p"),
+                std::time::Duration::from_secs(300),
+                vec!["*".to_string()],
+                test_provenance(&state, "/p"),
+                None,
+                None,
+                "0".repeat(64),
+                Some("0".repeat(64)),
+                serde_json::Value::Null,
+                0,
+                ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+                    max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+                    workspace_access:
+                        ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+                },
+            ),
+        );
+        // Methods that execute something or reach an external effect are
+        // refused at the method gate, before any handler parses its params.
+        for method in ["runtime.vault_get", "runtime.start_dedicated_session"] {
+            let error = dispatch_runtime_method(
+                method,
+                &json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-ceilinged-vault",
+                }),
+                &state,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+                    Some(ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                        code, ..
+                    }) if code == "thread_ceiling_route_refused"
+                ),
+                "expected the typed route refusal for {method}, got: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn bounded_thread_ceiling_refuses_detached_dispatch_at_the_call() {
         on_daemon_worker_stack(bounded_thread_ceiling_refuses_detached_dispatch_at_the_call_body);
     }
@@ -7107,6 +7261,207 @@ mod tests {
                 }) if code == "thread_ceiling_spawn_mode_refused"
             ),
             "expected the typed spawn-mode refusal, got: {error:#}"
+        );
+    }
+
+    fn detach_test_grant(detached: bool) -> ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+        let mut grant = ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+            schema: ryeos_app::callback_token::AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: ryeos_runtime::workload_client::WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: "T-grant-detach".to_owned(),
+            placement_thread_id: "T-grant-detach".to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            executions: vec![
+                ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+                    item_ref: "tool:test/detachable".to_owned(),
+                    ref_bindings: std::collections::BTreeMap::new(),
+                    calls: vec![ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default],
+                    effect_classes: vec!["live".to_owned(), "recorded".to_owned()],
+                    workspace_access:
+                        ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                    detached,
+                },
+            ],
+            execution_product_selections: std::collections::BTreeMap::new(),
+            execution_presentation: serde_json::Value::Null,
+            effective_caps: vec!["ryeos.execute.tool.test/detachable".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        grant.execution_presentation = serde_json::Value::Array(
+            grant
+                .executions
+                .iter()
+                .map(|ceiling| {
+                    json!({
+                        "authority": ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling)
+                    })
+                })
+                .collect(),
+        );
+        grant
+    }
+
+    #[test]
+    fn grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists() {
+        on_daemon_worker_stack(
+            grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists_body,
+        );
+    }
+
+    async fn grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-grant-detach");
+        let cbt = generate_test_callback(
+            &state,
+            "T-grant-detach",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.test/detachable".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .set_workload_client_grant(&cbt.token, detach_test_grant(false))
+                .unwrap()
+        );
+        let call = |item_id: &str, bindings: serde_json::Value| {
+            json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-grant-detach",
+                "thread_auth_token": "tat-not-reached",
+                "action": {
+                    "operation_id": "1".repeat(64),
+                    "item_id": item_id,
+                    "ref_bindings": bindings,
+                    "product_selections": [],
+                    "thread": "detached",
+                },
+            })
+        };
+        // The grant does not opt the item in: refused with its own code.
+        let error = ryeos_executor::execution::runtime_dispatch::handle(
+            &call("tool:test/detachable", json!({})),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+                Some(ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                    code, ..
+                }) if code == "workload_detach_not_opted_in"
+            ),
+            "expected the typed not-opted-in refusal, got: {error:#}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists() {
+        on_daemon_worker_stack(
+            opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists_body,
+        );
+    }
+
+    async fn opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists_body()
+    {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-grant-detach");
+        let cbt = generate_test_callback(
+            &state,
+            "T-grant-detach",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.test/detachable".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .set_workload_client_grant(&cbt.token, detach_test_grant(true))
+                .unwrap()
+        );
+        let call = |item_id: &str, bindings: serde_json::Value| {
+            json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-grant-detach",
+                "thread_auth_token": "tat-not-reached",
+                "action": {
+                    "operation_id": "1".repeat(64),
+                    "item_id": item_id,
+                    "ref_bindings": bindings,
+                    "product_selections": [],
+                    "thread": "detached",
+                },
+            })
+        };
+        // A ref binding the grant never listed, and an item it never listed,
+        // are refused by the grant's own surface check; neither reaches an
+        // intent row.
+        for (item, bindings) in [
+            ("tool:test/detachable", json!({"input": "knowledge:x/y"})),
+            ("tool:test/unlisted", json!({})),
+        ] {
+            let error =
+                ryeos_executor::execution::runtime_dispatch::handle(&call(item, bindings), &state)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("outside the admitted grant"),
+                "expected the grant surface refusal for {item}, got: {error:#}"
+            );
+            assert!(
+                state
+                    .state_store
+                    .runtime_action_intents()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        // The opted-in, in-surface call passes the grant gate and is stopped
+        // later (it carries no trusted ingress provenance): not by the opt-in.
+        let error = ryeos_executor::execution::runtime_dispatch::handle(
+            &call("tool:test/detachable", json!({})),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no trusted ingress provenance"),
+            "expected the call to pass the grant gate, got: {error:#}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
         );
     }
 

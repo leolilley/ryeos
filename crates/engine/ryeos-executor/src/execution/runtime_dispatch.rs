@@ -372,7 +372,12 @@ fn callback_execution_context(
     ))
 }
 
-async fn prepare_callback_dispatch(
+/// Resolve and admit the exact callee of a callback action against the
+/// calling thread's borrowed provenance, threadless, and return its preflight
+/// with the execution context it was judged under. Inline and detached calls
+/// are judged by this one function, so a detached child's declared
+/// projections are computed exactly as an inline call's are.
+fn callback_root_preflight(
     params: &DispatchActionParams,
     state: &AppState,
     thread_auth: &ThreadAuthState,
@@ -381,12 +386,11 @@ async fn prepare_callback_dispatch(
     origin_site_id: &str,
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
-    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
-    authorization: Option<ryeos_effect_contract::AdmittedEffectAuthorization>,
-) -> Result<PreparedCallbackDispatch> {
-    if params.action.thread != "inline" {
-        anyhow::bail!("callback preflight is only valid for inline actions");
-    }
+) -> Result<(
+    crate::executor::ExecutionContext,
+    Option<ryeos_app::handler_context::HandlerContext>,
+    crate::dispatch::RootDispatchPreflight,
+)> {
     let root = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
         .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
     let (context, handler_context) = callback_execution_context(
@@ -419,6 +423,34 @@ async fn prepare_callback_dispatch(
         None,
     )
     .map_err(anyhow::Error::new)?;
+    Ok((context, handler_context, preflight))
+}
+
+async fn prepare_callback_dispatch(
+    params: &DispatchActionParams,
+    state: &AppState,
+    thread_auth: &ThreadAuthState,
+    dispatch_caps: &[String],
+    current_site_id: &str,
+    origin_site_id: &str,
+    child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    authorization: Option<ryeos_effect_contract::AdmittedEffectAuthorization>,
+) -> Result<PreparedCallbackDispatch> {
+    if params.action.thread != "inline" {
+        anyhow::bail!("callback preflight is only valid for inline actions");
+    }
+    let (context, handler_context, preflight) = callback_root_preflight(
+        params,
+        state,
+        thread_auth,
+        dispatch_caps,
+        current_site_id,
+        origin_site_id,
+        child_provenance,
+        original_budget,
+    )?;
     let admitted_result_policy = preflight
         .root_admission
         .as_ref()
@@ -552,7 +584,13 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 "workload-client callback authority cannot select hook or effect dispatch"
             );
         }
-        grant.authorize_action(&params.action)?;
+        if params.action.thread == "detached" {
+            grant
+                .authorize_detached_ceiling(&params.action)
+                .map_err(grant_refusal_error)?;
+        } else {
+            grant.authorize_action(&params.action)?;
+        }
         let source = params.workload_invocation.as_ref().ok_or_else(|| {
             anyhow::anyhow!("workload dispatch has no trusted ingress provenance")
         })?;
@@ -754,18 +792,50 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
         None
     };
+    // A grant-bearing parent's detached call is judged here, before any intent
+    // row, thread or workspace operation exists, by the same projections and
+    // the same grant functions an inline call of the item is judged by.
+    let detached_preflight =
+        if params.action.thread == "detached" && cap.workload_client_grant.is_some() {
+            let (_context, _handler_context, preflight) = callback_root_preflight(
+                &params,
+                state,
+                &thread_auth,
+                &dispatch_caps,
+                &caller_thread.current_site_id,
+                &caller_thread.origin_site_id,
+                &child_provenance,
+                None,
+            )?;
+            Some(preflight)
+        } else {
+            None
+        };
+    let mut detached_grant_ceiling = None;
     let workload_workspace_access = if let Some(grant) = cap.workload_client_grant.as_ref() {
-        let prepared = prepared_callback_dispatch.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("workload-client dispatch lost its exact child preflight")
-        })?;
-        grant.authorize_effect_class(
-            &params.action.item_id,
-            prepared.preflight.effect_class_ceiling,
-        )?;
-        Some(grant.authorize_workspace_access(
-            &params.action.item_id,
-            prepared.preflight.workspace_access,
-        )?)
+        if let Some(preflight) = detached_preflight.as_ref() {
+            let (access, sealed_ceiling) = judge_detached_call(
+                grant,
+                &cap.thread_ceiling,
+                &params.action.item_id,
+                preflight,
+            )?;
+            require_detach_capable_parent(state, &cap)?;
+            detached_grant_ceiling = Some(sealed_ceiling);
+            Some(access)
+        } else {
+            let prepared = prepared_callback_dispatch.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("workload-client dispatch lost its exact child preflight")
+            })?;
+            grant.authorize_effect_class(
+                &params.action.item_id,
+                prepared.preflight.effect_class_ceiling,
+            )?;
+            Some(grant.authorize_workspace_access(
+                &params.action.item_id,
+                prepared.preflight.workspace_access,
+            )?)
+        }
     } else {
         None
     };
@@ -773,18 +843,26 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // from its descendants, whether or not the bearer carries a grant. The
     // values judged are the child's own declared projections.
     if cap.thread_ceiling.is_bounded() {
-        let prepared = prepared_callback_dispatch.as_ref().ok_or_else(|| {
-            thread_ceiling_error(ryeos_app::callback_token::ThreadCeilingRefusal {
-                code: ryeos_app::callback_token::THREAD_CEILING_SPAWN_MODE_REFUSED,
-                message: "a ceilinged thread's call lost its exact child preflight".to_owned(),
-            })
-        })?;
-        enforce_thread_ceiling(
-            &cap.thread_ceiling,
-            prepared.preflight.effect_class_ceiling,
-            prepared.preflight.workspace_access,
-        )?;
+        let preflight = prepared_callback_dispatch
+            .as_ref()
+            .map(|prepared| &prepared.preflight)
+            .or(detached_preflight.as_ref())
+            .ok_or_else(|| {
+                thread_ceiling_error(ryeos_app::callback_token::ThreadCeilingRefusal {
+                    code: ryeos_app::callback_token::THREAD_CEILING_SPAWN_MODE_REFUSED,
+                    message: "a ceilinged thread's call lost its exact child preflight".to_owned(),
+                })
+            })?;
+        enforce_thread_ceiling_on_preflight(&cap.thread_ceiling, preflight)?;
     }
+    let detached_admission = match (detached_preflight, detached_grant_ceiling) {
+        (Some(preflight), Some(sealed_ceiling)) => Some(DetachedGrantAdmission {
+            preflight,
+            sealed_ceiling,
+        }),
+        (None, None) => None,
+        _ => anyhow::bail!("a detached call lost its sealed workload ceiling"),
+    };
 
     let result = handle_execute(
         params,
@@ -799,6 +877,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         prepared_callback_dispatch,
         workload_workspace_access,
         lifecycle_authority,
+        detached_admission,
     )
     .await;
     drop(caller_thread);
@@ -813,6 +892,123 @@ fn thread_ceiling_error(refusal: ryeos_app::callback_token::ThreadCeilingRefusal
             message: refusal.message,
             binding: None,
         },
+    )
+}
+
+/// A grant-bearing parent's detached call after it was judged: the child's
+/// own preflight (kept for the request identity) and the workload ceiling the
+/// grant seals for it.
+struct DetachedGrantAdmission {
+    preflight: crate::dispatch::RootDispatchPreflight,
+    sealed_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+}
+
+/// Report a typed grant refusal under its stable code; any other refusal
+/// passes through unchanged.
+fn grant_refusal_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<ryeos_app::callback_token::ThreadCeilingRefusal>() {
+        Ok(refusal) => thread_ceiling_error(refusal),
+        Err(error) => error,
+    }
+}
+
+/// Judge a grant-bearing parent's detached call from the child's own exact
+/// preflight: the grant's per-item gates (opt-in, declared projection,
+/// exclusivity, effect class, workspace access) and the calling thread's own
+/// ceiling. Returns the workspace access the capture runs under and the
+/// ceiling the grant seals for the child. Nothing durable exists yet.
+pub(crate) fn judge_detached_call(
+    grant: &ryeos_app::callback_token::AdmittedWorkloadClientGrant,
+    parent_ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    item_ref: &str,
+    preflight: &crate::dispatch::RootDispatchPreflight,
+) -> Result<(
+    ryeos_engine::kind_registry::WorkspaceAccess,
+    ryeos_state::objects::ThreadWorkloadCeiling,
+)> {
+    let judged = grant
+        .authorize_detached_child(
+            item_ref,
+            preflight.effect_class_ceiling,
+            preflight.workspace_access,
+        )
+        .map_err(grant_refusal_error)?;
+    enforce_thread_ceiling_on_preflight(parent_ceiling, preflight)?;
+    Ok(judged)
+}
+
+/// A detached child is given its parent's workspace as captured data input, so
+/// the parent must run in a private pinned copy-on-write workspace the daemon
+/// can capture from (never the live project, whose files a child would
+/// borrow), and the node must be able to quiesce the parent's borrowers while
+/// the capture runs. Both are checked before any durable state exists.
+fn require_detach_capable_parent(
+    state: &AppState,
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> Result<()> {
+    require_detach_capable_authority(cap.provenance.project_authority())?;
+    require_detach_quiescence(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+    )
+}
+
+fn require_detach_capable_authority(
+    authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Result<()> {
+    use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
+    match authority {
+        ExecutionProjectAuthority::PinnedGeneration {
+            realization: PinnedProjectRealization::Cow { .. },
+            ..
+        } => Ok(()),
+        ExecutionProjectAuthority::LiveProject { .. } => Err(thread_ceiling_error(
+            ryeos_app::callback_token::ThreadCeilingRefusal {
+                code: ryeos_app::callback_token::WORKLOAD_DETACH_LIVE_PROJECT_PARENT,
+                message: "a detached child cannot be launched from a session running on the \
+                          live project"
+                    .to_owned(),
+            },
+        )),
+        _ => Err(thread_ceiling_error(
+            ryeos_app::callback_token::ThreadCeilingRefusal {
+                code: ryeos_app::callback_token::WORKLOAD_DETACH_PARENT_NOT_PRIVATE_WORKSPACE,
+                message: "a detached child can only be launched from a session running in a \
+                          private pinned copy-on-write workspace"
+                    .to_owned(),
+            },
+        )),
+    }
+}
+
+fn require_detach_quiescence(
+    process_scopes: &ryeos_engine::isolation::IsolationProcessScopePolicy,
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+) -> Result<()> {
+    super::require_workspace_quiescence_qualified(
+        process_scopes,
+        qualified,
+        "detached workspace-input capture",
+    )
+    .map_err(|error| {
+        thread_ceiling_error(ryeos_app::callback_token::ThreadCeilingRefusal {
+            code: ryeos_app::callback_token::WORKLOAD_DETACH_NO_QUIESCENCE,
+            message: format!("{error:#}"),
+        })
+    })
+}
+
+/// Judge the exact preflight of a callback-dispatched child against the
+/// calling thread's workload ceiling: the call's single enforcement point,
+/// reading only the child's own declared projections.
+pub(crate) fn enforce_thread_ceiling_on_preflight(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    preflight: &crate::dispatch::RootDispatchPreflight,
+) -> Result<()> {
+    enforce_thread_ceiling(
+        ceiling,
+        preflight.effect_class_ceiling,
+        preflight.workspace_access,
     )
 }
 
@@ -1413,6 +1609,7 @@ async fn handle_execute(
     prepared_callback_dispatch: Option<PreparedCallbackDispatch>,
     workload_workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    detached_admission: Option<DetachedGrantAdmission>,
 ) -> Result<Value> {
     let action_digest = ryeos_runtime::callback::dispatch_action_digest(&params.action)?;
     let prepared_workspace_operation = workload_workspace_access
@@ -1446,6 +1643,7 @@ async fn handle_execute(
             lifecycle_authority,
             prepared_callback_dispatch.as_ref(),
             prepared_workspace_operation.as_ref(),
+            detached_admission.as_ref(),
         )?)
     } else {
         None
@@ -1464,6 +1662,19 @@ async fn handle_execute(
             .operation_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("detached callback action has no operation_id"))?;
+        let detached_workload = match (detached_admission.as_ref(), &prepared_workspace_operation) {
+            (Some(admission), Some(operation)) => {
+                Some(super::detached_workspace_input::DetachedWorkloadAdmission {
+                    workspace_seed: operation.seed(),
+                    input_base_snapshot_hash: &operation.input_base_snapshot_hash,
+                    sealed_ceiling: admission.sealed_ceiling,
+                })
+            }
+            (None, _) => None,
+            (Some(_), None) => {
+                anyhow::bail!("detached call has a sealed ceiling but no workspace operation")
+            }
+        };
         let response = crate::execution::spawn_detached_child::spawn_detached_child(
             state,
             thread_auth,
@@ -1478,6 +1689,7 @@ async fn handle_execute(
             runtime_action_request_hash.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("detached callback action has no reserved request authority")
             })?,
+            detached_workload.as_ref(),
         )
         .await
         .map_err(|error| classify_detached_runtime_action_error(state, operation_id, error))?;
@@ -2770,6 +2982,7 @@ fn runtime_action_request_hash(
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     prepared: Option<&PreparedCallbackDispatch>,
     workspace_operation: Option<&PreparedWorkloadWorkspaceOperation>,
+    detached: Option<&DetachedGrantAdmission>,
 ) -> Result<String> {
     let product_selections = runtime_action_request_product_selections(action)?;
     let mut effective_caps = dispatch_caps.to_vec();
@@ -2787,17 +3000,20 @@ fn runtime_action_request_hash(
             "authenticated_origin_site_id": &context.authenticated_origin_site_id,
         })
     });
-    let prepared_subject = prepared.map(|prepared| {
-        let verified = &prepared.preflight.requested_subject;
-        serde_json::json!({
-            "dispatch_class": prepared.preflight.class.as_str(),
-            "subject_ref": verified.resolved.canonical_ref.to_string(),
-            "raw_content_digest": &verified.resolved.raw_content_digest,
-            "content_hash": &verified.resolved.content_hash,
-            "signer": verified.signer.as_ref().map(|signer| signer.0.as_str()),
-            "trust_class": verified.trust_class,
-        })
-    });
+    let prepared_subject = prepared
+        .map(|prepared| &prepared.preflight)
+        .or(detached.map(|detached| &detached.preflight))
+        .map(|preflight| {
+            let verified = &preflight.requested_subject;
+            serde_json::json!({
+                "dispatch_class": preflight.class.as_str(),
+                "subject_ref": verified.resolved.canonical_ref.to_string(),
+                "raw_content_digest": &verified.resolved.raw_content_digest,
+                "content_hash": &verified.resolved.content_hash,
+                "signer": verified.signer.as_ref().map(|signer| signer.0.as_str()),
+                "trust_class": verified.trust_class,
+            })
+        });
     let effect_authority = prepared
         .and_then(|prepared| prepared.effect_authority.as_ref())
         .map(|authority| {
@@ -2819,7 +3035,7 @@ fn runtime_action_request_hash(
             "input_base_snapshot_hash": &operation.input_base_snapshot_hash,
         })
     });
-    let identity = serde_json::json!({
+    let mut identity = serde_json::json!({
         "schema": RUNTIME_ACTION_REQUEST_SCHEMA,
         "action_digest": action_digest,
         "product_selections": product_selections,
@@ -2843,6 +3059,11 @@ fn runtime_action_request_hash(
         "effect_authority": effect_authority,
         "workspace_authority": workspace_authority,
     });
+    if let Some(detached) = detached {
+        // Only a grant-bearing detached call carries a sealed ceiling, so
+        // every other request keeps its identity unchanged.
+        identity["detached_workload_ceiling"] = serde_json::to_value(detached.sealed_ceiling)?;
+    }
     let canonical = lillux::canonical_json(&identity)
         .context("canonicalize exact runtime action request authority")?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
@@ -2855,7 +3076,7 @@ fn parent_execution_context_from_capability(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use lillux::time::{Duration, MonotonicDeadline};
     use std::sync::Arc;
@@ -3510,8 +3731,12 @@ mod tests {
         assert!(typed.to_string().contains("running"));
     }
 
-    #[test]
-    fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+    fn ceilinged_test_capability(
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    ) -> (
+        tempfile::TempDir,
+        ryeos_app::callback_token::CallbackCapability,
+    ) {
         let (project, provenance) = live_provenance();
         let cap = ryeos_app::callback_token::CallbackCapability {
             token: "cbt-test".to_string(),
@@ -3534,11 +3759,17 @@ mod tests {
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
             accounting_scope: None,
-            thread_ceiling: bounded_test_ceiling(),
+            thread_ceiling,
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
         };
+        (project, cap)
+    }
+
+    #[test]
+    fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+        let (_project, cap) = ceilinged_test_capability(bounded_test_ceiling());
 
         let ctx = parent_execution_context_from_capability(&cap);
         assert_eq!(ctx.parent_thread_id, "T-parent");
@@ -3552,10 +3783,202 @@ mod tests {
             bounded_test_ceiling(),
             "an inline child inherits the calling thread's ceiling unchanged"
         );
-        // Detached and follow spawns build the same context and persist it.
         let persisted = ctx.persisted();
         assert_eq!(persisted.parent_thread_id, "T-parent");
         assert_eq!(persisted.thread_ceiling, bounded_test_ceiling());
+    }
+
+    #[test]
+    fn detached_and_follow_spawn_contexts_carry_the_calling_threads_ceiling() {
+        let (_project, bounded_cap) = ceilinged_test_capability(bounded_test_ceiling());
+        let (_unbounded_project, unbounded_cap) =
+            ceilinged_test_capability(ryeos_state::objects::ThreadWorkloadCeiling::node_root());
+
+        // The builders the detached and follow spawn paths launch and persist
+        // their children with, not the shared constructor they delegate to.
+        for context in [
+            super::super::spawn_detached_child::detached_child_parent_context(&bounded_cap, None),
+            super::super::spawn_follow_child::follow_child_parent_context(&bounded_cap),
+        ] {
+            assert_eq!(context.parent_thread_id, "T-parent");
+            assert_eq!(context.thread_ceiling, bounded_test_ceiling());
+            assert_eq!(
+                context.persisted().thread_ceiling,
+                bounded_test_ceiling(),
+                "the persisted parent context a spawned child recovers from carries it"
+            );
+        }
+        for context in [
+            super::super::spawn_detached_child::detached_child_parent_context(&unbounded_cap, None),
+            super::super::spawn_follow_child::follow_child_parent_context(&unbounded_cap),
+        ] {
+            assert_eq!(
+                context.persisted().thread_ceiling,
+                ryeos_state::objects::ThreadWorkloadCeiling::node_root()
+            );
+        }
+    }
+
+    /// A grant whose one execution is `tool:example/effectful`, opted in to
+    /// detached launches, with the given effect classes (sorted, as a grant
+    /// lists them) and immutable workspace access.
+    pub(crate) fn detached_test_grant(
+        effect_classes: &[&str],
+    ) -> ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+        ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+            schema: ryeos_app::callback_token::AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: ryeos_runtime::workload_client::WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: "T-parent".to_owned(),
+            placement_thread_id: "T-parent".to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            executions: vec![
+                ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+                    item_ref: "tool:example/effectful".to_owned(),
+                    ref_bindings: std::collections::BTreeMap::new(),
+                    calls: vec![ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default],
+                    effect_classes: effect_classes
+                        .iter()
+                        .map(|class| (*class).to_owned())
+                        .collect(),
+                    workspace_access:
+                        ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                    detached: true,
+                },
+            ],
+            execution_product_selections: std::collections::BTreeMap::new(),
+            execution_presentation: serde_json::Value::Null,
+            effective_caps: vec!["ryeos.execute.tool.example/effectful".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn a_parent_with_a_grant_takes_the_base_generation_handoff_and_others_keep_the_freeze() {
+        use super::super::detached_workspace_input::DetachedWorkspaceHandoff;
+        let (_project, mut cap) =
+            ceilinged_test_capability(ryeos_state::objects::ThreadWorkloadCeiling::node_root());
+        assert_eq!(
+            DetachedWorkspaceHandoff::for_parent(&cap),
+            DetachedWorkspaceHandoff::CandidateFreeze
+        );
+        cap.workload_client_grant = Some(detached_test_grant(&["live", "recorded"]));
+        assert_eq!(
+            DetachedWorkspaceHandoff::for_parent(&cap),
+            DetachedWorkspaceHandoff::BaseGeneration
+        );
+    }
+
+    #[test]
+    fn detached_spawn_context_seals_the_grants_ceiling_and_only_narrows() {
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let ceiling = |max_effect_class| ThreadWorkloadCeiling::Bounded {
+            max_effect_class,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let (_project, session) = ceilinged_test_capability(ThreadWorkloadCeiling::node_root());
+        let sealed = super::super::spawn_detached_child::detached_child_parent_context(
+            &session,
+            Some(ceiling(ThreadEffectCeiling::Sealed)),
+        );
+        assert_eq!(sealed.thread_ceiling, ceiling(ThreadEffectCeiling::Sealed));
+        assert_eq!(
+            sealed.persisted().thread_ceiling,
+            ceiling(ThreadEffectCeiling::Sealed),
+            "the persisted parent context a recovered child launches from carries it"
+        );
+        // A calling thread that is already narrower keeps its narrower bound.
+        let (_narrow_project, narrow) =
+            ceilinged_test_capability(ceiling(ThreadEffectCeiling::Recorded));
+        let kept = super::super::spawn_detached_child::detached_child_parent_context(
+            &narrow,
+            Some(ceiling(ThreadEffectCeiling::Sealed)),
+        );
+        assert_eq!(kept.thread_ceiling, ceiling(ThreadEffectCeiling::Recorded));
+        // With no grant ceiling the context is the calling thread's, as before.
+        let unchanged =
+            super::super::spawn_detached_child::detached_child_parent_context(&session, None);
+        assert_eq!(unchanged.thread_ceiling, ThreadWorkloadCeiling::node_root());
+    }
+
+    #[test]
+    fn a_detached_parent_must_run_in_a_private_pinned_workspace() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, ExecutionProjectAuthority, PinnedProjectRealization,
+            PinnedTerminalPublication,
+        };
+        let refusal_code = |authority: &ExecutionProjectAuthority| {
+            ceiling_refusal_code(require_detach_capable_authority(authority).unwrap_err())
+        };
+        let pinned = |realization| {
+            ExecutionProjectAuthority::pinned(
+                "site:fixture:project".into(),
+                Some(std::path::PathBuf::from("/fixture")),
+                "a".repeat(64),
+                realization,
+                EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        require_detach_capable_authority(&pinned(PinnedProjectRealization::Cow {
+            terminal_publication: PinnedTerminalPublication::Discard,
+        }))
+        .unwrap();
+        let (_project, live) = live_provenance();
+        assert_eq!(
+            refusal_code(live.project_authority()),
+            "workload_detach_live_project_parent"
+        );
+        assert_eq!(
+            refusal_code(&pinned(PinnedProjectRealization::ReadOnly)),
+            "workload_detach_parent_not_private_workspace"
+        );
+        assert_eq!(
+            refusal_code(&ExecutionProjectAuthority::PROJECTLESS),
+            "workload_detach_parent_not_private_workspace"
+        );
+    }
+
+    #[test]
+    fn a_node_that_cannot_quiesce_refuses_a_detached_capture_typed() {
+        let required = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1000,
+        };
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            ceiling_refusal_code(require_detach_quiescence(&required, &none).unwrap_err()),
+            "workload_detach_no_quiescence"
+        );
+        let qualified: std::collections::BTreeSet<_> = [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+            lillux::ProcessScopeCapability::Quiescence,
+        ]
+        .into();
+        require_detach_quiescence(&required, &qualified).unwrap();
+        require_detach_quiescence(
+            &ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            &none,
+        )
+        .unwrap();
     }
 
     fn bounded_test_ceiling() -> ryeos_state::objects::ThreadWorkloadCeiling {
@@ -3573,6 +3996,51 @@ mod tests {
             }
             other => panic!("expected a typed launch-policy refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thread_effect_ceiling_order_agrees_with_the_engines_effect_class_permits() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_state::objects::ThreadEffectCeiling;
+        let durable = [
+            (ThreadEffectCeiling::Recorded, EffectClass::Recorded),
+            (ThreadEffectCeiling::Sealed, EffectClass::Sealed),
+        ];
+        for (ceiling, class) in durable {
+            for (other_ceiling, other_class) in durable {
+                // A ceiling admits a durable class exactly when the engine's
+                // class permits it, and the ceilings order the same way.
+                assert_eq!(
+                    ceiling.admitted_labels().contains(&other_class.as_str()),
+                    class.permits(other_class),
+                    "{ceiling:?} admitting {other_class:?}"
+                );
+                assert_eq!(
+                    other_ceiling <= ceiling,
+                    class.permits(other_class),
+                    "{other_ceiling:?} <= {ceiling:?}"
+                );
+            }
+            assert!(
+                !ceiling.admitted_labels().contains(&"live"),
+                "a durable ceiling never admits a live call"
+            );
+            assert!(ceiling < ThreadEffectCeiling::Live);
+        }
+        // `Live` is the widest: it admits every durable class and a call that
+        // declares none.
+        for (_, class) in durable {
+            assert!(
+                ThreadEffectCeiling::Live
+                    .admitted_labels()
+                    .contains(&class.as_str())
+            );
+        }
+        assert!(
+            ThreadEffectCeiling::Live
+                .admitted_labels()
+                .contains(&"live")
+        );
     }
 
     #[test]
