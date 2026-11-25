@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:59Z:29e4653f0e9cfdc2677073c3db1ad73c112455131a86c3723128311c1cd70e2b:BxNTJ/jDDwAq6MHeim7YWHDLcSdNWIKcXSLv3kouSbuaHM81LRTGazWb592ADEAb0cXZNLZUNP+xViQMc40eCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T00:22:30Z:89f605a3541b26c99b5f3b397982e675421edfc90e2c4231418b02db37afb6c8:BpzPk3tR6/WzimI8+0IfN1IUNW4k3dtQc32sXeUeukiL+Ihpo+30rkVc++/uaP4QMfEmAMRJd8YcK9tufYwvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui
 version: 0.5.0
 description: RyeOS UI surfaces, UI routes, operational inspector services, and renderer entrypoints
@@ -6,6 +6,7 @@ provides_kinds:
 - client
 - picture
 - surface
+- theme
 - view
 - view_set
 requires_kinds:

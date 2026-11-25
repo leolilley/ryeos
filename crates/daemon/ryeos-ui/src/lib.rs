@@ -22,6 +22,7 @@ pub mod session_bus;
 pub mod state;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+pub mod themes;
 mod thread_authorization;
 pub mod thread_hints;
 pub mod transfer_store;

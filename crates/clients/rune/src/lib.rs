@@ -12,6 +12,7 @@ mod icons;
 mod launcher;
 mod marks;
 mod overlay;
+mod pictures;
 #[cfg(test)]
 mod probe;
 mod recovery;
@@ -66,6 +67,8 @@ pub struct Local {
     /// presentation.
     pub(crate) confirming_independent: bool,
     scratch: TextEdit,
+    /// The pictures the daemon granted this session, fetched and decoded.
+    pub(crate) pictures: pictures::Pictures,
     /// Each split's main-axis length, by `shell::split_key`, as last laid out.
     pub(crate) split_extent: HashMap<String, f32>,
     /// The ratio a divider drag shows before it commits through the core.
@@ -770,13 +773,19 @@ fn view(app: &App, cx: &mut Cx<App>) -> El {
         }
         (Phase::Working, _) => recovery::working(),
         (phase, Some(vm)) => {
-            // The stored preference decides the palette; `system` follows the
-            // platform. A fixture keeps whatever palette was selected for it.
+            // The stored preference decides the theme, chosen from the
+            // catalogue the daemon sent; `system` follows the platform. A
+            // fixture keeps whatever theme was selected for it, and the boot
+            // theme draws until a catalogue arrives.
             if matches!(phase, Phase::Running(_))
-                && let Some(id) =
-                    theme::for_preference(&vm.presentation.theme.id, cx.env().system_dark)
+                && let Some(catalogue) = vm.presentation.theme.catalogue.as_ref()
+                && let Some(chosen) = theme::for_preference(
+                    catalogue,
+                    &vm.presentation.theme.id,
+                    cx.env().system_dark,
+                )
             {
-                theme::use_theme(id);
+                theme::use_theme(chosen);
             }
             shell::shell(&vm, &app.local, &app.document_offers())
         }
@@ -785,6 +794,7 @@ fn view(app: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn setup(app: &mut App, waker: rune::runtime::Waker) {
+    app.local.pictures.start(waker.clone());
     app.boot.start(waker);
 }
 
@@ -793,11 +803,39 @@ fn poll(app: &mut App, seconds: f64, tx: &mut Tx) -> bool {
     if let Some((width, height)) = app.local.viewport {
         app.set_viewport(width, height);
     }
-    let changed = app.sync_input_focus() | advance(app, seconds, tx);
+    let changed = app.sync_input_focus() | advance(app, seconds, tx) | sync_pictures(app);
     if changed {
         app.sync_edits();
     }
     app.reveal_selection(tx);
+    changed
+}
+
+/// Fetch the ground pictures the daemon granted that are not yet asked for,
+/// and decode what has arrived. True when a picture became ready.
+fn sync_pictures(app: &mut App) -> bool {
+    let changed = app.local.pictures.take_arrivals();
+    let hashes: Vec<String> = app
+        .view_model()
+        .map(|vm| {
+            vm.presentation
+                .theme
+                .grounds
+                .values()
+                .filter_map(|ground| ground.picture.as_ref().map(|art| art.sha256.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let wanted = app
+        .local
+        .pictures
+        .newly_wanted(hashes.iter().map(String::as_str));
+    if !wanted.is_empty()
+        && let Phase::Running(running) = &app.phase
+        && let Some((arrived, wake)) = app.local.pictures.arrived_sink()
+    {
+        running.fetch_pictures(wanted, arrived, wake);
+    }
     changed
 }
 
@@ -901,17 +939,12 @@ impl App {
     }
 }
 
-/// Select the theme by name (`night`, `paper` or `gruvbox`) for every later
-/// draw; false, with nothing changed, for any other name. Night is in force
+/// Select an embedded shipped theme by id (`night`, `paper` or `gruvbox`) for
+/// every later draw, for fixtures that have no daemon to serve a catalogue;
+/// false, with nothing changed, for any other id. The boot theme is in force
 /// until something selects another.
 pub fn select_theme(name: &str) -> bool {
-    match theme::ThemeId::from_name(name) {
-        Some(id) => {
-            theme::use_theme(id);
-            true
-        }
-        None => false,
-    }
+    theme::use_embedded(name)
 }
 
 /// The app. `fonts` are the coverage faces the page fetched beside the

@@ -1534,6 +1534,41 @@ pub async fn handle_recent_list(
     Ok(json!(recent))
 }
 
+/// The catalogue for the calling session: each theme's palette, and for the
+/// themes the stored preference may draw, their Surface grounds resolved
+/// through the picture index and granted to this session. A caller that is
+/// not a browser session (an operator client) is granted nothing and gets no
+/// grounds.
+fn theme_catalogue_for(
+    ctx: &HandlerContext,
+    state: &AppState,
+    installed: &crate::themes::InstalledThemes,
+    stored: &str,
+) -> Result<ryeos_client_base::theme_preference::ThemeCatalogue> {
+    let Ok((session, _attachment)) = crate::seat_auth::require_compiled_ui_session(ctx, state)
+    else {
+        return Ok(crate::themes::build_catalogue(installed, stored, None));
+    };
+    let ui = crate::state::get_ui_state(state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let index = ui.art_index.index_for(&state.engine);
+    let max_grants = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()?
+        .max_art_grants as usize;
+    let sessions = ui.browser_sessions.clone();
+    let session_id = session.session_id;
+    let mut grant = move |sha256: &str| sessions.grant_art(&session_id, sha256, max_grants);
+    Ok(crate::themes::build_catalogue(
+        installed,
+        stored,
+        Some(crate::themes::GroundGrants {
+            index: &index,
+            grant: &mut grant,
+        }),
+    ))
+}
+
 pub async fn handle_config_get(
     _params: Value,
     ctx: HandlerContext,
@@ -1541,10 +1576,22 @@ pub async fn handle_config_get(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
-    let config = store.load_ui_config()?;
+    let mut config = store.load_ui_config()?;
     let registered_project_id = crate::seat_auth::compiled_ui_attachment()
         .and_then(|attachment| attachment.registered_project_id.clone());
+    // A stored theme that names no installed theme reads as `system`, with a
+    // warning, exactly as a malformed one does.
+    let installed = crate::themes::load_installed(&state)?;
+    if !installed.allows(&config.theme) {
+        tracing::warn!(
+            stored = %config.theme,
+            "stored theme names no installed theme and reads as system; change the theme in the UI"
+        );
+        config.theme = ryeos_client_base::theme_preference::SYSTEM.to_string();
+    }
+    let catalogue = theme_catalogue_for(&ctx, &state, &installed, &config.theme)?;
     let mut response = json!(config);
+    response["theme_catalogue"] = json!(catalogue);
     // Each ordinary selection row carries the revision actually observed by
     // this source and its saved logical Surface. Neither is ambient authority.
     if let Some(rows) = response["particular_view_sets"].as_array_mut() {
@@ -1614,6 +1661,21 @@ pub async fn handle_config_update(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: UpdateConfigRequest = parse_request(params)?;
+    if let Some(theme) = req.theme.as_deref() {
+        let installed = crate::themes::load_installed(&state)?;
+        if !installed.allows(theme) {
+            return Err(HandlerError::BadRequest(format!(
+                "invalid theme value '{theme}'; expected `system` or an installed theme: {}",
+                installed
+                    .themes
+                    .iter()
+                    .map(|theme| theme.theme_ref.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .into());
+        }
+    }
     let store = locked_principal_store(&ctx, &state).await?;
     let mut config = store.load_ui_config()?;
     apply_config_update(&mut config, req)?;
@@ -1635,13 +1697,6 @@ fn apply_config_update_staged(
     config: &mut RyeOsConfigFile,
     req: UpdateConfigRequest,
 ) -> Result<()> {
-    if let Some(theme) = req.theme.as_deref() {
-        validate_choice(
-            "theme",
-            theme,
-            &ryeos_client_base::theme_preference::ALLOWED,
-        )?;
-    }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
     }
@@ -1756,16 +1811,16 @@ impl RyeOsPrincipalStoreExt for PrincipalStore {
     fn load_ui_config(&self) -> Result<RyeOsConfigFile> {
         let path = self.paths().ryeos_config();
         let mut config: RyeOsConfigFile = self.load_yaml(&path)?;
-        // A stored theme outside the allowed list (the earlier `light` and
-        // `dark` values) must not take every config read and update down with
-        // it. It reads as `system`, and the next config update writes a valid
-        // value back. The cure is named so the file can also be fixed by hand.
-        if !ryeos_client_base::theme_preference::ALLOWED.contains(&config.theme.as_str()) {
+        // A stored theme that is not `system` or a theme ref (the earlier
+        // palette ids, `light` and `dark`) must not take every config read
+        // and update down with it. It reads as `system`, and the next config
+        // update writes a valid value back. Whether a well-formed ref names an
+        // installed theme is judged where the installed set is known.
+        if !ryeos_client_base::theme_preference::is_preference_shape(&config.theme) {
             tracing::warn!(
                 file = %path.display(),
                 stored = %config.theme,
-                allowed = %ryeos_client_base::theme_preference::ALLOWED.join(", "),
-                "stored theme is not an allowed value and reads as system; set the `theme:` line in this file to one of the allowed values, or change the theme in the UI"
+                "stored theme is not `system` or a theme ref and reads as system; set the `theme:` line in this file to `system` or an installed theme's ref, or change the theme in the UI"
             );
             config.theme = ryeos_client_base::theme_preference::SYSTEM.to_string();
         }
@@ -1887,11 +1942,13 @@ fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
 
 fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
     ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
-    validate_choice(
-        "theme",
-        &config.theme,
-        &ryeos_client_base::theme_preference::ALLOWED,
-    )?;
+    if !ryeos_client_base::theme_preference::is_preference_shape(&config.theme) {
+        return Err(HandlerError::BadRequest(format!(
+            "invalid theme value '{}'; expected `system` or a theme ref",
+            config.theme
+        ))
+        .into());
+    }
     validate_choice("landing_view", &config.landing_view, &["projects"])?;
     validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
     validate_particular_view_set_resumes(&config.particular_view_sets)
@@ -2665,15 +2722,19 @@ mod tests {
 
     #[test]
     fn invalid_config_choices_are_rejected() {
-        let allowed = &ryeos_client_base::theme_preference::ALLOWED;
-        let err = validate_choice("theme", "neon", allowed).unwrap_err();
-        assert!(err.to_string().contains("invalid theme value 'neon'"));
-        // The earlier light/dark values are not palettes and are refused.
-        for old in ["light", "dark"] {
-            assert!(validate_choice("theme", old, allowed).is_err());
+        use ryeos_client_base::theme_preference::is_preference_shape;
+        validate_choice("landing_view", "projects", &["projects"]).unwrap();
+        let err = validate_choice("landing_view", "neon", &["projects"]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid landing_view value 'neon'")
+        );
+        // The earlier palette ids and light/dark values are not theme refs.
+        for old in ["light", "dark", "night", "paper", "gruvbox", "neon"] {
+            assert!(!is_preference_shape(old), "{old}");
         }
-        for accepted in ["system", "night", "paper", "gruvbox"] {
-            validate_choice("theme", accepted, allowed).unwrap();
+        for accepted in ["system", "theme:ryeos/night"] {
+            assert!(is_preference_shape(accepted), "{accepted}");
         }
     }
 
