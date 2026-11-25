@@ -254,7 +254,7 @@ fn stored_launch_contract_versions_and_runtime_epoch_move_together() {
             RUNTIME_OPERATOR_SCHEMA_EPOCH,
             ryeos_state::external_execution::transport::EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
         ),
-        (39, 40, 145, 3),
+        (40, 41, 146, 3),
         "a change to a stored launch or transport contract version needs a runtime operator epoch bump"
     );
 }

@@ -3938,6 +3938,8 @@ mod tests {
                 effective_caps: vec![],
                 parent_delegation_caps: None,
                 thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+                workspace_input: None,
+                evaluator_origin_chain: None,
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })
@@ -4165,6 +4167,8 @@ mod tests {
                 effective_caps: Vec::new(),
                 parent_delegation_caps: Some(Vec::new()),
                 thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+                workspace_input: None,
+                evaluator_origin_chain: None,
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })

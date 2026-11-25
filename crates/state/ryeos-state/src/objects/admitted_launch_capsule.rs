@@ -5,8 +5,37 @@ use serde::{Deserialize, Serialize};
 use super::{
     EXTERNAL_REALIZATIONS_DERIVED_KEY, ExecutionLaunchDriver, ExecutionLifecycleAuthority,
     ExecutionProjectAuthority, ExecutionRecoveryAuthority, ExternalContentKind,
-    ExternalContentMode, ExternalContentRealizationSet, validate_trimmed_control_free,
+    ExternalContentMode, ExternalContentRealizationSet, WorkspaceGenerationPair,
+    validate_trimmed_control_free,
 };
+
+/// Stable refusal code for a product-build reuse request from a launch that
+/// carries a workspace input.
+pub const PRODUCT_BUILD_REUSE_WORKSPACE_INPUT_REFUSED: &str =
+    "product_build_reuse_workspace_input_refused";
+
+/// A launch carrying a captured workspace input never takes part in product
+/// build reuse: the input is not part of the reusable digest, so reuse would
+/// answer one input with a product built from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductBuildReuseRefused;
+
+impl ProductBuildReuseRefused {
+    pub const fn code(&self) -> &'static str {
+        PRODUCT_BUILD_REUSE_WORKSPACE_INPUT_REFUSED
+    }
+}
+
+impl std::fmt::Display for ProductBuildReuseRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{PRODUCT_BUILD_REUSE_WORKSPACE_INPUT_REFUSED}: a launch carrying a workspace input is not eligible for product-build reuse"
+        )
+    }
+}
+
+impl std::error::Error for ProductBuildReuseRefused {}
 
 // v17 seals the flat exact node-history policy provenance carried by the v12
 // root execution request. v18 binds a remotely adopted invocation to its
@@ -53,10 +82,13 @@ use super::{
 // that leaves it unknown whether the external system acted. V40 seals the
 // thread workload ceiling: the explicit bound on the effect class and
 // workspace access that any tool call made from the launch's thread tree may
-// reach. Every schema change here requires a matching
+// reach. V41 seals the captured workspace generation a detached child reads
+// as data (`workspace_input`) and the chain a launch originated from
+// (`evaluator_origin_chain`), both required-nullable. Every schema change here
+// requires a matching
 // Operational dispatch-effect replay-index epoch bump, which retires effects
 // sealed under predecessor capsule contracts.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 40;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 41;
 pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
@@ -1549,6 +1581,20 @@ pub struct AdmittedLaunchCapsule {
     /// this launch's thread tree. Required: a launch states its ceiling, and
     /// only a launch with no parent execution context states `Unbounded`.
     pub thread_ceiling: ThreadWorkloadCeiling,
+    /// Parent workspace generation a detached child reads as data: mounted
+    /// read-only into its process, never an item-resolution source. Required-
+    /// nullable: `None` states the launch received no workspace input. It is
+    /// data and lineage, not product authority, so it is absent from the
+    /// product-build replay digest, and a launch carrying one is refused
+    /// product-build reuse.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub workspace_input: Option<WorkspaceGenerationPair>,
+    /// Chain root of the session this launch originated from, carried by a
+    /// detached child and everything it launches so a later check can refuse
+    /// an evaluator that descends from the chain it judges. Required-nullable;
+    /// absent from the product-build replay digest.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub evaluator_origin_chain: Option<String>,
     pub effective_caps: Vec<String>,
     /// Delegating parent's exact capability set for a followed or detached
     /// child. Required-nullable so cross-site continuation preserves the
@@ -1576,6 +1622,8 @@ pub struct AdmittedLaunchAuthority {
     pub execution_closure: AdmittedExecutionClosure,
     pub accounting_scope: Option<AdmittedAccountingScope>,
     pub thread_ceiling: ThreadWorkloadCeiling,
+    pub workspace_input: Option<WorkspaceGenerationPair>,
+    pub evaluator_origin_chain: Option<String>,
     pub effective_caps: Vec<String>,
     pub parent_delegation_caps: Option<Vec<String>>,
     pub runtime_ref: String,
@@ -1599,6 +1647,12 @@ impl AdmittedLaunchAuthority {
         }
         if let Some(scope) = &self.accounting_scope {
             scope.validate()?;
+        }
+        if let Some(input) = &self.workspace_input {
+            input.validate()?;
+        }
+        if let Some(chain) = &self.evaluator_origin_chain {
+            validate_trimmed_control_free("launch authority evaluator origin chain", chain, false)?;
         }
         validate_trimmed_control_free("launch authority runtime ref", &self.runtime_ref, false)?;
         validate_trimmed_control_free("launch authority executor ref", &self.executor_ref, false)?;
@@ -1650,8 +1704,16 @@ impl AdmittedLaunchAuthority {
     /// with every program, material, project and permission field. Limits stay
     /// sealed in the execution closure. This never authorizes a reservation or
     /// substitutes for `digest()` during recovery or payment settlement.
+    ///
+    /// `workspace_input` and `evaluator_origin_chain` are data and lineage, so
+    /// they are left out of the digest. A launch that carries a workspace
+    /// input is therefore refused here, typed, so a different input can never
+    /// reuse an accepted product by omission.
     pub fn product_build_replay_digest(&self) -> anyhow::Result<String> {
         self.validate()?;
+        if self.workspace_input.is_some() {
+            return Err(anyhow::Error::new(ProductBuildReuseRefused));
+        }
         #[derive(Serialize)]
         struct AccountingAuthority<'a> {
             budget_authority_site_id: &'a str,
@@ -1685,6 +1747,9 @@ impl AdmittedLaunchAuthority {
             execution_closure,
             accounting_scope,
             thread_ceiling,
+            // Data and lineage inputs, not product authority: guarded above.
+            workspace_input: _,
+            evaluator_origin_chain: _,
             effective_caps,
             parent_delegation_caps,
             runtime_ref,
@@ -1881,6 +1946,8 @@ impl AdmittedLaunchCapsule {
             execution_closure: self.execution_closure.clone(),
             accounting_scope: self.accounting_scope.clone(),
             thread_ceiling: self.thread_ceiling,
+            workspace_input: self.workspace_input.clone(),
+            evaluator_origin_chain: self.evaluator_origin_chain.clone(),
             effective_caps: self.effective_caps.clone(),
             parent_delegation_caps: self.parent_delegation_caps.clone(),
             runtime_ref: self.runtime_ref.clone(),
@@ -2341,6 +2408,12 @@ impl AdmittedLaunchCapsule {
         if let Some(scope) = &self.accounting_scope {
             scope.validate()?;
         }
+        if let Some(input) = &self.workspace_input {
+            input.validate()?;
+        }
+        if let Some(chain) = &self.evaluator_origin_chain {
+            validate_trimmed_control_free("launch capsule evaluator origin chain", chain, false)?;
+        }
         if self.artifact_identity.executor_ref() != self.executor_ref {
             anyhow::bail!("admitted launch artifact identity contradicts executor ref");
         }
@@ -2426,6 +2499,8 @@ impl AdmittedLaunchCapsule {
             && self.execution_closure == other.execution_closure
             && self.accounting_scope == other.accounting_scope
             && self.thread_ceiling == other.thread_ceiling
+            && self.workspace_input == other.workspace_input
+            && self.evaluator_origin_chain == other.evaluator_origin_chain
             && self.effective_caps == other.effective_caps
             && self.parent_delegation_caps == other.parent_delegation_caps
             && self.runtime_ref == other.runtime_ref
@@ -2496,6 +2571,8 @@ impl AdmittedLaunchCapsule {
             source_binding_hash,
             accounting_scope,
             thread_ceiling,
+            workspace_input,
+            evaluator_origin_chain,
             effective_caps,
             parent_delegation_caps,
             runtime_ref,
@@ -2538,6 +2615,8 @@ impl AdmittedLaunchCapsule {
             && *source_binding_hash == successor.source_binding_hash
             && *accounting_scope == successor.accounting_scope
             && *thread_ceiling == successor.thread_ceiling
+            && *workspace_input == successor.workspace_input
+            && *evaluator_origin_chain == successor.evaluator_origin_chain
             && *effective_caps == successor.effective_caps
             && *parent_delegation_caps == successor.parent_delegation_caps
             && *runtime_ref == successor.runtime_ref
@@ -2580,6 +2659,8 @@ impl AdmittedLaunchCapsule {
             )?
             && self.source_binding_hash == target.source_binding_hash
             && self.thread_ceiling == target.thread_ceiling
+            && self.workspace_input == target.workspace_input
+            && self.evaluator_origin_chain == target.evaluator_origin_chain
             && self.effective_caps == target.effective_caps
             && self.parent_delegation_caps == target.parent_delegation_caps
             && self.runtime_ref == target.runtime_ref
@@ -3156,6 +3237,8 @@ mod tests {
             source_binding_hash: None,
             accounting_scope: None,
             thread_ceiling: ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             parent_delegation_caps: None,
             runtime_ref: "runtime:direct".to_string(),
@@ -3317,6 +3400,8 @@ mod tests {
             source_binding_hash: None,
             accounting_scope: None,
             thread_ceiling: ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             parent_delegation_caps: None,
             runtime_ref: "runtime:test/directive".to_string(),
@@ -3915,6 +4000,183 @@ mod tests {
             narrowed.launch_authority().thread_ceiling,
             narrowed.thread_ceiling
         );
+    }
+
+    fn input_pair() -> WorkspaceGenerationPair {
+        WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: Some("b".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn workspace_input_and_origin_chain_are_required_nullable_and_committed() {
+        let capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        let value = capsule.to_value();
+        assert!(value["workspace_input"].is_null());
+        assert!(value["evaluator_origin_chain"].is_null());
+        for field in ["workspace_input", "evaluator_origin_chain"] {
+            let mut missing = capsule.to_value();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                AdmittedLaunchCapsule::from_current_value(missing).is_err(),
+                "{field} is required on the wire, null or a value"
+            );
+        }
+
+        let mut carrying = capsule.clone();
+        carrying.workspace_input = Some(input_pair());
+        carrying.evaluator_origin_chain = Some("T-session-root".to_string());
+        let round_trip = AdmittedLaunchCapsule::from_current_value(carrying.to_value()).unwrap();
+        assert_eq!(round_trip, carrying);
+        assert_eq!(
+            round_trip.launch_authority().workspace_input,
+            carrying.workspace_input
+        );
+        assert_eq!(
+            round_trip.launch_authority().evaluator_origin_chain,
+            carrying.evaluator_origin_chain
+        );
+
+        let base_digest = capsule.launch_authority_digest().unwrap();
+        let carrying_digest = carrying.launch_authority_digest().unwrap();
+        assert_ne!(base_digest, carrying_digest);
+        let mut other_pair = carrying.clone();
+        other_pair
+            .workspace_input
+            .as_mut()
+            .unwrap()
+            .output_capture_hash = None;
+        assert_ne!(
+            carrying_digest,
+            other_pair.launch_authority_digest().unwrap()
+        );
+        let mut other_snapshot = carrying.clone();
+        other_snapshot
+            .workspace_input
+            .as_mut()
+            .unwrap()
+            .snapshot_hash = "c".repeat(64);
+        assert_ne!(
+            carrying_digest,
+            other_snapshot.launch_authority_digest().unwrap()
+        );
+        let mut other_chain = carrying.clone();
+        other_chain.evaluator_origin_chain = Some("T-other-root".to_string());
+        assert_ne!(
+            carrying_digest,
+            other_chain.launch_authority_digest().unwrap()
+        );
+
+        let mut bad_hash = carrying.clone();
+        bad_hash.workspace_input.as_mut().unwrap().snapshot_hash = "not-a-hash".to_string();
+        assert!(bad_hash.validate().is_err());
+        let mut bad_capture = carrying.clone();
+        bad_capture
+            .workspace_input
+            .as_mut()
+            .unwrap()
+            .output_capture_hash = Some("short".to_string());
+        assert!(bad_capture.validate().is_err());
+        let mut bad_chain = carrying.clone();
+        bad_chain.evaluator_origin_chain = Some(" padded".to_string());
+        assert!(bad_chain.validate().is_err());
+    }
+
+    #[test]
+    fn continuation_inherits_and_rebind_keeps_workspace_input_and_origin_chain() {
+        let mut source = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        source.workspace_input = Some(input_pair());
+        source.evaluator_origin_chain = Some("T-session-root".to_string());
+        let successor = source.clone();
+        assert!(
+            source
+                .same_continuation_program_admission(&successor)
+                .unwrap()
+        );
+        assert!(source.same_continuation_admission(&successor).unwrap());
+        assert!(
+            source
+                .same_cross_site_continuation_program_admission(&successor)
+                .unwrap()
+        );
+
+        let mut dropped_input = successor.clone();
+        dropped_input.workspace_input = None;
+        let mut changed_input = successor.clone();
+        changed_input
+            .workspace_input
+            .as_mut()
+            .unwrap()
+            .snapshot_hash = "c".repeat(64);
+        let mut dropped_chain = successor.clone();
+        dropped_chain.evaluator_origin_chain = None;
+        let mut changed_chain = successor.clone();
+        changed_chain.evaluator_origin_chain = Some("T-other-root".to_string());
+        for mismatched in [dropped_input, changed_input, dropped_chain, changed_chain] {
+            assert!(
+                !source
+                    .same_continuation_program_admission(&mismatched)
+                    .unwrap()
+            );
+            assert!(
+                !source
+                    .same_cross_site_continuation_program_admission(&mismatched)
+                    .unwrap()
+            );
+        }
+
+        let (mut rebound_source, mut rebound_successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        assert!(
+            rebound_source
+                .same_rebound_continuation_admission(&rebound_successor, &model)
+                .unwrap()
+        );
+        rebound_source.workspace_input = Some(input_pair());
+        rebound_source.evaluator_origin_chain = Some("T-session-root".to_string());
+        assert!(
+            !rebound_source
+                .same_rebound_continuation_admission(&rebound_successor, &model)
+                .unwrap(),
+            "a rebind cannot drop either field"
+        );
+        rebound_successor.workspace_input = rebound_source.workspace_input.clone();
+        assert!(
+            !rebound_source
+                .same_rebound_continuation_admission(&rebound_successor, &model)
+                .unwrap()
+        );
+        rebound_successor.evaluator_origin_chain = rebound_source.evaluator_origin_chain.clone();
+        assert!(
+            rebound_source
+                .same_rebound_continuation_admission(&rebound_successor, &model)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_launch_with_a_workspace_input_is_refused_product_build_reuse() {
+        let mut authority = managed_capsule(serde_json::json!({})).launch_authority();
+        let reusable = authority.product_build_replay_digest().unwrap();
+        // Lineage alone is outside the reusable digest.
+        authority.evaluator_origin_chain = Some("T-session-root".to_string());
+        assert_eq!(reusable, authority.product_build_replay_digest().unwrap());
+
+        authority.workspace_input = Some(input_pair());
+        let refused = authority.product_build_replay_digest().unwrap_err();
+        let typed = refused
+            .downcast_ref::<ProductBuildReuseRefused>()
+            .expect("the refusal is typed");
+        assert_eq!(typed.code(), PRODUCT_BUILD_REUSE_WORKSPACE_INPUT_REFUSED);
+        // The exact digest still commits the input.
+        let mut other = authority.clone();
+        other.workspace_input.as_mut().unwrap().snapshot_hash = "c".repeat(64);
+        assert_ne!(authority.digest().unwrap(), other.digest().unwrap());
     }
 
     #[test]

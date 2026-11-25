@@ -6103,6 +6103,15 @@ async fn prepare_managed_launch_authority_in_mode(
                     .and_then(|template| template.resume_context.as_ref())
                     .and_then(|resume| resume.parent_delegation_caps.clone()),
                 thread_ceiling: resolve_thread_ceiling(params, metadata_template),
+                // Sealed by the spawn that admitted the child and carried
+                // unchanged by every continuation of it; never derived from
+                // action params or any runtime-supplied field.
+                workspace_input: metadata_template
+                    .and_then(|template| template.resume_context.as_ref())
+                    .and_then(|resume| resume.workspace_input.clone()),
+                evaluator_origin_chain: metadata_template
+                    .and_then(|template| template.resume_context.as_ref())
+                    .and_then(|resume| resume.evaluator_origin_chain.clone()),
                 executor_ref: Some(executor_ref.clone()),
                 runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
             });
@@ -15780,6 +15789,8 @@ mod tests {
                 effective_caps: Vec::new(),
                 parent_delegation_caps: None,
                 thread_ceiling,
+                workspace_input: None,
+                evaluator_origin_chain: None,
                 executor_ref: None,
                 runtime_ref: None,
             },

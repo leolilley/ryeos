@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 39;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 40;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -515,6 +515,18 @@ pub struct ResumeContext {
     /// spawn only narrows it. Required: only a launch with no parent
     /// execution context states `Unbounded`.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Parent workspace generation a detached child reads as data. It is
+    /// mounted read-only into the child's process by hash, re-attached on
+    /// recovery, sealed into the admitted launch capsule, and its objects stay
+    /// reachable for GC exactly while the thread is live. Required-nullable:
+    /// `None` states the launch received no workspace input.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub workspace_input: Option<ryeos_state::objects::WorkspaceGenerationPair>,
+    /// Chain root of the session this launch originated from. A detached
+    /// child records its parent session's chain here; a continuation copies
+    /// it. Required-nullable: `None` states no session origin.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub evaluator_origin_chain: Option<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
     /// graph — carry no item `executor_id`, so a continuation successor
@@ -661,6 +673,14 @@ impl ResumeContext {
         }
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
+        if let Some(input) = &self.workspace_input {
+            input.validate()?;
+        }
+        if let Some(chain) = &self.evaluator_origin_chain
+            && (chain.is_empty() || chain.trim() != chain || chain.chars().any(char::is_control))
+        {
+            anyhow::bail!("resume evaluator origin chain is empty, untrimmed, or control-bearing");
+        }
         if let Some(identity) = &self.stable_project_identity {
             identity.validate()?;
         }
@@ -1238,6 +1258,8 @@ impl RuntimeLaunchMetadata {
             source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
             thread_ceiling: resume.thread_ceiling,
+            workspace_input: resume.workspace_input.clone(),
+            evaluator_origin_chain: resume.evaluator_origin_chain.clone(),
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1344,6 +1366,8 @@ impl RuntimeLaunchMetadata {
             })?,
             accounting_scope: self.accounting_scope.clone(),
             thread_ceiling: resume.thread_ceiling,
+            workspace_input: resume.workspace_input.clone(),
+            evaluator_origin_chain: resume.evaluator_origin_chain.clone(),
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_owned(),
@@ -1742,6 +1766,8 @@ mod tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
@@ -1908,6 +1934,57 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_continuation_inherits_workspace_input_and_origin_chain_and_cannot_change_them() {
+        let project = tempfile::tempdir().unwrap();
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.workspace_input = Some(ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: Some("b".repeat(64)),
+        });
+        source.evaluator_origin_chain = Some("T-session-root".to_string());
+        let metadata = RuntimeLaunchMetadata {
+            resume_context: Some(source.clone()),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let seed = metadata
+            .for_continuation_successor("T-source", PathBuf::from("/state/successor/checkpoints"));
+        let inherited = seed.resume_context.as_ref().expect("successor resume");
+        assert_eq!(inherited.workspace_input, source.workspace_input);
+        assert_eq!(
+            inherited.evaluator_origin_chain,
+            source.evaluator_origin_chain
+        );
+        source
+            .clone()
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .unwrap();
+        let mut dropped = source.clone();
+        dropped.workspace_input = None;
+        let mut rechained = source.clone();
+        rechained.evaluator_origin_chain = Some("T-other-root".to_string());
+        for drifted in [dropped, rechained] {
+            assert!(
+                drifted
+                    .validate_continuation_transition_from(
+                        &source,
+                        None,
+                        ContinuationAuthorityTransitionKind::Inherit,
+                    )
+                    .is_err()
+            );
+        }
+        let mut malformed = source.clone();
+        malformed.workspace_input.as_mut().unwrap().snapshot_hash = "nope".to_string();
+        assert!(malformed.authoritative_project_identity().is_err());
     }
 
     #[test]
@@ -2553,6 +2630,8 @@ mod tests {
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:test-runtime".to_string()),
             runtime_ref: Some("runtime:test".to_string()),
         };

@@ -2252,7 +2252,7 @@ CREATE TABLE IF NOT EXISTS runtime_action_intent (
         )
         OR
         (
-            mode = 'inline'
+            (mode = 'inline' OR (mode = 'detached' AND workspace_access = 'immutable_current_generation'))
             AND
             workspace_id IS NOT NULL
             AND workspace_access IS NOT NULL
@@ -2402,7 +2402,8 @@ CREATE TABLE IF NOT EXISTS thread_child_link (
     child_thread_id TEXT PRIMARY KEY,
     parent_thread_id TEXT NOT NULL,
     relation TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    cancel_on_parent_end INTEGER NOT NULL DEFAULT 0 CHECK (cancel_on_parent_end IN (0, 1))
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
@@ -2777,7 +2778,19 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // the capsule commits it; an epoch-144 store holds launch rows without it,
 // which the strict launch decode refuses, so it is a predecessor and is reset
 // without decoding: `--schema-cut-from 144 --schema-cut-to 145`.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 145;
+// Epoch 146: stored `launch_metadata` is launch-metadata schema 40 sealing
+// admitted launch capsule schema 41. Every resume identity carries the
+// required-nullable `workspace_input` (the parent workspace generation a
+// detached child reads as data) and `evaluator_origin_chain` (the chain the
+// launch originated from), and the capsule commits both; an epoch-145 store
+// holds launch rows without them, which the strict launch decode refuses, so
+// it is a predecessor and is reset without decoding:
+// `--schema-cut-from 145 --schema-cut-to 146`. The same cut gives
+// `thread_child_link` the `cancel_on_parent_end` column, written with the
+// link by a detached spawn from a grant-bearing parent, and lets a detached
+// runtime action carry an immutable workspace operation (the
+// `runtime_action_intent` workspace CHECK admits `detached` beside `inline`).
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -5777,6 +5790,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cancel_on_parent_end",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
@@ -9076,9 +9095,9 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
         authority.validate()?;
     }
     if let Some(operation) = &intent.workspace_operation {
-        if !matches!(intent.mode, RuntimeActionMode::Inline) {
+        if !workspace_operation_admitted_in_mode(&intent.mode, operation.access) {
             bail!(
-                "runtime action `{}` carries workspace authority outside unary inline mode",
+                "runtime action `{}` carries workspace authority outside its admitted mode",
                 intent.operation_id
             );
         }
@@ -9123,6 +9142,22 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
         }
     }
     Ok(())
+}
+
+/// A workspace operation rides a unary inline call, or a detached launch that
+/// receives the parent's captured generation as data. A detached launch never
+/// takes shared-exclusive access to the parent's workspace.
+fn workspace_operation_admitted_in_mode(
+    mode: &RuntimeActionMode,
+    access: ryeos_engine::kind_registry::WorkspaceAccess,
+) -> bool {
+    match mode {
+        RuntimeActionMode::Inline => true,
+        RuntimeActionMode::Detached => {
+            access == ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration
+        }
+        RuntimeActionMode::AwaitedRoot => false,
+    }
 }
 
 fn validate_runtime_workspace_operation(operation: &RuntimeWorkspaceOperation) -> Result<()> {
@@ -17275,8 +17310,12 @@ impl RuntimeDb {
             if matches!(mode, RuntimeActionMode::Inline) && child_project_authority.is_some() {
                 bail!("inline runtime action cannot carry root project authority");
             }
-            if workspace_operation.is_some() && !matches!(mode, RuntimeActionMode::Inline) {
-                bail!("shared-workspace runtime action must use unary inline child execution");
+            if let Some(seed) = workspace_operation
+                && !workspace_operation_admitted_in_mode(&mode, seed.access)
+            {
+                bail!(
+                    "shared-workspace runtime action must be a unary inline call or a detached launch reading an immutable generation"
+                );
             }
             validate_runtime_action_intent(
                 operation_id,
@@ -23013,17 +23052,42 @@ impl RuntimeDb {
         relation: &str,
         stop_policy: ChildLinkStopPolicy,
     ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
+        self.record_child_link_with_options(
+            parent_thread_id,
+            child_thread_id,
+            relation,
+            stop_policy,
+            false,
+        )
+    }
+
+    /// As [`Self::record_child_link_with_stop_policy`], also recording in the
+    /// same transaction whether the child is to be cancelled when its parent
+    /// ends. The flag only ever moves from unset to set. The launch and
+    /// recovery paths replay the link without stating it (`false`) and leave
+    /// the recorded value; the spawn that owns the flag replays it as `true`,
+    /// which sets it on a link a recovery path happened to record first.
+    pub fn record_child_link_with_options(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+        stop_policy: ChildLinkStopPolicy,
+        cancel_on_parent_end: bool,
+    ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
         self.conn.with_sql(|conn| {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
-                "INSERT INTO thread_child_link (child_thread_id, parent_thread_id, relation, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO thread_child_link
+                    (child_thread_id, parent_thread_id, relation, created_at_ms, cancel_on_parent_end)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(child_thread_id) DO NOTHING",
                 params![
                     child_thread_id,
                     parent_thread_id,
                     relation,
-                    lillux::time::timestamp_millis()
+                    lillux::time::timestamp_millis(),
+                    cancel_on_parent_end
                 ],
             )?;
             let outcome = if inserted == 1 {
@@ -23031,10 +23095,16 @@ impl RuntimeDb {
             } else {
                 let existing = tx
                     .query_row(
-                    "SELECT parent_thread_id, relation FROM thread_child_link
+                    "SELECT parent_thread_id, relation, cancel_on_parent_end FROM thread_child_link
                  WHERE child_thread_id = ?1",
                     params![child_thread_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
                 )
                 .optional()?
                 .ok_or_else(|| {
@@ -23048,6 +23118,13 @@ impl RuntimeDb {
                         existing.0,
                         existing.1
                     );
+                }
+                if cancel_on_parent_end && !existing.2 {
+                    tx.execute(
+                        "UPDATE thread_child_link SET cancel_on_parent_end = 1
+                          WHERE child_thread_id = ?1",
+                        params![child_thread_id],
+                    )?;
                 }
                 ChildLinkInsertOutcome::AlreadyPresent
             };
@@ -23091,6 +23168,22 @@ impl RuntimeDb {
             };
             tx.commit()?;
             Ok((outcome, effective_stop))
+        })
+    }
+
+    /// Whether the child's link asks that it be cancelled when its parent
+    /// ends, or `None` when no link has been recorded. Nothing acts on the
+    /// flag yet: it is recorded with the link so the parent's end can find the
+    /// children it owes a cancel.
+    pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT cancel_on_parent_end FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
         })
     }
 
@@ -24801,6 +24894,8 @@ mod tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:storage-fixture".to_owned()),
             runtime_ref: Some("runtime:storage-fixture".to_owned()),
         };
@@ -32667,6 +32762,111 @@ mod tests {
             .expect_err("missing stop target must roll back lineage");
         assert!(error.to_string().contains("thread_runtime row missing"));
         assert!(db.descendant_thread_ids("parent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn child_link_records_cancel_on_parent_end_in_the_link_transaction() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(db.child_link_cancel_on_parent_end("flagged").unwrap(), None);
+
+        // The flag commits or rolls back with the link and its stop write.
+        let error = db
+            .record_child_link_with_options(
+                "parent",
+                "missing-child-runtime",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+            )
+            .expect_err("missing stop target must roll back the link and its flag");
+        assert!(error.to_string().contains("thread_runtime row missing"));
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("missing-child-runtime")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.child_link_relation("missing-child-runtime").unwrap(),
+            None
+        );
+
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "flagged",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::Inserted
+        );
+        db.record_child_link("parent", "plain", "dispatch").unwrap();
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("flagged").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("plain").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.child_link_relation("flagged").unwrap().as_deref(),
+            Some("dispatch")
+        );
+
+        // The launch and recovery paths replay the link without stating the
+        // flag and leave it.
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "flagged",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.record_child_link("parent", "flagged", "dispatch")
+                .unwrap(),
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("flagged").unwrap(),
+            Some(true)
+        );
+        // The spawn that owns the flag sets it on a link a recovery path
+        // recorded first; a conflicting parent is still refused.
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "plain",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("plain").unwrap(),
+            Some(true)
+        );
+        let error = db
+            .record_child_link_with_options(
+                "other",
+                "plain",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+            )
+            .expect_err("a conflicting parent is still refused");
+        assert!(error.to_string().contains("refusing conflicting"));
     }
 
     #[test]

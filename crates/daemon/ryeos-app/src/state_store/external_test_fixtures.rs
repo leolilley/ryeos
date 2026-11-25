@@ -108,6 +108,8 @@ pub(crate) fn external_fixture_launch_metadata(
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
         thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         executor_ref: Some("native:storage-fixture".into()),
         runtime_ref: Some("runtime:storage-fixture".into()),
     };

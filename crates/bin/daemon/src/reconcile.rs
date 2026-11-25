@@ -5034,6 +5034,8 @@ mod tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: None,
             runtime_ref: None,
         }

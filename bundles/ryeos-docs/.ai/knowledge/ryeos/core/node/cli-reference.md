@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-25T02:48:44Z:b163e7c841e84effd602c5d4a3f4305b6bef9c0305cc60c3ae5115c5660ac608:y0XPAUyPzJmIJzqiOvSsjNl7CSkzIR+o5sdLTVhCjsRXb4FhTH3AWXwBkI7jgCqJs4SLMBuisE41w554ZWe+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T07:27:26Z:dc11d5a2f5ef81da77edd854e94ea774efb420c976a1c4d7d6fcf37bd900df1b:Qv31h2qWiV1dDbLhKUxOXF5SI31cmShcygtJbobayQVjf9ZMjV2zDIkUtq33cr3rRR44Rh1PeADZDvchv8y4CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -348,6 +348,10 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the detached workspace input cut, epoch 146.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 145 --schema-cut-to 146` on its next upgrade; a node still on 144 goes straight to 146 with `--schema-cut-from 144 --schema-cut-to 146`. Admitted launch capsule schema 41 and launch metadata schema 40 seal two required-nullable fields for every launch: the parent workspace generation a detached child reads as data, and the chain the launch originated from. The child's process receives that generation as a private read-only-by-discard copy materialized by hash, and the generation stays reachable for garbage collection exactly while the child is live. A launch carrying a workspace input is never eligible for product-build reuse. A detached link from a grant-bearing parent also records a cancel-on-parent-end flag in a new `thread_child_link` column; nothing acts on it yet. Dispatch-effect replay moves to operational replay-index epoch 20 with the same capsule schema. Nothing in this cut makes a detached child reachable from a worker session; a node that has not enabled detached children sees no behaviour change.
 
 Operator note for the thread workload ceiling cut, epoch 145.
 

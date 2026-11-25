@@ -6810,16 +6810,26 @@ impl ThreadLifecycleService {
             .ok_or_else(|| {
                 anyhow!("child thread {child_thread_id} has no recorded link to its parent")
             })?;
+        let mut payload = json!({
+            "child_thread_id": child_thread_id,
+            "item_id": child.item_ref,
+            "operation_id": intent.operation_id,
+            "spawn_reason": relation,
+        });
+        // A link recorded to cancel its child when the parent ends says so in
+        // the session chain, before the child runs, beside the edge itself.
+        if self
+            .state_store
+            .child_link_cancel_on_parent_end(child_thread_id)?
+            == Some(true)
+        {
+            payload["cancel_on_parent_end"] = json!(true);
+        }
         let outcome = self.append_child_thread_spawned_once(
             &parent.chain_root_id,
             parent_thread_id,
             child_thread_id,
-            json!({
-                "child_thread_id": child_thread_id,
-                "item_id": child.item_ref,
-                "operation_id": intent.operation_id,
-                "spawn_reason": relation,
-            }),
+            payload,
         )?;
         Ok(DispatchChildLineage::Recorded(outcome))
     }

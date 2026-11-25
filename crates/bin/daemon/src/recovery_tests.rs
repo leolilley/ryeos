@@ -1199,6 +1199,8 @@ fn projectless_resume() -> ResumeContext {
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
         thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         executor_ref: Some("executor:test/runtime".to_string()),
         runtime_ref: Some("runtime:test/graph".to_string()),
     }

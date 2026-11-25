@@ -186,6 +186,14 @@ impl StateStore {
         g.runtime_db.child_link_relation(child_thread_id)
     }
 
+    /// Whether the child's link asks that it be cancelled when its parent
+    /// ends, or `None` when no link has been recorded.
+    pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .child_link_cancel_on_parent_end(child_thread_id)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was
@@ -200,6 +208,20 @@ impl StateStore {
         parent_thread_id: &str,
         child_thread_id: &str,
         relation: &str,
+    ) -> Result<Option<StopIntent>> {
+        self.record_child_link_with_cancel_flag(parent_thread_id, child_thread_id, relation, false)
+    }
+
+    /// As [`Self::record_child_link`], also recording in the link's own
+    /// transaction whether the child is to be cancelled when its parent ends.
+    /// A detached spawn from a grant-bearing parent passes `true`; the flag is
+    /// recorded before the child is launched, and nothing acts on it yet.
+    pub fn record_child_link_with_cancel_flag(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+        cancel_on_parent_end: bool,
     ) -> Result<Option<StopIntent>> {
         let _permit = self.acquire_write_permit()?;
         let active = self
@@ -239,10 +261,13 @@ impl StateStore {
             let stopped = g
                 .runtime_db
                 .request_thread_stop(child_thread_id, StopIntent::Cancel)?;
-            if let Err(error) =
-                g.runtime_db
-                    .record_child_link(parent_thread_id, child_thread_id, relation)
-            {
+            if let Err(error) = g.runtime_db.record_child_link_with_options(
+                parent_thread_id,
+                child_thread_id,
+                relation,
+                runtime_db::ChildLinkStopPolicy::None,
+                cancel_on_parent_end,
+            ) {
                 tracing::warn!(
                     parent_thread_id,
                     child_thread_id,
@@ -313,11 +338,12 @@ impl StateStore {
                 bail!("{}", refusal.message(child_thread_id));
             }
         }
-        let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
+        let (_, effective_stop) = g.runtime_db.record_child_link_with_options(
             parent_thread_id,
             child_thread_id,
             effective_relation,
             stop_policy,
+            cancel_on_parent_end,
         )?;
         Ok(effective_stop)
     }

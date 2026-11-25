@@ -106,6 +106,19 @@ pub(crate) async fn spawn_detached_child(
         })?;
     let parent_lifecycle_authority = parent_resume.lifecycle_authority;
     let scheduled_fire = parent_resume.scheduled_fire.clone();
+    // A child launched for a grant-bearing parent records the session chain it
+    // originated from: the chain the parent itself originated from when it
+    // already carries one, otherwise the parent's own chain root. Any other
+    // parent passes its own origin on unchanged.
+    let evaluator_origin_chain = match workload {
+        Some(_) => Some(
+            parent_resume
+                .evaluator_origin_chain
+                .clone()
+                .unwrap_or_else(|| parent.chain_root_id.clone()),
+        ),
+        None => parent_resume.evaluator_origin_chain.clone(),
+    };
     if !parent_resume.product_selections.is_empty() {
         anyhow::bail!(
             "detach: product-selected executions cannot spawn callback children in the first composition lane"
@@ -177,10 +190,12 @@ pub(crate) async fn spawn_detached_child(
                 "detach: child {child_thread_id} exists but its workspace operation is not released"
             );
         }
-        let inherited_stop =
-            state
-                .state_store
-                .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
+        let inherited_stop = state.state_store.record_child_link_with_cancel_flag(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+            workload.is_some(),
+        )?;
         // The child exists, so an earlier drive may have crashed between
         // its link and its lineage event. A settled parent is the normal
         // case on a late retry and must not turn the repair into a failure.
@@ -242,7 +257,10 @@ pub(crate) async fn spawn_detached_child(
     // Capture the parent's current workspace as pinned data input before the
     // child's authority is derived. The child itself is resolved from the base
     // generation below; this generation is never an item-resolution source.
-    if let Some(admission) = workload {
+    // The capture releases the parent's workspace at once; the released intent
+    // keeps the generation reachable for GC until the child's row exists, and
+    // the child's sealed resume authority holds it from then on.
+    let workspace_input = if let Some(admission) = workload {
         let retained_phase = reserved_intent
             .workspace_operation
             .as_ref()
@@ -252,16 +270,20 @@ pub(crate) async fn spawn_detached_child(
                     "detach: reserved operation {operation_id} has no workspace operation"
                 )
             })?;
-        capture_detached_workspace_input(
-            state,
-            &parent_thread_id,
-            operation_id,
-            &parent_project_path,
-            admission,
-            retained_phase,
+        Some(
+            capture_detached_workspace_input(
+                state,
+                &parent_thread_id,
+                operation_id,
+                &parent_project_path,
+                admission,
+                retained_phase,
+            )
+            .await?,
         )
-        .await?;
-    }
+    } else {
+        None
+    };
 
     // Detached and followed children derive from the same sealed provenance.
     // The callback's effective capabilities authorize the requested child;
@@ -428,6 +450,21 @@ pub(crate) async fn spawn_detached_child(
             child_project_authority.clone(),
         )?;
     }
+    // The captured generation rides the child's root provenance as data: its
+    // process receives a private copy by hash, while the program and every
+    // item it resolves still come from the child's own pinned generation.
+    if let Some(input) = workspace_input.as_ref() {
+        if input.output_capture_hash.is_some()
+            && child_project_authority.workspace_outputs().is_none()
+        {
+            anyhow::bail!(
+                "detach: the captured workspace input carries an output capture but the child's project authority admits no workspace outputs"
+            );
+        }
+        child_provenance = child_provenance
+            .with_detached_workspace_input(input.clone())
+            .context("detach: attach the captured workspace input to the child")?;
+    }
 
     // Managed-runtime children only: a child kind served by a registered runtime
     // resolves here; a leaf tool/service kind does not. The same lookup yields the
@@ -592,6 +629,8 @@ pub(crate) async fn spawn_detached_child(
                     .collect(),
             ),
             thread_ceiling: launch_parent_context.thread_ceiling,
+            workspace_input: workspace_input.clone(),
+            evaluator_origin_chain: evaluator_origin_chain.clone(),
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         });
@@ -643,9 +682,17 @@ pub(crate) async fn spawn_detached_child(
             Some(prepared.launch_metadata()),
         )?;
     let prepared = prepared.with_persisted_birth_audit();
+    // The cancel-on-parent-end flag is recorded in the link's own transaction,
+    // and `require_dispatch_child_lineage` below puts it in the session chain
+    // before the child is launched. Only a grant-bearing parent sets it.
     let inherited_stop = match state
         .state_store
-        .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
+        .record_child_link_with_cancel_flag(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+            workload.is_some(),
+        )
         .and_then(|inherited_stop| {
             // A parent stopped during admission cannot author the
             // lineage event; the child is stopped below instead.

@@ -391,6 +391,8 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             effective_caps: vec![],
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some(request.executor_ref.clone()),
             runtime_ref: Some(runtime_ref.clone()),
         };

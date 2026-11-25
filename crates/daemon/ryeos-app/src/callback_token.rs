@@ -2904,6 +2904,26 @@ mod tests {
         assert!(opted_in.authorize_detached_ceiling(&windowed).is_err());
     }
 
+    /// A detached child now receives its parent's workspace generation as a
+    /// sealed, mounted, GC-rooted input, but nothing may launch one until the
+    /// units that bound its spend, lifetime and collection land. The
+    /// production surface refuses every detached action whatever the grant
+    /// says, and node policy admits no detached opt-in.
+    #[test]
+    fn detach_stays_unreachable_on_the_production_surface() {
+        for grant in [
+            workload_client_grant(),
+            detached_grant(&["live", "recorded"]),
+        ] {
+            assert!(grant.authorize_action(&detached_action()).is_err());
+        }
+        let source = include_str!("callback_token.rs");
+        let (production, _tests) = source
+            .split_once("#[cfg(test)]")
+            .expect("module has a test section");
+        assert!(production.contains("workload-client grant admits only unary inline execution"));
+    }
+
     #[test]
     fn detached_ref_bindings_outside_the_grant_are_refused_like_inline() {
         let grant = detached_grant(&["live", "recorded"]);
