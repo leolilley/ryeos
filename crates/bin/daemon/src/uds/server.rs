@@ -551,8 +551,10 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
             ))
             .await
         }
-        "runtime.append_event" => handle_append_event(&clean_params, state),
-        "runtime.append_events" => handle_append_event_batch(&clean_params, state),
+        "runtime.append_event" => handle_append_event(&clean_params, state, callback_cap.as_ref()),
+        "runtime.append_events" => {
+            handle_append_event_batch(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
         "runtime.read_attachment" => {
             handle_read_attachment(&clean_params, state, callback_cap.as_ref())
@@ -1567,9 +1569,38 @@ fn thread_attachments_policy(
     >()
 }
 
-fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+/// Refuse event types a thread under a workload ceiling may not append,
+/// before anything is written.
+fn authorize_append_under_thread_ceiling<'a>(
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    event_types: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let Some(cap) = cap else {
+        return Ok(());
+    };
+    ryeos_app::callback_token::authorize_event_types_under_thread_ceiling(
+        &cap.thread_ceiling,
+        event_types,
+    )
+    .map_err(|refusal| {
+        anyhow::Error::new(
+            ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                code: refusal.code.to_owned(),
+                message: refusal.message,
+                binding: None,
+            },
+        )
+    })
+}
+
+fn handle_append_event(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
+    authorize_append_under_thread_ceiling(cap, [params.event.event_type.as_str()])?;
     let persisted = state.events.append(
         &params,
         event_storage_policy(state)?,
@@ -1587,9 +1618,14 @@ fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<s
 fn handle_append_event_batch(
     params: &serde_json::Value,
     state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
+    authorize_append_under_thread_ceiling(
+        cap,
+        params.events.iter().map(|event| event.event_type.as_str()),
+    )?;
     let result = state.events.append_batch(
         &params,
         event_storage_policy(state)?,

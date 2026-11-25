@@ -1852,6 +1852,65 @@ mod tests {
     }
 
     #[test]
+    fn a_continuation_successor_keeps_the_bounded_ceiling_and_cannot_widen_it() {
+        let project = tempfile::tempdir().unwrap();
+        let bounded = ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+            workspace_access:
+                ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.thread_ceiling = bounded;
+
+        // The seed a continuation derives keeps the sealed ceiling, not an
+        // unbounded one.
+        let metadata = RuntimeLaunchMetadata {
+            resume_context: Some(source.clone()),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let seed = metadata
+            .for_continuation_successor("T-source", PathBuf::from("/state/successor/checkpoints"));
+        assert_eq!(
+            seed.resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+        let machine_seed = metadata.continuation_successor_seed(source.clone());
+        assert_eq!(
+            machine_seed
+                .resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+
+        // A successor that states the same ceiling is the same authority; one
+        // that states a wider ceiling differs outside its typed transition.
+        source
+            .clone()
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            )
+            .unwrap();
+        let mut widened = source.clone();
+        widened.thread_ceiling = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+        assert!(
+            widened
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn continuation_transition_keeps_machine_authority_exact() {
         let project = tempfile::tempdir().unwrap();
         let source = resume_context(ProjectContext::LocalPath {

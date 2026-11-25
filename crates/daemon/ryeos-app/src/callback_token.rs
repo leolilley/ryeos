@@ -602,7 +602,8 @@ pub fn authorize_thread_ceiling_launch_effect(
 /// | dispatch_action                                               | executes a child                        | judged per call against the child's declared projections |
 /// | provider_attempt_prepare / mark_issued / settle / release_unissued / local_stream_start / local_stream_next / local_stream_control | provider calls, budget transitions | allowed: the launch's sealed external-effect authority was judged against the ceiling at launch, and a launch that sealed none has no attempt to prepare |
 /// | request_continuation                                          | launches own successor                  | allowed: the successor reseals the same ceiling and is judged at its launch |
-/// | append_event / append_events / mark_running / finalize_thread / attach_process / poll_input / claim_commands / complete_command | own-thread log and lifecycle bookkeeping | allowed |
+/// | append_event / append_events                                 | own-thread log                          | allowed for the event types in [`THREAD_CEILING_ALLOWED_EVENT_TYPES`] only; any other type is refused before it is written |
+/// | mark_running / finalize_thread / attach_process / poll_input / claim_commands / complete_command | own-thread lifecycle bookkeeping | allowed |
 /// | get_thread / get_thread_events / replay_events / get_facets / read_attachment / provider_attempt_get | reads | allowed |
 /// | spawn_follow_child                                            | launches a child                        | refused |
 /// | start_dedicated_session / dedicated_session_command / terminate_dedicated_session | launch or drive a hosted session | refused |
@@ -697,6 +698,63 @@ pub fn authorize_runtime_method_under_thread_ceiling(
             "callback method `{method}` is refused in a thread under a workload ceiling"
         ),
     })
+}
+
+pub const THREAD_CEILING_EVENT_TYPE_REFUSED: &str = "thread_ceiling_event_type_refused";
+
+/// The event types a thread under a `Bounded` workload ceiling may append to
+/// its own log through `runtime.append_event` and `runtime.append_events`:
+/// transcript, stream and observation records that nothing in the daemon
+/// reads as authority. Every other type is refused, so a type added to the
+/// runtime vocabulary is refused under a ceiling until it is listed here.
+///
+/// The types left out are the ones a projection or recovery reads as state:
+/// lifecycle (`thread_*`), child links and settlements (`child_thread_*`,
+/// `edge_recorded`), continuation and command records, `artifact_published`
+/// (derives an artifact row), `thread_facet_set` (derives a facet),
+/// `thread_usage` (derives the usage row), `worker_continuation_admitted`,
+/// the launch-fact records, `milestone` (free-form domain events) and the
+/// graph lifecycle records.
+pub const THREAD_CEILING_ALLOWED_EVENT_TYPES: &[&str] = &[
+    ryeos_state::event_types::COGNITION_IN,
+    ryeos_state::event_types::COGNITION_OUT,
+    ryeos_state::event_types::COGNITION_REASONING,
+    ryeos_state::event_types::COGNITION_FRAME,
+    ryeos_state::event_types::COGNITION_COMPACTION,
+    ryeos_state::event_types::TOOL_CALL_START,
+    ryeos_state::event_types::TOOL_CALL_RESULT,
+    ryeos_state::event_types::STREAM_OPENED,
+    ryeos_state::event_types::TOKEN_DELTA,
+    ryeos_state::event_types::STREAM_SNAPSHOT,
+    ryeos_state::event_types::STREAM_CLOSED,
+    ryeos_state::event_types::OBSERVATION,
+    ryeos_state::event_types::PROVIDER_RETRY,
+    ryeos_state::event_types::COST_UNTRACKED,
+];
+
+/// Gate the event types of one runtime append against a thread's workload
+/// ceiling before anything is written. An `Unbounded` ceiling admits every
+/// type the append validation itself admits; a `Bounded` one admits only
+/// [`THREAD_CEILING_ALLOWED_EVENT_TYPES`].
+pub fn authorize_event_types_under_thread_ceiling<'a>(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    event_types: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<(), ThreadCeilingRefusal> {
+    if !ceiling.is_bounded() {
+        return Ok(());
+    }
+    for event_type in event_types {
+        if !THREAD_CEILING_ALLOWED_EVENT_TYPES.contains(&event_type) {
+            return Err(ThreadCeilingRefusal {
+                code: THREAD_CEILING_EVENT_TYPE_REFUSED,
+                message: format!(
+                    "event type `{event_type}` cannot be appended by a thread under a \
+                     workload ceiling"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2748,6 +2806,75 @@ mod tests {
             Some(&authority(None)),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn bounded_ceiling_appends_only_observation_and_log_event_types() {
+        let bounded = bounded_thread_ceiling(ryeos_state::objects::ThreadEffectCeiling::Recorded);
+        let unbounded = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+        // The pinned allow-list: transcript, stream and observation records.
+        assert_eq!(
+            THREAD_CEILING_ALLOWED_EVENT_TYPES,
+            [
+                "cognition_in",
+                "cognition_out",
+                "cognition_reasoning",
+                "cognition_frame",
+                "cognition_compaction",
+                "tool_call_start",
+                "tool_call_result",
+                "stream_opened",
+                "token_delta",
+                "stream_snapshot",
+                "stream_closed",
+                "observation",
+                "provider_retry",
+                "cost_untracked",
+            ]
+        );
+        authorize_event_types_under_thread_ceiling(
+            &bounded,
+            THREAD_CEILING_ALLOWED_EVENT_TYPES.iter().copied(),
+        )
+        .unwrap();
+        // Every other registered type is refused under a ceiling, including
+        // each one a projection or recovery reads as authority.
+        for event_type in ryeos_state::event_types::ALL {
+            if THREAD_CEILING_ALLOWED_EVENT_TYPES.contains(event_type) {
+                continue;
+            }
+            assert_eq!(
+                refusal_code(authorize_event_types_under_thread_ceiling(
+                    &bounded,
+                    [*event_type]
+                )),
+                THREAD_CEILING_EVENT_TYPE_REFUSED,
+                "{event_type}"
+            );
+        }
+        for authority in [
+            ryeos_state::event_types::ARTIFACT_PUBLISHED,
+            ryeos_state::event_types::CHILD_THREAD_SPAWNED,
+            ryeos_state::event_types::THREAD_COMPLETED,
+            ryeos_state::event_types::THREAD_USAGE,
+            ryeos_state::event_types::THREAD_FACET_SET,
+            ryeos_state::event_types::COMMAND_COMPLETED,
+            ryeos_state::event_types::CONTINUATION_REQUESTED,
+        ] {
+            assert!(
+                authorize_event_types_under_thread_ceiling(&bounded, [authority]).is_err(),
+                "{authority}"
+            );
+            authorize_event_types_under_thread_ceiling(&unbounded, [authority]).unwrap();
+        }
+        // One refused type in a batch refuses the whole batch.
+        assert!(
+            authorize_event_types_under_thread_ceiling(
+                &bounded,
+                ["observation", "artifact_published"]
+            )
+            .is_err()
+        );
     }
 
     #[test]
