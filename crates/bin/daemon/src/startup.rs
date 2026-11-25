@@ -262,6 +262,13 @@ async fn application_dispatch(State(state): State<DynamicHttpState>, request: Re
         // protects the invariant if a future caller violates that ordering.
         return unavailable_response(&lifecycle);
     };
+    // The publication read routes are a separate table built in code. They
+    // take no caller and never enter the bundle-driven route table.
+    if ryeos_api::published::is_published_path(request.uri().path()) {
+        let response = ryeos_api::published::serve(application.app.clone(), request).await;
+        drop(application);
+        return response;
+    }
     let response = ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
         State((*application).clone()),
         request,

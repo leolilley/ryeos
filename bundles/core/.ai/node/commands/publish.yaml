@@ -1,0 +1,19 @@
+# ryeos:signed:2026-11-25T03:41:20Z:da859a2f347670e630aad13e5f22e0bd267975e6a551f8a804276a1407a38c33:yiTmem9m9vH4ObWuxo81XnTgQa6ltjLQChRmJXdry8G/hN5Co8BSJiw4xXKznOXfDWEmM1MMyJqzHcj9y+KCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- publish
+description: Publish an installed bundle to anyone holding the link, signing the record with your operator key in this CLI
+help:
+  usage: "ryeos publish <bundle> --not-after <YYYY-MM-DD or RFC 3339 UTC instant>"
+  examples:
+    - "ryeos publish my-bundle --not-after 2027-01-31"
+forms:
+- slots:
+  - field: bundle_name
+    matcher: string
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: local_handler
+  handler: publish_bundle
+  bootstrap: false

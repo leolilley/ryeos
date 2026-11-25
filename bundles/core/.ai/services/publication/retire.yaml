@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-25T03:41:20Z:25ab63fac103b878a446745122ea500ed9775c7d8746ea053636438272ed0cfc:MYdj8HkEJ+GUZ2dXaM1yjm9+wgXBZZq6/YsA9oO/0e8p1jysYzYD8U4jG+jWYJbxW7PE6AGkGmp25lNaoP6QAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: publication.retire
+required_caps: ["ryeos.execute.service.publication/retire"]
+schema:
+  id: string
+description: "Stop serving one publication with a node-signed tombstone keyed by its id. Copies already taken are not recalled."

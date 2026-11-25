@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-25T03:41:20Z:b73a13a8a242aa866115628836cb99834fe5e121725ba2ed79d790946ddb6793:7wwxGh29qrtN2ES3B67lMGZ+6zk8HAyBBVeYM9QAyyN9DrvEIWqvQTzTXBe1mie5zDO5yNX4cRyxJp82pP+TDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: publication.freeze
+required_caps: ["ryeos.execute.service.publication/freeze"]
+schema:
+  bundle_name: string
+description: "Freeze an installed bundle into a content-addressed export manifest, ready for the operator to sign a publication record naming it. Operator only. Returns the manifest hash and the facts the record needs."

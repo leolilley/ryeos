@@ -1,0 +1,6 @@
+# ryeos:signed:2026-11-25T03:41:20Z:0d5684f7dff9b5bbd13572ec7df2f5ca97d01ba5676f87679159c896ce03c489:9VfEMzmR+pqIg1DAS/uVHYSyf9er8LcyLQIQYCKtREIo7NaPBc/Z3h/qPfOC/f2ggGRm4cbxrRZBbvi3zSoZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: publication.list
+required_caps: ["ryeos.execute.service.publication/list"]
+schema: {}
+description: "List the publications recorded on this node with their status: live, expired, retired, or signer_not_operator."

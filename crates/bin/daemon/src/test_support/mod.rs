@@ -1707,6 +1707,25 @@ impl DaemonHarness {
         Ok((status, value))
     }
 
+    /// Send one request with no signature, cookie or credential of any kind,
+    /// as a stranger would. Returns (status, response headers, body bytes).
+    pub async fn raw_request(
+        &self,
+        method: reqwest::Method,
+        route_path: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>)> {
+        let resp = ryeos_http_egress::client_builder()
+            .build()
+            .expect("the HTTP client builds")
+            .request(method, format!("http://{}{}", self.bind, route_path))
+            .send()
+            .await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.bytes().await?.to_vec();
+        Ok((status, headers, body))
+    }
+
     /// Path the daemon writes standalone-mode audit records to.
     pub fn standalone_audit_path(&self) -> PathBuf {
         self.state_path.join(".ai/state/audit/standalone.ndjson")

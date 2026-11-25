@@ -89,6 +89,7 @@ pub fn signed_report(
         capacity: BTreeMap::new(),
         floor,
         established_residency: None,
+        publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
         in_place_roots: BTreeMap::new(),
     }
     .sign(signer.signing_key())
