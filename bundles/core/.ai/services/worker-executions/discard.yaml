@@ -1,6 +1,8 @@
-# ryeos:signed:2026-08-26T10:09:18Z:39ba9d228fd802e989e9e7a4ed4d5ddc31d42f71f3f2e3998561d78a3f33fa38:Me5fLUrpmgWwDSPdqfkBUFpdqXH9HRgGreuscaDOjh2PLkcQJbus1RqsMyE9ZH8mfU2kdZjGTbNPxVK2/8owCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:cf535e7a5b4f92b2ff71f0752b6d721e072c4092b39f4fe8a0aee28763e69ed3:vlQwTrwnAPwaR0iLO4D+l4lFZkRqBTm2QapVVhqThDEsOg3GXlJdbLGCNQDnuXE1l4bj8KuoXceCN1T61Y2YDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.discard
 required_caps: ["ryeos.execute.service.worker-executions/discard"]
 schema: {chain_root_id: string, candidate_snapshot_hash: string}
 description: Terminally discard one retained execution candidate.
+# Hosted worker executions are a single configured-operator trust domain; the handler requires the admitted operator, so no principal is served.
+disclosure: {}

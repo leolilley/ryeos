@@ -3725,8 +3725,12 @@ pub(crate) mod tests {
                     .unwrap()
             );
         }
-        db.request_thread_stop(&original.placement_thread_id, StopIntent::Cancel)
-            .unwrap();
+        db.request_thread_stop(
+            &original.placement_thread_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
+        .unwrap();
         assert!(
             db.conn
                 .with_sql(|connection| require_contactable_direct_owner(connection, &original))
@@ -3755,8 +3759,12 @@ pub(crate) mod tests {
             .unwrap();
         db.fixture_claim_thread_launch(&reservation.placement_thread_id, "new-claim", "daemon:new")
             .unwrap();
-        db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
-            .unwrap();
+        db.request_thread_stop(
+            &reservation.placement_thread_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
+        .unwrap();
         db.conn.with_sql(validate_current).unwrap();
         assert!(
             db.conn

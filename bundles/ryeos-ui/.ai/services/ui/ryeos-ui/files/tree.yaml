@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:16Z:2ed172cbc3e2ef9e97a14fc636af8acf00d3fe6af70a90cd7911b9fddbc78b9b:p6O4d+OFYKh220px7JPbtuYN7aS1RWcmK75grIYIAEZ0Tyi+tuEbvbyVlXuaxD/orjeNBQRec+DitSSayKL+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:e0ac13f1451924d409e1f1fff24fbef6f7e5312af8e6c3c74fc78ab15e77ce38:ZdA5HbBLa1TeszWgnZBaSnzhRf8LQ/g1njmpcQLBkBjgwFndw75kWCJpqJVCubbPo8KCnU/9xipvLcAGaBbpAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/tree
 version: "1.0.0"
@@ -8,3 +8,15 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+# Paths and names are interim exceptions: the file browser reads them for the seat's own project.
+disclosure:
+  principal:
+    - /truncated
+    - /entries/*/is_dir
+    - /entries/*/size
+    - /entries/*/modified
+  interim_free_text:
+    - /entries/*/path  # removed by: m4
+    - /entries/*/name  # removed by: m4
+  max_items: 3072
+  max_result_bytes: 2097152

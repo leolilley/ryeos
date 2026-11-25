@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T02:16:20Z:ae075df07774356cc76601e154a608c85525702e6a90dbf0d16f00fc2d50a805:KmxsyXQovL6OxJ9/icpczPyfTPj6fohDlmFeYrxtO+8neg3BC+HFbuNVz75Uot3zeg1kfawLzPQrYuPxKIjlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:3823afbf46215808d8a6dd2cfdbdbc54dbe08230db0eadfbf24bfe6e5cad8b66:ZDCuWR/sKVFQEyuSYDmWt1f7B7gssm4HrvfmfuTf2yQF4IP7Dp3hLJQB1PCBuqBlTMO6GeincEX22i/Ddyk+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-append
 version: "1.0.0"
@@ -9,3 +9,29 @@ endpoint: ui.seat.append
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/producer_incarnation"
+    - "/operation_id"
+    - "/first_engine_seq"
+    - "/last_engine_seq"
+    - "/event_count"
+    - "/payload_digest"
+    - "/appended"
+    - "/chain_seq"
+    - "/receipt_thread_seq"
+    - "/receipt_event_hash"
+    - "/events_authority"
+    - "/events/*/event_hash"
+    - "/events/*/chain_root_id"
+    - "/events/*/chain_seq"
+    - "/events/*/thread_id"
+    - "/events/*/thread_seq"
+    - "/events/*/event_type"
+    - "/events/*/durability"
+    - "/events/*/ts"
+    - "/events/*/prev_chain_event_hash"
+    - "/events/*/prev_thread_event_hash"
+  interim_free_text:
+    - "/events/*/payload"  # removed by: m4
+  max_result_bytes: 1048576

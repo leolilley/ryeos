@@ -365,12 +365,14 @@ impl StateStore {
         Ok(())
     }
 
-    /// Atomically tombstone an explicit stop against process attachment and
-    /// return the identity (if any) that won the attach race before the stop.
+    /// Atomically tombstone a stop against process attachment and return the
+    /// identity (if any) that won the attach race before the stop. The first
+    /// writer's origin is kept; see [`runtime_db::StopOrigin`].
     pub fn request_thread_stop(
         &self,
         thread_id: &str,
         intent: runtime_db::StopIntent,
+        origin: runtime_db::StopOrigin,
     ) -> Result<RuntimeInfo> {
         let active = self
             .active_in_process_handlers
@@ -384,7 +386,7 @@ impl StateStore {
         if let Some(refusal) = in_process_stop_refusal_locked(&active, &runtime, thread_id) {
             bail!("{}", refusal.message(thread_id));
         }
-        g.runtime_db.request_thread_stop(thread_id, intent)
+        g.runtime_db.request_thread_stop(thread_id, intent, origin)
     }
 
     /// Request a stop only if ordinary execution ownership is still open.
@@ -436,7 +438,7 @@ impl StateStore {
             return Ok(StopIfAdmissionOpenOutcome::PreservedForShutdown);
         }
         g.runtime_db
-            .request_thread_stop(thread_id, intent)
+            .request_thread_stop(thread_id, intent, runtime_db::StopOrigin::Explicit)
             .map(|runtime| StopIfAdmissionOpenOutcome::Requested(Box::new(runtime)))
     }
 

@@ -1,7 +1,14 @@
-# ryeos:signed:2026-11-13T01:19:59Z:df3d41a2002df7a2a7b8d81bb00e7b23a8a213203d29fa76a377045831d4e2cd:yby+94tc54JBZe2bq77gXooTJPRiOKz9IX0mgfDiakYaR9syERkmhr1T4dQ1gIGN+Idyp0Jmhy5lmEoZlwMNAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:c59b0ce6c61f2e0765281447e496b994d94945167c0f9a3ff8506749e5a70d0e:c7uxgOUhlrP3s7QYGU1sN0C6jwsRn59rbl9qKV4H4BqWRRvQ8PeTsbEawJlVRL6oQ3GV8w0V2HCl+VzKx5ZPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "reauthorize"
 kind: service
 endpoint: scheduler.reauthorize
 required_caps: ["ryeos.execute.service.scheduler/reauthorize"]
 description: "Re-pin a schedule to its owner's current grant generation"
+disclosure:
+  principal:
+    - "/schedule_id"
+    - "/reauthorized"
+    - "/previous_principal_grant_hash"
+    - "/principal_grant_hash"
+    - "/enabled"

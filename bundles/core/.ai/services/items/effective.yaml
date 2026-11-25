@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:10Z:583ddebc3320f4c29981c634363d004ff76059bbf9a1c6e1201e9f5cfb9717e0:FsLAjpeLxnHszI9mnXBVq7YHK1KOtvjiLkAIajB2VvOrNKbQX6z02JpcHs6r8bKRtphPiSohP2oEEPIUm56NCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:c2ff8cec5174c4f6bfc928ac7412a20f8eb752927627df9708cd59fb6be30729:xgPCQ89CkdKNZ9Uyn/rpjdz6mpCJpjuGiaCkoXKux5RdOm2VK73YHAYCNf0x4s2OBmAoEdDfvXTYbn83wytdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: effective
 version: "1.0.0"
@@ -13,3 +13,31 @@ schema:
   canonical_ref: string
   expected_kind: string?
   project_path: string?
+disclosure:
+  principal:
+    - "/requested_ref"
+    - "/canonical_ref"
+    - "/kind"
+    - "/trusted"
+    - "/trust_class"
+    - "/root_trust_class"
+    - "/shadows_bundle_item"
+    - "/policy_facts"
+    - "/provenance/root/requested_id"
+    - "/provenance/root/resolved_ref"
+    - "/provenance/root/source_space"
+    - "/provenance/root/trust_class"
+    - "/provenance/root/signer_fingerprint"
+    - "/provenance/root/raw_content_digest"
+    - "/provenance/ancestors/*/requested_id"
+    - "/provenance/ancestors/*/resolved_ref"
+    - "/provenance/ancestors/*/source_space"
+    - "/provenance/ancestors/*/trust_class"
+    - "/provenance/ancestors/*/signer_fingerprint"
+    - "/provenance/ancestors/*/raw_content_digest"
+    - "/authorship"
+    - "/as_launched"
+  free_text:
+    - "/diagnostics"
+  max_items: 2048
+  max_result_bytes: 1048576

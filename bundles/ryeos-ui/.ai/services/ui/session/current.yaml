@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T02:18:23Z:cc965aea23de89a93510d22618eddd0f89dcdc98878527c20bae9610e97f36db:cZu9JjnsrDeyEnB8oCX/Oe5uEHI5T/L0czeRelrWSEeKNL+Mo2/V5DqjiR63GTZkobIprzdcvHPE7Xr2Uw59Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:40a0f389c5469fafc8c84fec2cdcda1d2d08c3fb98ce8901ff5253d447687128:y/Qr5V6pCxCDic3vjA3V6OJwbTTCj6omssJ98OZyAy++2tKq5zpgqoDcY4URSzWN7k4W/tx8nfxDiLbiDih2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: session-current
 version: "1.0.0"
@@ -7,3 +7,15 @@ endpoint: ui.session.current
 ui_read_only: true
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/ui_binding_contract_revision"
+    - "/session_id"
+    - "/root_attachment_id"
+    - "/user_principal_id"
+    - "/events_url"
+  interim_free_text:
+    - "/presentations"  # removed by: m4
+    - "/binding_attachments"  # removed by: m4
+  max_items: 1024
+  max_result_bytes: 4194304

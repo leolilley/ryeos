@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T20:09:10Z:c669ba9e05a5d5680273175bec43f3058068dc25faf839d8653eadcdf686a8c4:R51OX1ekYh3+zphEc//tyrLArTa70oobB0z/qoaGpF6eGmIV06vfWsLjbU1pj/3SS2o1YLOo049fn4NSxS5ICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T07:27:26Z:6e2e5de4a4968c368b4e536a6d214b32d89166a835ffe7d3cfbf9b6fcc829c91:6ET6LZLS91ZZc+BRFXWbxhvy5r/ZmtWTotaiJNA228/tOA32MiJ8dhQJ1KSPnj6mgX2hBd9km5pRFCdsvZm5Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -178,7 +178,13 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 19 for the schema-40
+Dispatch-effect replay moves to operational epoch 20 for the schema-41
+contract. Capsule 41 seals `workspace_input` (the parent workspace generation a
+detached child reads as data) and `evaluator_origin_chain`, both
+required-nullable. Both are data and lineage, so the product-build replay
+digest omits them, and a launch carrying a workspace input is refused product
+build reuse with `product_build_reuse_workspace_input_refused`. Epoch 19 paired
+with the schema-40
 contract. Capsule 40 seals the thread workload ceiling, the required bound on
 the effect class and workspace access of every tool call made from the launch's
 thread tree. A root launch seals `unbounded`; a callback-dispatched child

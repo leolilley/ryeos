@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T07:56:08Z:89b510164526f30ccf689ead7d9e79d2a2c6aeddf6e963fbcccba799eea31081:P/bwNOSJeX7lgvseuvuCPjqQhWrEYcoZ4L67rcTrZL0jjV5MukhZM8e7QhWAfbrEGgNflzTo1P2aXh31yXFDAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:da62c0d9bc1fdbaa26a10bac225336dd87235025f5ed999e73673e22484a708b:ux8CAQ/N4OsLVIo0ugE29zoaM+dMdHDvHvGk8VXnSg6KB05p8eS6G8Rur/cdacNMBPUP6qVLnkCwHIEJxJFbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
@@ -14,3 +14,38 @@ schema:
   selection: object
   placement: object
   creation_request_id: string
+disclosure:
+  principal:
+    - "/project/local_id"
+    - "/project/added_at"
+    - "/project/exists"
+    - "/project/current"
+    - "/project/registered"
+    - "/ui_transition/kind"
+    - "/ui_transition/presentation_id"
+    - "/ui_transition/creation_request_id"
+    - "/ui_transition/opening"
+    - "/ui_transition/tab_attachments"
+    - "/ui_transition/surface/surface_instance_id"
+    - "/ui_transition/surface/ordinal"
+    - "/ui_transition/surface/binding"
+    - "/ui_transition/surface/mount_manifest"
+    - "/ui_transition/attachment/binding_attachment_id"
+    - "/ui_transition/attachment/binding_generation"
+    - "/ui_transition/attachment/binding_digest"
+    - "/ui_transition/attachment/root_ref"
+    - "/ui_transition/attachment/root_generation"
+    - "/ui_transition/attachment/subject"
+    - "/ui_transition/attachment/posture"
+    - "/ui_transition/attachment/seat_project"
+    - "/ui_transition/attachment/binding_request_bounds"
+    - "/ui_transition/attachment/named_items"
+  free_text:
+    - "/project/name"
+    - "/project/root"
+    - "/project/tags"
+  interim_free_text:
+    - "/ui_transition/surface/title"  # removed by: m4
+    - "/ui_transition/surface/saved_surface"  # removed by: m4
+    - "/ui_transition/attachment/project_path"  # removed by: m4
+    - "/ui_transition/attachment/presentation"  # removed by: m4

@@ -69,6 +69,12 @@ pub struct ValueShape {
     /// `strict_fields: warn`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_fields: Option<StrictFieldsPolicy>,
+    /// Constraints on fields beyond their type: an integer's closed range,
+    /// or a field that may not appear beside certain sibling values. Each
+    /// refusal is a typed instance violation. Declared as `rules` in the
+    /// kind schema; empty when absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<FieldRule>,
 }
 
 /// On-the-wire form for `ValueShape`. Used purely for deserialization:
@@ -86,6 +92,38 @@ struct ValueShapeRaw {
     optional: std::collections::BTreeMap<String, FieldType>,
     #[serde(default)]
     strict_fields: Option<String>,
+    #[serde(default)]
+    rules: Vec<FieldRule>,
+}
+
+/// A constraint on one field of a mapping, beyond its primitive type. The
+/// field's type check runs first; a rule only judges a value of the right
+/// type, so a wrong-typed value is a type mismatch and never also a rule
+/// violation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FieldRule {
+    /// An integer field stays within `minimum..=maximum`.
+    IntegerRange {
+        field: String,
+        minimum: i64,
+        maximum: i64,
+    },
+    /// The field may not be present when the named sibling string field
+    /// holds one of `values`.
+    ForbiddenWhen {
+        field: String,
+        sibling: String,
+        values: Vec<String>,
+    },
+}
+
+impl FieldRule {
+    fn field(&self) -> &str {
+        match self {
+            Self::IntegerRange { field, .. } | Self::ForbiddenWhen { field, .. } => field,
+        }
+    }
 }
 
 /// How unknown fields in descriptor values are handled during instance
@@ -118,6 +156,65 @@ impl<'de> Deserialize<'de> for ValueShape {
                 raw.root_type
             )));
         }
+        if raw.root_type != ShapeType::Mapping && !raw.rules.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "`rules` is only meaningful when root_type == mapping (got {:?})",
+                raw.root_type
+            )));
+        }
+        for rule in &raw.rules {
+            let declared =
+                |name: &str| raw.required.contains_key(name) || raw.optional.contains_key(name);
+            if !declared(rule.field()) {
+                return Err(serde::de::Error::custom(format!(
+                    "rule names field `{}` which the contract does not declare",
+                    rule.field()
+                )));
+            }
+            match rule {
+                FieldRule::IntegerRange {
+                    field,
+                    minimum,
+                    maximum,
+                } => {
+                    if minimum > maximum {
+                        return Err(serde::de::Error::custom(format!(
+                            "integer_range on `{field}`: minimum {minimum} exceeds maximum {maximum}"
+                        )));
+                    }
+                    let integer = |map: &std::collections::BTreeMap<String, FieldType>| {
+                        matches!(
+                            map.get(field.as_str()),
+                            Some(FieldType::Single {
+                                prim: PrimType::Integer,
+                                ..
+                            })
+                        )
+                    };
+                    if !integer(&raw.required) && !integer(&raw.optional) {
+                        return Err(serde::de::Error::custom(format!(
+                            "integer_range on `{field}`: the field must be a single `prim: integer`"
+                        )));
+                    }
+                }
+                FieldRule::ForbiddenWhen {
+                    field,
+                    sibling,
+                    values,
+                } => {
+                    if values.is_empty() {
+                        return Err(serde::de::Error::custom(format!(
+                            "forbidden_when on `{field}`: `values` must not be empty"
+                        )));
+                    }
+                    if !declared(sibling) {
+                        return Err(serde::de::Error::custom(format!(
+                            "forbidden_when on `{field}`: sibling `{sibling}` is not declared"
+                        )));
+                    }
+                }
+            }
+        }
         // Union emptiness and FieldType constraint validation is now
         // handled inside FieldType::try_from (called by FieldType's
         // Deserialize impl), so we don't duplicate it here.
@@ -134,6 +231,7 @@ impl<'de> Deserialize<'de> for ValueShape {
                     ))),
                 })
                 .transpose()?,
+            rules: raw.rules,
         })
     }
 }
@@ -350,6 +448,10 @@ pub enum InstanceViolationCode {
     NestedViolation,
     /// A field is present in the value but not in the contract.
     UnexpectedField,
+    /// An integer field lies outside its declared closed range.
+    OutOfRange,
+    /// A field is present beside a sibling value that forbids it.
+    ForbiddenField,
 }
 
 impl std::fmt::Display for InstanceViolationCode {
@@ -362,6 +464,8 @@ impl std::fmt::Display for InstanceViolationCode {
             Self::SequenceElementMismatch => write!(f, "sequence_element_mismatch"),
             Self::NestedViolation => write!(f, "nested_violation"),
             Self::UnexpectedField => write!(f, "unexpected_field"),
+            Self::OutOfRange => write!(f, "out_of_range"),
+            Self::ForbiddenField => write!(f, "forbidden_field"),
         }
     }
 }
@@ -468,6 +572,7 @@ impl ValueShape {
             required: std::collections::BTreeMap::new(),
             optional: std::collections::BTreeMap::new(),
             strict_fields: None,
+            rules: Vec::new(),
         }
     }
 
@@ -747,6 +852,54 @@ fn validate_value(
                 }
             }
 
+            // Field rules judge only values the type check accepted.
+            for rule in &shape.rules {
+                match rule {
+                    FieldRule::IntegerRange {
+                        field,
+                        minimum,
+                        maximum,
+                    } => {
+                        let Some(val) = obj.get(field).filter(|v| is_json_integer(v)) else {
+                            continue;
+                        };
+                        if !val
+                            .as_i64()
+                            .is_some_and(|n| (*minimum..=*maximum).contains(&n))
+                        {
+                            report.errors.push(InstanceViolation {
+                                path: build_path(path, field),
+                                code: InstanceViolationCode::OutOfRange,
+                                expected: format!("integer in {minimum}..={maximum}"),
+                                found: val.to_string(),
+                            });
+                        }
+                    }
+                    FieldRule::ForbiddenWhen {
+                        field,
+                        sibling,
+                        values,
+                    } => {
+                        let (Some(_), Some(held)) =
+                            (obj.get(field), obj.get(sibling).and_then(Value::as_str))
+                        else {
+                            continue;
+                        };
+                        if values.iter().any(|value| value == held) {
+                            report.errors.push(InstanceViolation {
+                                path: build_path(path, field),
+                                code: InstanceViolationCode::ForbiddenField,
+                                expected: format!(
+                                    "field absent when `{sibling}` is one of [{}]",
+                                    values.join(", ")
+                                ),
+                                found: format!("field present with `{sibling}` = {held:?}"),
+                            });
+                        }
+                    }
+                }
+            }
+
             // Unknown fields → warnings when strict_fields is enabled.
             if shape.strict_fields == Some(StrictFieldsPolicy::Warn) {
                 for key in obj.keys() {
@@ -1018,6 +1171,7 @@ mod value_shape_tests {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
             strict_fields: None,
+            rules: Vec::new(),
         }
     }
 
@@ -1116,6 +1270,7 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let producer_mapping = shape_mapping(&[("body", ft_string())], &[]);
         let producer_seq = ValueShape {
@@ -1123,12 +1278,14 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let producer_root_any = ValueShape {
             root_type: ShapeType::Any,
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         assert!(
             consumer_root_any
@@ -1161,6 +1318,7 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let v = consumer.is_satisfied_by(&producer_root_any);
         assert!(
@@ -1262,12 +1420,14 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let producer = ValueShape {
             root_type: ShapeType::Sequence,
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let v = consumer.is_satisfied_by(&producer);
         assert!(
@@ -1287,6 +1447,7 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let v = consumer.is_satisfied_by(&producer);
         // 1 root mismatch + 3 missing fields
@@ -2298,6 +2459,7 @@ strict_fields: warn
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         assert!(validate(&shape, &serde_json::json!("hello")).is_ok());
         assert!(validate(&shape, &serde_json::json!({"a": 1})).is_ok());
@@ -2312,6 +2474,7 @@ strict_fields: warn
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let report = validate(&shape, &serde_json::json!({ "key": "val" }));
         assert!(!report.is_ok());
@@ -2328,6 +2491,7 @@ strict_fields: warn
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         let report = validate(&shape, &serde_json::json!([1, 2]));
         assert!(!report.is_ok());
@@ -2344,6 +2508,7 @@ strict_fields: warn
             required: Default::default(),
             optional: Default::default(),
             strict_fields: None,
+            rules: Vec::new(),
         };
         assert!(validate(&shape, &serde_json::json!("hello")).is_ok());
         assert!(validate(&shape, &serde_json::json!(42)).is_ok());
@@ -2407,6 +2572,98 @@ strict_fields: warn
 // and that malformed variants are correctly rejected. These tests
 // construct ValueShape objects programmatically matching the actual
 // kind schemas, so they don't depend on file loading or signatures.
+
+#[cfg(test)]
+mod view_column_priority_tests {
+    use super::*;
+
+    /// The view kind's own composed contract, as shipped.
+    fn view_contract() -> ValueShape {
+        let schema: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../../bundles/ryeos-ui/.ai/node/engine/kinds/view/view.kind-schema.yaml"
+        ))
+        .expect("view kind schema parses");
+        serde_yaml::from_value(schema["composed_value_contract"].clone())
+            .expect("view composed contract loads")
+    }
+
+    fn view_with_columns(columns: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "widget": "table",
+            "projections": { "columns": columns }
+        })
+    }
+
+    fn only_code(report: &InstanceValidationReport) -> InstanceViolationCode {
+        assert_eq!(report.errors.len(), 1, "{report}");
+        report.errors[0].code.clone()
+    }
+
+    #[test]
+    fn a_column_priority_in_range_or_absent_is_accepted() {
+        let contract = view_contract();
+        for columns in [
+            serde_json::json!([{"field": "a"}, {"field": "b", "role": "time"}]),
+            serde_json::json!([{"field": "a", "priority": 0}]),
+            serde_json::json!([{"field": "a", "role": "id", "priority": 15}]),
+        ] {
+            let report = contract.validate_instance(&view_with_columns(columns));
+            assert!(report.is_ok(), "{report}");
+        }
+    }
+
+    #[test]
+    fn a_column_priority_out_of_range_is_refused_with_a_typed_violation() {
+        let contract = view_contract();
+        for bad in [16, -1, 1000] {
+            let report = contract.validate_instance(&view_with_columns(
+                serde_json::json!([{"field": "a", "priority": bad}]),
+            ));
+            assert_eq!(only_code(&report), InstanceViolationCode::OutOfRange);
+            assert_eq!(report.errors[0].path, "projections.columns[0].priority");
+        }
+    }
+
+    #[test]
+    fn a_column_priority_that_is_not_an_integer_is_refused_with_a_type_mismatch() {
+        let contract = view_contract();
+        for bad in [
+            serde_json::json!("3"),
+            serde_json::json!(2.5),
+            serde_json::json!(true),
+        ] {
+            let report = contract.validate_instance(&view_with_columns(
+                serde_json::json!([{"field": "a", "priority": bad}]),
+            ));
+            assert_eq!(only_code(&report), InstanceViolationCode::TypeMismatch);
+        }
+    }
+
+    #[test]
+    fn a_status_or_action_column_may_not_carry_a_priority() {
+        let contract = view_contract();
+        for role in ["status", "action"] {
+            let report = contract.validate_instance(&view_with_columns(
+                serde_json::json!([{"field": "a", "role": role, "priority": 3}]),
+            ));
+            assert_eq!(only_code(&report), InstanceViolationCode::ForbiddenField);
+            let bare = contract.validate_instance(&view_with_columns(
+                serde_json::json!([{"field": "a", "role": role}]),
+            ));
+            assert!(bare.is_ok(), "{bare}");
+        }
+    }
+
+    #[test]
+    fn a_rule_naming_an_undeclared_field_or_a_non_integer_is_refused_at_load() {
+        let undeclared = "root_type: mapping\noptional:\n  n: { type: single, prim: integer }\nrules:\n  - { kind: integer_range, field: m, minimum: 0, maximum: 1 }\n";
+        assert!(serde_yaml::from_str::<ValueShape>(undeclared).is_err());
+        let not_integer = "root_type: mapping\noptional:\n  n: { type: single, prim: string }\nrules:\n  - { kind: integer_range, field: n, minimum: 0, maximum: 1 }\n";
+        assert!(serde_yaml::from_str::<ValueShape>(not_integer).is_err());
+        let inverted = "root_type: mapping\noptional:\n  n: { type: single, prim: integer }\nrules:\n  - { kind: integer_range, field: n, minimum: 2, maximum: 1 }\n";
+        assert!(serde_yaml::from_str::<ValueShape>(inverted).is_err());
+    }
+}
 
 #[cfg(test)]
 mod kind_contract_regressions {
@@ -2483,6 +2740,7 @@ mod kind_contract_regressions {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
             strict_fields: None,
+            rules: Vec::new(),
         }
     }
 

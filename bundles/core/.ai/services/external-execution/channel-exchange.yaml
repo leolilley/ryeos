@@ -1,7 +1,20 @@
-# ryeos:signed:2026-10-12T19:54:26Z:e0a74b11a48906dcedf7162dbaaebff9184fa4b824900a94b73d046f5ce1ceab:rMD8ndNir2KISQ8T9F2WrIZXaRdbB/RrrRe9hlYOElKGzC2roM1ffKF0zqwYDvZgXtCRK7MPCfMIYVZ88VuuCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:cf37c7938a5f99ae442a0b810e0fc257110d66431412473d3a65c81a24a49943:JB8SQFkMDaD8HyBvdr9l+eACu/nGejhLoo2qRWNSDK82RB1i78Qqutxk25jxCUnjA0by+Rom0PSvn5M4K7u8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-execution.channel-exchange
 availability: daemon_only
 record_thread: false
 required_caps: []
 description: "Exchange exact signed frames with one attached external supervisor"
+disclosure:
+  principal:
+    - "/schema"
+    - "/incoming_new"
+    - "/incoming_sequence"
+    - "/incoming_frame_digest"
+    - "/acknowledgement_frame_digest"
+    - "/outbound_frames/*/sequence"
+    - "/outbound_frames/*/frame_digest"
+    - "/outbound_frames/*/frame_base64"
+    - "/urgent_revocation_frame/sequence"
+    - "/urgent_revocation_frame/frame_digest"
+    - "/urgent_revocation_frame/frame_base64"

@@ -548,8 +548,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         reserved_child_ids.insert(item_index, child_thread_id);
     }
 
-    let expected_parent_context =
-        crate::dispatch::ParentExecutionContext::for_child_of(&cap).persisted();
+    let expected_parent_context = follow_child_parent_context(&cap).persisted();
     let mut child_thread_ids = Vec::with_capacity(children.len());
     let mut queued_child_thread_ids = Vec::new();
     let mut fresh_indices = std::collections::BTreeSet::new();
@@ -1072,6 +1071,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     }))
 }
 
+/// The parent context follow children are launched with and persisted under:
+/// it carries the calling thread's workload ceiling through the one shared
+/// builder.
+pub(crate) fn follow_child_parent_context(
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> crate::dispatch::ParentExecutionContext {
+    crate::dispatch::ParentExecutionContext::for_child_of(cap)
+}
+
 fn admit_follow_child_requests(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1207,7 +1215,7 @@ async fn prepare_follow_children(
         fingerprint: acting_principal.to_owned(),
         scopes: cap.effective_caps.clone(),
     });
-    let launch_parent_context = crate::dispatch::ParentExecutionContext::for_child_of(cap);
+    let launch_parent_context = follow_child_parent_context(cap);
     let mut child_metadata = std::collections::BTreeMap::new();
     let mut prepared_children = std::collections::BTreeMap::new();
     for (item_index, child) in children.iter().enumerate() {
@@ -1319,7 +1327,9 @@ async fn prepare_follow_children(
                             .into_iter()
                             .collect(),
                     ),
-                    thread_ceiling: cap.thread_ceiling,
+                    thread_ceiling: launch_parent_context.thread_ceiling,
+                    workspace_input: None,
+                    evaluator_origin_chain: launch_parent_context.evaluator_origin_chain.clone(),
                     executor_ref: Some(child_execution.executor_ref.clone()),
                     runtime_ref: Some(runtime_ref),
                 });

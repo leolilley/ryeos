@@ -1,7 +1,9 @@
-# ryeos:signed:2026-09-28T09:42:59Z:0d781c4e91cf14be56d8bb81c4dd6a1d0264c0aeb213507ecd9690dafcc1710c:oPx4k2U2x4ggW0Nd83NflWAAemY6CmGp/wfkJStgjxVRGAYmyRTj2IaEZ7RjPc+Y402dKzj5zsQdIICygi70DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:64c99e2836b281c181006e71002ad1169152d49b3cac60545ff4ffc1d0062664:oShhqZytrBpv5uSKh9MAfLWoR4HDFP9pqoIdrMl/qpolgzpGqFHt8Da7u18fxtHAz2/Yr3ZePbtg1+XNtRFTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.terminate-runtime-snapshot-qualification
 required_caps: ["ryeos.execute.service.external-content/terminate-runtime-snapshot-qualification"]
 schema:
   qualification_operation_id: string
 description: Terminate one exact restored qualification Sandbox; replay observes only and provider terminal status is not guest-writer proof
+# Operator-only: the handler requires the admitted (or local configured) operator.
+disclosure: {}

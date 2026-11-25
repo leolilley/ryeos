@@ -3,9 +3,10 @@
 //! The request names a typed read root and the closure roots it wants
 //! described; each closure root must itself be reachable from that read root.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::objects_read_scope::{ReadRoot, require_objects_in_scope, resolve_scope, root_required};
@@ -95,11 +96,16 @@ pub(crate) fn admit_request(req: Request, state: &AppState) -> Result<AdmittedRe
         },
     )?;
     if req.roots.len() > limits.max_roots {
-        bail!(
-            "object-closure root count exceeds node policy: {} > {}",
-            req.roots.len(),
-            limits.max_roots
-        );
+        return Err(typed_refusal(
+            "object_closure_roots_exceed_policy",
+            422,
+            format!(
+                "object-closure root count exceeds node policy: {} > {}",
+                req.roots.len(),
+                limits.max_roots
+            ),
+        )
+        .into());
     }
     Ok(AdmittedRequest {
         roots: req.roots,
@@ -143,11 +149,15 @@ pub(crate) fn enforce_serialized_response_limit(
     )
     .unwrap_or(u64::MAX);
     if serialized_bytes > max_response_bytes {
-        bail!(
-            "object closure response exceeds max_response_bytes: {} > {}",
-            serialized_bytes,
-            max_response_bytes
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_exceeded",
+            422,
+            format!(
+                "object closure response exceeds max_response_bytes: {} > {}",
+                serialized_bytes, max_response_bytes
+            ),
+        )
+        .into());
     }
     Ok(())
 }
@@ -169,69 +179,119 @@ pub(crate) fn collect_limited_closure_with_cas(
     cas: &lillux::CasStore,
 ) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
     if req.roots.is_empty() {
-        bail!("roots must not be empty");
+        return Err(typed_refusal(
+            "object_closure_roots_required",
+            400,
+            "roots must not be empty",
+        )
+        .into());
     }
     for root in &req.roots {
         if !lillux::valid_hash(root) || root.bytes().any(|b| b.is_ascii_uppercase()) {
-            bail!("invalid closure root hash: {root}");
+            return Err(typed_refusal(
+                "object_closure_root_invalid",
+                400,
+                format!("invalid closure root hash: {root}"),
+            )
+            .into());
         }
     }
     if req.max_objects == 0
         || req.max_objects > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
     {
-        bail!(
-            "max_objects must be between 1 and {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_objects must be between 1 and {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
+            ),
+        )
+        .into());
     }
     if req.max_blobs > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOBS {
-        bail!(
-            "max_blobs must not exceed {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOBS
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_blobs must not exceed {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOBS
+            ),
+        )
+        .into());
     }
     if req.max_object_bytes == 0
         || req.max_object_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES
     {
-        bail!(
-            "max_object_bytes must be between 1 and {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_object_bytes must be between 1 and {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES
+            ),
+        )
+        .into());
     }
     if req.max_total_object_bytes
         > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES
     {
-        bail!(
-            "max_total_object_bytes must not exceed {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_total_object_bytes must not exceed {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES
+            ),
+        )
+        .into());
     }
     if req.max_blob_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES {
-        bail!(
-            "max_blob_bytes must not exceed {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_blob_bytes must not exceed {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES
+            ),
+        )
+        .into());
     }
     if req.max_total_blob_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES {
-        bail!(
-            "max_total_blob_bytes must not exceed {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_total_blob_bytes must not exceed {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES
+            ),
+        )
+        .into());
     }
     if req.max_response_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES {
-        bail!(
-            "max_response_bytes must not exceed {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_response_bytes must not exceed {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES
+            ),
+        )
+        .into());
     }
     if req.max_links_per_object == 0
         || req.max_links_per_object
             > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT
     {
-        bail!(
-            "max_links_per_object must be between 1 and {}",
-            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_out_of_range",
+            400,
+            format!(
+                "max_links_per_object must be between 1 and {}",
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT
+            ),
+        )
+        .into());
     }
 
     let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
@@ -248,11 +308,16 @@ pub(crate) fn collect_limited_closure_with_cas(
         },
     )?;
     if report.blob_hashes.len() > req.max_blobs {
-        bail!(
-            "object closure exceeds max_blobs: {} > {}",
-            report.blob_hashes.len(),
-            req.max_blobs
-        );
+        return Err(typed_refusal(
+            "object_closure_limit_exceeded",
+            422,
+            format!(
+                "object closure exceeds max_blobs: {} > {}",
+                report.blob_hashes.len(),
+                req.max_blobs
+            ),
+        )
+        .into());
     }
     Ok(report)
 }

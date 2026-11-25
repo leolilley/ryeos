@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:18Z:d17b3c022fd12fe0b2a235dba49aa1259cea9719fc1fb31f422c74e026b8379d:xL1ffEa2NnkmlHmYnVqHpCzVjuHhknXg3o97cyKhTMH2uyZ9dIETvIS+TU6KRw34EBhbIErhZl5TABxOJWYfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:1ce2b0392a842ba62beaa14307b6839283a98c56d5ce87f928de13c60addb0d9:45FGE17xSaI+bfADSVnFW2ybpgOFjsq+tnTXJ8gAPnJHaxH0m3EBuF8I2DX59JkzxrOOG+uFjG8GmPS88B1HDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: remote.thread-status
@@ -7,3 +7,51 @@ schema:
   remote: string?
   thread_id: string
 description: "Get thread detail on a remote node"
+disclosure:
+  principal:
+    - "/thread/thread_id"
+    - "/thread/chain_root_id"
+    - "/thread/kind"
+    - "/thread/status"
+    - "/thread/item_ref"
+    - "/thread/executor_ref"
+    - "/thread/launch_mode"
+    - "/thread/current_site_id"
+    - "/thread/origin_site_id"
+    - "/thread/upstream_thread_id"
+    - "/thread/successor_thread_id"
+    - "/thread/created_at"
+    - "/thread/updated_at"
+    - "/thread/started_at"
+    - "/thread/finished_at"
+    - "/thread/pending"
+    - "/thread/execution/supports_continuation"
+    - "/thread/execution/supports_operator_followup"
+    - "/thread/follow/role"
+    - "/thread/follow/display_state"
+    - "/thread/follow/phase"
+    - "/thread/follow/child_thread_id"
+    - "/thread/follow/child_chain_root_id"
+    - "/thread/follow/child_terminal_status"
+    - "/result/outcome_code"
+    - "/artifacts/*/artifact_id"
+    - "/artifacts/*/artifact_type"
+    - "/artifacts/*/content_hash"
+  free_text:
+    - "/thread/requested_by"
+    - "/thread/project_root"
+    - "/thread/project/path"
+    - "/thread/project/name"
+    - "/thread/project_authority"
+    - "/thread/lifecycle_authority"
+    - "/thread/admitted_launch_capsule_hash"
+    - "/thread/result_project_snapshot_hash"
+    - "/thread/result_workspace_output_capture_hash"
+    - "/thread/runtime"
+    - "/thread/follow/follow_node"
+    - "/result/result"
+    - "/result/error"
+    - "/result/metadata"
+    - "/artifacts/*/uri"
+    - "/artifacts/*/metadata"
+    - "/facets"

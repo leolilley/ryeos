@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T14:29:21Z:3dabd1f845cea738fa3bf96f32cd01714e1c8e82b8d24e3f157c98a2c443f4e8:9EB/m5ijSYXpaC5iJV2tlF46Qk66CkToJV4eH5QTWAien7tylkVOUSXS6xKEnNCHtK5WavyZbyoUTyybdjJXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:c705cf4d3e7927e67961b4f9662cc8b839c124df2a462edf11b416b452580db4:nh350xit5GowaShpFJDnCj86Qgkit3GP2xuJQhc9tuNTPtgA3CvontRZmiNueoxHf4sRwX1rqYqSvtR1fS1/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.push
 required_caps: ["ryeos.execute.service.remote/push"]
@@ -7,3 +7,17 @@ schema:
   project: string
   outbound_principal: string?
 description: "Push project content to a remote node. outbound_principal is delegated (the caller, under its signed delegation) or node; it defaults to delegated unless the caller is the node itself."
+disclosure:
+  principal:
+    - "/scope"
+    - "/project_name"
+    - "/snapshot_hash"
+    - "/tree_hash"
+    - "/tree_entries"
+    - "/blobs_uploaded"
+    - "/blobs_skipped"
+    - "/applied"
+    - "/note"
+  free_text:
+    - "/remote_project_path"
+    - "/next_step"

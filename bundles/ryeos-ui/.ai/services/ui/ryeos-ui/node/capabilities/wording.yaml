@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:05:27Z:21cb42b8265eae6e540623adfd47ffa7efd2c20c6776a930d3319584bb8030f4:foZc9bNWTMVm5R5ttGSGAkBhYskInQZIlppjPphVqQBSgEYN+f1lv6muERyq3Gmf6e7P++xw87cCvafldcHQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:de6f84e33415100ec60b8d6d11afae4a63bc7748ccc2edea533a7a98fe2ea6cc:WklNvjCd7Eqj8UBn58gjD6cm/Gx1E6ER6dHoDa8rt738TTHIgeIQY9ttEGIGsHreV1jNrKXBUK38ikBhn6r4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/capabilities/wording
 version: "1.0.0"
@@ -10,3 +10,30 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /fallback/label
+    - /fallback/tone
+    - /fallback/detail
+    - /report_states/*/label
+    - /report_states/*/tone
+    - /report_states/*/detail
+    - /isolation_modes/*/label
+    - /isolation_modes/*/tone
+    - /isolation_modes/*/detail
+    - /host_classes/*/label
+    - /host_classes/*/tone
+    - /host_classes/*/detail
+    - /proof_states/*/label
+    - /proof_states/*/tone
+    - /proof_states/*/detail
+    - /grades/*/label
+    - /grades/*/tone
+    - /grades/*/detail
+    - /guarantees/*/label
+    - /guarantees/*/tone
+    - /guarantees/*/detail
+    - /grants/*/label
+    - /grants/*/tone
+    - /grants/*/detail

@@ -2233,7 +2233,11 @@ fn cancel_after_handoff_resolves_to_canonical_durable_thread_stop() {
         panic!("handed-off launch must resolve to its durable thread");
     };
     let runtime = store
-        .request_thread_stop(&thread_id, StopIntent::Cancel)
+        .request_thread_stop(
+            &thread_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .expect("request canonical durable stop");
     assert_eq!(runtime.stop_intent, Some(StopIntent::Cancel));
     assert_eq!(thread_id, "T-after-handoff");

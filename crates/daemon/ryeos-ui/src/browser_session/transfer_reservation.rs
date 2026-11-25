@@ -1683,6 +1683,7 @@ fn candidate_from(source: &AdmittedBindingAttachment) -> BindingAttachmentCandid
         compiled_binding: source.compiled_binding.clone(),
         presentation: source.presentation.clone(),
         project_authority: source.project_authority.clone(),
+        seat_project: source.seat_project.clone(),
     }
 }
 
@@ -1724,6 +1725,7 @@ mod tests {
                     compiled_binding: context.compiled_binding,
                     presentation: context.presentation,
                     project_authority: None,
+                    seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                 },
                 "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32),
@@ -1898,7 +1900,7 @@ mod tests {
             "root_ref": "surface:test", "root_generation": "generation-one",
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "test"}}, "views": {}},
             "project_path": null, "subject": {"kind":"projectless"},
-            "posture": "observation_only",
+            "posture": "observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024, "max_seat_append_bytes": 65536}
         })).unwrap();
         let reservation = UiTransferReservation {

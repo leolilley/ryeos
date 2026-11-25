@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T07:56:08Z:8fa2f8de0c1eb8e7b1245595c9964d00df2d1f86353c3831a345667394734971:VDZqyHnq58YWmjzgp82Q8OPLb/iAsd0z8hGicjWCxAear9ZzUFwgeEqyrj+G5irwz5GCHJbyMOk+GlKNW2TnCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T03:51:26Z:7a7a57db56b01bd7a5d9365d0ab0b325b69c578123b16b4bfcfc98fd70d1a6c7:NfToY57C9tfxW6BTvKn/bHZdJ7dEDyJPXQ5j+dkgDEefiolsBgzI0Iuqpcyhx692IZOCzn6Zurif5P2yqQqECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/session/surfaces/open"]
 name: session/surfaces/open
@@ -13,3 +13,15 @@ schema:
   creation_request_id: string
   selection: object
   placement: object
+disclosure:
+  principal:
+    - /ui_transition/kind
+    - /ui_transition/presentation_id
+    - /ui_transition/creation_request_id
+  free_text:
+    - /project
+  interim_free_text:
+    - /ui_transition/surface  # removed by: m4
+    - /ui_transition/attachment  # removed by: m4
+    - /ui_transition/tab_attachments  # removed by: m4
+    - /ui_transition/opening  # removed by: m4

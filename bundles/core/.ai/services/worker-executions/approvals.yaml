@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T10:09:18Z:55113da263a3047c07d746a0c0f87992123a38e604ad40a6590584974bae88ab:TOziweUXsgzwBwlZ0x9YaVzUbkOfjhBcy14AGWsqig54PNRM6PEu9MusLtfw2CC8qh4/gN76krXWop6bWy+ADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:05038294307bc69d07894a2618504c41042e95e723a1787fb0d3fe6ab3e8e95e:1MNlai4LR3oDIk2kILoEncRp9C4YZkvAMJnnOfha+RbajLWgvdDop9VeGPzHqzjQl2IouusHgvvHKm0s4JWlBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: approvals
 kind: service
@@ -6,3 +6,19 @@ endpoint: worker-executions.approvals
 description: List pending owner-authorized worker execution approvals.
 required_caps: ["ryeos.execute.service.worker-executions/approvals"]
 schema: {chain_root_id: string}
+disclosure:
+  principal:
+    - "/approvals/*/chain_root_id"
+    - "/approvals/*/placement_thread_id"
+    - "/approvals/*/approval_id"
+    - "/approvals/*/worker_boot_epoch"
+    - "/approvals/*/request_digest"
+    - "/approvals/*/operation_class"
+    - "/approvals/*/requested_authority/accept_allowed"
+    - "/approvals/*/state"
+    - "/approvals/*/expires_at_ms"
+    - "/approvals/*/created_at_ms"
+  interim_free_text:
+    - "/approvals/*/requested_authority/display"  # removed by: per-chain publication
+  max_items: 256
+  max_result_bytes: 262144

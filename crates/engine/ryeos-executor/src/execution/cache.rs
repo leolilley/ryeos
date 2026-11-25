@@ -1508,6 +1508,46 @@ pub(super) mod tests {
         assert!(!cache.cache_dir(&hash).exists());
     }
 
+    /// A detached child's by-hash input root keeps its generation's cache
+    /// lease for exactly as long as its guard lives: a write inside the
+    /// private root lands only in the root, the shared generation is
+    /// untouched and cannot be discarded under the running child, and the
+    /// guard's drop at the child's terminal releases the lease.
+    #[cfg(unix)]
+    #[test]
+    fn an_input_root_guard_holds_its_generation_lease_until_it_drops() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = MaterializationCache::new(root.path().join("cache"));
+        let hash = snapshot_hash();
+        write_regular(&cache.cache_dir(&hash).join("input"), b"original");
+        let construction = cache.generation_build_lock(&hash).unwrap();
+        fs::create_dir_all(root.path().join("scratch")).unwrap();
+        let (private_root, guard) = ryeos_app::temp_dir_guard::create_admitted_input_workspace(
+            &root.path().join("scratch"),
+            "T-00000000-0000-0000-0000-000000000009",
+        )
+        .unwrap();
+        guard.retain_lease(cache.generation_lease(&hash).unwrap());
+
+        fs::write(private_root.join("input"), b"overwritten by the child").unwrap();
+        assert_eq!(
+            fs::read(cache.cache_dir(&hash).join("input")).unwrap(),
+            b"original",
+            "a write in the private root never reaches the shared generation"
+        );
+        assert!(
+            cache
+                .discard_generation_with(&hash, &construction, |_| panic!("live lease callback"))
+                .is_err(),
+            "the generation cannot be discarded under a running child"
+        );
+
+        drop(guard);
+        assert!(!private_root.exists());
+        cache.discard_generation(&hash, &construction).unwrap();
+        assert!(!cache.cache_dir(&hash).exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn generation_repair_refuses_a_replaced_root_binding() {

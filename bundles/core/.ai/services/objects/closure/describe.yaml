@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T20:05:09Z:f5466e953f6a158a94781fe3756fd9666cda4058981ee0f020a34de34aa56d30:2mhZIV5XJlDq5hBGTubwuD6IPESaC+9Hn7Y4ISEI76MAzbGigdoDPa+SoeoD848nHe6xr9oXaxI5gCGTDB6tDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:51e183a303c525614cf1d7fbe357539d2967b18dd7da90e3762beca24dc1f97c:D9oNJO5ZAsK7u+lVuKtKk9jbxIztTk1wcMe1uIcEGre4kMpwkqHhKxzANWtNmSmfK8a+F5unyYa28Svdh61dDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.closure.describe
 required_caps: ["ryeos.execute.service.objects/closure/describe"]
@@ -16,3 +16,21 @@ schema:
   allow_incomplete: boolean?
   allow_untransported_large_objects: boolean?
 description: "Describe the schema-defined CAS closure reachable from root object hashes within node object_closure policy"
+disclosure:
+  principal:
+    - "/roots"
+    - "/complete"
+    - "/object_hashes"
+    - "/blob_hashes"
+    - "/large_object_hashes"
+    - "/missing_objects/*/hash"
+    - "/missing_objects/*/referenced_by"
+    - "/missing_blobs/*/hash"
+    - "/missing_blobs/*/referenced_by"
+    - "/malformed_objects/*/hash"
+    - "/unsupported_objects/*/hash"
+    - "/unsupported_objects/*/kind"
+  free_text:
+    - "/malformed_objects/*/reason"
+  max_items: 4096
+  max_result_bytes: 8388608

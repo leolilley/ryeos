@@ -480,6 +480,7 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             authorized_key_class: None,
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
+            minted_session_grant: None,
             metadata,
         }))
     }

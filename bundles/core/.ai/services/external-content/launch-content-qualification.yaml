@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-30T01:47:55Z:3ff1175da0714bf23ad6ca49a2dd68fdd5b255205f057539bde902276a06f181:pdUJJeAGtuEiGbX53SOtHT2VvKGKBezQIf/psv8djQ6L2kl0yQpJoZPin6NI21POplLNZQ8ldOzXTO9e3JDoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:573a59790d0ede594d41699ac09bf24e99183ccac9b2e07f898108eaaae1bb22:6BFcdNMplAogFcXzsToFI9GLVgdvwaknUve6oOlmvO+fI9UOf1dmzdJPHigu+k6FOOedW4qfi9GNMETRHHPLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.launch-content-qualification
 required_caps: ["ryeos.execute.service.external-content/launch-content-qualification"]
@@ -7,3 +7,5 @@ schema:
   activation_ref: string
   declaration_id: string
 description: Accept one exact activated-content qualification launch; the signed consumer allowance selects the policy and verifier. Acquisition and compatibility remain distinct authorities. Unsupported consumer-context qualification is refused.
+# The handler requires the admitted node operator (external content acquisition and qualification).
+disclosure: {}
