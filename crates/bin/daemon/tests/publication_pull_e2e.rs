@@ -11,7 +11,9 @@
 use ryeosd::test_support as common;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_workflow_bundles};
+use common::fast_fixture::{
+    FAST_FIXTURE_TIME, FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use lillux::crypto::SigningKey;
 use ryeos_engine::trust::{PublicationManifest, PublicationRecord};
 use serde_json::{Value, json};
@@ -60,10 +62,14 @@ struct Publication {
 }
 
 async fn publish_on(a: &DaemonHarness, fixture: &FastFixture) -> Publication {
+    publish_bundle_on(a, fixture, BUNDLE).await
+}
+
+async fn publish_bundle_on(a: &DaemonHarness, fixture: &FastFixture, bundle: &str) -> Publication {
     let (status, frozen) = service(
         a,
         "service:publication/freeze",
-        json!({ "bundle_name": BUNDLE }),
+        json!({ "bundle_name": bundle }),
     )
     .await;
     assert_eq!(status, 200, "{frozen:#}");
@@ -80,7 +86,7 @@ async fn publish_on(a: &DaemonHarness, fixture: &FastFixture) -> Publication {
         &hex(&rand::random::<[u8; 16]>()),
         &node_fingerprint,
         result["manifest_hash"].as_str().unwrap(),
-        BUNDLE,
+        bundle,
         &lillux::time::iso8601_from_unix_secs(now + 3600),
         &lillux::time::iso8601_from_unix_secs(now),
         read_bound,
@@ -192,4 +198,97 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
     // The bundle is now installed, so a second pull moves nothing.
     let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
     assert_ne!(status, 200, "{again:#}");
+}
+
+/// The unpinned publisher: A holds a bundle whose manifest is signed by a key
+/// A pins and B does not.
+const UNPINNED_BUNDLE: &str = "unpinned-demo";
+
+fn stranger_key() -> SigningKey {
+    SigningKey::from_bytes(&[0x77; 32])
+}
+
+async fn start_publisher_with_stranger_bundle() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            let stranger = stranger_key();
+            common::pin_signer(
+                state_path,
+                &stranger.verifying_key(),
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
+            register_config_fixture_bundle(state_path, UNPINNED_BUNDLE, fixture, |_| Ok(()))?;
+            // The fixture signs the manifest with the shared fixture publisher;
+            // sign it with the stranger instead.
+            let manifest = state_path
+                .join(".ai/bundles")
+                .join(UNPINNED_BUNDLE)
+                .join(".ai/manifest.yaml");
+            let body =
+                lillux::signature::strip_signature_lines(&std::fs::read_to_string(&manifest)?);
+            std::fs::write(
+                &manifest,
+                lillux::signature::sign_content_at(&body, &stranger, "#", None, FAST_FIXTURE_TIME),
+            )?;
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the publishing node")
+}
+
+fn signer_files(h: &DaemonHarness) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(ryeos_engine::trust::signers_dir(&h.state_path))
+        .expect("read signer registry")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publication_signed_by_a_publisher_the_puller_does_not_trust_is_refused_and_changes_nothing()
+ {
+    let (a, a_fixture) = start_publisher_with_stranger_bundle().await;
+    let (b, _b_fixture) = start_puller().await;
+    let publication = publish_bundle_on(&a, &a_fixture, UNPINNED_BUNDLE).await;
+    let node_pin = format!("fp:{}", publication.node_fingerprint);
+    let signers_before = signer_files(&b);
+
+    let (status, refused) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
+    assert_eq!(status, 422, "{refused:#}");
+    let text = refused.to_string();
+    assert!(
+        text.contains("publication_publisher_unpinned"),
+        "{refused:#}"
+    );
+    let stranger_fp = lillux::signature::compute_fingerprint(&stranger_key().verifying_key());
+    assert!(text.contains(&stranger_fp), "{refused:#}");
+    assert!(
+        text.contains("ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher"),
+        "{refused:#}"
+    );
+
+    // Nothing was installed and the pull added no trust.
+    assert!(
+        !b.state_path
+            .join(".ai/bundles")
+            .join(UNPINNED_BUNDLE)
+            .exists(),
+        "a refused pull left a bundle behind"
+    );
+    assert!(
+        !b.state_path
+            .join(".ai/node/bundles")
+            .join(format!("{UNPINNED_BUNDLE}.yaml"))
+            .exists(),
+        "a refused pull registered a bundle"
+    );
+    assert_eq!(
+        signer_files(&b),
+        signers_before,
+        "the pull changed B's trust"
+    );
 }
