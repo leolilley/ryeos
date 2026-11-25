@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-01T22:15:11Z:6c8573235926ced12b0916ee0b182fd4f69815ced494b8d4825fd95cf9102b42:IhiQ/lHhhOzs/l58X6WlW3WoQgigqiloOee0ucgbovH95S56po6gANBJ0WrZ9Mxd19o2O8BlkPI6yCDJdCRLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:a926c02fd04982620784dc8ec469fa61481ac46f99b1cddbbcb95cb5baeb8d1b:VOgGfLLq11ubG5hKmBfnc5hWmefMUth1t7j5B4hYYg256oPCPv3MD/H7s6WS4wLQru4S/xeWj5VVOQvFNzVtCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.admit
 required_caps: ["ryeos.execute.service.remote/admit"]
@@ -8,3 +8,19 @@ schema:
   label: string?
   scopes: string[]
 description: "Claim a one-time admission token on a configured remote node"
+disclosure:
+  principal:
+    - "/remote"
+    - "/local_site_id"
+    - "/claim/admitted"
+    - "/claim/fingerprint"
+    - "/claim/scopes"
+    - "/claim/created_at"
+    - "/claim/principal_class"
+    - "/claim/origin_site_id"
+    - "/claim/expires_at"
+  free_text:
+    - "/url"
+    - "/local_public_key"
+    - "/claim/label"
+    - "/claim/granted_by"

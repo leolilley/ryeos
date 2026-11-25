@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use base64::Engine as _;
 use ryeos_app::{
     bundle_publication::catalog::{
@@ -10,6 +10,7 @@ use ryeos_app::{
         inspect_catalog, publish_catalog, stage_local_catalog_closure,
     },
     handler_context::HandlerContext,
+    handler_error::typed_refusal,
     state::AppState,
 };
 use ryeos_executor::executor::ServiceAvailability;
@@ -67,7 +68,12 @@ pub async fn upload(
         .saturating_add(req.blob_chunks.len())
         > MAX_UPLOAD_ENTRIES
     {
-        bail!("catalog upload batch exceeds the entry bound");
+        return Err(typed_refusal(
+            "catalog_upload_batch_too_large",
+            400,
+            "catalog upload batch exceeds the entry bound",
+        )
+        .into());
     }
     let policy = state.node_policy.require::<BundlePublicationPolicy>()?;
     let catalog = policy.require_catalog(&req.catalog_namespace)?;
@@ -106,7 +112,12 @@ pub async fn upload(
         )?,
     };
     if stage.admitted_target_hash().is_some() {
-        bail!("catalog upload session is already admitted");
+        return Err(typed_refusal(
+            "catalog_upload_session_admitted",
+            409,
+            "catalog upload session is already admitted",
+        )
+        .into());
     }
     let mut object_hashes = Vec::with_capacity(req.objects.len());
     for value in &req.objects {
@@ -115,28 +126,65 @@ pub async fn upload(
     let mut blob_hashes = Vec::with_capacity(req.blobs_base64.len());
     for encoded in &req.blobs_base64 {
         if encoded.len() > MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4 {
-            bail!("inline catalog blob exceeds the bounded upload size");
+            return Err(typed_refusal(
+                "catalog_blob_too_large",
+                400,
+                "inline catalog blob exceeds the bounded upload size",
+            )
+            .into());
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .context("catalog upload contains invalid base64")?;
+            .map_err(|_| {
+                typed_refusal(
+                    "catalog_upload_invalid_base64",
+                    400,
+                    "catalog upload contains invalid base64",
+                )
+            })?;
         if bytes.len() > MAX_INLINE_BLOB_BYTES {
-            bail!("inline catalog blob exceeds the bounded upload size");
+            return Err(typed_refusal(
+                "catalog_blob_too_large",
+                400,
+                "inline catalog blob exceeds the bounded upload size",
+            )
+            .into());
         }
         blob_hashes.push(stage.store_blob(&guard, &cas, &bytes)?);
     }
     for chunk in &req.blob_chunks {
         if chunk.total_size > MAX_BLOB_BYTES {
-            bail!("catalog blob exceeds the bounded transport size");
+            return Err(typed_refusal(
+                "catalog_blob_too_large",
+                400,
+                "catalog blob exceeds the bounded transport size",
+            )
+            .into());
         }
         if chunk.data_base64.len() > MAX_BLOB_CHUNK_BYTES.saturating_mul(2) {
-            bail!("encoded catalog blob chunk exceeds the route-safe bound");
+            return Err(typed_refusal(
+                "catalog_blob_chunk_too_large",
+                400,
+                "encoded catalog blob chunk exceeds the route-safe bound",
+            )
+            .into());
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&chunk.data_base64)
-            .context("catalog upload contains invalid chunk base64")?;
+            .map_err(|_| {
+                typed_refusal(
+                    "catalog_upload_invalid_base64",
+                    400,
+                    "catalog upload contains invalid chunk base64",
+                )
+            })?;
         if bytes.len() > MAX_BLOB_CHUNK_BYTES {
-            bail!("catalog blob chunk exceeds the bounded upload size");
+            return Err(typed_refusal(
+                "catalog_blob_chunk_too_large",
+                400,
+                "catalog blob chunk exceeds the bounded upload size",
+            )
+            .into());
         }
         if stage.store_blob_chunk(
             &guard,
@@ -221,7 +269,13 @@ pub async fn resolve(req: ResolveRequest, state: Arc<AppState>) -> Result<Value>
         .set_channels
         .iter()
         .find(|entry| entry.set_name == req.set_name && entry.channel == req.channel)
-        .context("requested curated-set channel is absent from the current catalog")?;
+        .ok_or_else(|| {
+            typed_refusal(
+                "catalog_set_channel_absent",
+                404,
+                "requested curated-set channel is absent from the current catalog",
+            )
+        })?;
     Ok(serde_json::json!({
         "catalog_namespace": req.catalog_namespace,
         "catalog_publication_attestation_hash": inspected.catalog_publication_attestation_hash,
@@ -290,13 +344,23 @@ pub async fn restore_genesis(
     if req.bundle_publication_policy_section_digest != policy.section_digest()?
         || req.node_policy_generation_digest != state.node_policy.generation_digest()
     {
-        bail!("recovery manifest is bound to another node-policy generation");
+        return Err(typed_refusal(
+            "catalog_recovery_generation_mismatch",
+            409,
+            "recovery manifest is bound to another node-policy generation",
+        )
+        .into());
     }
     let current = state.state_store.with_state_db(|db| {
         db.read_generic_head_ref(BUNDLE_CATALOG_HEAD_NAMESPACE, &req.catalog_namespace)
     })?;
     if current.is_some() {
-        bail!("catalog genesis restore is forbidden while a head exists");
+        return Err(typed_refusal(
+            "catalog_genesis_head_exists",
+            409,
+            "catalog genesis restore is forbidden while a head exists",
+        )
+        .into());
     }
     let outcome = publish_catalog(
         &state,

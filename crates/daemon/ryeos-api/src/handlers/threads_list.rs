@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -43,13 +44,25 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some("newest") => ryeos_app::thread_lifecycle::ThreadSort::Newest,
         Some("watch") => ryeos_app::thread_lifecycle::ThreadSort::Watch,
         Some(other) => {
-            anyhow::bail!("invalid sort '{other}': expected one of default | newest | watch")
+            return Err(typed_refusal(
+                "thread_list_sort_invalid",
+                400,
+                format!("invalid sort '{other}': expected one of default | newest | watch"),
+            )
+            .into());
         }
     };
     let facet = match (req.facet_key, req.facet_value) {
         (Some(key), Some(value)) => Some((key, value)),
         (None, None) => None,
-        _ => anyhow::bail!("facet_key and facet_value must be given together"),
+        _ => {
+            return Err(typed_refusal(
+                "thread_list_facet_incomplete",
+                400,
+                "facet_key and facet_value must be given together",
+            )
+            .into());
+        }
     };
     state.threads.list_threads_filtered_sorted_facet(
         req.limit.clamp(1, MAX_THREAD_LIST_LIMIT),

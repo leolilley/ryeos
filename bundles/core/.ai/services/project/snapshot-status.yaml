@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T06:51:53Z:eacc70d7f8ed8ecb69e33135bc23005a50a5d9ab9beb672f3999144c9321bb77:YSctJjyMZtaWsUWmgimZq0rei8VM6PDUFBQj4ptHOl1yF7hkxyfy6/pxmzOpbgluRB91vkLwFI8wSKiBcQ5qBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:0cf162135a20bba1463de11abfff78f1b90add16744fc05b6e842aa8da3ff474:mtFw5K9Y3Tw3lupGJfUemtRC2a2ofwCb0CNrBYOqqyHtmMC1sYOXSq4jojdRvj5NWyO9+6TjLGPVcVMQe/7oAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.snapshot-status
 availability: both
@@ -10,3 +10,5 @@ schema:
   include_unchanged: boolean?
   time_budget_ms: integer
 description: "Configured-local-operator worktree comparison against the principal's trusted snapshot HEAD. Uses the live node or fail-only existing-state standalone service when stopped; never repairs projections or creates snapshots. Project path must be absolute. The caller selects a scan budget in milliseconds; zero disables the scan deadline."
+# Compares a local project path under the local configured operator; no principal is served.
+disclosure: {}

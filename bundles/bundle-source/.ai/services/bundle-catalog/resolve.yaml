@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:491c9d02267a5e8b085b6c65e67b7814450c972383c5658ce7d6397e1c32919a:7IusNIdEEby1BWOCJrYy8o3bmHPq7WgSMxf8+4jJKorqQJ59H0GiMhzkOZX9vZGVJ4iSDrXpPAWnDXQ5uvd/Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:028954953a2bdf06f6fc0cc1613b777d3fd2d1db7c7af80ba92a7a2f293a8fae:8enHx/AoeWbi14Ijj8O0+h1cgbEdSPW+97vUHz4HxINfsi96yrt/9bcM3CmIJCIjEdIziJI/TjlKu9NoWefGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle-catalog.resolve
 required_caps: ["ryeos.execute.service.bundle-catalog/resolve"]
@@ -8,3 +8,11 @@ schema:
   set_name: string
   channel: string
 description: "Resolve one channel to an immutable verified catalog and curated-set coordinate"
+disclosure:
+  principal:
+    - "/catalog_namespace"
+    - "/catalog_publication_attestation_hash"
+    - "/catalog_snapshot_hash"
+    - "/set_name"
+    - "/channel"
+    - "/set_attestation_hash"

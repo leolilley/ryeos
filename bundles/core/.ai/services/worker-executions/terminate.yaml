@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:325d0f182f1439e8bc628c3735b46d8da915f8e4ec95b3647587d10045ae2372:4kzTqAF4WEycUp28NGKbUMmxgFtxEyewczyXRgFhALu64pnk8ZHoBuZgw+7w5sUoR7L+1j5CtqDLSBQ7fZJ8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:67a0a857b2659eb9bc610ba73f4e3db11919e73b243e60ac02bc029107ef1f4f:tv2jJ/PC8SwUDM6jSVwvcd4MDwCEnrW13e0vvivpSb+yAb5TDyDvjOQSWZFuj2XP7UvawA2JCsyS1xBGyRbaBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: terminate
 kind: service
@@ -6,3 +6,11 @@ endpoint: worker-executions.terminate
 description: Stop, reap, and settle one owner-authorized session worker execution.
 required_caps: ["ryeos.execute.service.worker-executions/terminate"]
 schema: {chain_root_id: string, reason: string, completion: object?}
+disclosure:
+  principal:
+    - "/chain_root_id"
+    - "/placement_thread_id"
+    - "/state"
+    - "/reason"
+    - "/idempotent"
+    - "/prior_outcome"

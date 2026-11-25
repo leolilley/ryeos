@@ -351,6 +351,13 @@ fn callback_execution_context(
     if original_budget.is_some() && handler_context.is_none() {
         anyhow::bail!("callback preparation lost its original budget handler context");
     }
+    // The class is the thread's acting key's, read from the same authority the
+    // handler context carries. A thread with no ingress authority is a
+    // node-internal one and acts as the node's own operator authority.
+    let disclosure_class = match handler_context.as_ref() {
+        Some(context) => ryeos_app::operator_authority::disclosure_class_for(state, context),
+        None => ryeos_node_runtime::disclosure::DisclosureClass::Operator,
+    };
     Ok((
         crate::executor::ExecutionContext {
             principal_fingerprint: thread_auth.acting_principal.clone(),
@@ -359,6 +366,7 @@ fn callback_execution_context(
             engine: child_provenance.request_engine().clone(),
             plan_ctx,
             requested_call: params.action.call.clone(),
+            disclosure_class,
         },
         handler_context,
     ))

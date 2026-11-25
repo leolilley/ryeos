@@ -20,6 +20,7 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::{self, ProjectSyncScope, RemoteConfig};
 use crate::remote::push::push_snapshot_generation;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::hosted_candidate_result::{
     HostedCandidateResultRequest, HostedCandidateResultResponse,
 };
@@ -940,7 +941,8 @@ async fn drive_operation(
 }
 
 pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id).map_err(anyhow::Error::msg)?;
+    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id)
+        .map_err(|e| typed_refusal("source_work_id_invalid", 400, e.to_string()))?;
     let operator = ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let job = state
         .state_store

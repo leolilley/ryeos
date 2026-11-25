@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:19Z:7749b5022ba0d6a3563f0fbe74a5a241eaeff343b2599706706bb92d70a57e8f:KjHFlJ/kDYY5st52xer5KCitqzlBVhZWyA7WLBfKQvRN+Meaoj5fazo/5l52RBC+5Cm/ZUeQ3v3z1kh5pldhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:3d13e5cbc98e7627720552da39c0feede7e71f021194a60eeafae50d9cf2e8da:2zVDQXnT1ubEvnYWXQD/aRA0CceEPMWA43S6xA9echu3KAvhGpfJRTXZgjwDamajIhXCcCIRsrO03B8DuTVUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: tool.env-check
 availability: daemon_only
@@ -8,3 +8,22 @@ schema:
   ref_bindings: object
   project_path: string
 description: "Report which source would satisfy each declared required_secret of an item (vault / host env / .env / missing), without running it. Names and sources only, never values."
+disclosure:
+  principal:
+    - "/item_ref"
+    - "/kind"
+    - "/secrets/*/name"
+    - "/secrets/*/present"
+    - "/missing/*"
+    - "/launch_contract_applied"
+    - "/project_result_requirement"
+    - "/project_result_readiness"
+    - "/import_check"
+    - "/import_ok"
+    - "/venv_populated"
+    - "/has_execute"
+  free_text:
+    - "/import_check_reason"
+    - "/import_error"
+    - "/interpreter"
+    - "/note"

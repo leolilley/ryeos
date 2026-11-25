@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:45b0621b76c99131cd1101d2b03fa39750a129ecb1ac1426ab6e21244eada0c0:jS7h9SbSiD4hE+KGO/FPURUoL5vaIYoAk3GMcla0jhrEtPbTeOfwshLEBIskbeY+aF7A9MzzXrUFmnGxcT82DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:33a0646832a71de23ea7181f9e4ce81dd6a4ac8d895b91626b3350af77e04421:VSgU2FNnZmqfWoDXiRKr+yyooDSh+mTyUE8Y6dqS2f3om8bumXNEuwLGO1CaODwPKD8dhcz2SjlOsTzJ4Gz9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: submit
 version: "1.0.0"
@@ -19,3 +19,5 @@ schema:
   expected_catalog_sequence: integer
   catalog_namespace: string
   channel: string
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

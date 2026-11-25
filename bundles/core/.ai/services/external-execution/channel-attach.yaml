@@ -1,7 +1,12 @@
-# ryeos:signed:2026-10-12T19:54:26Z:c63f2c39fdea8cc1170e9708916eec14d9e7df611a3c4306698d017c88c7026c:CLN0X2Ry+68J1lWrvzW2BHodrcrygvEdCryM+iNIR3RJQp06QzrReiAIA/ILC4TE53qco7cS72BZFYZH2an9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:ed3ab2c1b0c3f41a6e89eabf3a4e837abcb6927039f2b057029b2d692c3ba840:1PeUtdBDjidJkejLjKizvePKc49q8r3avr2eTKv7gPpIqvqbJhZfItYrd+4gIToCUA11w2iKdptTjwp/1HNaBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-execution.channel-attach
 availability: daemon_only
 record_thread: false
 required_caps: []
 description: "Attach one authenticated protected supervisor occurrence"
+disclosure:
+  principal:
+    - "/schema"
+    - "/binding"
+    - "/binding_digest"

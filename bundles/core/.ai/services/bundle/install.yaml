@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T09:39:40Z:80e6eeb0fa9be828e6b3134178148c323d8cda055129f0a99978f07e27ede2ad:OQZIN0AfkL2vXV9FJ1TAA4A2RizthMf0AlKmkTHkIyAOMKfK+LFOJsCj6duollXZRBTlj2SVgmmULH6l7bXBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:aa3de5ba4b00ebb7753b7107787812e46c9ef568e9a2baafc3846322785bb1f0:+0FMpaAawdB/kIrUlKui/WgeXSBgBOsJLHHyEGumLDLDi4+zxdo089Wh9XpPQt2s97qf3x/MpY10zonGoSwuDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.install
 availability: stopped_node
@@ -10,3 +10,5 @@ schema:
   preserve_runtime_artifacts: boolean?
   invalidate_bindings: array?
 description: "Install or replace a downstream bundle (NOT core; core is the packaged base laid down at system_data_dir). Copies source_path into <system_space_dir>/.ai/bundles/<name>/ and registers it. Preflight verifies signatures and metadata anchoring before mutation. Stopped-node authority is required; use --replace to update an existing installed bundle. Use --preserve-runtime-artifacts when replacing from a sparse source that omits installed runtime artifacts such as .ai/bin, .ai/objects, or .ai/refs. A replacement that would leave installed node bindings pinning artifacts it removes is refused (replacement_strands_bindings) unless invalidate_bindings names each stranded binding as <section>/<id>."
+# Stopped-node bundle installation copies local source paths into the node; the node operator only.
+disclosure: {}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:3837ed96fe23ea4b2dce9300f50672395eef539543cae7cfa7ae688fc5e92c05:asYf+0p1yynKcg4/mH5mvh6G/AAQT8u6uIVtijG6AfXw1XcSd0sktb4RVfUQUa6VF5/dmHwY08aigSp70225CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:b6df9de450694639e087281264061640f5f4e6dd953eb81efe5cf66484a1bc13:fZko0RP6yOvRqCDdMETq1kN12RusbdnWD19ZsfyJUjd2O2nY0979XLtwTxo9xYQTNkKS8NCy8OzGXv83ZGCHCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/inspect
 version: "1.0.0"
@@ -8,3 +8,56 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /thread/thread_id
+    - /thread/chain_root_id
+    - /thread/kind
+    - /thread/status
+    - /thread/item_ref
+    - /thread/executor_ref
+    - /thread/launch_mode
+    - /thread/current_site_id
+    - /thread/origin_site_id
+    - /thread/upstream_thread_id
+    - /thread/created_at
+    - /thread/updated_at
+    - /thread/started_at
+    - /thread/finished_at
+    - /thread/execution
+    - /outcome_coverage
+    - /events_truncated
+    - /pending
+    - /usage/*/label
+    - /usage/*/value
+    - /execution_meta/*/label
+    - /execution_meta/*/value
+    - /execution_coverage
+    - /launch_facts/*/state
+    - /launch_facts/*/reason
+    - /launch_facts/*/execution_realization_hash
+    - /evidence_coverage
+  free_text:
+    - /thread/requested_by
+    - /thread/project_authority
+    - /thread/admitted_launch_capsule_hash
+    - /thread/result_project_snapshot_hash
+    - /thread/result_workspace_output_capture_hash
+    - /children
+    - /facets
+    - /events
+    - /follow
+    - /thread_meta
+  interim_free_text:
+    - /thread/project_root  # removed by: m4
+    - /result/outcome_code  # removed by: per-chain publication
+    - /result/error  # removed by: per-chain publication
+    - /artifacts/*/artifact_id  # removed by: per-chain publication
+    - /artifacts/*/artifact_type  # removed by: per-chain publication
+    - /artifacts/*/metadata  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_enforced  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_policy_digest  # removed by: per-chain publication
+    - /launch_facts/*/properties/isolation_backend_inspection_digest  # removed by: per-chain publication
+  max_items: 512
+  max_result_bytes: 2097152

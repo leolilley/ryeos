@@ -3529,6 +3529,7 @@ async fn dispatch_via_method_executor(
             method: Some(method),
             args: Some(args.clone()),
         }),
+        disclosure_class: ctx.disclosure_class,
     };
 
     let dispatch_req = DispatchRequest {
@@ -3977,6 +3978,7 @@ fn dispatch_daemon_owned_inner(
         engine: ctx.engine.clone(),
         plan_ctx: ctx.plan_ctx.clone(),
         requested_call: ctx.requested_call.clone(),
+        disclosure_class: ctx.disclosure_class,
     };
     let state = state.clone();
 
@@ -6460,6 +6462,7 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                                     args: Some(args),
                                                 },
                                             ),
+                                            disclosure_class: ctx.disclosure_class,
                                         };
                                         let mut target = preflight_root_dispatch_with_remote_consumer(
                                             &target_ref,
@@ -6747,6 +6750,7 @@ pub fn preflight_root_dispatch_for_provenance_with_remote_consumer(
             .resolution_plan_context_for(&ctx.plan_ctx)
             .map_err(DispatchError::Internal)?,
         requested_call: ctx.requested_call.clone(),
+        disclosure_class: ctx.disclosure_class,
     };
     let mut admitted = preflight_root_dispatch_with_remote_consumer(
         item_ref,
@@ -7449,6 +7453,7 @@ metadata:
                 node_trust_store,
             )),
             plan_ctx: test_plan_context(bundle_root),
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         }
     }
@@ -7494,6 +7499,7 @@ metadata:
                 scheduled_fire: None,
                 validate_only: false,
             },
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         }
     }
@@ -9477,6 +9483,7 @@ runtime_authority:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx,
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         };
         // `unknown` kind has no schema; only `runtime` was loaded.

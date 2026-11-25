@@ -1,7 +1,18 @@
-# ryeos:signed:2026-07-06T08:36:51Z:e9a1e4a3bc50bcd10cf456186e70a1414c52c9d917b2eaf5b931008e16b5d67a:YBj5qOdSlh/bJdWjk7tCCJfMbCPkWoTHLcJZHCfZi1lcg8IXZGjllBIoL4xEOoxFSZo652Qi3ic3ItQLylKgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:8959fb3d0de6e07f979460a6a53a8768b2027fd52b16f7cdbd758adf926c42ab:TUfUXXYwsqxtdl688pMnHLIWWhtF9OZ32wp2LUsXYIFK+XNyiKUZrtauMO4ere1zCIjoXofEIcriKOPG+5UjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/resolve
 version: "1.0.0"
 description: Resolve one project registry entry by opaque local id.
 endpoint: projects.resolve
 availability: daemon_only
+disclosure:
+  principal:
+    - "/project/local_id"
+    - "/project/added_at"
+    - "/project/exists"
+    - "/project/current"
+    - "/project/registered"
+  free_text:
+    - "/project/name"
+    - "/project/root"
+    - "/project/tags"

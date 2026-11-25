@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T14:13:53Z:4cf35764939337f24ac085c9b54adf5441e014dc91cb14b59b06dfb908986b31:CwZaoJIwA8/ToDCedr92O2szN5UYZ5Wrw3A+YAs8WTuHfQ/sGtTrV0XGUdDmFLZ8Vmjhbvwb7lDi+zlXmuO8DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:2dd1158aaba3d11ad9f4b8ecac8eeb0c5c5b054396c793bdbf2f8cef04e5aba7:wRhsrLeA41lBuIOA/Vjd+XRbdFfIl+4MMnF0rbOlkzFN/t8fhKXh4OKHS+BE+KNKxPlgWOIi/ivNxcVJ9AJ2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: system.push-head
@@ -11,3 +11,12 @@ schema:
   expected_previous_hash: json
   required_origin_site_id: string?
 description: "Write a principal-scoped project HEAD ref using an explicit nullable expected_previous_hash and optional signed forwarding-origin assertion"
+disclosure:
+  principal:
+    - "/principal_key"
+    - "/project_hash"
+    - "/snapshot_hash"
+    - "/tree_entries"
+    - "/idempotent"
+  free_text:
+    - "/project"

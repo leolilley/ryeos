@@ -127,6 +127,12 @@ pub fn resolve_pin(
     }
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // A remote pin decides whose signatures the node accepts from that
     // remote, so only the configured local operator may make one.
@@ -154,12 +160,24 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .remote
         .clone()
         .or_else(|| descriptor.as_ref().map(|d| d.name.clone()))
-        .context("remote name required: pass a remote name or descriptor.name")?;
+        .ok_or_else(|| {
+            refuse(
+                "remote_name_required",
+                400,
+                "remote name required: pass a remote name or descriptor.name",
+            )
+        })?;
     let remote_url_input = req
         .url
         .clone()
         .or_else(|| descriptor.as_ref().and_then(|d| d.url.clone()))
-        .context("remote URL required: pass --url or a descriptor that carries one (an inbound-only descriptor is pinned with `ryeos remote pin`)")?;
+        .ok_or_else(|| {
+            refuse(
+                "remote_url_required",
+                400,
+                "remote URL required: pass --url or a descriptor that carries one (an inbound-only descriptor is pinned with `ryeos remote pin`)",
+            )
+        })?;
     let remote_url = config::normalize_url(&remote_url_input)?;
     if let Some(descriptor) = descriptor.as_ref()
         && descriptor
@@ -167,10 +185,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             .as_deref()
             .is_some_and(|url| url != remote_url)
     {
-        anyhow::bail!(
-            "remote descriptor URL is not canonical; expected '{}'",
-            remote_url,
-        );
+        return Err(refuse(
+            "remote_descriptor_url_not_canonical",
+            400,
+            format!(
+                "remote descriptor URL is not canonical; expected '{}'",
+                remote_url,
+            ),
+        ));
     }
 
     validate_expected_fingerprint(req.expect_fingerprint.as_deref())?;
@@ -182,36 +204,44 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     if let Some(descriptor) = descriptor.as_ref() {
         if pubkey.signing_key != descriptor.node.public_key {
-            anyhow::bail!(
-                "remote descriptor key mismatch for '{}': descriptor pins {}, live node reports {}",
-                remote_name,
-                descriptor.node.public_key,
-                pubkey.signing_key,
-            );
+            return Err(refuse(
+                "remote_descriptor_key_mismatch",
+                409,
+                format!(
+                    "remote descriptor key mismatch for '{}': descriptor pins {}, live node reports {}",
+                    remote_name, descriptor.node.public_key, pubkey.signing_key,
+                ),
+            ));
         }
         if pubkey.fingerprint != descriptor.node.fingerprint {
-            anyhow::bail!(
-                "remote descriptor fingerprint mismatch for '{}': descriptor pins {}, live node reports {}",
-                remote_name,
-                descriptor.node.fingerprint,
-                pubkey.fingerprint,
-            );
+            return Err(refuse(
+                "remote_descriptor_fingerprint_mismatch",
+                409,
+                format!(
+                    "remote descriptor fingerprint mismatch for '{}': descriptor pins {}, live node reports {}",
+                    remote_name, descriptor.node.fingerprint, pubkey.fingerprint,
+                ),
+            ));
         }
         if pubkey.site_id != descriptor.site_id {
-            anyhow::bail!(
-                "remote descriptor site_id mismatch for '{}': descriptor binds {}, live node reports {}",
-                remote_name,
-                descriptor.site_id,
-                pubkey.site_id,
-            );
+            return Err(refuse(
+                "remote_descriptor_site_id_mismatch",
+                409,
+                format!(
+                    "remote descriptor site_id mismatch for '{}': descriptor binds {}, live node reports {}",
+                    remote_name, descriptor.site_id, pubkey.site_id,
+                ),
+            ));
         }
         if pubkey.vault_fingerprint != descriptor.vault_fingerprint {
-            anyhow::bail!(
-                "remote descriptor vault_fingerprint mismatch for '{}': descriptor binds {}, live node reports {}",
-                remote_name,
-                descriptor.vault_fingerprint,
-                pubkey.vault_fingerprint,
-            );
+            return Err(refuse(
+                "remote_descriptor_vault_fingerprint_mismatch",
+                409,
+                format!(
+                    "remote descriptor vault_fingerprint mismatch for '{}': descriptor binds {}, live node reports {}",
+                    remote_name, descriptor.vault_fingerprint, pubkey.vault_fingerprint,
+                ),
+            ));
         }
     }
     let pin_source = resolve_pin(

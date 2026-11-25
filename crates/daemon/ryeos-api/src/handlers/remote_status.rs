@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -52,7 +53,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 })
                 .collect();
             if invalid.is_empty() {
-                return Err(e);
+                return Err(typed_refusal("remote_not_found", 404, format!("{e:#}")).into());
             }
             anyhow::bail!(invalid.join("\n"));
         }

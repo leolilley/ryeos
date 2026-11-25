@@ -84,6 +84,14 @@ impl AdmittedOperatorAuthority {
     }
 }
 
+/// The refusal a caller that is not the operator gets: a stable code with a 403
+/// so a non-operator never reads it as a node fault. The sentence stays the
+/// context of the error, so a log or a test reads it as before.
+fn not_operator(code: &str, message: &str) -> anyhow::Error {
+    anyhow::Error::new(crate::handler_error::typed_refusal(code, 403, message))
+        .context(message.to_owned())
+}
+
 /// Require the app root's exact local configured operator.
 pub fn require_local_configured_operator(
     state: &AppState,
@@ -95,15 +103,49 @@ pub fn require_local_configured_operator(
     if context.authorized_key_class != Some(AuthorizedKeyPrincipalClass::LocalClient)
         || context.authenticated_origin_site_id.is_some()
     {
-        bail!("action requires a local_client configured operator");
+        return Err(not_operator(
+            "local_operator_required",
+            "action requires a local_client configured operator",
+        ));
     }
     let operator =
         ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
             .context("load configured local operator identity")?;
     if context.fingerprint != operator.principal_id() {
-        bail!("local action requires the configured local operator");
+        return Err(not_operator(
+            "local_operator_required",
+            "local action requires the configured local operator",
+        ));
     }
     Ok(operator.fingerprint().to_owned())
+}
+
+/// How much of a service's answer the acting key may see. A key the node
+/// admits as its operator (the configured local operator, or a verified,
+/// origin-bound remote principal forwarded as one) sees the whole answer; any
+/// other verified key sees the tiers a service declares for principals; no
+/// verified key sees the public tier. The class comes from the key and its
+/// grant only: never from the kind of client holding the key. A failure to
+/// establish the operator is not the operator.
+pub fn disclosure_class_for(
+    state: &AppState,
+    context: &HandlerContext,
+) -> ryeos_node_runtime::disclosure::DisclosureClass {
+    use ryeos_node_runtime::disclosure::DisclosureClass;
+    if context.require_verified().is_err() {
+        // No verified key. A live browser session holds the grant the node
+        // minted for it, carried in its own field; that makes it a principal.
+        // Any other caller with no verified key is the public.
+        return if context.minted_session_grant().is_some() {
+            DisclosureClass::Principal
+        } else {
+            DisclosureClass::Public
+        };
+    }
+    if require_admitted_operator(state, context).is_ok() {
+        return DisclosureClass::Operator;
+    }
+    DisclosureClass::Principal
 }
 
 /// Require either the exact local operator or a verified, origin-bound
@@ -126,13 +168,18 @@ pub fn require_admitted_operator(
         (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), Some(_)) => {
             remote_principal_fingerprint(context)
         }
-        (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => {
-            bail!("operator actions reject remote_node grants")
-        }
-        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => {
-            bail!("remote_principal request has no authenticated source-node forwarding proof")
-        }
-        _ => bail!("action requires an authenticated admitted-operator class"),
+        (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => Err(not_operator(
+            "operator_rejects_remote_node",
+            "operator actions reject remote_node grants",
+        )),
+        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => Err(not_operator(
+            "operator_origin_proof_missing",
+            "remote_principal request has no authenticated source-node forwarding proof",
+        )),
+        _ => Err(not_operator(
+            "operator_class_required",
+            "action requires an authenticated admitted-operator class",
+        )),
     }
 }
 

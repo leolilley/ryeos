@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:47Z:3aa51b0472cc900cf2b76813b71769e07a34b1c184874e9e9989d533267eddea:XczWnRgTRM+8musownwBd8y7n7NlAibplhiYgmua4l3RWOD/QQ2fa2Ls3+IPXzBTffNjGqC455aZMCPE8hlHDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:1b97ca97b9313d56c8e108b47d73014d36561529f0e11346b93084bc57be3a39:DYlvaTWBpIcGeZU7O9bbsjdyCnJjw5wIjy4/S42NqJHLyPKxGG/NrTwYLc5Wh1druMNVmk2wL9Fu+m32c2MuCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.logs
 availability: local
@@ -8,3 +8,5 @@ schema:
   app_root: string?
   lines: integer?
 description: "Tail the local node's trace events and startup stderr from the app root as a local inspection; the daemon may remain running."
+# Trace events and startup stderr are log lines; operator-only.
+disclosure: {}

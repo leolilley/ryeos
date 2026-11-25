@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:05:27Z:3760fe5e0e8af3349c160322e8e9957d51dd86e489d91d2f2e3046dcf14df8bc:4ASQ1D6tI4682zqMzxiBevaJMQQjpGoV0tuGLOknSin9QAbZPPmKTfZbgfm9dlJ3jqoNBKko/7NEnGcyFnipBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:335f91fe03f14acb864c1a5ca14d7a46c1c7d4d93db096cdf644b55ec5ccf741:/5Zz9GW8LcANiBmGp/7NJgDTjLNGqZF8gkSVRcjRF5BL6M4DisiqO9MzmNeq4CFtk4jjLcBXPxCKOwl607GjDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/capabilities
 version: "1.0.0"
@@ -13,3 +13,26 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /host/class
+    - /host/profile
+    - /host/kernel
+    - /isolation/mode
+    - /floor/admitted
+    - /proofs/*/name
+    - /proofs/*/state
+    - /proofs/*/grade
+    - /proofs/*/provider
+    - /report/state
+    - /report/verified
+    - /report/signer
+    - /report/digest
+    - /report/measured_at
+    - /granted/*
+  free_text:
+    - /floor/unmet
+    - /proofs/*/basis
+    - /proofs/*/reason
+    - /report/reason

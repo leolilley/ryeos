@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:9e45a130847e4881c596cd5620cd561ea3f301a9673ee3c41def98073f286f90:SRGv3fi5u99cYFsATxR6qD3EdOZij/Sg85EMwo2x9FNe5MYHm1hIVChx2nSAgmK4VW940uCIaAc6Up/x1hD7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:0fa81ec46ba4cab4e62922ea2237e6606699b4c65bf9aa03fd88701cb5c201d4:WVBx/BY2w+VZIc+upFXPEhw/+GO1JeFvp+oTeFRMrmt11t6xv/Wu+mRm3Fr/lYx8ytNOoPyv+uAbn/GFZMJEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-transfer
 version: "1.0.0"
@@ -7,3 +7,12 @@ endpoint: ui.seat.transfer
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/operation_id"
+    - "/outcome"
+    - "/inbound"
+    - "/preparation"
+    - "/acceptance"
+    - "/activation"
+    - "/decision"

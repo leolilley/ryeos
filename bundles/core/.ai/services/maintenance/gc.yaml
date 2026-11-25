@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:47Z:dd0f0e1b244b90352b104dfd4313cc305df9db40e19e7fcfc7300ddd34376231:X2rHKrXCVBZ58TYc4/CTpyRb7JdmhbqZivmFvS2BKmYD8BLa225G2az7oWwnnFAn41TsdXr5Kvyq3L+j3egLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:fb94b8341f04bedb5d63e37ed7548e7986208a282a092913a3d84089fca2fbab:dc+9J7jRbClP5yaQLW+4Vy3VStyVsCH5pqhyxeD1KDfeWq0FWIbFIHeVlweOPPztsWoCPDt4JU8npket+8uBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: maintenance.gc
 availability: both
@@ -17,3 +17,5 @@ schema:
   seat_lease_grace_seconds: integer?
   durable_cas_upload_max_age_seconds: integer?
 description: "Run maintenance garbage collection with write-barrier quiescence and lease-aware deep cache eviction"
+# Garbage collection is a node maintenance tool; nothing for a principal.
+disclosure: {}

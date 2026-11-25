@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:a7d86ff0298e8cd7be59a20fcfc65de07a8ede41444496fb4b690d668160b4f6:3Jse+QPhkeaoYfr7f9c6PXNCTeAIAzkBhFGa083TF0z58/jhNpSFMBfCuGLlSfkZC/BdEWb39hHEudXbmcgNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:347d3dfd5af12c7e4c2d975d1517176396b7b915e6f81483b5b444e3f40920fa:TmYcqZBhSbzPYNoSNt03WFlA/BTBPriJioCwXOB10cQbn5qPnSEXkUcv/hGfd5LqwWrdjB4JUZ5D28FGWNQlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: catalog-remote-publish
 version: "1.0.0"
@@ -12,3 +12,5 @@ schema:
   catalog_namespace: string
   candidate_publication_attestation_hash: string
   expected_catalog_head: string?
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

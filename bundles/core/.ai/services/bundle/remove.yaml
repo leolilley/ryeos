@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:46Z:a1902edab7a1120f87c2ea5e16bc23b316153803b71e8600d55a0b7955130486:AqO58vDO2mGF9ZQECBII4TYhafxwZQh7mE8XsrCS+3IUEE8RxsFj8HLpW0X2px9hWGrDm7T+SGlRIg1CCakbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:a24b7ed67e6acf6fda4e1121860f42a887efec1cc96f3479eaa1731459f463ca:RpqwFV6DcmreoUQtZ+7YPxnHKJukjZSPkdPtdyK3GUU1J1QxL3AEVixZdI0MaKytSj1hZYVXosN091pzMaKxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.remove
 availability: stopped_node
@@ -6,3 +6,5 @@ required_caps: ["ryeos.execute.service.bundle/remove"]
 schema:
   name: string
 description: "Remove an installed bundle: delete <system_space_dir>/.ai/node/bundles/<name>.yaml and <system_space_dir>/.ai/bundles/<name>/. Stopped-node authority is required."
+# Bundle removal runs only on a stopped node under its operator; no principal is served.
+disclosure: {}
