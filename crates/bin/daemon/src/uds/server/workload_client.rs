@@ -1332,10 +1332,18 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(matches!(
-            attempt(&collect_grant(true, true)),
-            WorkloadClientOutcome::Collected { .. }
-        ));
+        // The permitted case reads the terminal child's result; the refusals
+        // below must never reach that read.
+        let permitted = collect_outcome(
+            &collect_grant(true, true),
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || Ok(None),
+            no_secrets,
+        )
+        .unwrap();
+        assert!(matches!(permitted, WorkloadClientOutcome::Collected { .. }));
         let no_collect = attempt(&collect_grant(true, false));
         let no_detached = attempt(&collect_grant(false, false));
         let collect_without_detached = attempt(&collect_grant(false, true));
