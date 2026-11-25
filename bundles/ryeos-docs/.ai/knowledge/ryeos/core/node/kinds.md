@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-25T05:41:27Z:8cddcd2ee86c79249c2dbf3e75dbfc82c4db632693decbfee6f78573650b7fd2:od5+42kD/oGJjre2EdK7IV1IJDwA7WXilxcOBzNWsVDAtNe3+qELEs5X29ZamBg0tLCyM9hRQ5tWLi7RzAMUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T06:55:13Z:d24fee4f6521c0b1912f50c5b59b31cb72e74fc344ff011b685fc619d3701e52:AW61HVSzsmufqs3IKXnJRD9apnxwyiysEsg6kZmXHxq9H/Tmv8b1PxL8/KQqmIRKPeGHzpSQpGpzqwKRHh3WDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
@@ -173,3 +173,9 @@ launch, while a declared `none` passes. `none` is a preflight judgement only;
 capsules and receipts still name only `recorded` or `sealed`, so a durable
 request against a `none` subject is ineligible. Only a signed kind schema can
 declare `none`; an item that authors `none` at a path declaration is refused.
+Kind schemas load only from installed node bundles, each signature-checked against
+the trust store, and the first one found for a kind wins; there is no project
+overlay and no separate check that the signer is the core publisher. So any
+installed bundle from a trusted signer can declare `none` for its own kind: it
+is that kind author's claim, and trust in it follows the pinned publisher and
+the installed bundle.
