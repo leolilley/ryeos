@@ -650,6 +650,11 @@ pub const DAEMON_AUTHORED_EVENT_TYPES: &[&str] = &[
     ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
     ryeos_state::event_types::ATTENTION_ACKNOWLEDGED,
     ryeos_state::event_types::LAUNCH_BINDING_REBOUND,
+    // Birth and start: written by the daemon when it creates and starts a
+    // thread. A runtime-written one would let a thread restate the chain's
+    // usage subject.
+    ryeos_state::event_types::THREAD_CREATED,
+    ryeos_state::event_types::THREAD_STARTED,
     // Terminal lifecycle: written only when the daemon finalizes a thread.
     ryeos_state::event_types::THREAD_COMPLETED,
     ryeos_state::event_types::THREAD_FAILED,
@@ -1102,12 +1107,8 @@ mod tests {
     /// Every other registered type, which a runtime may append. A new event
     /// type must be placed in one of these lists or in
     /// `DAEMON_AUTHORED_EVENT_TYPES`, so a type with a daemon writer is
-    /// classified when it is added. `thread_created` and `thread_started` are
-    /// written by the daemon at birth and stay appendable here only because the
-    /// refusal set is the explicit list above.
+    /// classified when it is added.
     const RUNTIME_APPENDABLE: &[&str] = &[
-        "thread_created",
-        "thread_started",
         "stream_opened",
         "token_delta",
         "stream_snapshot",
@@ -1176,6 +1177,8 @@ mod tests {
             "provider_call_observation_recorded",
             "attention_acknowledged",
             "launch_binding_rebound",
+            "thread_created",
+            "thread_started",
             "thread_completed",
             "thread_failed",
             "thread_killed",

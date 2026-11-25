@@ -2271,7 +2271,11 @@ async fn handle_execute(
     // linked; this is the one place that holds the retained action intent for
     // every inline child, so a child born by a path with no launch-site record
     // (a method or in-process service child) still gets its edge. The append
-    // is idempotent and never fails the caller's result.
+    // is idempotent and never fails the caller's result. A failed write is
+    // only a warning here: a reader that needs the edge (qualification,
+    // collecting a child's result) must fail closed when the edge is missing
+    // and must never rebuild it from what a runtime claims about its own
+    // children.
     if let Some(child_thread_id) = retained_runtime_action_child_id.as_deref()
         && state.threads.get_thread(child_thread_id)?.is_some()
     {
