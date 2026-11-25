@@ -390,6 +390,19 @@ fn signer_of(found: &Found) -> Option<&str> {
     }
 }
 
+/// The signer's standing at read time. The node's own key is `node`: the
+/// verifier pins that signer to this node's identity. A signer whose standing
+/// can change (an operator or a publisher key) reports `active`, `retired` or
+/// `revoked` once such a kind exists and its resolver is in; no kind that needs
+/// it is declared yet. `signing_principal` is absent, never null, until a
+/// person-signed kind exists.
+fn signer_status_of(kind: &UsableKind, found: &Found) -> Option<&'static str> {
+    match (found, kind.verifier) {
+        (Found::Verified { .. }, Verifier::NodeSignedJsonDigest) => Some("node"),
+        _ => None,
+    }
+}
+
 fn verify_object(kind: &UsableKind, found: &Found) -> Value {
     let (status, reason, detail, fresh) = match found {
         Found::Verified {
@@ -409,6 +422,7 @@ fn verify_object(kind: &UsableKind, found: &Found) -> Value {
         "status": status,
         "scheme": kind.verifier.name(),
         "signer": signer_of(found),
+        "signer_status": signer_status_of(kind, found),
         "reason": reason,
         "detail": detail,
         "fresh": fresh,
@@ -485,6 +499,7 @@ fn unverified_kind_answer(name: &str, reason: &str) -> Value {
             "status": "unverified_kind",
             "scheme": null,
             "signer": null,
+            "signer_status": null,
             "reason": reason,
             "fresh": null,
         },
@@ -771,6 +786,14 @@ mod tests {
         let mut decl = declaration();
         decl[field] = value;
         decl
+    }
+
+    #[test]
+    fn a_failed_read_has_no_signer_standing_and_no_signing_principal() {
+        let kind = usable(declaration());
+        let verify = verify_object(&kind, &Found::Absent);
+        assert!(verify["signer_status"].is_null());
+        assert!(verify.get("signing_principal").is_none());
     }
 
     #[test]
