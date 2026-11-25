@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T18:53:31Z:a8ec723a734d40c8e9e0b95a71671a13e50307a53443ffc134bd1b421164acb9:IzwRmfycNHN6a87OI19WI4lCai+H9x4rTYcy/nWrYC563/QQEJwVKJ/m+lvehaajxCLE6sOtHWgJV7cdjc++AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T18:56:52Z:c3dd4ebbbc37d4a2e332f5d651037d7cdb80a6414c2ae47b30ce4285426b9461:yosQq9B4Mlz3Ef+1r8fRNvE8kOhH+tcSZka6UIs0s049aH7R0y06SoKIOApRP+w9uJZKboeLdYZa4EwKmSIJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.get
 availability: both
@@ -25,7 +25,27 @@ disclosure:
     - "/verify/scheme"
     - "/verify/reason"
     - "/verify/fresh"
+    - "/verify/signer_status"
+    - "/body/schema"
+    - "/body/generated_at"
+    - "/body/composition/host_class"
+    - "/body/floor/admitted"
+    - "/body/host/kernel_kind"
+    - "/collections/provided/*/name"
+    - "/collections/provided/*/source"
+    - "/collections/provided/*/provider"
+    - "/collections/missing/*/name"
+    - "/collections/floor_met/*/label"
+    - "/collections/floor_met/*/name"
+    - "/collections/floor_met/*/source"
+    - "/collections/floor_met/*/provider"
+    - "/collections/floor_unmet/*/label"
+    - "/collections/capacity/*/name"
+    - "/collections_coverage/provided"
+    - "/collections_coverage/missing"
+    - "/collections_coverage/floor_met"
+    - "/collections_coverage/floor_unmet"
+    - "/collections_coverage/capacity"
   free_text:
-    - "/body"
     - "/verify/signer"
     - "/verify/detail"

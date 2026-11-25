@@ -440,13 +440,33 @@ fn signer_status_of(kind: &UsableKind, found: &Found) -> Option<&'static str> {
     }
 }
 
+/// The stable code of a stale report's reason. The reason's sentence names a
+/// policy generation or says the host restarted; a seat reads the code, and the
+/// sentence stays in `detail` for the operator.
+fn stale_code(reason: &str) -> &'static str {
+    if reason.starts_with("the host restarted") {
+        "host_restarted"
+    } else if reason.starts_with("node policy generation is now") {
+        "policy_generation_changed"
+    } else if reason.starts_with("the current node policy generation is unreadable") {
+        "policy_generation_unreadable"
+    } else {
+        "stale"
+    }
+}
+
 fn verify_object(kind: &UsableKind, found: &Found) -> Value {
     let (status, reason, detail, fresh) = match found {
         Found::Verified {
             fresh,
             stale_reason,
             ..
-        } => ("verified", stale_reason.clone(), None, *fresh),
+        } => (
+            "verified",
+            stale_reason.as_deref().map(stale_code).map(str::to_owned),
+            stale_reason.clone(),
+            *fresh,
+        ),
         Found::Failed { code, message } => (
             "failed",
             Some((*code).to_owned()),
@@ -939,6 +959,24 @@ mod tests {
             ]),
         ] {
             assert!(resolve_decl("capability_report", with("collections", bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_stale_reasons_sentence_stays_in_detail_and_its_code_is_the_reason() {
+        for (sentence, code) in [
+            ("the host restarted since this report", "host_restarted"),
+            (
+                "node policy generation is now a, not b",
+                "policy_generation_changed",
+            ),
+            (
+                "the current node policy generation is unreadable",
+                "policy_generation_unreadable",
+            ),
+            ("anything else, /home/x", "stale"),
+        ] {
+            assert_eq!(stale_code(sentence), code);
         }
     }
 

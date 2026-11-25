@@ -274,16 +274,72 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
         "node_pid",
         "uid_map",
         "fp:node",
-        "signer",
+        "\"signer\"",
+        "probe failed",
     ] {
         assert!(
             !text.contains(gone),
             "principal view leaks `{gone}`: {text}"
         );
     }
-    assert!(shown.get("body").is_none());
-    assert!(shown.get("collections").is_none());
-    assert!(shown.get("collections_coverage").is_none());
+    // What the capability view exists to show: names, grades, providers and the
+    // closed coverage words, by literal collection name.
+    assert_eq!(shown["verify"]["signer_status"], "node");
+    assert_eq!(shown["body"]["composition"]["host_class"], "container");
+    assert_eq!(shown["body"]["floor"]["admitted"], true);
+    assert_eq!(shown["body"]["host"]["kernel_kind"], "native");
+    let provided = &shown["collections"]["provided"][0];
+    assert_eq!(provided["name"], "isolation:pid_ns");
+    assert_eq!(provided["source"], "measured");
+    assert_eq!(provided["provider"], "pid_namespace_init");
+    assert!(provided.get("basis").is_none(), "{provided}");
+    assert_eq!(
+        shown["collections"]["missing"],
+        json!([{"name": "quiescence:pid_namespace"}]),
+        "a missing proof is named without its reason"
+    );
+    assert_eq!(
+        shown["collections"]["floor_unmet"],
+        json!([{"label": "quiescence"}])
+    );
+    assert_eq!(
+        shown["collections"]["floor_met"][0],
+        json!({"label": "isolation", "name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init"})
+    );
+    assert_eq!(
+        shown["collections"]["capacity"],
+        json!([{"name": "enclosure_memory_max_bytes"}]),
+        "capacity is named and carries no number"
+    );
+    for collection in [
+        "provided",
+        "missing",
+        "floor_met",
+        "floor_unmet",
+        "capacity",
+    ] {
+        assert_eq!(shown["collections_coverage"][collection], "present");
+    }
+    // The body itself is only the named leaves.
+    assert!(shown["body"].get("credential_home").is_none());
+    assert!(shown["body"].get("provided").is_none());
+}
+
+/// A node whose report says nothing of enforcement carries no
+/// `isolation:enforced` row, so a seat is told nothing of posture: the
+/// posture is that row's presence, never computed here.
+#[test]
+fn a_report_silent_on_enforcement_shows_no_posture_row() {
+    let mut silent = answer();
+    silent["collections"]["provided"] = json!([]);
+    let shaping = call(&standard(), GET, report_request()).expect("admitted");
+    let shown = seat_view("get", &shaping, silent).expect("fits");
+    assert_eq!(shown["collections"]["provided"], json!([]));
+    assert!(
+        !serde_json::to_string(&shown)
+            .unwrap()
+            .contains("isolation:enforced")
+    );
 }
 
 #[test]

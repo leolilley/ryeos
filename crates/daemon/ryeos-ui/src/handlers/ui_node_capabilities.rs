@@ -60,6 +60,12 @@ pub struct Wording {
     pub grades: BTreeMap<String, Entry>,
     pub guarantees: BTreeMap<String, Entry>,
     pub grants: BTreeMap<String, Entry>,
+    /// The coverage word of each collection of a record read.
+    pub coverage_states: BTreeMap<String, Entry>,
+    /// The verification status of a record read.
+    pub verify_states: BTreeMap<String, Entry>,
+    /// The reason code of a record that failed or is stale.
+    pub verify_reasons: BTreeMap<String, Entry>,
 }
 
 impl Wording {
@@ -73,6 +79,9 @@ impl Wording {
                 &self.grades,
                 &self.guarantees,
                 &self.grants,
+                &self.coverage_states,
+                &self.verify_states,
+                &self.verify_reasons,
             ]
             .into_iter()
             .flat_map(BTreeMap::values),
@@ -212,5 +221,43 @@ mod tests {
         ] {
             assert!(wording.guarantees.contains_key(name), "{name}");
         }
+    }
+
+    #[test]
+    fn the_shipped_wording_covers_every_coverage_word_and_verify_code_and_a_missing_one_reads_not_known()
+     {
+        let wording = wording_from_config(shipped()).unwrap();
+        for word in [
+            "present",
+            "not_reported",
+            "not_a_map",
+            "key_field_collision",
+        ] {
+            assert!(wording.coverage_states.contains_key(word), "{word}");
+        }
+        for status in ["verified", "failed", "unverified_kind"] {
+            assert!(wording.verify_states.contains_key(status), "{status}");
+        }
+        for reason in [
+            "absent",
+            "unreadable",
+            "oversized",
+            "stale_format",
+            "digest_mismatch",
+            "wrong_signer",
+            "bad_signature",
+            "host_restarted",
+            "policy_generation_changed",
+            "policy_generation_unreadable",
+            "stale",
+        ] {
+            assert!(wording.verify_reasons.contains_key(reason), "{reason}");
+        }
+        // A code no table lists reads as the fallback, which says "not known".
+        assert!(
+            wording.fallback.label.to_lowercase().contains("not known"),
+            "{}",
+            wording.fallback.label
+        );
     }
 }
