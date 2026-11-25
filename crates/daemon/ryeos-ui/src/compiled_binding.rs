@@ -1463,7 +1463,6 @@ mod tests {
                 "schema": 1,
                 "reads": [{
                     "target": "service:test/read",
-                    "classes": ["local_operator", "hosted_principal"],
                     "keep": ["/value"],
                     "max_result_bytes": 1024,
                     "max_items": 10
