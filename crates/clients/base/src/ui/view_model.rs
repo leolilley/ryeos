@@ -815,6 +815,11 @@ pub enum RyeOsViewVm {
         /// dimming, alignment and width from it.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         column_roles: Vec<super::content::ColumnRole>,
+        /// Each column's signed drop priority, parallel to `columns`; `None`
+        /// leaves the column to its role's default drop order. Empty when no
+        /// column signs one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_priorities: Vec<Option<u8>>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
@@ -2080,6 +2085,13 @@ fn bound_view_vm_keyed(
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
             let column_roles = columns.iter().map(|col| col.role).collect();
+            let column_priorities: Vec<Option<u8>> =
+                columns.iter().map(|col| col.priority).collect();
+            let column_priorities = if column_priorities.iter().any(Option::is_some) {
+                column_priorities
+            } else {
+                Vec::new()
+            };
             let records = super::content::source_collection(binding, response);
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
@@ -2178,6 +2190,7 @@ fn bound_view_vm_keyed(
                 source_status: observation_status,
                 columns: column_labels,
                 column_roles,
+                column_priorities,
                 total_rows,
                 coverage: table_source_coverage(
                     binding,
