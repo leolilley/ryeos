@@ -2511,7 +2511,17 @@ async fn handle_execute(
                 child_thread_id,
                 "parent settled before the dispatched child's lineage event was recorded"
             ),
-            Ok(_) => {}
+            // Written now, or already written by a launch site: nothing owed.
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::Appended
+                | ryeos_app::state_store::ChildLineageAppendOutcome::AlreadyPresent,
+            )) => {}
+            // This child holds a retained action intent, so an event is owed;
+            // `NotOwed` here means the intent row went missing.
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::NotOwed) => tracing::warn!(
+                child_thread_id,
+                "the dispatched child has no retained action intent, so no lineage event was written"
+            ),
             Err(error) => tracing::warn!(
                 child_thread_id,
                 error = %error,
