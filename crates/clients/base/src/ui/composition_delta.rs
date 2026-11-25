@@ -387,6 +387,57 @@ mod tests {
         );
     }
     #[test]
+    fn a_rebind_carries_a_newer_seat_project_and_a_late_one_cannot_move_it_back() {
+        let (composition, mut request, descriptors, frontier) = fixture();
+        let successor = rebind_request(&mut request, &descriptors);
+        let from = request.owner.binding().clone();
+        // The successor generation carries the newer judgement.
+        let mut newer = successor.clone();
+        newer.seat_project = super::super::seat_project::UiSeatProject::Absent {
+            absence: super::super::seat_project::UiSeatAbsence::Unregistered,
+        };
+        let CompositionMutation::RebindAttachment { to, .. } = request.mutation.clone() else {
+            unreachable!()
+        };
+        request.mutation = CompositionMutation::RebindAttachment {
+            from: from.clone(),
+            to: to.clone(),
+            descriptor: Box::new(newer.clone()),
+        };
+        assert!(
+            stage_composition_delta(&composition, &request, 0, frontier, &descriptors, 65536)
+                .is_ok()
+        );
+        // An update staged at the source's own generation is not a
+        // successor, whatever seat project it carries. It is a fresh
+        // attachment id, so no retained descriptor can be the reason it is
+        // refused.
+        let mut late = newer.clone();
+        late.binding_attachment_id = "late-update".into();
+        late.binding_generation = descriptors[&from.binding_attachment_id].binding_generation;
+        let mut late_request = request.clone();
+        late_request.mutation = CompositionMutation::RebindAttachment {
+            from,
+            to: super::super::binding::UiBindingAttachmentCoordinate {
+                binding_attachment_id: late.binding_attachment_id.clone(),
+                binding_generation: late.binding_generation,
+                binding_digest: late.binding_digest.clone(),
+            },
+            descriptor: Box::new(late),
+        };
+        let refusal = stage_composition_delta(
+            &composition,
+            &late_request,
+            0,
+            frontier,
+            &descriptors,
+            65536,
+        )
+        .err()
+        .expect("a rebind at the source's generation is refused");
+        assert!(refusal.contains("successor"), "{refusal}");
+    }
+    #[test]
     fn rebind_closes_a_tile_whose_view_left_the_successor() {
         let (composition, request, descriptors, _) = fixture();
         let owner = request.owner.surface_instance_id().unwrap().clone();

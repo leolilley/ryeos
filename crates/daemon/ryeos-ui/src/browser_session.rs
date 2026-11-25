@@ -102,6 +102,10 @@ pub struct LaunchContext {
     /// Stable principal-registry identity. This is indexing identity, never a
     /// filesystem coordinate and never inferred from browser input.
     pub registered_project_id: Option<String>,
+    /// The project this session's root seat states, judged by the daemon when
+    /// it minted. Display data carried into the root descriptor; the daemon
+    /// never reads it back as authority.
+    pub seat_project: ryeos_client_base::ui::UiSeatProject,
 }
 
 /// Browser-visible coordinate for one exact admitted binding attachment.
@@ -132,6 +136,10 @@ pub struct AdmittedBindingAttachment {
     /// retained descriptor authority below.
     pub project_query_identity: Option<String>,
     pub project_authority: Option<Arc<lillux::PinnedDirectory>>,
+    /// The project this generation states, as the daemon judged it when it
+    /// admitted the generation. A later generation carries a later judgement.
+    /// Copied into the public descriptor and nowhere read as authority.
+    pub seat_project: ryeos_client_base::ui::UiSeatProject,
 }
 
 impl AdmittedBindingAttachment {
@@ -180,6 +188,7 @@ impl AdmittedBindingAttachment {
                     ryeos_client_base::ui::UiEffectivePosture::Interactive
                 }
             },
+            seat_project: self.seat_project.clone(),
             binding_request_bounds,
             named_items: self
                 .compiled_binding
@@ -198,6 +207,9 @@ pub struct BindingAttachmentCandidate {
     pub compiled_binding: Arc<crate::compiled_binding::SessionCompiledUiBinding>,
     pub presentation: ryeos_client_base::presentation::UiCompositionPresentation,
     pub project_authority: Option<Arc<lillux::PinnedDirectory>>,
+    /// The project the candidate states, judged by the daemon when it
+    /// compiled the candidate.
+    pub seat_project: ryeos_client_base::ui::UiSeatProject,
 }
 
 /// Store-linearized permission for already prepared work to cross UI dispatch
@@ -838,6 +850,7 @@ impl BrowserSessionStore {
                 compiled_binding: ctx.compiled_binding,
                 presentation: ctx.presentation,
                 project_authority: ctx.project_authority,
+                seat_project: ctx.seat_project,
             },
             &principal_id,
             current_policy_generation_digest,
@@ -2726,6 +2739,7 @@ fn build_attachment(
         presentation: candidate.presentation,
         project_query_identity,
         project_authority: candidate.project_authority,
+        seat_project: candidate.seat_project,
     })
 }
 
@@ -2894,6 +2908,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: Some(authority),
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             },
             "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
             &"22".repeat(32),
@@ -2925,6 +2940,7 @@ pub(crate) mod tests {
                     compiled_binding: attachment.compiled_binding.clone(),
                     presentation: attachment.presentation.clone(),
                     project_authority: attachment.project_authority.clone(),
+                    seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                 },
                 "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32)
@@ -2956,6 +2972,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             },
             "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
             &"22".repeat(32),
@@ -2976,6 +2993,7 @@ pub(crate) mod tests {
                     compiled_binding: context.compiled_binding,
                     presentation: context.presentation,
                     project_authority: None,
+                    seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                 },
                 "fp:7e577e577e577e577e577e577e577e577e577e577e577e577e577e577e577e57",
                 &"22".repeat(32)
@@ -3016,6 +3034,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let origin = ryeos_client_base::surface::saved_surfaces::SavedSurfaceOrigin {
@@ -3134,6 +3153,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let publish = |opening: &SurfaceOpenRequest, limit, fail| {
@@ -3268,6 +3288,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let policy = "22".repeat(32);
@@ -3823,6 +3844,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let record = |name: &str| ParticularSurfaceReceipt {
@@ -4086,6 +4108,7 @@ pub(crate) mod tests {
             user_principal_id: None,
             project_authority: None,
             registered_project_id: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         }
     }
 
@@ -4177,6 +4200,7 @@ pub(crate) mod tests {
                             compiled_binding: context.compiled_binding,
                             presentation: context.presentation,
                             project_authority: None,
+                            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                         },
                     }
                 })
@@ -4458,7 +4482,8 @@ pub(crate) mod tests {
                         registered_project_id: None,
                         compiled_binding: context.compiled_binding,
                         presentation: context.presentation,
-                        project_authority: None
+                        project_authority: None,
+                        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless
                     },
                     &limits(16, 8, 8, 128),
                     &policy,
@@ -4508,6 +4533,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let request = uuid::Uuid::new_v4().to_string();
@@ -4745,6 +4771,7 @@ pub(crate) mod tests {
                 compiled_binding: context.compiled_binding,
                 presentation: context.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             }
         };
         let (surface, attachment) = store
@@ -4949,6 +4976,7 @@ pub(crate) mod tests {
                     compiled_binding: test_shared_context().compiled_binding,
                     presentation: test_shared_context().presentation,
                     project_authority: None,
+                    seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                 },
                 4,
                 &"22".repeat(32),
@@ -5221,6 +5249,7 @@ pub(crate) mod tests {
                     ),
                     presentation: test_presentation(),
                     project_authority: None,
+                    seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
                 },
                 4,
                 &"22".repeat(32),
@@ -5279,6 +5308,7 @@ pub(crate) mod tests {
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             project_authority: None,
             registered_project_id: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         };
         let (session_id, token) = mint(&store, ctx);
         assert!(store.get_session(&session_id).is_none());
@@ -5610,6 +5640,7 @@ pub(crate) mod tests {
             ),
             presentation: test_presentation(),
             project_authority: Some(authority),
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         };
         assert!(matches!(
             store.publish_attachment(

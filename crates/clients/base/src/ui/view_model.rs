@@ -20,7 +20,9 @@ pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsT
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use session::{RyeOsChipMarkVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm};
+pub use session::{
+    RyeOsChipMarkVm, RyeOsProjectChipVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -3189,6 +3191,22 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
         posture: surface
             .map(|attachment| attachment.posture)
             .unwrap_or_default(),
+        // The active Surface's own binding states the project drawn: a rebind
+        // replaces it with a later generation, while the root's never changes.
+        project_chip: core
+            .active_surface()
+            .and_then(|active| core.binding_attachment(&active.binding().binding_attachment_id))
+            .or(surface)
+            .and_then(|attachment| {
+                super::seat_project::project_chip(
+                    &attachment.seat_project,
+                    core.data.coverage_wording.as_ref(),
+                )
+            })
+            .map(|chip| session::RyeOsProjectChipVm {
+                text: chip.text,
+                tone: tone_from_name(Some(&chip.tone)),
+            }),
     }
 }
 

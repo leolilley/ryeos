@@ -145,7 +145,7 @@ pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[
         filename: "ryeos_rune_bg.wasm.gz",
         content_type: "application/wasm",
         cache_control: "no-cache",
-        sha256: "bd067cd6eb5ed5c4af9c7c3c0577c1ad557cd132c8fce3ff61f04909da004513",
+        sha256: "8fe07cc96cb7e1465e4c4596016df3869ccb7221ce38677cc664815f28f618f0",
         encoding: Some("gzip"),
         imports: &[],
         bytes: include_bytes!("../../../clients/rune/pkg/ryeos_rune_bg.wasm.gz"),

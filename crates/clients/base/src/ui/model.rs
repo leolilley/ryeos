@@ -3976,6 +3976,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: Default::default(),
             }],
             ..Default::default()
@@ -4431,6 +4432,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: super::super::binding::UiBindingRequestBounds {
                     max_request_bytes: 4096,
                     max_input_bytes: 1024,

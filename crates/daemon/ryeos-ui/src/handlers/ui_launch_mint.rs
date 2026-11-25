@@ -181,6 +181,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             .into());
         }
     };
+    // The project the seat states, judged now from the seat key's live
+    // registration. It rides the descriptor as display data; later acts
+    // judge the project again in their own checks.
+    let seat_project =
+        crate::seat_project::resolve_for_binding(&state, &compiled_binding, &granted_caps)?;
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
         presentation,
@@ -189,6 +194,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         user_principal_id,
         project_authority,
         registered_project_id,
+        seat_project,
     };
 
     let (session_id, token, attachment) = get_ui_state(&state)
