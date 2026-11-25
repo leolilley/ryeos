@@ -433,4 +433,50 @@ mod tests {
             &Some("forged-capsule".to_string())
         ));
     }
+
+    fn minted(seat_project: ryeos_client_base::ui::UiSeatProject) -> SeatCaller {
+        let mut context = crate::browser_session::tests::test_context();
+        context.seat_project = seat_project;
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (_, _, attachment) = store
+            .mint_token(context, 4, &"22".repeat(32))
+            .expect("mint fixture");
+        SeatCaller::Attachment(attachment)
+    }
+
+    /// The seat project a descriptor carries is display data. A thread read
+    /// rebuilds its reader from the sealed binding and the live trust store,
+    /// so a binding minted `stated` whose registration has since lapsed, one
+    /// minted `absent` and one minted `projectless` read exactly the same
+    /// threads: nothing here follows the carried value, and the carried value
+    /// itself only changes when a successor generation is admitted.
+    #[test]
+    fn the_thread_reader_never_follows_the_carried_seat_project() {
+        use ryeos_client_base::ui::{UiSeatAbsence, UiSeatProject};
+
+        let stated = UiSeatProject::Stated {
+            project: format!("pid:v1:{}/snap-track", "ab".repeat(32)),
+        };
+        let carried = [
+            stated.clone(),
+            UiSeatProject::Absent {
+                absence: UiSeatAbsence::Unregistered,
+            },
+            UiSeatProject::Projectless,
+        ];
+        let callers = carried.iter().cloned().map(minted).collect::<Vec<_>>();
+        let readers = callers
+            .iter()
+            .map(|caller| thread_reader(caller).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(readers[0], readers[1]);
+        assert_eq!(readers[1], readers[2]);
+        // The descriptor still shows what was admitted: the chip does not move
+        // until a rebind carries a new judgement.
+        let SeatCaller::Attachment(attachment) = &callers[0] else {
+            unreachable!()
+        };
+        let descriptor = attachment.public_descriptor(Default::default());
+        assert_eq!(descriptor.seat_project, stated);
+    }
 }

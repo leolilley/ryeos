@@ -14,6 +14,7 @@ pub mod invokers;
 pub mod item_hints;
 mod phase_timing;
 pub mod seat_auth;
+mod seat_project;
 pub mod seat_read_policy;
 mod seat_stream_policy;
 pub mod session_authority;
