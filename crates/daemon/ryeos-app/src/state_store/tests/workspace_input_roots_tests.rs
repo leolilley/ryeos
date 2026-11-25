@@ -17,7 +17,7 @@ fn quiesced_detached_input(
 ) -> String {
     use runtime_db::RuntimeWorkspaceOperationPhase::{Quiescing, Reserved};
     let invocation = ryeos_runtime::workload_client::WorkloadInvocationSource::Cli {
-        external_request_id: format!("detached-{child}"),
+        external_request_id: format!("detached-{}", child.to_ascii_lowercase()),
     };
     let grant = "c".repeat(64);
     let boot = "a".repeat(64);
