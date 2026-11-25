@@ -1142,6 +1142,22 @@ impl DaemonHarness {
         .await
     }
 
+    /// A Core-only node with its own node and operator keys, for a test that
+    /// needs a second node holding no bundle beyond Core.
+    pub async fn start_fast_core_only_with_node_and_user_keys(
+        node_key: SigningKey,
+        user_key: SigningKey,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::CoreOnly,
+            |_state_path, _user_space, _fixture| Ok(()),
+            |_| {},
+        )
+        .await
+    }
+
     /// Cross-site fixture with distinct node and operator identities. This is
     /// the faithful shape for forwarding tests: the source operator must be an
     /// origin-bound remote authority on the target, never its local operator.
