@@ -771,11 +771,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 message: "a ceilinged thread's call lost its exact child preflight".to_owned(),
             })
         })?;
-        enforce_thread_ceiling(
-            &cap.thread_ceiling,
-            prepared.preflight.effect_class_ceiling,
-            prepared.preflight.workspace_access,
-        )?;
+        enforce_thread_ceiling_on_preflight(&cap.thread_ceiling, &prepared.preflight)?;
     }
 
     let result = handle_execute(
@@ -805,6 +801,20 @@ fn thread_ceiling_error(refusal: ryeos_app::callback_token::ThreadCeilingRefusal
             message: refusal.message,
             binding: None,
         },
+    )
+}
+
+/// Judge the exact preflight of a callback-dispatched child against the
+/// calling thread's workload ceiling: the call's single enforcement point,
+/// reading only the child's own declared projections.
+pub(crate) fn enforce_thread_ceiling_on_preflight(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    preflight: &crate::dispatch::RootDispatchPreflight,
+) -> Result<()> {
+    enforce_thread_ceiling(
+        ceiling,
+        preflight.effect_class_ceiling,
+        preflight.workspace_access,
     )
 }
 
@@ -3502,8 +3512,12 @@ mod tests {
         assert!(typed.to_string().contains("running"));
     }
 
-    #[test]
-    fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+    fn ceilinged_test_capability(
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    ) -> (
+        tempfile::TempDir,
+        ryeos_app::callback_token::CallbackCapability,
+    ) {
         let (project, provenance) = live_provenance();
         let cap = ryeos_app::callback_token::CallbackCapability {
             token: "cbt-test".to_string(),
@@ -3526,11 +3540,17 @@ mod tests {
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
             accounting_scope: None,
-            thread_ceiling: bounded_test_ceiling(),
+            thread_ceiling,
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
         };
+        (project, cap)
+    }
+
+    #[test]
+    fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+        let (_project, cap) = ceilinged_test_capability(bounded_test_ceiling());
 
         let ctx = parent_execution_context_from_capability(&cap);
         assert_eq!(ctx.parent_thread_id, "T-parent");
@@ -3544,10 +3564,40 @@ mod tests {
             bounded_test_ceiling(),
             "an inline child inherits the calling thread's ceiling unchanged"
         );
-        // Detached and follow spawns build the same context and persist it.
         let persisted = ctx.persisted();
         assert_eq!(persisted.parent_thread_id, "T-parent");
         assert_eq!(persisted.thread_ceiling, bounded_test_ceiling());
+    }
+
+    #[test]
+    fn detached_and_follow_spawn_contexts_carry_the_calling_threads_ceiling() {
+        let (_project, bounded_cap) = ceilinged_test_capability(bounded_test_ceiling());
+        let (_unbounded_project, unbounded_cap) =
+            ceilinged_test_capability(ryeos_state::objects::ThreadWorkloadCeiling::node_root());
+
+        // The builders the detached and follow spawn paths launch and persist
+        // their children with, not the shared constructor they delegate to.
+        for context in [
+            super::super::spawn_detached_child::detached_child_parent_context(&bounded_cap),
+            super::super::spawn_follow_child::follow_child_parent_context(&bounded_cap),
+        ] {
+            assert_eq!(context.parent_thread_id, "T-parent");
+            assert_eq!(context.thread_ceiling, bounded_test_ceiling());
+            assert_eq!(
+                context.persisted().thread_ceiling,
+                bounded_test_ceiling(),
+                "the persisted parent context a spawned child recovers from carries it"
+            );
+        }
+        for context in [
+            super::super::spawn_detached_child::detached_child_parent_context(&unbounded_cap),
+            super::super::spawn_follow_child::follow_child_parent_context(&unbounded_cap),
+        ] {
+            assert_eq!(
+                context.persisted().thread_ceiling,
+                ryeos_state::objects::ThreadWorkloadCeiling::node_root()
+            );
+        }
     }
 
     fn bounded_test_ceiling() -> ryeos_state::objects::ThreadWorkloadCeiling {
@@ -3565,6 +3615,51 @@ mod tests {
             }
             other => panic!("expected a typed launch-policy refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thread_effect_ceiling_order_agrees_with_the_engines_effect_class_permits() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_state::objects::ThreadEffectCeiling;
+        let durable = [
+            (ThreadEffectCeiling::Recorded, EffectClass::Recorded),
+            (ThreadEffectCeiling::Sealed, EffectClass::Sealed),
+        ];
+        for (ceiling, class) in durable {
+            for (other_ceiling, other_class) in durable {
+                // A ceiling admits a durable class exactly when the engine's
+                // class permits it, and the ceilings order the same way.
+                assert_eq!(
+                    ceiling.admitted_labels().contains(&other_class.as_str()),
+                    class.permits(other_class),
+                    "{ceiling:?} admitting {other_class:?}"
+                );
+                assert_eq!(
+                    other_ceiling <= ceiling,
+                    class.permits(other_class),
+                    "{other_ceiling:?} <= {ceiling:?}"
+                );
+            }
+            assert!(
+                !ceiling.admitted_labels().contains(&"live"),
+                "a durable ceiling never admits a live call"
+            );
+            assert!(ceiling < ThreadEffectCeiling::Live);
+        }
+        // `Live` is the widest: it admits every durable class and a call that
+        // declares none.
+        for (_, class) in durable {
+            assert!(
+                ThreadEffectCeiling::Live
+                    .admitted_labels()
+                    .contains(&class.as_str())
+            );
+        }
+        assert!(
+            ThreadEffectCeiling::Live
+                .admitted_labels()
+                .contains(&"live")
+        );
     }
 
     #[test]

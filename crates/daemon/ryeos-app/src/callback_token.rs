@@ -554,6 +554,151 @@ pub fn authorize_thread_ceiling(
     Ok(())
 }
 
+pub const THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED: &str = "thread_ceiling_launch_effect_exceeded";
+
+/// Judge the external-effect authority a launch seals for its own provider
+/// calls against the ceiling it will run under. A launch that seals none has
+/// no external effect of its own; one that seals a durable class must fit
+/// under the ceiling, and one that seals no class acts live and fits only
+/// under a ceiling that admits live. An `Unbounded` ceiling admits any.
+pub fn authorize_thread_ceiling_launch_effect(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    authority: Option<&ryeos_effect_contract::AdmittedExternalEffectAuthority>,
+) -> std::result::Result<(), ThreadCeilingRefusal> {
+    let ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+        max_effect_class, ..
+    } = ceiling
+    else {
+        return Ok(());
+    };
+    let Some(authority) = authority else {
+        return Ok(());
+    };
+    authorize_effect_class_within(
+        max_effect_class.admitted_labels(),
+        authority.admitted_effect_class,
+    )
+    .map_err(|error| ThreadCeilingRefusal {
+        code: THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED,
+        message: format!(
+            "the launch's own sealed external-effect authority exceeds the thread's \
+                 workload ceiling: {error}"
+        ),
+    })
+}
+
+/// Callback methods a thread under a `Bounded` workload ceiling may call.
+/// Every other method is refused, so a method added to the callback surface
+/// is refused under a ceiling until it is classified here.
+///
+/// Classification of the whole `runtime.*` callback surface. "Judged" means
+/// the ceiling is applied by the method's own handler or at launch; "refused"
+/// means the method can execute something or cause an external effect that no
+/// declared projection of the caller bounds, so it is not available under a
+/// ceiling.
+///
+/// | method                                                        | class                                   | under a ceiling |
+/// |---------------------------------------------------------------|-----------------------------------------|-----------------|
+/// | dispatch_action                                               | executes a child                        | judged per call against the child's declared projections |
+/// | provider_attempt_prepare / mark_issued / settle / release_unissued / local_stream_start / local_stream_next / local_stream_control | provider calls, budget transitions | allowed: the launch's sealed external-effect authority was judged against the ceiling at launch, and a launch that sealed none has no attempt to prepare |
+/// | request_continuation                                          | launches own successor                  | allowed: the successor reseals the same ceiling and is judged at its launch |
+/// | append_event / append_events / mark_running / finalize_thread / attach_process / poll_input / claim_commands / complete_command | own-thread log and lifecycle bookkeeping | allowed |
+/// | get_thread / get_thread_events / replay_events / get_facets / read_attachment / provider_attempt_get | reads | allowed |
+/// | spawn_follow_child                                            | launches a child                        | refused |
+/// | start_dedicated_session / dedicated_session_command / terminate_dedicated_session | launch or drive a hosted session | refused |
+/// | dedicated_session_status / wait_dedicated_session / dedicated_session_command_observation | observe a hosted session | refused (reach only sessions this thread could not have started) |
+/// | submit_command                                                | acts on a thread                        | refused |
+/// | vault_put / vault_get / vault_delete / vault_list             | secret access                           | refused |
+/// | author_item / project_snapshot                                | durable project writes                  | refused |
+/// | publish_artifact / publish_state_anchor / publish_project_observation | durable publication              | refused |
+/// | bundle_events_append / read_chain / scan / materialize_attachment | bundle-scoped event authority       | refused |
+/// | consumer_verification_* / scoped_child_*                      | qualification producers and verifiers   | refused |
+/// | test_phase_cut                                                | test-only fault injection               | refused |
+pub const THREAD_CEILING_ALLOWED_RUNTIME_METHODS: &[&str] = &[
+    "runtime.dispatch_action",
+    "runtime.provider_attempt_prepare",
+    "runtime.provider_attempt_mark_issued",
+    "runtime.provider_attempt_settle",
+    "runtime.provider_attempt_release_unissued",
+    "runtime.provider_attempt_local_stream_start",
+    "runtime.provider_attempt_local_stream_next",
+    "runtime.provider_attempt_local_stream_control",
+    "runtime.request_continuation",
+    "runtime.append_event",
+    "runtime.append_events",
+    "runtime.mark_running",
+    "runtime.finalize_thread",
+    "runtime.attach_process",
+    "runtime.poll_input",
+    "runtime.claim_commands",
+    "runtime.complete_command",
+    "runtime.get_thread",
+    "runtime.get_thread_events",
+    "runtime.replay_events",
+    "runtime.get_facets",
+    "runtime.read_attachment",
+    "runtime.provider_attempt_get",
+];
+
+/// The callback methods a ceiling refuses, kept explicit so the classification
+/// table above and the callback server's method set can be checked against
+/// each other.
+pub const THREAD_CEILING_REFUSED_RUNTIME_METHODS: &[&str] = &[
+    "runtime.spawn_follow_child",
+    "runtime.start_dedicated_session",
+    "runtime.dedicated_session_status",
+    "runtime.wait_dedicated_session",
+    "runtime.dedicated_session_command",
+    "runtime.dedicated_session_command_observation",
+    "runtime.terminate_dedicated_session",
+    "runtime.submit_command",
+    "runtime.vault_put",
+    "runtime.vault_get",
+    "runtime.vault_delete",
+    "runtime.vault_list",
+    "runtime.author_item",
+    "runtime.project_snapshot",
+    "runtime.publish_artifact",
+    "runtime.publish_state_anchor",
+    "runtime.publish_project_observation",
+    "runtime.bundle_events_append",
+    "runtime.bundle_events_read_chain",
+    "runtime.bundle_events_scan",
+    "runtime.bundle_events_materialize_attachment",
+    "runtime.consumer_verification_inputs",
+    "runtime.consumer_verification_observe",
+    "runtime.consumer_verification_settle",
+    "runtime.consumer_verification_start",
+    "runtime.scoped_child_expected_source",
+    "runtime.scoped_child_expected_isolation_class",
+    "runtime.scoped_child_start",
+    "runtime.scoped_child_resume",
+    "runtime.scoped_child_observe",
+    "runtime.scoped_child_abort",
+    "runtime.scoped_child_write",
+    "runtime.scoped_child_read",
+    "runtime.scoped_child_close_input",
+    "runtime.test_phase_cut",
+];
+
+/// Gate one callback method against a thread's workload ceiling before the
+/// method body runs. An `Unbounded` ceiling admits every method; a `Bounded`
+/// one admits only the methods in [`THREAD_CEILING_ALLOWED_RUNTIME_METHODS`].
+pub fn authorize_runtime_method_under_thread_ceiling(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    method: &str,
+) -> std::result::Result<(), ThreadCeilingRefusal> {
+    if !ceiling.is_bounded() || THREAD_CEILING_ALLOWED_RUNTIME_METHODS.contains(&method) {
+        return Ok(());
+    }
+    Err(ThreadCeilingRefusal {
+        code: THREAD_CEILING_ROUTE_REFUSED,
+        message: format!(
+            "callback method `{method}` is refused in a thread under a workload ceiling"
+        ),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct CallbackCapability {
     // This is the process-local bearer projection for every runtime-origin
@@ -2556,6 +2701,86 @@ mod tests {
         let live = bounded_thread_ceiling(ThreadEffectCeiling::Live);
         authorize_thread_ceiling(&live, None, immutable).unwrap();
         authorize_thread_ceiling(&live, Some(EffectClass::Sealed), immutable).unwrap();
+    }
+
+    #[test]
+    fn thread_ceiling_refuses_a_launch_whose_own_effect_authority_is_above_it() {
+        use ryeos_effect_contract::{AdmittedExternalEffectAuthority, EffectClass};
+        use ryeos_state::objects::ThreadEffectCeiling;
+        let authority = |class: Option<EffectClass>| AdmittedExternalEffectAuthority {
+            authority_family: "provider".to_owned(),
+            admitted_effect_class: class,
+            unknown_outcome_retry_ceiling: 0,
+        };
+        let recorded = bounded_thread_ceiling(ThreadEffectCeiling::Recorded);
+        authorize_thread_ceiling_launch_effect(&recorded, None).unwrap();
+        authorize_thread_ceiling_launch_effect(
+            &recorded,
+            Some(&authority(Some(EffectClass::Recorded))),
+        )
+        .unwrap();
+        for above in [Some(EffectClass::Sealed), None] {
+            assert_eq!(
+                refusal_code(authorize_thread_ceiling_launch_effect(
+                    &recorded,
+                    Some(&authority(above))
+                )),
+                THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED
+            );
+        }
+        let sealed = bounded_thread_ceiling(ThreadEffectCeiling::Sealed);
+        authorize_thread_ceiling_launch_effect(
+            &sealed,
+            Some(&authority(Some(EffectClass::Sealed))),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal_code(authorize_thread_ceiling_launch_effect(
+                &sealed,
+                Some(&authority(None))
+            )),
+            THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED
+        );
+        let live = bounded_thread_ceiling(ThreadEffectCeiling::Live);
+        authorize_thread_ceiling_launch_effect(&live, Some(&authority(None))).unwrap();
+        authorize_thread_ceiling_launch_effect(
+            &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            Some(&authority(None)),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bounded_ceiling_admits_only_classified_allowed_callback_methods() {
+        let bounded = bounded_thread_ceiling(ryeos_state::objects::ThreadEffectCeiling::Recorded);
+        let unbounded = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+        for method in THREAD_CEILING_ALLOWED_RUNTIME_METHODS {
+            authorize_runtime_method_under_thread_ceiling(&bounded, method).unwrap();
+        }
+        for method in THREAD_CEILING_REFUSED_RUNTIME_METHODS {
+            assert_eq!(
+                refusal_code(authorize_runtime_method_under_thread_ceiling(
+                    &bounded, method
+                )),
+                THREAD_CEILING_ROUTE_REFUSED,
+                "{method}"
+            );
+            authorize_runtime_method_under_thread_ceiling(&unbounded, method).unwrap();
+        }
+        // A method nobody classified is refused by default.
+        assert_eq!(
+            refusal_code(authorize_runtime_method_under_thread_ceiling(
+                &bounded,
+                "runtime.some_future_method"
+            )),
+            THREAD_CEILING_ROUTE_REFUSED
+        );
+        for method in THREAD_CEILING_ALLOWED_RUNTIME_METHODS {
+            assert!(
+                !THREAD_CEILING_REFUSED_RUNTIME_METHODS.contains(method),
+                "{method} is classified both ways"
+            );
+        }
     }
 
     #[test]

@@ -7563,6 +7563,49 @@ metadata:
         }
     }
 
+    #[test]
+    fn callback_ceiling_refuses_a_preflight_above_it_with_the_typed_code() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let bounded = ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ThreadEffectCeiling::Recorded,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let judged = |class: Option<EffectClass>| {
+            let mut preflight = effect_preflight(class, None);
+            preflight.workspace_access = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+            crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+                &bounded, &preflight,
+            )
+        };
+        judged(Some(EffectClass::Recorded)).unwrap();
+        for above in [Some(EffectClass::Sealed), None] {
+            let error = judged(above).unwrap_err();
+            match error.downcast_ref::<DispatchError>() {
+                Some(DispatchError::LaunchPolicyForbidden { code, .. }) => {
+                    assert_eq!(code, "thread_ceiling_effect_class_exceeded")
+                }
+                other => panic!("expected a typed launch-policy refusal, got {other:?}"),
+            }
+        }
+        // A subject with no declared workspace projection is refused too.
+        let preflight = effect_preflight(Some(EffectClass::Recorded), None);
+        assert!(
+            crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+                &bounded, &preflight
+            )
+            .is_err()
+        );
+        crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+            &ThreadWorkloadCeiling::node_root(),
+            &preflight,
+        )
+        .unwrap();
+    }
+
     fn effects_decl(
         unproven_max: Option<ryeos_effect_contract::EffectClass>,
     ) -> ryeos_engine::kind_registry::EffectClassCeilingDecl {

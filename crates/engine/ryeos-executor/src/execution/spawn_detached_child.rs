@@ -473,6 +473,7 @@ pub async fn spawn_detached_child(
         ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
     )
     .then(|| cap.provenance.original_project_path().to_path_buf());
+    let launch_parent_context = detached_child_parent_context(cap);
     let mut meta = RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
         .with_resume_context(ResumeContext {
@@ -513,11 +514,10 @@ pub async fn spawn_detached_child(
                     .into_iter()
                     .collect(),
             ),
-            thread_ceiling: cap.thread_ceiling,
+            thread_ceiling: launch_parent_context.thread_ceiling,
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         });
-    let launch_parent_context = crate::dispatch::ParentExecutionContext::for_child_of(cap);
     meta.follow_parent_context = Some(launch_parent_context.persisted());
     meta.follow_launch_window = persisted_launch_window.clone();
     let prepared = crate::execution::launch::prepare_follow_child_launch(
@@ -748,6 +748,16 @@ pub async fn spawn_detached_child(
         if queued { "created" } else { "running" },
         queued,
     ))
+}
+
+/// The parent context a detached child is launched with: it seals and
+/// persists the calling thread's workload ceiling through the one shared
+/// builder, so a detached child can never run under a wider ceiling than the
+/// thread that spawned it.
+pub(crate) fn detached_child_parent_context(
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> crate::dispatch::ParentExecutionContext {
+    crate::dispatch::ParentExecutionContext::for_child_of(cap)
 }
 
 fn detached_callback_response(child_thread_id: &str, status: &str, queued: bool) -> Value {

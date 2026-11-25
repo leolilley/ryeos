@@ -4324,6 +4324,16 @@ fn resolve_thread_ceiling(
     let inherited = params
         .parent_execution_context
         .map(|parent| parent.thread_ceiling);
+    combine_launch_ceilings(sealed, inherited)
+}
+
+/// The ceiling a launch runs under, from the one sealed with its original
+/// launch and the one inherited from its parent context. The launch's own
+/// augmentation workers run under this same value.
+fn combine_launch_ceilings(
+    sealed: Option<ryeos_state::objects::ThreadWorkloadCeiling>,
+    inherited: Option<ryeos_state::objects::ThreadWorkloadCeiling>,
+) -> ryeos_state::objects::ThreadWorkloadCeiling {
     match (sealed, inherited) {
         (Some(sealed), Some(inherited)) => sealed.meet(inherited),
         (Some(ceiling), None) | (None, Some(ceiling)) => ceiling,
@@ -5177,6 +5187,7 @@ async fn prepare_managed_launch_authority_in_mode(
                         .root_admission
                         .as_ref()
                         .map(|admission| admission.request_trust()),
+                    resolve_thread_ceiling(params, metadata_template),
                 ))
                 .await
                 .map_err(|error| match error {
@@ -5326,6 +5337,20 @@ async fn prepare_managed_launch_authority_in_mode(
     .map_err(BuildAndLaunchError::from)?;
     super::launch_preparation::require_prepared_project_result(&prepared_launch, params.provenance)
         .map_err(BuildAndLaunchError::from)?;
+    // The launch's own sealed external-effect authority (its provider calls)
+    // must fit under the ceiling it will run under, judged here, before
+    // anything is sealed or spawned.
+    ryeos_app::callback_token::authorize_thread_ceiling_launch_effect(
+        &resolve_thread_ceiling(params, metadata_template),
+        prepared_launch.external_effect_authority.as_ref(),
+    )
+    .map_err(|refusal| {
+        BuildAndLaunchError::from(DispatchError::LaunchPolicyForbidden {
+            code: refusal.code.to_owned(),
+            message: refusal.message,
+            binding: None,
+        })
+    })?;
     let current_trust_store = match (
         recovery_trust_store.as_ref(),
         effective_request_snapshot.as_deref(),
@@ -15657,6 +15682,30 @@ mod tests {
         assert_eq!(hard.depth, 3);
         assert_eq!(hard.duration_seconds, 45);
         assert_eq!(launch_depth_from_context(Some(&ctx)), 5);
+    }
+
+    #[test]
+    fn launch_ceiling_carries_the_parents_and_only_a_rootless_launch_is_unbounded() {
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let bounded = |max_effect_class| ThreadWorkloadCeiling::Bounded {
+            max_effect_class,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let recorded = bounded(ThreadEffectCeiling::Recorded);
+        let sealed = bounded(ThreadEffectCeiling::Sealed);
+        assert_eq!(combine_launch_ceilings(None, Some(recorded)), recorded);
+        assert_eq!(combine_launch_ceilings(Some(sealed), None), sealed);
+        assert_eq!(
+            combine_launch_ceilings(Some(sealed), Some(recorded)),
+            recorded,
+            "a resumed launch never widens past its parent"
+        );
+        assert_eq!(
+            combine_launch_ceilings(None, None),
+            ThreadWorkloadCeiling::node_root()
+        );
     }
 
     #[test]

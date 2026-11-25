@@ -455,6 +455,22 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
 
     if let Some(cap) = callback_cap.as_ref() {
         cap.runtime_method_surface.authorize(method)?;
+        // A thread under a workload ceiling reaches only the callback methods
+        // classified as judged or bookkeeping; every other method, including
+        // one added later, is refused before its body runs.
+        ryeos_app::callback_token::authorize_runtime_method_under_thread_ceiling(
+            &cap.thread_ceiling,
+            method,
+        )
+        .map_err(|refusal| {
+            anyhow::Error::new(
+                ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                    code: refusal.code.to_owned(),
+                    message: refusal.message,
+                    binding: None,
+                },
+            )
+        })?;
         if matches!(
             method,
             "runtime.consumer_verification_inputs"
@@ -7034,6 +7050,108 @@ mod tests {
                 !err.message.contains("missing thread_auth_token")
                     && !err.message.contains("invalid thread auth token"),
                 "auth must succeed; downstream errors are fine: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_runtime_method_the_server_names_is_classified_for_thread_ceilings() {
+        use ryeos_app::callback_token::{
+            THREAD_CEILING_ALLOWED_RUNTIME_METHODS, THREAD_CEILING_REFUSED_RUNTIME_METHODS,
+        };
+        // Production half of this file: everything before the test module.
+        let source = include_str!("server.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("split yields a first part");
+        let mut named = std::collections::BTreeSet::new();
+        let mut rest = production;
+        while let Some(start) = rest.find("\"runtime.") {
+            let after = &rest[start + 1..];
+            let end = after
+                .find(|c: char| !(c.is_ascii_lowercase() || c == '_' || c == '.'))
+                .unwrap_or(after.len());
+            if after[end..].starts_with('"') && &after[..end] != "runtime." {
+                named.insert(after[..end].to_owned());
+            }
+            rest = &rest[start + 1..];
+        }
+        assert!(
+            named.len() > 40,
+            "the scan found too few method names: {named:?}"
+        );
+        for method in &named {
+            assert!(
+                THREAD_CEILING_ALLOWED_RUNTIME_METHODS.contains(&method.as_str())
+                    ^ THREAD_CEILING_REFUSED_RUNTIME_METHODS.contains(&method.as_str()),
+                "callback method `{method}` is not classified exactly once for thread ceilings"
+            );
+        }
+        for method in THREAD_CEILING_ALLOWED_RUNTIME_METHODS
+            .iter()
+            .chain(THREAD_CEILING_REFUSED_RUNTIME_METHODS)
+        {
+            assert!(
+                named.contains(*method),
+                "classified method `{method}` is not a callback method of this server"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body() {
+        on_daemon_worker_stack(
+            bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body_body,
+        );
+    }
+
+    async fn bounded_thread_ceiling_refuses_an_unadmitted_callback_method_before_its_body_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ceilinged-vault");
+        let cbt = bind_test_callback_owner(
+            &state,
+            state.callback_tokens.generate_with_context(
+                "T-ceilinged-vault",
+                std::path::PathBuf::from("/p"),
+                std::time::Duration::from_secs(300),
+                vec!["*".to_string()],
+                test_provenance(&state, "/p"),
+                None,
+                None,
+                "0".repeat(64),
+                Some("0".repeat(64)),
+                serde_json::Value::Null,
+                0,
+                ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+                    max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+                    workspace_access:
+                        ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+                },
+            ),
+        );
+        // Methods that execute something or reach an external effect are
+        // refused at the method gate, before any handler parses its params.
+        for method in ["runtime.vault_get", "runtime.start_dedicated_session"] {
+            let error = dispatch_runtime_method(
+                method,
+                &json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-ceilinged-vault",
+                }),
+                &state,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+                    Some(ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                        code, ..
+                    }) if code == "thread_ceiling_route_refused"
+                ),
+                "expected the typed route refusal for {method}, got: {error:#}"
             );
         }
     }
