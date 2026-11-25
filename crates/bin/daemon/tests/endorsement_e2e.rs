@@ -322,14 +322,16 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         .as_str()
         .expect("head")
         .to_owned();
-    let sign = |item: &str| {
+    let sign_with = |kinds: Vec<String>, lifetime: Option<u64>| {
         let nonce: [u8; 16] = rand::random();
         SignedEndorsement::sign(
             EndorsementBody::standing(
                 &project_identity(&fixture.user),
                 &format!("fp:{}", fixture.user_fp()),
-                vec![item.to_owned()],
-                None,
+                kinds,
+                lifetime.map(|secs| {
+                    lillux::time::iso8601_from_unix_secs(lillux::time::unix_secs_now() + secs)
+                }),
                 &lillux::time::iso8601_now(),
                 &nonce
                     .iter()
@@ -341,6 +343,45 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         )
         .expect("sign")
     };
+    let sign = |item: &str| sign_with(vec![item.to_owned()], Some(3600));
+
+    // A standing endorsement can name only kinds that allow one, and must end.
+    for (kinds, lifetime, code) in [
+        (
+            vec!["directive".to_owned()],
+            Some(3600),
+            "endorsement_kind_not_standing",
+        ),
+        (
+            vec!["directive".to_owned(), "knowledge".to_owned()],
+            Some(3600),
+            "endorsement_kind_not_standing",
+        ),
+        (
+            vec!["knowledge".to_owned()],
+            None,
+            "endorsement_standing_lifetime_required",
+        ),
+        (
+            vec!["knowledge".to_owned()],
+            Some(31 * 24 * 3600),
+            "endorsement_standing_lifetime_too_long",
+        ),
+    ] {
+        let (status, refused) = service(
+            &h,
+            "service:endorsements/record",
+            json!({ "endorsement": sign_with(kinds, lifetime) }),
+        )
+        .await;
+        assert_eq!(status, 403, "{refused:#}");
+        assert!(refused.to_string().contains(code), "{code}: {refused:#}");
+    }
+    assert_eq!(
+        trust_class(&h, project.path()).await,
+        "untrusted_project",
+        "a refused endorsement trusts nothing"
+    );
     let (status, first) = service(
         &h,
         "service:endorsements/record",
@@ -351,7 +392,7 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
     let (status, second) = service(
         &h,
         "service:endorsements/record",
-        json!({ "endorsement": sign("directive") }),
+        json!({ "endorsement": sign("knowledge") }),
     )
     .await;
     assert_eq!(status, 409, "{second:#}");

@@ -6,24 +6,26 @@ bundles (e.g. `bundles/codex/.ai/node/commands/`), read by the CLI on
 every invocation, so new verbs become callable immediately after bundle
 install with no MCP redeploy.
 
-THREAT MODEL — MCP SERVER
+THE MCP SERVER IS A KEY HOLDER
 
-The MCP server is intended for LOCAL SINGLE-USER use:
+The server acts with a key of its own, never the operator's. The key's file is
+named by `RYEOS_CLIENT_KEY` in the server's environment (the server refuses to
+start without it) and the server hands that same key to every `ryeos` it
+spawns. Whatever the server may do is exactly what that key's grant allows:
+the daemon authorizes each request by the key and its capabilities, the way it
+does for any other key. A person gives the key a narrowed grant (see the
+`mcp-interface` doc); a verb the grant does not cover is refused by the daemon
+with a missing-capability error, for whoever holds the key.
 
-  * Transport: stdio over a process owned by the operator's OS user.
-  * Caller authentication: assumed (the OS user IS the operator).
-  * Capability gating: none at the MCP layer — every CLI verb that
-    the wrapped `ryeos` binary exposes is available to any caller
-    that reaches the transport.
-
-This means:
-
-  * Do NOT expose the MCP server over the network without a separate
-    auth-terminating proxy.
-  * Do NOT run the MCP server as a system service available to other
-    OS users.
-  * DO use it from a single-operator IDE harness (Claude Code,
-    Cursor, etc.) on the operator's own machine.
+  * Transport: stdio over a process the operator starts.
+  * Authority: the key's grant, nothing else. The server adds no gating of
+    its own and does not look at what is calling it.
+  * Commands that act directly on a node's files (key rotation, trust pin,
+    project register, resets) need the node's operator key, so `ryeos` refuses
+    them for this key with `operator_key_required`.
+  * On a node that does not enclose its processes, a process of the same OS
+    user can still read the operator's key files. To keep them out of reach,
+    run the server as another OS user or inside the enclosure.
 
 The proper auth design (signed-request from delegated principal,
 audience binding, replay protection) is tracked in
@@ -37,11 +39,16 @@ import logging
 import os
 import shutil
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.server.models import InitializationOptions
-from mcp.server.lowlevel import NotificationOptions
-from mcp.types import Tool, TextContent
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
 from ryeosd_mcp import __version__
 
@@ -49,6 +56,9 @@ from ryeosd_mcp import __version__
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 60.0
+# Names the key file the CLI signs with. The server holds a key of its own and
+# passes it to every `ryeos` it starts.
+CLIENT_KEY_ENV = "RYEOS_CLIENT_KEY"
 TOOL_NAME = "cli"
 TOOL_DESCRIPTION = (
     "Run any Rye CLI verb. Verbs are loaded data-driven from signed "
@@ -94,7 +104,14 @@ INPUT_SCHEMA = {
 }
 
 
-def _error_result(message: str, error_type: str) -> list[TextContent]:
+def _text_result(payload: dict) -> CallToolResult:
+    """A complete tool result carrying one JSON text block."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, default=str))],
+    )
+
+
+def _error_result(message: str, error_type: str) -> CallToolResult:
     """Build a typed JSON error result for user-visible failures.
 
     Used for input-validation failures and wrapper-originated timeouts.
@@ -102,10 +119,24 @@ def _error_result(message: str, error_type: str) -> list[TextContent]:
     as MCP-level errors so they cannot masquerade as successful tool
     results.
     """
-    return [TextContent(
-        type="text",
-        text=json.dumps({"error": message, "type": error_type}),
-    )]
+    return _text_result({"error": message, "type": error_type})
+
+
+def _resolve_client_key() -> str:
+    """The server's own key file, from `RYEOS_CLIENT_KEY`.
+
+    There is no fallback: a server without a key of its own would act with
+    whatever key the CLI finds by default, which is the operator's.
+    """
+    key = os.environ.get(CLIENT_KEY_ENV)
+    if not key:
+        raise RuntimeError(
+            f"{CLIENT_KEY_ENV} is not set. The MCP server acts with a key of its "
+            "own: create one (`openssl genpkey -algorithm ed25519 -out "
+            "mcp-key.pem && chmod 600 mcp-key.pem`), authorize it with a "
+            "narrowed grant, and set the variable to its absolute path."
+        )
+    return key
 
 
 def _resolve_bin() -> str:
@@ -125,6 +156,7 @@ def _resolve_bin() -> str:
 
 async def _run_rye(
     bin_path: str,
+    client_key: str,
     args: list[str],
     project_path: str | None,
     timeout_s: float,
@@ -141,6 +173,7 @@ async def _run_rye(
         bin_path,
         *args,
         cwd=project_path if project_path is not None else None,
+        env={**os.environ, CLIENT_KEY_ENV: client_key},
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -172,106 +205,110 @@ async def _run_rye(
 
 
 class RYEServer:
-    """MCP server that shells to the `ryeos` CLI."""
+    """MCP server that shells to the `ryeos` CLI.
+
+    The server holds one key of its own (`RYEOS_CLIENT_KEY`, read once at
+    start) and gives it to every `ryeos` it spawns. It serves both MCP
+    revisions the SDK serves: the legacy `initialize` handshake and the
+    stateless per-request era with `server/discover`. What a client says about
+    itself (`clientInfo`) is display only and decides nothing here.
+    """
 
     def __init__(self) -> None:
         self._bin = _resolve_bin()
-        self.server = Server("ryeos")
-        self._setup()
+        self._client_key = _resolve_client_key()
+        self.server = Server(
+            "ryeos",
+            version=__version__,
+            on_list_tools=self._list_tools,
+            on_call_tool=self._call_tool,
+        )
 
-    def _setup(self) -> None:
-        @self.server.list_tools()
-        async def list_tools() -> list[Tool]:
-            return [
+    async def _list_tools(
+        self,
+        ctx: ServerRequestContext,
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        return ListToolsResult(
+            tools=[
                 Tool(
                     name=TOOL_NAME,
                     description=TOOL_DESCRIPTION,
-                    inputSchema=INPUT_SCHEMA,
+                    input_schema=INPUT_SCHEMA,
                 ),
-            ]
+            ],
+        )
 
-        @self.server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-            if name != TOOL_NAME:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"unknown tool: {name}"}),
-                )]
-            # Validation errors (bad input shape) and subprocess
-            # timeouts are user-visible failures we surface as JSON
-            # tool results. We do NOT catch unexpected exceptions
-            # (programmer bugs, OS errors): those must propagate so
-            # they show up as MCP-level errors and don't silently
-            # masquerade as a "successful" tool result.
-            try:
-                args = arguments["args"]
-            except KeyError:
-                return _error_result("missing required field `args`", "ValueError")
-            if not isinstance(args, list) or not all(
-                isinstance(a, str) for a in args
-            ):
+    async def _call_tool(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
+        if name != TOOL_NAME:
+            return _text_result({"error": f"unknown tool: {name}"})
+        # Validation errors (bad input shape) and subprocess timeouts are
+        # user-visible failures we surface as JSON tool results. We do NOT
+        # catch unexpected exceptions (programmer bugs, OS errors): those
+        # must propagate so they show up as MCP-level errors and don't
+        # silently masquerade as a "successful" tool result.
+        # The v2 SDK does not check arguments against the tool's schema, so
+        # the schema's `additionalProperties: false` is enforced here.
+        unknown = sorted(set(arguments) - set(INPUT_SCHEMA["properties"]))
+        if unknown:
+            return _error_result(
+                f"unknown field(s) {', '.join(unknown)}; allowed: "
+                f"{', '.join(sorted(INPUT_SCHEMA['properties']))}",
+                "ValueError",
+            )
+        try:
+            args = arguments["args"]
+        except KeyError:
+            return _error_result("missing required field `args`", "ValueError")
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            return _error_result("`args` must be an array of strings", "ValueError")
+
+        project_path = arguments.get("project_path")
+        if project_path is not None:
+            if not isinstance(project_path, str):
+                return _error_result("`project_path` must be a string", "ValueError")
+            if project_path == "":
                 return _error_result(
-                    "`args` must be an array of strings", "ValueError"
+                    "`project_path` must not be empty when supplied; "
+                    "omit the field to use the server cwd",
+                    "ValueError",
                 )
 
-            project_path = arguments.get("project_path")
-            if project_path is not None:
-                if not isinstance(project_path, str):
-                    return _error_result(
-                        "`project_path` must be a string", "ValueError"
-                    )
-                if project_path == "":
-                    return _error_result(
-                        "`project_path` must not be empty when supplied; "
-                        "omit the field to use the server cwd",
-                        "ValueError",
-                    )
+        raw_timeout = arguments.get("timeout_s", DEFAULT_TIMEOUT_S)
+        if not isinstance(raw_timeout, (int, float)) or isinstance(raw_timeout, bool):
+            return _error_result("`timeout_s` must be a number", "ValueError")
+        timeout_s = float(raw_timeout)
+        if timeout_s < 1:
+            return _error_result("`timeout_s` must be >= 1", "ValueError")
 
-            raw_timeout = arguments.get("timeout_s", DEFAULT_TIMEOUT_S)
-            if not isinstance(raw_timeout, (int, float)) or isinstance(
-                raw_timeout, bool
-            ):
-                return _error_result(
-                    "`timeout_s` must be a number", "ValueError"
-                )
-            timeout_s = float(raw_timeout)
-            if timeout_s < 1:
-                return _error_result(
-                    "`timeout_s` must be >= 1", "ValueError"
-                )
+        try:
+            result = await _run_rye(
+                self._bin, self._client_key, args, project_path, timeout_s,
+            )
+        except asyncio.TimeoutError as e:
+            # _run_rye raises RuntimeError on its own timeout, but if the
+            # underlying wait_for surfaces TimeoutError to the caller, treat
+            # it as a wrapper-originated failure (no CLI exit code to
+            # preserve).
+            return _error_result(str(e) or "timeout", "TimeoutError")
+        except RuntimeError as e:
+            # Includes _run_rye's "exceeded timeout" RuntimeError.
+            return _error_result(str(e), "RuntimeError")
 
-            try:
-                result = await _run_rye(
-                    self._bin, args, project_path, timeout_s,
-                )
-            except asyncio.TimeoutError as e:
-                # _run_rye raises RuntimeError on its own timeout, but
-                # if the underlying wait_for surfaces TimeoutError to
-                # the caller, treat it as a wrapper-originated failure
-                # (no CLI exit code to preserve).
-                return _error_result(str(e) or "timeout", "TimeoutError")
-            except RuntimeError as e:
-                # Includes _run_rye's "exceeded timeout" RuntimeError.
-                return _error_result(str(e), "RuntimeError")
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, default=str),
-            )]
+        return _text_result(result)
 
     async def start(self) -> None:
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name="ryeos",
-                    server_version=__version__,
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
+                self.server.create_initialization_options(),
             )
 
 

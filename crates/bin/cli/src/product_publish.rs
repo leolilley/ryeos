@@ -43,7 +43,7 @@ pub(crate) fn matches(rest: &[String]) -> bool {
     no_binary_name = true
 )]
 struct Args {
-    /// The producer to execute, for example `graph:codex/guest-runtime-production`.
+    /// The producer to execute, for example `graph:acme/product-producer`.
     producer_ref: String,
 
     /// The product name the producer declares, for example `runtime`.
@@ -509,9 +509,9 @@ mod tests {
 
     fn plan(from_thread: Option<&str>, push_to: Option<&str>, activation: bool) -> PublishPlan {
         PublishPlan {
-            producer_ref: "graph:codex/guest-runtime-production".into(),
+            producer_ref: "graph:acme/product-producer".into(),
             product_name: "runtime".into(),
-            activation: activation.then(|| "config:codex/guest-runtime-activation".to_owned()),
+            activation: activation.then(|| "config:acme/product-activation".to_owned()),
             from_thread: from_thread.map(str::to_owned),
             push_to: push_to.map(str::to_owned),
             project: ProjectSelector::PinAtAdmission,
@@ -571,7 +571,7 @@ mod tests {
                 "execute",
                 "--async",
                 "--pin-project",
-                "graph:codex/guest-runtime-production"
+                "graph:acme/product-producer"
             ]
         );
         assert_eq!(

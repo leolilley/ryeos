@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
-use test_state::{build_test_state, local_operator_context};
+use test_state::{build_test_state, build_test_state_with_live_bundles, local_operator_context};
 
 fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
@@ -96,7 +96,7 @@ async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request()
 
 #[tokio::test]
 async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() {
-    let (_tmp, _state_owner, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-selected", &operator.fingerprint);
     create_running_thread(&state, "T-foreign", &operator.fingerprint);
@@ -169,7 +169,7 @@ async fn admitted_operator_cannot_read_a_foreign_signed_thread() {
 
 #[tokio::test]
 async fn execution_handler_applies_expansion_to_a_valid_braid_cut() {
-    let (_tmp, _state_owner, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-cut", &operator.fingerprint);
     let event = append_fixture_event(&state, "T-cut");

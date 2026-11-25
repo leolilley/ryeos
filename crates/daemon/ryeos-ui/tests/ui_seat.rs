@@ -388,7 +388,8 @@ async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
         .capture_thread_event_read_anchor(&detail.chain_root_id, thread)
         .unwrap()
         .unwrap();
-    let owner = detail.requested_by.as_deref().unwrap();
+    // The session holds the seat's lease.
+    let holder = format!("session:{session}");
     // Absence of a lease is not evidence that a retained active writer died.
     // Observation must neither guess a replacement nor recreate the lease.
     state.state_store.remove_seat_lease(thread).unwrap();
@@ -406,7 +407,7 @@ async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
     assert!(
         state
             .state_store
-            .seat_leases_for_owner_client(owner, &detail.executor_ref)
+            .seat_leases_for_owner_client(&holder, &detail.executor_ref)
             .unwrap()
             .is_empty()
     );
@@ -539,7 +540,7 @@ async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
         state
             .state_store
             .seat_leases_for_owner_client(
-                initialized_detail.requested_by.as_deref().unwrap(),
+                &format!("session:{unclaimed_session}"),
                 &initialized_detail.executor_ref
             )
             .unwrap()
@@ -558,10 +559,7 @@ async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
     assert!(
         state
             .state_store
-            .seat_leases_for_owner_client(
-                detail.requested_by.as_deref().unwrap(),
-                &detail.executor_ref
-            )
+            .seat_leases_for_owner_client(&format!("session:{session}"), &detail.executor_ref)
             .unwrap()
             .is_empty()
     );
@@ -1762,20 +1760,21 @@ fn prepare_pair_directly(
     };
     let (source_anchor, destination_anchor) = (anchor_of(source.1), anchor_of(destination.1));
     let (source_detail, destination_detail) = (detail_of(source.1), detail_of(destination.1));
-    let (source_owner, destination_owner) = (
+    let (source_holder, destination_holder) = (
         format!("session:{}", source.0),
         format!("session:{}", destination.0),
     );
     fn context<'a>(
         anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
-        owner: &'a str,
+        holder: &'a str,
         detail: &'a ryeos_app::state_store::ThreadDetail,
         opened: &'a Value,
         max_append_bytes: u64,
     ) -> TransferSeatContext<'a> {
         TransferSeatContext {
             anchor,
-            owner,
+            launcher: detail.requested_by.as_deref().expect("seat launcher"),
+            holder,
             surface: &detail.item_ref,
             client_ref: &detail.executor_ref,
             presentation_id: opened["presentation_id"].as_str().unwrap(),
@@ -1787,14 +1786,14 @@ fn prepare_pair_directly(
     }
     let source_context = context(
         &source_anchor,
-        &source_owner,
+        &source_holder,
         &source_detail,
         source.1,
         max_append_bytes,
     );
     let destination_context = context(
         &destination_anchor,
-        &destination_owner,
+        &destination_holder,
         &destination_detail,
         destination.1,
         max_append_bytes,
@@ -2922,7 +2921,8 @@ async fn thread_inspection_facets_cross_a_fixed_anchor_page_boundary() {
         .get_session(&session_id)
         .unwrap();
     let attachment = session.attachments[&session.root_attachment_id].clone();
-    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let inspected = test_state::with_session_dispatch(
+        &session,
         attachment,
         (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
             json!({"thread_id": producer.thread_id, "event_limit": 1}),
@@ -3003,7 +3003,8 @@ async fn thread_inspection_does_not_publish_a_partial_facet_map_at_page_budget()
         .get_session(&session_id)
         .unwrap();
     let attachment = session.attachments[&session.root_attachment_id].clone();
-    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let inspected = test_state::with_session_dispatch(
+        &session,
         attachment,
         (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
             json!({"thread_id": producer.thread_id, "event_limit": 1}),
@@ -3024,5 +3025,113 @@ async fn thread_inspection_does_not_publish_a_partial_facet_map_at_page_budget()
                     && entry["state"] == "unavailable"
                     && entry["reason"] == "signed_facet_map_not_proven"
             })
+    );
+}
+
+/// A seat thread is launched by the key its session was minted for, never by
+/// the session, and its lease is held by that session. Another session of the
+/// same key passes the signed launcher check, so it reads the thread, but it
+/// holds no membership naming the seat, so its append is refused and nothing
+/// is written.
+#[tokio::test]
+async fn a_seat_is_launched_by_its_sessions_key_and_held_by_that_session_alone() {
+    use ryeos_ui::handlers::ui_seat::*;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let sibling = activate(&state);
+    let state = Arc::new(state);
+    let ui = get_ui_state(&state).unwrap();
+    let key = ui
+        .browser_sessions
+        .get_session(&session)
+        .unwrap()
+        .principal_id;
+    let sibling_session = ui.browser_sessions.get_session(&sibling).unwrap();
+    assert_eq!(
+        sibling_session.principal_id, key,
+        "both sessions share one key"
+    );
+
+    let (opened, _claim) = fresh_with_request(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap().to_owned();
+    let detail = state.state_store.get_thread(&thread).unwrap().unwrap();
+    assert_eq!(detail.requested_by.as_deref(), Some(key.as_str()));
+    assert!(
+        !detail
+            .requested_by
+            .as_deref()
+            .unwrap()
+            .starts_with("session:"),
+        "no seat is launched by a session"
+    );
+
+    let own = append_request(
+        &opened,
+        "00000000-0000-4000-8000-000000000031",
+        0,
+        &[json!({"key":"k","value":1})],
+    );
+    route(&state, &session, &APPEND_DESCRIPTOR, own)
+        .await
+        .expect("the holder session appends");
+    assert_eq!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(&format!("session:{session}"), &detail.executor_ref)
+            .unwrap(),
+        vec![thread.clone()],
+        "the holder session holds the lease"
+    );
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(&detail.chain_root_id, &thread)
+        .unwrap()
+        .unwrap();
+
+    let foreign = append_request(
+        &opened,
+        "00000000-0000-4000-8000-000000000032",
+        1,
+        &[json!({"key":"k","value":2})],
+    );
+    route(&state, &sibling, &APPEND_DESCRIPTOR, foreign)
+        .await
+        .expect_err("another session of the same key holds no membership naming this seat");
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(&detail.chain_root_id, &thread)
+            .unwrap()
+            .unwrap()
+            .tip(),
+        before.tip(),
+        "the refused append wrote nothing"
+    );
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(&format!("session:{sibling}"), &detail.executor_ref)
+            .unwrap()
+            .is_empty(),
+        "the lease never moves to another session"
+    );
+
+    // Reading follows the key: the sibling session reads the seat thread.
+    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        sibling_session.attachments[&sibling_session.root_attachment_id].clone(),
+        (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
+            json!({"thread_id": thread, "event_limit": 1}),
+            HandlerContext::new(
+                "fp:compiled-source".to_string(),
+                vec!["ui.read".into()],
+                true,
+            ),
+            state.clone(),
+        ),
+    )
+    .await;
+    assert!(
+        inspected.is_ok(),
+        "the launching key's other session reads it: {inspected:?}"
     );
 }

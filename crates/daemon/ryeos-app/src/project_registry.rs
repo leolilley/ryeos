@@ -270,16 +270,88 @@ pub fn live_signer_project(
     checkout: &Path,
 ) -> Result<ryeos_state::project_identity::LogicalProject> {
     use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
-    let not_registered = Ok(LogicalProject::Absent(LogicalProjectAbsence::NotRegistered));
+    Ok(
+        match live_signer_project_outcome(
+            app_root,
+            node_key,
+            trust,
+            launcher,
+            launcher_holds_live_write,
+            checkout,
+        )? {
+            LiveSignerOutcome::Stated(identity) => LogicalProject::Stated(identity),
+            LiveSignerOutcome::NoLiveWrite
+            | LiveSignerOutcome::OwnerKeyNotActive
+            | LiveSignerOutcome::NotRegistered => {
+                LogicalProject::Absent(LogicalProjectAbsence::NotRegistered)
+            }
+            LiveSignerOutcome::NoProjectName => {
+                LogicalProject::Absent(LogicalProjectAbsence::NoProjectName)
+            }
+            LiveSignerOutcome::CheckoutNameChanged {
+                checkout,
+                registered,
+                declared,
+            } => bail!(
+                "checkout_name_changed: checkout {} is registered as project {} but its manifest \
+                 now says `name: {}`; register it again with `ryeos project register {}` if the \
+                 rename is intended",
+                checkout.display(),
+                registered,
+                declared,
+                checkout.display()
+            ),
+        },
+    )
+}
+
+/// Every answer [`live_signer_project`] can reach, without folding any of
+/// them together. Admission folds them into the sealed `LogicalProject`; a
+/// seat reports them as its project state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveSignerOutcome {
+    Stated(ProjectIdentity),
+    /// The launcher does not hold live project write.
+    NoLiveWrite,
+    /// The launcher key is retired or revoked, so it acts for no owner.
+    OwnerKeyNotActive,
+    /// No registration of this checkout under the launcher's owner, or the
+    /// node cannot resolve an owner for the launcher.
+    NotRegistered,
+    /// The checkout's manifest declares no name.
+    NoProjectName,
+    /// The checkout is registered for the launcher's owner under another name
+    /// than its manifest now declares.
+    CheckoutNameChanged {
+        checkout: PathBuf,
+        registered: ProjectIdentity,
+        declared: ProjectName,
+    },
+}
+
+/// [`live_signer_project`] with each outcome kept apart. A registry or
+/// checkout that cannot be read refuses.
+pub fn live_signer_project_outcome(
+    app_root: &Path,
+    node_key: &lillux::crypto::VerifyingKey,
+    trust: &ryeos_engine::trust::TrustStore,
+    launcher: &str,
+    launcher_holds_live_write: bool,
+    checkout: &Path,
+) -> Result<LiveSignerOutcome> {
     if !launcher_holds_live_write {
-        return not_registered;
+        return Ok(LiveSignerOutcome::NoLiveWrite);
     }
-    let Ok(owner) = crate::project_owner::owner_for_in(trust, launcher) else {
-        return not_registered;
+    let owner = match trust.owner_for(launcher) {
+        Ok(owner) => owner,
+        Err(ryeos_engine::trust::OwnerRefusal::KeyNotActive { .. }) => {
+            return Ok(LiveSignerOutcome::OwnerKeyNotActive);
+        }
+        Err(_) => return Ok(LiveSignerOutcome::NotRegistered),
     };
     let (canonical, declared) = inspect_checkout(app_root, checkout)?;
     let Some(declared) = declared else {
-        return Ok(LogicalProject::Absent(LogicalProjectAbsence::NoProjectName));
+        return Ok(LiveSignerOutcome::NoProjectName);
     };
     let identity = ProjectIdentity::new(owner.principal, declared);
     let registrations = load_registrations(app_root, node_key)?;
@@ -296,23 +368,32 @@ pub fn live_signer_project(
         .map(|loaded| &loaded.registration.identity)
         .collect();
     if holding.contains(&&identity) {
-        return Ok(LogicalProject::Stated(identity));
+        return Ok(LiveSignerOutcome::Stated(identity));
     }
     // Registered for this owner under another name: the manifest name was
-    // changed since. The registration is the source of truth, so this is a
-    // refusal, never a silent re-label.
+    // changed since. The registration is the source of truth, so this is
+    // never a silent re-label.
     if let Some(registered) = holding.first() {
-        bail!(
-            "checkout_name_changed: checkout {} is registered as project {} but its manifest now \
-             says `name: {}`; register it again with `ryeos project register {}` if the rename \
-             is intended",
-            canonical.display(),
-            registered,
-            identity.name(),
-            canonical.display()
-        );
+        return Ok(LiveSignerOutcome::CheckoutNameChanged {
+            checkout: canonical,
+            registered: (*registered).clone(),
+            declared: identity.name().clone(),
+        });
     }
-    not_registered
+    Ok(LiveSignerOutcome::NotRegistered)
+}
+
+/// Whether `scopes` authorize `ryeos.write.project.live` on this node.
+pub fn holds_live_project_write(state: &crate::state::AppState, scopes: &[String]) -> bool {
+    state
+        .authorizer
+        .authorize(
+            scopes,
+            &ryeos_runtime::authorizer::AuthorizationPolicy::require(
+                ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY,
+            ),
+        )
+        .is_ok()
 }
 
 /// [`live_signer_project`] for a caller of this node: the caller is the
@@ -325,15 +406,7 @@ pub fn live_logical_project(
     scopes: &[String],
     checkout: &Path,
 ) -> ryeos_state::project_identity::LogicalProject {
-    let holds_live_write = state
-        .authorizer
-        .authorize(
-            scopes,
-            &ryeos_runtime::authorizer::AuthorizationPolicy::require(
-                ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY,
-            ),
-        )
-        .is_ok();
+    let holds_live_write = holds_live_project_write(state, scopes);
     match live_signer_project(
         &state.config.app_root,
         state.identity.verifying_key(),

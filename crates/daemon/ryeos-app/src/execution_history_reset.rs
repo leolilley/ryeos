@@ -926,6 +926,8 @@ pub struct ExecutionHistoryResetReport {
     pub evidence_obligations: usize,
     pub runtime_rows: RuntimeThreadHistoryAccounting,
     pub thread_runtime_artifacts: usize,
+    /// Dry run: the scheduler fire journal files the reset would retire.
+    /// Performed: the signed scheduler retirement records it published.
     pub scheduler_journal_artifacts: usize,
     pub scheduler_rows: ryeos_scheduler_contract::SchedulerFireHistoryAccounting,
     pub replay_indexes: ryeos_state::operational::ReplayIndexResetReport,

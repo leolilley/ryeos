@@ -1694,6 +1694,18 @@ fn run_init_under_lock_on_storage(
         capacity_issuance.binding(),
     )
     .map_err(|error| capacity_issuance.retain_error(error))?;
+    // The node is initialized; the journal records from which profile. A
+    // journal that cannot be written is reported, never a failed init.
+    let journaled = ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
+        .map_err(|error| format!("{error:#}"))
+        .and_then(|identity| {
+            crate::node_journal::NodeJournal::for_app_root(&opts.app_root, identity)
+                .record_initialized(opts.node_profile.as_deref().unwrap_or("none"))
+                .map_err(|error| error.to_string())
+        });
+    if let Err(error) = journaled {
+        tracing::warn!(error = %error, "the node journal did not record this initialization");
+    }
     let next_steps = Vec::new();
 
     Ok(InitReport {

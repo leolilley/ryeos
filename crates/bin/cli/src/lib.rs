@@ -5,6 +5,7 @@
 pub mod arg_bind;
 mod bundle_set_update;
 mod client_handlers;
+pub mod client_key;
 mod codex_device_login;
 pub mod daemon_preflight;
 pub mod dispatcher;

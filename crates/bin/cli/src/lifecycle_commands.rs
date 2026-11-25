@@ -372,6 +372,7 @@ pub async fn try_dispatch(
     if argv.is_empty() {
         return Ok(false);
     }
+    require_operator_key_for_node_files(argv)?;
     match (argv[0].as_str(), argv.get(1).map(String::as_str)) {
         ("identity", _) => {
             run_identity_command(&argv[1..], console).map_err(map_local_err)?;
@@ -1773,8 +1774,14 @@ fn run_execution_history_reset_command(
                 |rows| rows.to_string(),
             ),
         ),
+        // The dry run counts the fire journal files it would retire; a
+        // performed reset counts the signed retirement records it published.
         crate::tty::Row::key_value(
-            "scheduler journal artifacts",
+            if report.dry_run {
+                "scheduler fire journal files"
+            } else {
+                "scheduler retirement records"
+            },
             report.scheduler_journal_artifacts.to_string(),
         ),
         crate::tty::Row::key_value(
@@ -2327,10 +2334,10 @@ async fn run_node_offline_operation_facts_command(
     // The authority the signing key holds here, so `sign --facts` signs under
     // it. Without a key to name, the facts name no signer and `sign` refuses
     // them rather than guess.
-    let key_path = args
-        .signing_key
-        .clone()
-        .unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&app_root));
+    let key_path = match args.signing_key.clone() {
+        Some(path) => path,
+        None => crate::transport::signing::client_signing_key_path(&app_root)?,
+    };
     let signer = match lillux::crypto::load_signing_key(&key_path) {
         Ok(key) => Some(ryeos_node::offline_operation::deliver::local_signer_report(
             &app_root,
@@ -4452,11 +4459,16 @@ fn inspect_capability_report(
             None,
         ),
         Ok(Some(signed)) => {
-            // The same policy generation digest the daemon recorded.
+            // The report records the whole node policy generation, not the
+            // isolation policy's own digest.
             let policy_generation =
-                ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+                crate::node_descriptors::load_verified_policy_snapshot(app_root)
                     .ok()
-                    .and_then(|runtime| runtime.digest().map(str::to_owned));
+                    .map(|snapshot| {
+                        ryeos_node::capability_report::report_policy_generation(
+                            snapshot.generation_digest(),
+                        )
+                    });
             let staleness = signed
                 .staleness(policy_generation.as_deref())
                 .map_err(|error| format!("{error:#}"));
@@ -6299,6 +6311,25 @@ pub(crate) fn parse_or_render_help<P: Parser>(
             _ => Err(anyhow::anyhow!("{e}")),
         },
     }
+}
+
+/// Lifecycle commands act directly on a node's files, with no daemon to check
+/// the caller, so they need the node's operator key. With another key selected
+/// (`RYEOS_CLIENT_KEY`) they refuse; `help`-style entries touch no node files.
+fn require_operator_key_for_node_files(argv: &[String]) -> Result<(), CliError> {
+    let acts_on_node_files = LOCAL_COMMANDS.iter().any(|descriptor| {
+        descriptor.category != "meta"
+            && argv.len() >= descriptor.tokens.len()
+            && descriptor
+                .tokens
+                .iter()
+                .zip(argv)
+                .all(|(want, got)| want == got)
+    });
+    if acts_on_node_files {
+        crate::client_key::require_operator_key(&default_app_root())?;
+    }
+    Ok(())
 }
 
 fn default_app_root() -> PathBuf {

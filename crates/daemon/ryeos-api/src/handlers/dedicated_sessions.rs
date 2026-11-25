@@ -327,6 +327,24 @@ fn owner_base_head_key(
     ))
 }
 
+/// A pinned generation that sealed an owner+name identity at admission must
+/// name exactly the head integration and publication target. `Absent` seals
+/// nothing and is allowed: the head comes from the base and the fresh owner.
+fn require_sealed_identity_matches(
+    signer_project: &ryeos_state::project_identity::LogicalProject,
+    head: &ryeos_state::project_identity::ProjectHeadKey,
+) -> Result<(), HandlerError> {
+    let Some(sealed) = signer_project.identity() else {
+        return Ok(());
+    };
+    if ryeos_state::project_identity::ProjectHeadKey::for_project(sealed) == *head {
+        return Ok(());
+    }
+    Err(HandlerError::Conflict(format!(
+        "candidate_project_identity_mismatch: the generation sealed project {sealed}, which is not the owner's head this candidate targets"
+    )))
+}
+
 /// Whether a hosted session's pinned terminal publication is consistent with
 /// its recorded disposition. A pin that carries a HEAD destination must name
 /// the owner, the target project and the base snapshot exactly, whichever
@@ -6276,6 +6294,18 @@ async fn approvals(
         .into_iter()
         .filter(|approval| approval.state == "pending")
         .map(|approval| {
+            let mut public = ryeos_app::dedicated_session_service::public_approval_authority(
+                &approval.requested_authority,
+            );
+            // Offer accept only where the admitted profile allows it too.
+            if !ryeos_app::dedicated_session_service::approval_accept_ceiling(
+                &state,
+                &approval.placement_thread_id,
+                &approval.operation_class,
+                &approval.requested_authority,
+            ) {
+                public["accept_allowed"] = Value::Bool(false);
+            }
             Ok(json!({
                 "chain_root_id":session.chain_root_id.clone(),
                 "placement_thread_id":approval.placement_thread_id,
@@ -6283,7 +6313,7 @@ async fn approvals(
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
                 "operation_class":approval.operation_class,
-                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority),
+                "requested_authority":public,
                 "state":approval.state,
                 "expires_at_ms":approval.expires_at_ms,
                 "created_at_ms":approval.created_at_ms,
@@ -6936,16 +6966,69 @@ async fn resolve_approval(
             "approval request digest does not match pending authority".into(),
         ));
     }
+    // The worker's report is not the ceiling: whether this class of request may
+    // be accepted at all is the admitted, frozen profile's rule, and the
+    // worker's own report can only narrow it.
     if req.accept
-        && approval
-            .requested_authority
-            .get("accept_allowed")
-            .and_then(Value::as_bool)
-            != Some(true)
+        && let Some(refusal) = ryeos_app::dedicated_session_service::check_accept(
+            &state,
+            &session.admitted_capsule_hash,
+            &approval.operation_class,
+            &approval.requested_authority,
+        )
+        .map_err(internal)?
     {
-        return Err(HandlerError::BadRequest(
-            "the admitted structured-session contract does not allow accepting this authority delta".into(),
-        ));
+        return Err(match refusal {
+            ryeos_app::dedicated_session_service::AcceptRefusal::NotOffered => {
+                HandlerError::BadRequest(
+                    "the admitted structured-session contract does not allow accepting this authority delta".into(),
+                )
+            }
+            ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByNodePolicy {
+                operation_class,
+            } => HandlerError::Structured {
+                code: "approval_accept_refused_by_node_policy".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_accept_refused_by_node_policy",
+                    "error": "this node's approval ceiling does not list this class of request `allow`; decline it, or have the node operator list the class",
+                    "operation_class": operation_class,
+                }),
+            },
+            ryeos_app::dedicated_session_service::AcceptRefusal::UnnamedMethod => {
+                HandlerError::Structured {
+                    code: "approval_method_unnamed".to_owned(),
+                    status: 403,
+                    body: json!({
+                        "code": "approval_method_unnamed",
+                        "error": "the admitted profile names no rule for this request's method; decline it",
+                    }),
+                }
+            }
+            ryeos_app::dedicated_session_service::AcceptRefusal::ClassMismatch {
+                profile_class,
+            } => HandlerError::Structured {
+                code: "approval_class_mismatch".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_class_mismatch",
+                    "error": "the request's operation class is not the class of the admitted profile's rule for its method; decline it",
+                    "profile_class": profile_class,
+                }),
+            },
+            ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByProfile {
+                operation_class,
+            } => HandlerError::Structured {
+                code: "approval_accept_refused_by_profile".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_accept_refused_by_profile",
+                    "error": "the admitted profile does not let this class of request be accepted \
+                              (its rule is deny-only, or the profile names no rule for it); decline it",
+                    "operation_class": operation_class,
+                }),
+            },
+        });
     }
     let request_id = approval
         .requested_authority
@@ -7440,10 +7523,11 @@ pub struct QualifyCandidateRequest {
     candidate_validation_hash: String,
     evaluator_chain_root_id: String,
     evaluator_terminal_thread_id: String,
-    evaluator_capsule_hash: String,
+    /// The evaluator is the person's choice, so it stays a request field and
+    /// must equal the ref the daemon sealed for that thread. The capsule hash
+    /// and the definition and parameters digests are not: the daemon holds
+    /// them for the sealed evaluator thread and records what it derives.
     evaluator_item_ref: String,
-    evaluator_definition_digest: String,
-    evaluator_parameters_digest: String,
     #[serde(default)]
     integration: Option<CandidateIntegrationCoordinate>,
     /// One pre-minted launch coordinate reserved by accepted source-candidate
@@ -7738,6 +7822,7 @@ async fn start_candidate_operation(
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
     ) {
         let head = owner_base_head_key(&state, &session.owner_principal, &base_snapshot_hash)?;
+        require_sealed_identity_matches(&source.project_authority.signer_project(), &head)?;
         let principal_key = head.owner_component();
         let project_hash = head.name_hash().to_owned();
         let current = state
@@ -9057,6 +9142,11 @@ fn verify_candidate_integration_terminal(
         }
     };
     let expected_head = owner_base_head_key(state, &session.owner_principal, base_snapshot_hash)?;
+    require_sealed_identity_matches(&source.project_authority.signer_project(), &expected_head)?;
+    require_sealed_identity_matches(
+        &integration.project_authority.signer_project(),
+        &expected_head,
+    )?;
     let expected_principal_key = expected_head.owner_component();
     let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(
@@ -9256,6 +9346,23 @@ fn verified_candidate_source(
     })
 }
 
+/// An evaluator the person names by a bundle's ref must be that bundle's item.
+/// A project may carry its own evaluator under its own ref, but a project file
+/// that took a bundle item's ref (so `tool:ryeos/core/evaluate/unchecked` would
+/// run the project's file instead) is refused, whatever its trust.
+fn refuse_project_item_standing_for_a_bundle_item(
+    authority_kind: &str,
+    shadows_bundle_item: bool,
+) -> Result<(), HandlerError> {
+    if authority_kind == "base_project_generation" && shadows_bundle_item {
+        return Err(HandlerError::BadRequest(
+            "candidate operation program is a project item standing in for an installed bundle item under the same ref"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn immutable_base_program_evidence(
     sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
     base_snapshot_hash: &str,
@@ -9288,6 +9395,10 @@ fn immutable_base_program_evidence(
             ));
         }
     };
+    refuse_project_item_standing_for_a_bundle_item(
+        authority_kind,
+        sealed.admitted_subject_shadows_bundle_item(),
+    )?;
     let trusted_effective = match authority_kind {
         "installed_bundle" => resolution.effective_trust_class == TrustClass::TrustedBundle,
         "base_project_generation" => matches!(
@@ -9770,21 +9881,9 @@ fn candidate_qualification_request_matches(
             .and_then(Value::as_str)
             == Some(req.evaluator_terminal_thread_id.as_str())
         && evaluation
-            .pointer("/evaluator/capsule_hash")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_capsule_hash.as_str())
-        && evaluation
             .pointer("/evaluator/item_ref")
             .and_then(Value::as_str)
             == Some(req.evaluator_item_ref.as_str())
-        && evaluation
-            .pointer("/evaluator/effective_definition_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_definition_digest.as_str())
-        && evaluation
-            .pointer("/evaluator/parameters_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_parameters_digest.as_str())
         && (!compare_reserved_launch
             || evaluation
                 .pointer("/qualification/reserved_integration_launch_id")
@@ -9994,17 +10093,12 @@ async fn qualify_candidate(
         .admitted_launch_capsule_hash
         .as_deref()
         .ok_or_else(|| HandlerError::BadRequest("evaluator has no admitted capsule".into()))?;
-    if evaluator_capsule_hash != req.evaluator_capsule_hash {
-        return Err(HandlerError::BadRequest(
-            "evaluator capsule differs from the requested qualification coordinate".into(),
-        ));
-    }
     let evaluator_capsule = state
         .state_store
         .admitted_launch_capsule(&req.evaluator_terminal_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("evaluator admitted capsule disappeared"))?;
-    if evaluator_capsule.content_hash().map_err(internal)? != req.evaluator_capsule_hash
+    if evaluator_capsule.content_hash().map_err(internal)? != evaluator_capsule_hash
         || evaluator_capsule.project_authority != evaluator.project_authority
     {
         return Err(internal(
@@ -10038,15 +10132,17 @@ async fn qualify_candidate(
             "evaluator capsule is sealed to another retained candidate operation".into(),
         ));
     }
-    if sealed.item_ref() != req.evaluator_item_ref
-        || evaluator.item_ref != req.evaluator_item_ref
-        || sealed.effective_definition_digest().as_str() != req.evaluator_definition_digest
-        || sealed.admitted_parameters_digest().map_err(internal)? != req.evaluator_parameters_digest
-    {
+    if sealed.item_ref() != req.evaluator_item_ref || evaluator.item_ref != req.evaluator_item_ref {
         return Err(HandlerError::BadRequest(
-            "evaluator invocation differs from the exact requested definition or parameters".into(),
+            "evaluator invocation differs from the requested evaluator item".into(),
         ));
     }
+    // What the sealed evaluator thread was admitted with. The daemon derives
+    // these; a caller never carries them. They are written into the
+    // qualification record and returned, so the testimony names exactly which
+    // definition and parameters were evaluated.
+    let evaluator_definition_digest = sealed.effective_definition_digest().as_str().to_owned();
+    let evaluator_parameters_digest = sealed.admitted_parameters_digest().map_err(internal)?;
 
     let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
         stable_project_identity,
@@ -10137,6 +10233,22 @@ async fn qualify_candidate(
     let reserved_integration_thread_id = reserved_integration_launch_id
         .as_ref()
         .map(|_| ryeos_app::thread_lifecycle::new_thread_id());
+    // What the evaluator says it checked, kept short and printable so the
+    // person deciding sees it (an evaluator that ran nothing says so).
+    let evidence_scope = evaluator_result
+        .evidence
+        .get("scope")
+        .and_then(Value::as_str)
+        .filter(|scope| scope.len() <= 200 && !scope.chars().any(char::is_control))
+        .map(str::to_owned);
+    let evaluator_coordinate = json!({
+        "chain_root_id":req.evaluator_chain_root_id,
+        "terminal_thread_id":req.evaluator_terminal_thread_id,
+        "capsule_hash":evaluator_capsule_hash,
+        "item_ref":req.evaluator_item_ref,
+        "effective_definition_digest":evaluator_definition_digest,
+        "parameters_digest":evaluator_parameters_digest,
+    });
     let evaluation_evidence = json!({
         "schema":"ryeos.hosted_candidate_evaluation.v1",
         "candidate":closure_evidence,
@@ -10145,10 +10257,10 @@ async fn qualify_candidate(
         "evaluator":{
             "chain_root_id":req.evaluator_chain_root_id,
             "terminal_thread_id":req.evaluator_terminal_thread_id,
-            "capsule_hash":req.evaluator_capsule_hash,
+            "capsule_hash":evaluator_capsule_hash,
             "item_ref":req.evaluator_item_ref,
-            "effective_definition_digest":req.evaluator_definition_digest,
-            "parameters_digest":req.evaluator_parameters_digest,
+            "effective_definition_digest":evaluator_definition_digest,
+            "parameters_digest":evaluator_parameters_digest,
             "immutable_definition_authority":immutable_evaluator,
             "project_authority_digest":evaluator_project_authority_digest,
             "candidate_realization":realization_kind,
@@ -10160,6 +10272,7 @@ async fn qualify_candidate(
             "accepted":evaluator_result.accepted,
             "result_digest":evaluator_result_digest,
             "claim_evidence_digest":evaluator_claim_evidence_digest,
+            "evidence_scope":evidence_scope,
         },
         "qualification":{
             "root_thread_id":qualification_root_id,
@@ -10177,6 +10290,8 @@ async fn qualify_candidate(
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
             "candidate_validation_hash":req.candidate_validation_hash,
             "candidate_evaluation_hash":candidate_evaluation_hash,
+            "evaluator":evaluator_coordinate,
+            "evidence_scope":evidence_scope,
             "accepted":false,
         }));
     }
@@ -10255,6 +10370,8 @@ async fn qualify_candidate(
         "candidate_evaluation_hash":candidate_evaluation_hash,
         "qualification_root_id":qualification_root_id,
         "qualification_operation_id":qualification_operation_id,
+        "evaluator":evaluator_coordinate,
+        "evidence_scope":evidence_scope,
         "accepted":true,
         "idempotent":false,
     }))
@@ -11474,6 +11591,54 @@ mod tests {
             assert!(!check(disposition, &Discard));
         }
     }
+    #[test]
+    fn a_project_item_standing_in_for_a_bundle_item_is_not_an_accepted_evaluator() {
+        // A project's own evaluator, under its own ref, is fine.
+        super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", false)
+            .unwrap();
+        // The bundle's own item is fine.
+        super::refuse_project_item_standing_for_a_bundle_item("installed_bundle", false).unwrap();
+        // A project file that took a bundle item's ref is refused.
+        let refused =
+            super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", true)
+                .unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("standing in for an installed bundle item"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_sealed_identity_must_name_the_targeted_head() {
+        use ryeos_state::project_identity::{
+            LogicalProject, LogicalProjectAbsence, ProjectHeadKey, ProjectIdentity, ProjectName,
+        };
+        let owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
+        let other: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "c".repeat(64)).parse().unwrap();
+        let name = |value: &str| ProjectName::new(value).unwrap();
+        let head = ProjectHeadKey::owned_by(&owner, &name("demo"));
+        let sealed = |owner: &ryeos_state::principal_id::PrincipalId, project: &str| {
+            LogicalProject::Stated(ProjectIdentity::new(owner.clone(), name(project)))
+        };
+        super::require_sealed_identity_matches(&sealed(&owner, "demo"), &head).unwrap();
+        super::require_sealed_identity_matches(
+            &LogicalProject::Absent(LogicalProjectAbsence::ForeignHeadNotHeld),
+            &head,
+        )
+        .unwrap();
+        for mismatch in [sealed(&owner, "renamed"), sealed(&other, "demo")] {
+            match super::require_sealed_identity_matches(&mismatch, &head) {
+                Err(super::HandlerError::Conflict(message)) => assert!(
+                    message.starts_with("candidate_project_identity_mismatch:"),
+                    "{message}"
+                ),
+                other => panic!("a sealed mismatch must refuse by code: {other:?}"),
+            }
+        }
+    }
+
     use super::{discard_placement_admitted, qualification_placement_admitted};
 
     #[test]
@@ -12496,10 +12661,7 @@ mod tests {
                 "candidate_validation_hash":hash(),
                 "evaluator_chain_root_id":"T-evaluator",
                 "evaluator_terminal_thread_id":"T-evaluator",
-                "evaluator_capsule_hash":hash(),
                 "evaluator_item_ref":"tool:project/evaluate",
-                "evaluator_definition_digest":hash(),
-                "evaluator_parameters_digest":hash(),
                 "integration":{
                     "chain_root_id":"T-integration",
                     "terminal_thread_id":"T-integration"

@@ -1,5 +1,8 @@
-# ryeos:signed:2026-11-11T02:56:41Z:1da39491c987892464de4348988c91f349c7528d73150cf3dd6780c47e3b930c:RL7XXe+JjZj3Y8aDemzqSCAap85kkpOjU5somGWTbGLMSiu7+I5nU0t3dVigESuifBT8H66IxmpJREh/7UcOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T01:26:02Z:7a03a7ca66392d4f63ec5e8727f84e6facc82716dbca11476cadf8e5b1fdb2f1:QJdic6uNb/Cl6jDgylPwRLcXJMiOBBmia5vYLxB7234Ra5YoSBVEEhuqWSfe4RJKOAxnm6KTMUT9BnFurpWxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
+# A standing endorsement may name this kind (knowledge items are text: nothing in one runs or invokes).
+# Kinds that run or invoke are endorsed one change at a time.
+standing_endorsement: allowed
 inventory_policy:
   admission:
     capability_template: "ryeos.execute.{kind}.{bare_id}"

@@ -752,6 +752,7 @@ impl StateStore {
                 settled_at: now.clone(),
                 last_settled_turn_seq: u64::from(cost.completed_turns),
                 elapsed_ms: 0, // daemon doesn't track wall-clock time
+                usage_status: cost.usage_status,
                 provider_id: None,
                 model: None,
                 profile: None,

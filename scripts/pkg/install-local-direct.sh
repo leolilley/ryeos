@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-17T22:20:51Z:3c95ccd161dfaed78db6c851d23ccbfe0fbe8edca4b7bc56320b5556a217ab1f:RkuxqJomhBtuGZYi0Y7VaQE/6KzvYToHSDU9GkpLVdtGsRjZgwxlZ9PzelWPywpreuvv7pLaFMchBMbMZ4UyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T09:52:16Z:9b709f622711eeb10968e6dc93d13b56200b6297bc5e0e558d1fab3e1fe9c054:JqfPatNp8TUW1nQM/DZ28sfn1FA9CXg37OTF/JQ/1v2PNgJ4YbaagYwZVQyEEIdz9CStJGYSFh43gfnP4UzRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -68,6 +68,9 @@ Options:
                         This explicit value survives the root-owned package
                         transaction; no privileged re-exec inherits it from the
                         ambient environment.
+  --app-root-from-env   Accept the node named by an inherited RYEOS_APP_ROOT.
+                        Without this or --app-root, an inherited RYEOS_APP_ROOT
+                        is refused: a stale export must not pick the node.
   --prefix DIR          Install under this absolute root-owned prefix instead
                         of /usr: DIR/bin, DIR/share/ryeos, DIR/share/doc/ryeos.
                         Requires --app-root naming a node other than
@@ -191,7 +194,7 @@ ryeos_user() {
     # Initialization already passes the selected app root explicitly. Carry
     # the same selection across sudo/login for lifecycle operations too;
     # otherwise an install targeting a second node can stop the primary node.
-    local selected_app_root="${init_app_root:-${RYEOS_APP_ROOT:-}}"
+    local selected_app_root="${init_app_root:-}"
     if [[ "$invoking_user" != "$(id -un)" ]]; then
         local user_shell cmd a
         user_shell="$(getent passwd "$invoking_user" | cut -d: -f7)"
@@ -690,6 +693,7 @@ crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
 init_app_root="${RYEOS_APP_ROOT:-}"
 app_root_argument_present=0
+app_root_from_env_confirmed=0
 install_prefix_argument="/usr"
 
 while [[ $# -gt 0 ]]; do
@@ -722,6 +726,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 && "$2" =~ ^[a-z][a-z0-9_]*$ ]] || die "$1 requires a section name"
             policy_carry_args+=("$1" "$2")
             shift 2
+            ;;
+        --app-root-from-env)
+            app_root_from_env_confirmed=1
+            shift
             ;;
         --app-root)
             [[ $# -ge 2 && -n "$2" ]] || die "--app-root requires a path"
@@ -793,6 +801,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# An inherited RYEOS_APP_ROOT silently choosing the node nearly re-initialised
+# a different node than the one meant; the selection must be stated.
+if [[ -n "$init_app_root" && $app_root_argument_present -eq 0 && $app_root_from_env_confirmed -eq 0 ]]; then
+    die "RYEOS_APP_ROOT=$init_app_root is inherited from the environment; pass --app-root $init_app_root to manage that node, --app-root-from-env to accept it, or unset RYEOS_APP_ROOT"
+fi
 if [[ -n "$init_app_root" && "$init_app_root" != /* ]]; then
     die "selected app root must be an absolute path"
 fi
