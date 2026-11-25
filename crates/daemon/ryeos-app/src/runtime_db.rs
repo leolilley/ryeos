@@ -236,19 +236,24 @@ impl StopIntent {
     }
 
     fn parse(value: &str) -> Result<Self> {
-        parse_stop_tombstone(value).map(|(intent, _)| intent)
+        match value {
+            "cancel" => Ok(Self::Cancel),
+            "kill" => Ok(Self::Kill),
+            other => bail!("invalid durable stop intent `{other}`"),
+        }
     }
 }
 
-/// Who wrote a durable stop tombstone. The origin of the FIRST writer is kept
-/// for the life of the tombstone, as its timestamp is: a later writer can
-/// escalate the intent (cancel to kill) but never changes who stopped the
-/// thread.
+/// Provenance of a durable stop, stored in `thread_runtime.stop_origin`
+/// beside the intent. It is provenance only: a stop is authorized by key and
+/// capability, whoever wrote it. The first writer's origin is kept for the
+/// life of the stop, as its timestamp is: a later writer can escalate the
+/// intent (cancel to kill) but never changes the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOrigin {
-    /// An explicit stop: a person's cancel or kill, a cascade of one, or any
-    /// recovery path.
-    Requested,
+    /// An explicit stop: a person's, a key's or an MCP caller's cancel or
+    /// kill, a cascade of one, or any recovery path.
+    Explicit,
     /// The stop written because the flagged child's parent session ended: by
     /// the parent-end sweep, or by the link of a flagged child born under an
     /// ended or stopped parent. It is what makes a stopped child finalize as
@@ -256,37 +261,34 @@ pub enum StopOrigin {
     ParentEnd,
 }
 
-/// The stored text of a stop tombstone. The origin rides in the same column
-/// as the intent, as a value suffix, so no schema carries it.
-fn stop_tombstone_text(intent: StopIntent, origin: StopOrigin) -> &'static str {
-    match (intent, origin) {
-        (StopIntent::Cancel, StopOrigin::Requested) => "cancel",
-        (StopIntent::Kill, StopOrigin::Requested) => "kill",
-        (StopIntent::Cancel, StopOrigin::ParentEnd) => "cancel_parent_end",
-        (StopIntent::Kill, StopOrigin::ParentEnd) => "kill_parent_end",
+impl StopOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::ParentEnd => "parent_end",
+        }
+    }
+
+    /// Parses only the two stored values; anything else is a hard error.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "explicit" => Ok(Self::Explicit),
+            "parent_end" => Ok(Self::ParentEnd),
+            other => bail!("invalid durable stop origin `{other}`"),
+        }
     }
 }
 
-fn parse_stop_tombstone(value: &str) -> Result<(StopIntent, StopOrigin)> {
-    match value {
-        "cancel" => Ok((StopIntent::Cancel, StopOrigin::Requested)),
-        "kill" => Ok((StopIntent::Kill, StopOrigin::Requested)),
-        "cancel_parent_end" => Ok((StopIntent::Cancel, StopOrigin::ParentEnd)),
-        "kill_parent_end" => Ok((StopIntent::Kill, StopOrigin::ParentEnd)),
-        other => bail!("invalid durable stop intent `{other}`"),
-    }
-}
-
-/// SQL expression merging a stop request (bound as `?3`, a stored tombstone
-/// text) into the `stop_intent` column. A kill dominates a cancel, and the
-/// origin of the first writer is kept.
-const MERGE_STOP_TOMBSTONE_SQL: &str = "CASE
-    WHEN stop_intent IS NULL THEN ?3
-    WHEN stop_intent IN ('kill', 'kill_parent_end') THEN stop_intent
-    WHEN ?3 IN ('kill', 'kill_parent_end') THEN
-        CASE WHEN stop_intent = 'cancel_parent_end' THEN 'kill_parent_end' ELSE 'kill' END
-    ELSE stop_intent
-END";
+/// SQL assignments merging a stop request into `thread_runtime`: `?2` is the
+/// request time, `?3` the intent text and `?4` the origin text. A kill
+/// dominates a cancel; the time and the origin of the first writer are kept.
+const MERGE_STOP_SQL: &str = "stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
+    stop_intent = CASE
+        WHEN stop_intent IS NULL THEN ?3
+        WHEN ?3 = 'kill' THEN 'kill'
+        ELSE stop_intent
+    END,
+    stop_origin = COALESCE(stop_origin, ?4)";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeInfo {
@@ -2234,6 +2236,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT,
+    stop_origin TEXT CHECK (
+        stop_origin IS NULL OR stop_origin IN ('explicit', 'parent_end')
+    ),
     process_quarantine TEXT,
     workspace_id TEXT,
     workspace_view_identity TEXT,
@@ -2246,7 +2251,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     ),
     -- A quarantine describes the attached identity recovery cannot prove
     -- gone; it is cleared in the same statement that clears the identity.
-    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL)
+    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL),
+    -- A stop origin is provenance of a stop intent; it never stands alone.
+    CHECK (stop_origin IS NULL OR stop_intent IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -2961,6 +2968,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // release never exceeds its draw, and a settled link that carries a draw
 // carries its release too (0 when nothing is released). A link with no draw
 // settles with `settled_at_ms` alone, written by the child's terminal path.
+// The same cut gives `thread_runtime` the `stop_origin` column beside
+// `stop_intent`: who wrote the stop (`explicit` or `parent_end`), written
+// with the intent by the first writer and kept. CHECKs: an origin is one of
+// the two values, and an origin carries an intent.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
 
 /// Most steps up the child links a launch-lineage walk takes before it refuses
@@ -5095,6 +5106,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "stop_intent",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stop_origin",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -20832,8 +20849,8 @@ impl RuntimeDb {
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
                 "UPDATE thread_runtime SET stop_requested_at_ms=COALESCE(stop_requested_at_ms, ?4),
-                stop_intent=CASE WHEN stop_intent IN ('cancel_parent_end', 'kill_parent_end')
-                    THEN 'kill_parent_end' ELSE 'kill' END
+                stop_intent='kill',
+                stop_origin=COALESCE(stop_origin, 'explicit')
               WHERE thread_id=?1 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND EXISTS(SELECT 1 FROM thread_process_scope_reservation
                     WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3)",
@@ -21253,13 +21270,7 @@ impl RuntimeDb {
     /// return the process identity that was attached before the tombstone.
     /// A concurrent attach is serialized by the StateStore lock: it either
     /// lands first and is returned here, or observes the tombstone and fails.
-    pub fn request_thread_stop(&self, thread_id: &str, intent: StopIntent) -> Result<RuntimeInfo> {
-        self.request_thread_stop_with_origin(thread_id, intent, StopOrigin::Requested)
-    }
-
-    /// As [`Self::request_thread_stop`], recording who wrote the stop. Only
-    /// the first writer's origin is kept; see [`StopOrigin`].
-    pub fn request_thread_stop_with_origin(
+    pub fn request_thread_stop(
         &self,
         thread_id: &str,
         intent: StopIntent,
@@ -21270,11 +21281,10 @@ impl RuntimeDb {
             let updated = conn.execute(
                 &format!(
                     "UPDATE thread_runtime
-                SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                    stop_intent = {MERGE_STOP_TOMBSTONE_SQL}
+                SET {MERGE_STOP_SQL}
               WHERE thread_id = ?1"
                 ),
-                params![thread_id, now_ms, stop_tombstone_text(intent, origin)],
+                params![thread_id, now_ms, intent.as_str(), origin.as_str()],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -21284,22 +21294,25 @@ impl RuntimeDb {
         })
     }
 
-    /// Whether the thread's stop tombstone was written by the parent-end stop
-    /// of a flagged child (see [`StopOrigin::ParentEnd`]).
-    pub fn thread_stopped_by_parent_end(&self, thread_id: &str) -> Result<bool> {
+    /// The stored origin of the thread's durable stop, or `None` when no stop
+    /// was requested. An unknown stored value is an error.
+    pub fn thread_stop_origin(&self, thread_id: &str) -> Result<Option<StopOrigin>> {
         self.conn.with_sql(|conn| {
             let text: Option<Option<String>> = conn
                 .query_row(
-                    "SELECT stop_intent FROM thread_runtime WHERE thread_id = ?1",
+                    "SELECT stop_origin FROM thread_runtime WHERE thread_id = ?1",
                     params![thread_id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            match text.flatten() {
-                Some(text) => Ok(parse_stop_tombstone(&text)?.1 == StopOrigin::ParentEnd),
-                None => Ok(false),
-            }
+            text.flatten().as_deref().map(StopOrigin::parse).transpose()
         })
+    }
+
+    /// Whether the thread's stop was written by the parent-end stop of a
+    /// flagged child (see [`StopOrigin::ParentEnd`]).
+    pub fn thread_stopped_by_parent_end(&self, thread_id: &str) -> Result<bool> {
+        Ok(self.thread_stop_origin(thread_id)? == Some(StopOrigin::ParentEnd))
     }
 
     /// Record that recovery holds the exact attached identity in quarantine.
@@ -23475,19 +23488,19 @@ impl RuntimeDb {
                 let origin = if flagged {
                     StopOrigin::ParentEnd
                 } else {
-                    StopOrigin::Requested
+                    StopOrigin::Explicit
                 };
                 let updated = tx.execute(
                     &format!(
                         "UPDATE thread_runtime
-                    SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                        stop_intent = {MERGE_STOP_TOMBSTONE_SQL}
+                    SET {MERGE_STOP_SQL}
                   WHERE thread_id = ?1"
                     ),
                     params![
                         child_thread_id,
                         lillux::time::timestamp_millis(),
-                        stop_tombstone_text(intent, origin)
+                        intent.as_str(),
+                        origin.as_str()
                     ],
                 )?;
                 if updated == 0 {
@@ -33091,10 +33104,27 @@ mod tests {
         };
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        // A parent-end cancel written first keeps its origin through the
+        // fence's escalation to kill.
+        db.conn
+            .with_sql(|conn| {
+                conn.execute(
+                    "UPDATE thread_runtime SET stop_requested_at_ms = 1,
+                        stop_intent = 'cancel', stop_origin = 'parent_end'
+                      WHERE thread_id = 'scope-recovery'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         db.fence_thread_process_scope_recovery(&reservation)
             .unwrap();
         let runtime = db.get_runtime_info("scope-recovery").unwrap().unwrap();
         assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("scope-recovery").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
         assert!(runtime.stop_requested_at_ms.is_some());
         assert!(
             db.thread_process_scope_reservation("scope-recovery")
@@ -33453,6 +33483,10 @@ mod tests {
             db.get_runtime_info("child").unwrap().unwrap().stop_intent,
             Some(StopIntent::Cancel)
         );
+        assert_eq!(
+            db.thread_stop_origin("child").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
 
         let (outcome, stop) = db
             .record_child_link_with_stop_policy(
@@ -33464,6 +33498,152 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, ChildLinkInsertOutcome::AlreadyPresent);
         assert_eq!(stop, None);
+    }
+
+    #[test]
+    fn stop_origin_checks_refuse_an_unknown_value_and_an_origin_without_an_intent() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t", "t").unwrap();
+        db.conn
+            .with_sql(|conn| {
+                assert!(
+                    conn.execute(
+                        "UPDATE thread_runtime SET stop_requested_at_ms = 1,
+                            stop_intent = 'cancel', stop_origin = 'operator'
+                          WHERE thread_id = 't'",
+                        [],
+                    )
+                    .is_err(),
+                    "an unknown origin value must be refused"
+                );
+                assert!(
+                    conn.execute(
+                        "UPDATE thread_runtime SET stop_origin = 'explicit' WHERE thread_id = 't'",
+                        [],
+                    )
+                    .is_err(),
+                    "an origin with no intent must be refused"
+                );
+                assert!(
+                    conn.execute(
+                        "INSERT INTO thread_runtime (thread_id, chain_root_id, stop_origin)
+                         VALUES ('t2', 't2', 'parent_end')",
+                        [],
+                    )
+                    .is_err(),
+                    "an origin with no intent must be refused on insert"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(db.thread_stop_origin("t").unwrap(), None);
+    }
+
+    #[test]
+    fn an_unknown_stored_stop_origin_is_a_hard_error_for_the_reader() {
+        assert_eq!(StopOrigin::parse("explicit").unwrap(), StopOrigin::Explicit);
+        assert_eq!(
+            StopOrigin::parse("parent_end").unwrap(),
+            StopOrigin::ParentEnd
+        );
+        for bad in ["", "operator", "cancel_parent_end", "Explicit"] {
+            assert!(StopOrigin::parse(bad).is_err(), "{bad:?} must not parse");
+        }
+        assert!(StopIntent::parse("cancel_parent_end").is_err());
+        assert!(StopIntent::parse("kill_parent_end").is_err());
+    }
+
+    #[test]
+    fn the_first_writers_stop_origin_is_kept_while_kill_dominates_the_intent() {
+        let (_tmp, db) = fresh_db();
+        for id in ["a", "b", "c", "d"] {
+            db.insert_thread_runtime(id, id).unwrap();
+        }
+        // Stop request: explicit cancel first, then a parent-end kill.
+        db.request_thread_stop("a", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        db.request_thread_stop("a", StopIntent::Kill, StopOrigin::ParentEnd)
+            .unwrap();
+        // Stop request: parent-end cancel first, then an explicit cancel.
+        db.request_thread_stop("b", StopIntent::Cancel, StopOrigin::ParentEnd)
+            .unwrap();
+        let runtime = db
+            .request_thread_stop("b", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Cancel));
+        assert_eq!(
+            db.thread_stop_origin("b").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
+        assert_eq!(
+            db.get_runtime_info("a").unwrap().unwrap().stop_intent,
+            Some(StopIntent::Kill)
+        );
+        assert_eq!(
+            db.thread_stop_origin("a").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // A kill is never softened by a later cancel.
+        let runtime = db
+            .request_thread_stop("a", StopIntent::Cancel, StopOrigin::ParentEnd)
+            .unwrap();
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("a").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // Link-time inherited stop: a flagged child already stopped by an
+        // explicit cancel keeps `explicit` when the link escalates to kill.
+        db.request_thread_stop("c", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        let (_, stop) = db
+            .record_child_link_with_options(
+                "parent",
+                "c",
+                "dispatch",
+                ChildLinkStopPolicy::Always(StopIntent::Kill),
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(stop, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("c").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // A fresh flagged child born under a stopped parent is parent-end; an
+        // unflagged one is explicit.
+        let (_, stop) = db
+            .record_child_link_with_options(
+                "parent",
+                "d",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(stop, Some(StopIntent::Cancel));
+        assert_eq!(
+            db.thread_stop_origin("d").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
+        db.insert_thread_runtime("e", "e").unwrap();
+        db.record_child_link_with_options(
+            "parent",
+            "e",
+            "dispatch",
+            ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.thread_stop_origin("e").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        assert!(!db.thread_stopped_by_parent_end("e").unwrap());
+        assert!(db.thread_stopped_by_parent_end("d").unwrap());
     }
 
     #[test]

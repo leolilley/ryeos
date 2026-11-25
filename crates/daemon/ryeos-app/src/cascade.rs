@@ -327,7 +327,7 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
 /// A terminal row is still signalled when it retains an attached identity: a
 /// managed runtime may self-finalize before the outer owned wrapper has exited.
 pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
-    signal_thread_with_origin(state, thread_id, mode, StopOrigin::Requested)
+    signal_thread_with_origin(state, thread_id, mode, StopOrigin::Explicit)
 }
 
 /// As [`signal_thread`], recording who wrote the stop tombstone. The first
@@ -350,7 +350,7 @@ fn signal_thread_with_origin(
         CascadeMode::Graceful => crate::state_store::StopIntent::Cancel,
         CascadeMode::Hard => crate::state_store::StopIntent::Kill,
     };
-    let runtime = match store.request_thread_stop_with_origin(thread_id, stop_intent, origin) {
+    let runtime = match store.request_thread_stop(thread_id, stop_intent, origin) {
         Ok(runtime) => runtime,
         Err(error) => {
             return json!({
@@ -434,7 +434,7 @@ fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
         // writes. Any other descendant keeps the plain stop.
         let origin = match state.state_store.flagged_dispatch_parent(thread_id) {
             Ok(Some(_)) => StopOrigin::ParentEnd,
-            Ok(None) | Err(_) => StopOrigin::Requested,
+            Ok(None) | Err(_) => StopOrigin::Explicit,
         };
         return signal_thread_with_origin(state, thread_id, mode, origin);
     }
@@ -472,7 +472,7 @@ pub fn stop_thread_and_descendants(
     thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<(Value, Vec<String>)> {
-    stop_thread_and_descendants_with_origin(state, thread_id, mode, StopOrigin::Requested)
+    stop_thread_and_descendants_with_origin(state, thread_id, mode, StopOrigin::Explicit)
 }
 
 /// As [`stop_thread_and_descendants`], recording who wrote the target's stop.

@@ -5208,6 +5208,11 @@ mod tests {
         let (event_type, payload) = terminal_event(state, child);
         assert_eq!(event_type, format!("thread_{status}"));
         assert_eq!(
+            state.state_store.thread_stop_origin(child).unwrap(),
+            Some(ryeos_app::state_store::StopOrigin::ParentEnd),
+            "{child} stop origin"
+        );
+        assert_eq!(
             payload["outcome_code"],
             ryeos_app::cascade::PARENT_END_OUTCOME_CODE
         );
@@ -5450,7 +5455,11 @@ mod tests {
         // and settle steps `threads.cancel` runs.
         state
             .state_store
-            .request_thread_stop("T-cxl", ryeos_app::state_store::StopIntent::Cancel)
+            .request_thread_stop(
+                "T-cxl",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::Explicit,
+            )
             .unwrap();
         ryeos_app::cascade::cancel_queued_descendants(&state, "T-cxl").unwrap();
         ryeos_app::cascade::cascade_descendants(
@@ -5481,7 +5490,11 @@ mod tests {
         running_thread(&state, "T-race");
         state
             .state_store
-            .request_thread_stop("T-race", ryeos_app::state_store::StopIntent::Cancel)
+            .request_thread_stop(
+                "T-race",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::Explicit,
+            )
             .unwrap();
         running_thread(&state, "T-race-child");
         let inherited = state
@@ -5520,7 +5533,11 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .request_thread_stop("T-live-child", ryeos_app::state_store::StopIntent::Cancel)
+            .request_thread_stop(
+                "T-live-child",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::Explicit,
+            )
             .unwrap();
         state
             .threads
@@ -5650,7 +5667,11 @@ mod tests {
         // The session is over and the sweep has not yet run: a person cancels.
         state
             .state_store
-            .request_thread_stop("T-person-child", ryeos_app::state_store::StopIntent::Cancel)
+            .request_thread_stop(
+                "T-person-child",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::Explicit,
+            )
             .unwrap();
         state
             .threads
@@ -5670,6 +5691,13 @@ mod tests {
         assert_eq!(event_type, "thread_cancelled");
         assert_eq!(payload["outcome_code"], "cancelled");
         assert_eq!(payload["error"]["reason"], "durable_stop_intent");
+        assert_eq!(
+            state
+                .state_store
+                .thread_stop_origin("T-person-child")
+                .unwrap(),
+            Some(ryeos_app::state_store::StopOrigin::Explicit)
+        );
         // The sweep finds it already terminal and writes nothing.
         let report = ryeos_app::cascade::stop_flagged_children_on_parent_end(
             &state,
@@ -5693,7 +5721,11 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .request_thread_stop("T-first-child", ryeos_app::state_store::StopIntent::Cancel)
+            .request_thread_stop(
+                "T-first-child",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::Explicit,
+            )
             .unwrap();
         state
             .state_store
@@ -5711,6 +5743,22 @@ mod tests {
         assert_eq!(event_type, "thread_killed");
         assert_eq!(payload["outcome_code"], "killed");
         assert_eq!(payload["error"]["reason"], "durable_stop_intent");
+        let child = state
+            .state_store
+            .get_thread("T-first-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            child.runtime.stop_intent,
+            Some(ryeos_app::state_store::StopIntent::Kill)
+        );
+        assert_eq!(
+            state
+                .state_store
+                .thread_stop_origin("T-first-child")
+                .unwrap(),
+            Some(ryeos_app::state_store::StopOrigin::Explicit)
+        );
     }
 
     #[test]
@@ -5734,7 +5782,7 @@ mod tests {
         // blocked until the forced stop reaches the child.
         let worker = state.clone();
         ryeos_app::cascade::stop_flagged_child_with(&state, "T-ignore-child", grace, move || {
-            worker.state_store.request_thread_stop_with_origin(
+            worker.state_store.request_thread_stop(
                 "T-ignore-child",
                 ryeos_app::state_store::StopIntent::Cancel,
                 ryeos_app::state_store::StopOrigin::ParentEnd,
@@ -5783,7 +5831,7 @@ mod tests {
             "T-obey-child",
             std::time::Duration::from_secs(20),
             move || {
-                worker.state_store.request_thread_stop_with_origin(
+                worker.state_store.request_thread_stop(
                     "T-obey-child",
                     ryeos_app::state_store::StopIntent::Cancel,
                     ryeos_app::state_store::StopOrigin::ParentEnd,

@@ -218,6 +218,13 @@ impl StateStore {
         g.runtime_db.flagged_dispatch_parent(child_thread_id)
     }
 
+    /// The stored origin of the thread's durable stop, or `None` when no stop
+    /// was requested; see [`runtime_db::RuntimeDb::thread_stop_origin`].
+    pub fn thread_stop_origin(&self, thread_id: &str) -> Result<Option<runtime_db::StopOrigin>> {
+        let g = self.lock()?;
+        g.runtime_db.thread_stop_origin(thread_id)
+    }
+
     /// The spend columns of the child's link, or `None` when no link has been
     /// recorded.
     pub fn child_link_spend(
@@ -324,9 +331,11 @@ impl StateStore {
             // before it reached this second durable mutation. Tombstone the child
             // first so no later attach can win, then preserve operational lineage
             // on a best-effort basis.
-            let stopped = g
-                .runtime_db
-                .request_thread_stop(child_thread_id, StopIntent::Cancel)?;
+            let stopped = g.runtime_db.request_thread_stop(
+                child_thread_id,
+                StopIntent::Cancel,
+                crate::runtime_db::StopOrigin::Explicit,
+            )?;
             if let Err(error) = g.runtime_db.record_child_link_with_options(
                 parent_thread_id,
                 child_thread_id,

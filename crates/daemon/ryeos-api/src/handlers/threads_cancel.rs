@@ -213,7 +213,11 @@ async fn cancel_loaded_thread(
     // attach is rejected and its caller kills the just-spawned process.
     let runtime = state
         .state_store
-        .request_thread_stop(&req.thread_id, ryeos_app::state_store::StopIntent::Cancel)
+        .request_thread_stop(
+            &req.thread_id,
+            ryeos_app::state_store::StopIntent::Cancel,
+            ryeos_app::state_store::StopOrigin::Explicit,
+        )
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let effective_intent = runtime.stop_intent.ok_or_else(|| {
         HandlerError::Internal(format!(
