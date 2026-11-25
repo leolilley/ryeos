@@ -901,6 +901,7 @@ mod tests {
             effect_classes: vec!["live".to_owned()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
         }
     }
 
