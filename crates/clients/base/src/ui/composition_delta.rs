@@ -433,7 +433,8 @@ mod tests {
             &descriptors,
             65536,
         )
-        .expect_err("a rebind at the source's generation is refused");
+        .err()
+        .expect("a rebind at the source's generation is refused");
         assert!(refusal.contains("successor"), "{refusal}");
     }
     #[test]
