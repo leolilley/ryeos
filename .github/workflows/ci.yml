@@ -1251,6 +1251,28 @@ jobs:
           done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
           exit "$failed"
 
+      # The ryeos-ui tests marked #[ignore] need populated handler binaries, which this job
+      # has from the bundle state. They run when the change touches ryeos-ui, so a branch
+      # cannot merge a broken seat read, dispatch or authority test that only the next full CI
+      # would catch. The count is exact, as in the full CI's ui-ignored-tests job.
+      - name: Run the ignored ryeos-ui tests and require the exact count
+        if: ${{ contains(needs.classify.outputs.test_packages, '"ryeos-ui"') }}
+        env:
+          RUST_MIN_STACK: 8388608
+          EXPECTED: "15"
+        run: |
+          set -o pipefail
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
+          log="$(mktemp)"
+          ./scripts/gate.sh -p ryeos-ui --run-ignored only 2>&1 | tee "$log"
+          summary="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Summary .* tests run:' | tail -n 1)"
+          echo "summary: $summary"
+          [[ "$summary" == *"$EXPECTED tests run: $EXPECTED passed"* && "$summary" != *" failed"* ]] \
+            || { echo "FAIL: expected exactly $EXPECTED ignored ryeos-ui tests to run and pass" >&2; exit 1; }
+
   # Daemon end-to-end binaries (crates/bin/daemon/tests) for a merge_gates run. The classifier
   # picks them from the coverage map: binaries covering a changed package or path, a changed
   # test binary itself, or all of them when the daemon's sources or shared test helpers change.
