@@ -106,6 +106,48 @@ pub struct ParentExecutionContext {
     /// Parent's immutable accounting scope; paid descendants inherit this
     /// execution budget authority (never a fresh allowance).
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Parent's workload ceiling, narrowed by whatever the spawn itself
+    /// derives. The child's own ceiling is this value; it is never read from
+    /// runtime-supplied params or fields.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+}
+
+impl ParentExecutionContext {
+    /// The context a thread's spawned child launches under. Every spawn path
+    /// (inline, detached, follow) builds it here, so the child's ceiling is the
+    /// calling thread's bearer ceiling and nothing runtime-supplied; any
+    /// narrowing derived at a spawn belongs in this one function.
+    pub fn for_child_of(cap: &ryeos_app::callback_token::CallbackCapability) -> Self {
+        Self {
+            parent_thread_id: cap.thread_id.clone(),
+            hard_limits: cap.hard_limits.clone(),
+            depth: cap.depth,
+            accounting_scope: cap.accounting_scope.clone(),
+            thread_ceiling: cap.thread_ceiling,
+        }
+    }
+
+    /// The durable form of this context, for a child admitted after the live
+    /// callback context is gone.
+    pub fn persisted(&self) -> ryeos_app::launch_metadata::PersistedParentExecutionContext {
+        ryeos_app::launch_metadata::PersistedParentExecutionContext {
+            parent_thread_id: self.parent_thread_id.clone(),
+            hard_limits: self.hard_limits.clone(),
+            depth: self.depth,
+            accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: self.thread_ceiling,
+        }
+    }
+
+    /// Ceiling a launch with this parent context carries. A launch with no
+    /// parent execution context is a root launch and is the only place a
+    /// thread is unbounded.
+    pub fn launch_ceiling(parent: Option<&Self>) -> ryeos_state::objects::ThreadWorkloadCeiling {
+        match parent {
+            Some(parent) => parent.thread_ceiling,
+            None => ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        }
+    }
 }
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
@@ -2349,6 +2391,7 @@ pub(crate) async fn dispatch_method(
         None,
         serde_json::Value::Null,
         0,
+        ParentExecutionContext::launch_ceiling(request.parent_execution_context.as_ref()),
     );
     if !state
         .callback_tokens

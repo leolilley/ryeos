@@ -533,6 +533,7 @@ mod tests {
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,

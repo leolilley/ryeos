@@ -5231,6 +5231,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: vec!["project.read".into(), "project.write".into()],
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:worker-execution".into()),
             runtime_ref: Some("runtime:worker-execution-runtime".into()),
         }

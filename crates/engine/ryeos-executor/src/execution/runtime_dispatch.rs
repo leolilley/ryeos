@@ -537,6 +537,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         .validate_token_and_thread(&params.callback_token, &params.thread_id)?;
     cap.runtime_method_surface
         .authorize(ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD)?;
+    refuse_unjudged_route_under_ceiling(&cap.thread_ceiling, &params)?;
     if let Some(grant) = cap.workload_client_grant.as_ref() {
         if params.hook_dispatch.is_some() || params.effect_dispatch.is_some() {
             anyhow::bail!(
@@ -760,6 +761,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     } else {
         None
     };
+    // The thread's own workload ceiling bounds every call made from it and
+    // from its descendants, whether or not the bearer carries a grant. The
+    // values judged are the child's own declared projections.
+    if cap.thread_ceiling.is_bounded() {
+        let prepared = prepared_callback_dispatch.as_ref().ok_or_else(|| {
+            thread_ceiling_error(ryeos_app::callback_token::ThreadCeilingRefusal {
+                code: ryeos_app::callback_token::THREAD_CEILING_SPAWN_MODE_REFUSED,
+                message: "a ceilinged thread's call lost its exact child preflight".to_owned(),
+            })
+        })?;
+        enforce_thread_ceiling(
+            &cap.thread_ceiling,
+            prepared.preflight.effect_class_ceiling,
+            prepared.preflight.workspace_access,
+        )?;
+    }
 
     let result = handle_execute(
         params,
@@ -779,6 +796,69 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     drop(caller_thread);
     drop(thread_auth);
     result
+}
+
+fn thread_ceiling_error(refusal: ryeos_app::callback_token::ThreadCeilingRefusal) -> anyhow::Error {
+    anyhow::Error::new(
+        crate::dispatch_error::DispatchError::LaunchPolicyForbidden {
+            code: refusal.code.to_owned(),
+            message: refusal.message,
+            binding: None,
+        },
+    )
+}
+
+/// Judge a child's own declared effect class and workspace access against the
+/// calling thread's workload ceiling. An unbounded ceiling admits everything.
+fn enforce_thread_ceiling(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
+    workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+) -> Result<()> {
+    ryeos_app::callback_token::authorize_thread_ceiling(
+        ceiling,
+        effect_class_ceiling,
+        workspace_access,
+    )
+    .map_err(thread_ceiling_error)
+}
+
+/// Under a bounded ceiling, refuse every dispatch the ceiling cannot judge
+/// from the child's own declared projections: hook and effect routes, whose
+/// authority is selected by the runtime rather than declared by the child,
+/// and any spawn mode other than a unary inline call, which has no exact
+/// child preflight to judge. Applying the ceiling to those routes is a
+/// separate change.
+fn refuse_unjudged_route_under_ceiling(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    params: &DispatchActionParams,
+) -> Result<()> {
+    if !ceiling.is_bounded() {
+        return Ok(());
+    }
+    if params.hook_dispatch.is_some() || params.effect_dispatch.is_some() {
+        return Err(thread_ceiling_error(
+            ryeos_app::callback_token::ThreadCeilingRefusal {
+                code: ryeos_app::callback_token::THREAD_CEILING_ROUTE_REFUSED,
+                message: "hook and effect dispatch routes are refused in a thread under a \
+                          workload ceiling"
+                    .to_owned(),
+            },
+        ));
+    }
+    if params.action.thread != "inline" {
+        return Err(thread_ceiling_error(
+            ryeos_app::callback_token::ThreadCeilingRefusal {
+                code: ryeos_app::callback_token::THREAD_CEILING_SPAWN_MODE_REFUSED,
+                message: format!(
+                    "a thread under a workload ceiling may only dispatch unary inline calls, \
+                     not `{}`",
+                    params.action.thread
+                ),
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {
@@ -2747,6 +2827,7 @@ fn runtime_action_request_hash(
         "hard_limits": &cap.hard_limits,
         "depth": cap.depth,
         "accounting_scope": &cap.accounting_scope,
+        "thread_ceiling": &cap.thread_ceiling,
         "callback_root_item_ref": &cap.item_ref,
         "callback_root_raw_content_digest": &cap.root_raw_content_digest,
         "callback_effective_definition_digest": &cap.effective_definition_digest,
@@ -2762,12 +2843,7 @@ fn runtime_action_request_hash(
 fn parent_execution_context_from_capability(
     cap: &ryeos_app::callback_token::CallbackCapability,
 ) -> crate::dispatch::ParentExecutionContext {
-    crate::dispatch::ParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-        accounting_scope: cap.accounting_scope.clone(),
-    }
+    crate::dispatch::ParentExecutionContext::for_child_of(cap)
 }
 
 #[cfg(test)]
@@ -3450,6 +3526,7 @@ mod tests {
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
             accounting_scope: None,
+            thread_ceiling: bounded_test_ceiling(),
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
@@ -3462,6 +3539,126 @@ mod tests {
             serde_json::json!({"turns": 6, "tokens": 1000})
         );
         assert_eq!(ctx.depth, 4);
+        assert_eq!(
+            ctx.thread_ceiling,
+            bounded_test_ceiling(),
+            "an inline child inherits the calling thread's ceiling unchanged"
+        );
+        // Detached and follow spawns build the same context and persist it.
+        let persisted = ctx.persisted();
+        assert_eq!(persisted.parent_thread_id, "T-parent");
+        assert_eq!(persisted.thread_ceiling, bounded_test_ceiling());
+    }
+
+    fn bounded_test_ceiling() -> ryeos_state::objects::ThreadWorkloadCeiling {
+        ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+            workspace_access:
+                ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        }
+    }
+
+    fn ceiling_refusal_code(error: anyhow::Error) -> String {
+        match error.downcast_ref::<crate::dispatch_error::DispatchError>() {
+            Some(crate::dispatch_error::DispatchError::LaunchPolicyForbidden { code, .. }) => {
+                code.clone()
+            }
+            other => panic!("expected a typed launch-policy refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_ceiling_refuses_a_tool_above_it_at_the_call() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        let ceiling = bounded_test_ceiling();
+        let immutable = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+
+        enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), immutable).unwrap();
+        assert_eq!(
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Some(EffectClass::Sealed), immutable).unwrap_err()
+            ),
+            "thread_ceiling_effect_class_exceeded"
+        );
+        assert_eq!(
+            ceiling_refusal_code(enforce_thread_ceiling(&ceiling, None, immutable).unwrap_err()),
+            "thread_ceiling_effect_class_exceeded",
+            "a tool that declares no durable class runs live"
+        );
+        assert_eq!(
+            ceiling_refusal_code(
+                enforce_thread_ceiling(
+                    &ceiling,
+                    Some(EffectClass::Recorded),
+                    Some(WorkspaceAccess::SharedExclusive)
+                )
+                .unwrap_err()
+            ),
+            "thread_ceiling_workspace_access_exceeded"
+        );
+        assert_eq!(
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), None).unwrap_err()
+            ),
+            "thread_ceiling_no_declared_projection"
+        );
+        enforce_thread_ceiling(
+            &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bounded_ceiling_refuses_hook_effect_and_non_inline_routes() {
+        let bounded = bounded_test_ceiling();
+        let unbounded = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+
+        let ordinary = test_dispatch_params(Some("1".repeat(64)), None);
+        refuse_unjudged_route_under_ceiling(&bounded, &ordinary).unwrap();
+        refuse_unjudged_route_under_ceiling(&unbounded, &ordinary).unwrap();
+
+        let hook = ryeos_runtime::callback::HookDispatchIdentity {
+            occurrence: test_directive_occurrence("continuation"),
+            hook_id: "audit".to_string(),
+            layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
+            result_mode: ryeos_runtime::hooks_loader::HookResultMode::Discard,
+            context_contract: test_context_contract("event"),
+            context_hash: "c".repeat(64),
+        };
+        let hook_params = test_dispatch_params(None, Some(hook));
+        assert_eq!(
+            ceiling_refusal_code(
+                refuse_unjudged_route_under_ceiling(&bounded, &hook_params).unwrap_err()
+            ),
+            "thread_ceiling_route_refused"
+        );
+        refuse_unjudged_route_under_ceiling(&unbounded, &hook_params).unwrap();
+
+        let mut effect_params = test_dispatch_params(Some("1".repeat(64)), None);
+        effect_params.effect_dispatch = Some(ryeos_runtime::callback::EffectDispatchRequest {
+            authorization_id: "effect-1".to_owned(),
+        });
+        assert_eq!(
+            ceiling_refusal_code(
+                refuse_unjudged_route_under_ceiling(&bounded, &effect_params).unwrap_err()
+            ),
+            "thread_ceiling_route_refused"
+        );
+
+        for mode in ["detached", "follow"] {
+            let mut spawned = test_dispatch_params(Some("1".repeat(64)), None);
+            spawned.action.thread = mode.to_owned();
+            assert_eq!(
+                ceiling_refusal_code(
+                    refuse_unjudged_route_under_ceiling(&bounded, &spawned).unwrap_err()
+                ),
+                "thread_ceiling_spawn_mode_refused"
+            );
+            refuse_unjudged_route_under_ceiling(&unbounded, &spawned).unwrap();
+        }
     }
 
     #[test]
