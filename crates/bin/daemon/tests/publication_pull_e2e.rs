@@ -41,10 +41,10 @@ async fn start_publisher() -> (DaemonHarness, FastFixture) {
     .expect("start the publishing node")
 }
 
-/// A second node with its own node and operator keys and only the core
-/// bundle: it has never seen the published bundle and has no remote.
+/// A second node with its own node and operator keys and only the
+/// Core-knowledge profile: it has never seen the published bundle and has no remote.
 async fn start_puller() -> (DaemonHarness, FastFixture) {
-    DaemonHarness::start_fast_core_only_with_node_and_user_keys(
+    DaemonHarness::start_fast_core_knowledge_with_node_and_user_keys(
         SigningKey::from_bytes(&[0x5b; 32]),
         SigningKey::from_bytes(&[0x5c; 32]),
     )

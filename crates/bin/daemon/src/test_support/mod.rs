@@ -808,6 +808,7 @@ pub struct DaemonHarness {
 enum FastBundleSelection {
     CoreOnly,
     CoreScheduling,
+    CoreKnowledge,
     Standard,
     StandardCentralAuth,
     Development,
@@ -1142,16 +1143,18 @@ impl DaemonHarness {
         .await
     }
 
-    /// A Core-only node with its own node and operator keys, for a test that
-    /// needs a second node holding no bundle beyond Core.
-    pub async fn start_fast_core_only_with_node_and_user_keys(
+    /// A node initialized with the shipped Core-knowledge profile and its own node
+    /// and operator keys: the smallest shipped selection that provides the
+    /// `knowledge` kind, for a test that needs a second node that does not
+    /// already hold the bundle it pulls.
+    pub async fn start_fast_core_knowledge_with_node_and_user_keys(
         node_key: SigningKey,
         user_key: SigningKey,
     ) -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             Some(user_key),
-            FastBundleSelection::CoreOnly,
+            FastBundleSelection::CoreKnowledge,
             |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
@@ -1201,6 +1204,9 @@ impl DaemonHarness {
             FastBundleSelection::CoreScheduling => {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
+            FastBundleSelection::CoreKnowledge => {
+                copy_core_to_temp_prepared(&["core", "knowledge"])?
+            }
             FastBundleSelection::Standard => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Standard
                     .exact_bundles()
@@ -1223,6 +1229,7 @@ impl DaemonHarness {
         let selected_profile = match bundle_selection {
             FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
             FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
+            FastBundleSelection::CoreKnowledge => fast_fixture::FastFixtureProfile::CoreKnowledge,
             FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
             FastBundleSelection::StandardCentralAuth => {
                 fast_fixture::FastFixtureProfile::StandardCentralAuth
@@ -1264,6 +1271,9 @@ impl DaemonHarness {
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         match bundle_selection {
+            FastBundleSelection::CoreKnowledge => {
+                fast_fixture::register_core_knowledge_composition(&state_path, &fixture)?
+            }
             FastBundleSelection::Standard => {
                 fast_fixture::register_standard_composition(&state_path, &fixture)?
             }
