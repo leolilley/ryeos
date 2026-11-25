@@ -458,13 +458,17 @@ impl AdmittedWorkloadClientGrant {
     /// without any declared bound and is refused, whatever its kind, and
     /// exclusive access is refused outright: exclusivity needs the parent
     /// quiesced for the child's lifetime, and a detached child outlives the
-    /// call. The returned ceiling is built from the grant's own entry for the
-    /// item and bounds every call the child and its descendants make.
+    /// call. An undeclared effect class is refused the same way: nothing
+    /// bounds what the child may do. A declared `none` of either kind passes
+    /// its gate; a detached child with no direct workspace use runs on the
+    /// immutable current generation. The returned ceiling is built from the
+    /// grant's own entry for the item and bounds every call the child and its
+    /// descendants make.
     pub fn authorize_detached_child(
         &self,
         item_ref: &str,
-        effect_class: Option<ryeos_effect_contract::EffectClass>,
-        workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+        effect_class: ryeos_engine::kind_registry::ProjectedEffectClass,
+        workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
     ) -> Result<(
         ryeos_engine::kind_registry::WorkspaceAccess,
         ryeos_state::objects::ThreadWorkloadCeiling,
@@ -481,8 +485,17 @@ impl AdmittedWorkloadClientGrant {
                 message: format!("the grant does not allow `{item_ref}` to be launched detached"),
             }));
         }
+        if effect_class == ryeos_engine::kind_registry::ProjectedEffectClass::Undeclared {
+            return Err(anyhow::Error::new(ThreadCeilingRefusal {
+                code: WORKLOAD_DETACH_NO_DECLARED_PROJECTION,
+                message: format!(
+                    "`{item_ref}` declares no signed effect-class projection, so nothing \
+                     bounds a detached child of it"
+                ),
+            }));
+        }
         match workspace_access {
-            None => {
+            ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Undeclared => {
                 return Err(anyhow::Error::new(ThreadCeilingRefusal {
                     code: WORKLOAD_DETACH_NO_DECLARED_PROJECTION,
                     message: format!(
@@ -491,7 +504,9 @@ impl AdmittedWorkloadClientGrant {
                     ),
                 }));
             }
-            Some(ryeos_engine::kind_registry::WorkspaceAccess::SharedExclusive) => {
+            ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Access(
+                ryeos_engine::kind_registry::WorkspaceAccess::SharedExclusive,
+            ) => {
                 return Err(anyhow::Error::new(ThreadCeilingRefusal {
                     code: WORKLOAD_DETACH_SHARED_EXCLUSIVE,
                     message: format!(
@@ -500,7 +515,10 @@ impl AdmittedWorkloadClientGrant {
                     ),
                 }));
             }
-            Some(ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration) => {}
+            ryeos_engine::kind_registry::ProjectedWorkspaceAccess::NoDirect
+            | ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Access(
+                ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            ) => {}
         }
         self.authorize_effect_class(item_ref, effect_class)?;
         let access = self.authorize_workspace_access(item_ref, workspace_access)?;
@@ -551,7 +569,7 @@ impl AdmittedWorkloadClientGrant {
     pub fn authorize_effect_class(
         &self,
         item_ref: &str,
-        effect_class: Option<ryeos_effect_contract::EffectClass>,
+        effect_class: ryeos_engine::kind_registry::ProjectedEffectClass,
     ) -> Result<()> {
         let execution = self
             .executions
@@ -565,7 +583,7 @@ impl AdmittedWorkloadClientGrant {
     pub fn authorize_workspace_access(
         &self,
         item_ref: &str,
-        access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+        access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
     ) -> Result<ryeos_engine::kind_registry::WorkspaceAccess> {
         let execution = self
             .executions
@@ -578,13 +596,20 @@ impl AdmittedWorkloadClientGrant {
 }
 
 /// Compare a child's declared durable-effect class with the classes a ceiling
-/// admits. A child that declares no class runs live. The grant's per-item
-/// lookup and a thread's workload ceiling both decide through this function.
+/// admits. A child whose class is undeclared, or declared live, runs live. A
+/// child that declares no direct effect is at or below every class and always
+/// fits. The grant's per-item lookup and a thread's workload ceiling both
+/// decide through this function.
 pub fn authorize_effect_class_within<S: AsRef<str>>(
     admitted_classes: &[S],
-    effect_class: Option<ryeos_effect_contract::EffectClass>,
+    effect_class: ryeos_engine::kind_registry::ProjectedEffectClass,
 ) -> Result<()> {
-    let class = effect_class.map_or("live", ryeos_effect_contract::EffectClass::as_str);
+    use ryeos_engine::kind_registry::ProjectedEffectClass;
+    let class = match effect_class {
+        ProjectedEffectClass::NoDirectEffect => return Ok(()),
+        ProjectedEffectClass::Undeclared | ProjectedEffectClass::Live => "live",
+        ProjectedEffectClass::Class(class) => class.as_str(),
+    };
     if !admitted_classes
         .iter()
         .any(|value| AsRef::<str>::as_ref(value) == class)
@@ -595,15 +620,24 @@ pub fn authorize_effect_class_within<S: AsRef<str>>(
 }
 
 /// Compare a child's signed workspace-access projection with the one a
-/// ceiling admits. A child with no signed projection is refused. The grant's
-/// per-item lookup and a thread's workload ceiling both decide through this
-/// function.
+/// ceiling admits. A child with no signed projection is refused. A child that
+/// declares no direct workspace use fits any ceiling and holds the weakest
+/// access, the immutable current generation. The grant's per-item lookup and a
+/// thread's workload ceiling both decide through this function.
 pub fn authorize_workspace_access_within(
     admitted_access: ryeos_engine::kind_registry::WorkspaceAccess,
-    access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
 ) -> Result<ryeos_engine::kind_registry::WorkspaceAccess> {
-    let access = access
-        .ok_or_else(|| anyhow::anyhow!("child has no signed shared-workspace access projection"))?;
+    use ryeos_engine::kind_registry::{ProjectedWorkspaceAccess, WorkspaceAccess};
+    let access = match access {
+        ProjectedWorkspaceAccess::Undeclared => {
+            bail!("child has no signed shared-workspace access projection")
+        }
+        ProjectedWorkspaceAccess::NoDirect => {
+            return Ok(WorkspaceAccess::ImmutableCurrentGeneration);
+        }
+        ProjectedWorkspaceAccess::Access(access) => access,
+    };
     if access != admitted_access {
         bail!("child workspace access contradicts the admitted ceiling");
     }
@@ -655,15 +689,16 @@ impl std::error::Error for ThreadCeilingRefusal {}
 
 /// Judge a child's own declared projections against a thread's ceiling. An
 /// `Unbounded` ceiling admits everything. Under a `Bounded` ceiling a child
-/// that declares no workspace-access projection executes without any declared
-/// bound and is refused, whatever its kind; the declared effect class and
+/// that declares no workspace-access projection, or no effect-class
+/// projection, executes without any declared bound and is refused, whatever
+/// its kind; a declared `none` passes; the declared effect class and
 /// workspace access are then checked by the same functions the workload-client
 /// grant uses. The values come from the child's own preflight, never from the
 /// caller.
 pub fn authorize_thread_ceiling(
     ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
-    effect_class: Option<ryeos_effect_contract::EffectClass>,
-    workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    effect_class: ryeos_engine::kind_registry::ProjectedEffectClass,
+    workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
 ) -> std::result::Result<(), ThreadCeilingRefusal> {
     let ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
         max_effect_class,
@@ -672,10 +707,18 @@ pub fn authorize_thread_ceiling(
     else {
         return Ok(());
     };
-    if workspace_access.is_none() {
+    if workspace_access == ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Undeclared {
         return Err(ThreadCeilingRefusal {
             code: THREAD_CEILING_NO_DECLARED_PROJECTION,
             message: "the child declares no signed workspace-access projection, so nothing \
+                      bounds it under this thread's workload ceiling"
+                .to_owned(),
+        });
+    }
+    if effect_class == ryeos_engine::kind_registry::ProjectedEffectClass::Undeclared {
+        return Err(ThreadCeilingRefusal {
+            code: THREAD_CEILING_NO_DECLARED_PROJECTION,
+            message: "the child declares no signed effect-class projection, so nothing \
                       bounds it under this thread's workload ceiling"
                 .to_owned(),
         });
@@ -722,7 +765,10 @@ pub fn authorize_thread_ceiling_launch_effect(
     };
     authorize_effect_class_within(
         max_effect_class.admitted_labels(),
-        authority.admitted_effect_class,
+        authority.admitted_effect_class.map_or(
+            ryeos_engine::kind_registry::ProjectedEffectClass::Live,
+            |class| ryeos_engine::kind_registry::ProjectedEffectClass::Class(class),
+        ),
     )
     .map_err(|error| ThreadCeilingRefusal {
         code: THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED,
@@ -2879,13 +2925,22 @@ mod tests {
     #[test]
     fn detached_child_is_judged_by_the_same_gates_as_the_inline_call() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         let grant = detached_grant(&["live", "recorded"]);
-        let projections = [None, Some(EffectClass::Recorded), Some(EffectClass::Sealed)];
+        let projections = [
+            Effect::Undeclared,
+            Effect::NoDirectEffect,
+            Effect::Live,
+            Effect::Class(EffectClass::Recorded),
+            Effect::Class(EffectClass::Sealed),
+        ];
         let access = [
-            None,
-            Some(WorkspaceAccess::ImmutableCurrentGeneration),
-            Some(WorkspaceAccess::SharedExclusive),
+            Workspace::Undeclared,
+            Workspace::NoDirect,
+            Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration),
+            Workspace::Access(WorkspaceAccess::SharedExclusive),
         ];
         for effect in projections {
             for workspace in access {
@@ -2902,8 +2957,10 @@ mod tests {
                     assert!(detached.is_err(), "{effect:?} {workspace:?}");
                 }
                 if let Ok((admitted_access, ceiling)) = detached {
-                    assert_eq!(Some(admitted_access), workspace);
+                    assert_eq!(admitted_access, WorkspaceAccess::ImmutableCurrentGeneration);
                     assert!(ceiling.is_bounded());
+                    assert_ne!(effect, Effect::Undeclared);
+                    assert_ne!(workspace, Workspace::Undeclared);
                 }
             }
         }
@@ -2917,8 +2974,10 @@ mod tests {
         let error = grant
             .authorize_detached_child(
                 "tool:project/check",
-                Some(EffectClass::Sealed),
-                Some(WorkspaceAccess::ImmutableCurrentGeneration),
+                ryeos_engine::kind_registry::ProjectedEffectClass::Class(EffectClass::Sealed),
+                ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Access(
+                    WorkspaceAccess::ImmutableCurrentGeneration,
+                ),
             )
             .unwrap_err();
         assert!(
@@ -2930,16 +2989,16 @@ mod tests {
     #[test]
     fn detached_child_without_a_declared_projection_or_with_exclusive_access_is_refused_typed() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         let grant = detached_grant(&["live", "recorded"]);
+        let recorded = Effect::Class(EffectClass::Recorded);
+        let immutable = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
         assert_eq!(
             typed_refusal_code(
                 grant
-                    .authorize_detached_child(
-                        "tool:project/check",
-                        Some(EffectClass::Recorded),
-                        None
-                    )
+                    .authorize_detached_child("tool:project/check", recorded, Workspace::Undeclared)
                     .unwrap_err()
             ),
             WORKLOAD_DETACH_NO_DECLARED_PROJECTION
@@ -2947,26 +3006,42 @@ mod tests {
         assert_eq!(
             typed_refusal_code(
                 grant
+                    .authorize_detached_child("tool:project/check", Effect::Undeclared, immutable)
+                    .unwrap_err()
+            ),
+            WORKLOAD_DETACH_NO_DECLARED_PROJECTION,
+            "an undeclared effect class is refused, not read as live"
+        );
+        assert_eq!(
+            typed_refusal_code(
+                grant
                     .authorize_detached_child(
                         "tool:project/check",
-                        Some(EffectClass::Recorded),
-                        Some(WorkspaceAccess::SharedExclusive),
+                        recorded,
+                        Workspace::Access(WorkspaceAccess::SharedExclusive),
                     )
                     .unwrap_err()
             ),
             WORKLOAD_DETACH_SHARED_EXCLUSIVE
         );
+        // A declared `none` of both kinds is bounded and admitted, holding the
+        // immutable generation whatever the grant lists.
+        let (access, ceiling) = grant
+            .authorize_detached_child(
+                "tool:project/check",
+                Effect::NoDirectEffect,
+                Workspace::NoDirect,
+            )
+            .unwrap();
+        assert_eq!(access, WorkspaceAccess::ImmutableCurrentGeneration);
+        assert!(ceiling.is_bounded());
         // An item the grant does not let the session detach is refused before
         // its projections are read.
         let plain = workload_client_grant();
         assert_eq!(
             typed_refusal_code(
                 plain
-                    .authorize_detached_child(
-                        "tool:project/check",
-                        Some(EffectClass::Recorded),
-                        Some(WorkspaceAccess::ImmutableCurrentGeneration),
-                    )
+                    .authorize_detached_child("tool:project/check", recorded, immutable)
                     .unwrap_err()
             ),
             WORKLOAD_DETACH_NOT_OPTED_IN
@@ -2982,8 +3057,12 @@ mod tests {
         let sealed_for = |classes: &[&str]| {
             detached_grant(classes).authorize_detached_child(
                 "tool:project/check",
-                Some(ryeos_effect_contract::EffectClass::Recorded),
-                Some(WorkspaceAccess::ImmutableCurrentGeneration),
+                ryeos_engine::kind_registry::ProjectedEffectClass::Class(
+                    ryeos_effect_contract::EffectClass::Recorded,
+                ),
+                ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Access(
+                    WorkspaceAccess::ImmutableCurrentGeneration,
+                ),
             )
         };
         let expected = |max_effect_class| ThreadWorkloadCeiling::Bounded {
@@ -3015,8 +3094,10 @@ mod tests {
         // A list naming no class a ceiling can be built from is refused.
         let unrepresentable = detached_grant(&["live"]).authorize_detached_child(
             "tool:project/check",
-            None,
-            Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            ryeos_engine::kind_registry::ProjectedEffectClass::Live,
+            ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Access(
+                WorkspaceAccess::ImmutableCurrentGeneration,
+            ),
         );
         assert_eq!(
             typed_refusal_code(unrepresentable.unwrap_err()),
@@ -3071,21 +3152,30 @@ mod tests {
 
     #[test]
     fn workload_client_grant_rechecks_resolved_child_effect_class() {
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let grant = workload_client_grant();
+        // An undeclared class and a declared live are the same for an inline
+        // call: both run live.
         grant
-            .authorize_effect_class("tool:project/check", None)
+            .authorize_effect_class("tool:project/check", Effect::Undeclared)
+            .unwrap();
+        grant
+            .authorize_effect_class("tool:project/check", Effect::Live)
+            .unwrap();
+        grant
+            .authorize_effect_class("tool:project/check", Effect::NoDirectEffect)
             .unwrap();
         grant
             .authorize_effect_class(
                 "tool:project/check",
-                Some(ryeos_effect_contract::EffectClass::Recorded),
+                Effect::Class(ryeos_effect_contract::EffectClass::Recorded),
             )
             .unwrap();
         assert!(
             grant
                 .authorize_effect_class(
                     "tool:project/check",
-                    Some(ryeos_effect_contract::EffectClass::Sealed),
+                    Effect::Class(ryeos_effect_contract::EffectClass::Sealed),
                 )
                 .is_err()
         );
@@ -3093,28 +3183,35 @@ mod tests {
 
     #[test]
     fn workload_client_grant_requires_the_exact_child_workspace_projection() {
+        use ryeos_engine::kind_registry::{ProjectedWorkspaceAccess as Workspace, WorkspaceAccess};
         let grant = workload_client_grant();
         assert_eq!(
             grant
                 .authorize_workspace_access(
                     "tool:project/check",
-                    Some(ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,),
+                    Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration),
                 )
                 .unwrap(),
-            ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration
+            WorkspaceAccess::ImmutableCurrentGeneration
         );
         assert!(
             grant
                 .authorize_workspace_access(
                     "tool:project/check",
-                    Some(ryeos_engine::kind_registry::WorkspaceAccess::SharedExclusive),
+                    Workspace::Access(WorkspaceAccess::SharedExclusive),
                 )
                 .is_err()
         );
         assert!(
             grant
-                .authorize_workspace_access("tool:project/check", None)
+                .authorize_workspace_access("tool:project/check", Workspace::Undeclared)
                 .is_err()
+        );
+        assert_eq!(
+            grant
+                .authorize_workspace_access("tool:project/check", Workspace::NoDirect)
+                .unwrap(),
+            WorkspaceAccess::ImmutableCurrentGeneration
         );
     }
 
@@ -3135,37 +3232,58 @@ mod tests {
     #[test]
     fn thread_ceiling_refuses_child_above_effect_class() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         use ryeos_state::objects::ThreadEffectCeiling;
-        let immutable = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+        let immutable = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
 
         let recorded = bounded_thread_ceiling(ThreadEffectCeiling::Recorded);
-        authorize_thread_ceiling(&recorded, Some(EffectClass::Recorded), immutable).unwrap();
+        authorize_thread_ceiling(&recorded, Effect::Class(EffectClass::Recorded), immutable)
+            .unwrap();
+        authorize_thread_ceiling(&recorded, Effect::NoDirectEffect, immutable).unwrap();
         assert_eq!(
             refusal_code(authorize_thread_ceiling(
                 &recorded,
-                Some(EffectClass::Sealed),
+                Effect::Class(EffectClass::Sealed),
                 immutable
             )),
             THREAD_CEILING_EFFECT_CLASS_EXCEEDED
         );
         assert_eq!(
-            refusal_code(authorize_thread_ceiling(&recorded, None, immutable)),
+            refusal_code(authorize_thread_ceiling(&recorded, Effect::Live, immutable)),
             THREAD_CEILING_EFFECT_CLASS_EXCEEDED,
-            "a child that declares no durable class runs live"
+            "a child that declares live runs live"
+        );
+        assert_eq!(
+            refusal_code(authorize_thread_ceiling(
+                &recorded,
+                Effect::Undeclared,
+                immutable
+            )),
+            THREAD_CEILING_NO_DECLARED_PROJECTION,
+            "a child that declares no effect class is refused, not read as live"
         );
 
         let sealed = bounded_thread_ceiling(ThreadEffectCeiling::Sealed);
-        authorize_thread_ceiling(&sealed, Some(EffectClass::Sealed), immutable).unwrap();
-        authorize_thread_ceiling(&sealed, Some(EffectClass::Recorded), immutable).unwrap();
+        authorize_thread_ceiling(&sealed, Effect::Class(EffectClass::Sealed), immutable).unwrap();
+        authorize_thread_ceiling(&sealed, Effect::Class(EffectClass::Recorded), immutable).unwrap();
         assert_eq!(
-            refusal_code(authorize_thread_ceiling(&sealed, None, immutable)),
+            refusal_code(authorize_thread_ceiling(&sealed, Effect::Live, immutable)),
             THREAD_CEILING_EFFECT_CLASS_EXCEEDED
         );
 
         let live = bounded_thread_ceiling(ThreadEffectCeiling::Live);
-        authorize_thread_ceiling(&live, None, immutable).unwrap();
-        authorize_thread_ceiling(&live, Some(EffectClass::Sealed), immutable).unwrap();
+        authorize_thread_ceiling(&live, Effect::Live, immutable).unwrap();
+        authorize_thread_ceiling(&live, Effect::Class(EffectClass::Sealed), immutable).unwrap();
+        assert_eq!(
+            refusal_code(authorize_thread_ceiling(
+                &live,
+                Effect::Undeclared,
+                immutable
+            )),
+            THREAD_CEILING_NO_DECLARED_PROJECTION
+        );
     }
 
     #[test]
@@ -3320,21 +3438,24 @@ mod tests {
     #[test]
     fn thread_ceiling_refuses_child_above_workspace_access() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         use ryeos_state::objects::ThreadEffectCeiling;
         let live = bounded_thread_ceiling(ThreadEffectCeiling::Live);
         authorize_thread_ceiling(
             &live,
-            Some(EffectClass::Recorded),
-            Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            Effect::Class(EffectClass::Recorded),
+            Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration),
         )
         .unwrap();
+        authorize_thread_ceiling(&live, Effect::NoDirectEffect, Workspace::NoDirect).unwrap();
         // Exclusive access to the live workspace is refused under any ceiling.
         assert_eq!(
             refusal_code(authorize_thread_ceiling(
                 &live,
-                Some(EffectClass::Recorded),
-                Some(WorkspaceAccess::SharedExclusive),
+                Effect::Class(EffectClass::Recorded),
+                Workspace::Access(WorkspaceAccess::SharedExclusive),
             )),
             THREAD_CEILING_WORKSPACE_ACCESS_EXCEEDED
         );
@@ -3342,26 +3463,35 @@ mod tests {
 
     #[test]
     fn thread_ceiling_refuses_a_child_with_no_declared_projection() {
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace,
+        };
         use ryeos_state::objects::ThreadEffectCeiling;
         // A kind that declares neither projection executes without any bound.
         let live = bounded_thread_ceiling(ThreadEffectCeiling::Live);
         assert_eq!(
-            refusal_code(authorize_thread_ceiling(&live, None, None)),
+            refusal_code(authorize_thread_ceiling(
+                &live,
+                Effect::Undeclared,
+                Workspace::Undeclared
+            )),
             THREAD_CEILING_NO_DECLARED_PROJECTION
         );
         assert_eq!(
             refusal_code(authorize_thread_ceiling(
                 &live,
-                Some(ryeos_effect_contract::EffectClass::Recorded),
-                None
+                Effect::Class(ryeos_effect_contract::EffectClass::Recorded),
+                Workspace::Undeclared
             )),
             THREAD_CEILING_NO_DECLARED_PROJECTION
         );
+        // A declared `none` is a declaration: it is not refused for want of one.
+        authorize_thread_ceiling(&live, Effect::NoDirectEffect, Workspace::NoDirect).unwrap();
         // An unceilinged thread is not asked for a projection.
         authorize_thread_ceiling(
             &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
-            None,
-            None,
+            Effect::Undeclared,
+            Workspace::Undeclared,
         )
         .unwrap();
     }
@@ -3369,20 +3499,36 @@ mod tests {
     #[test]
     fn thread_ceiling_and_grant_decide_through_the_same_functions() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         // The shared gates take the admitted values directly; the grant's
         // per-item lookup and the thread ceiling both reduce to them.
-        authorize_effect_class_within(&["recorded"], Some(EffectClass::Recorded)).unwrap();
-        assert!(authorize_effect_class_within(&["recorded"], None).is_err());
-        authorize_effect_class_within(&["live", "recorded"], None).unwrap();
+        authorize_effect_class_within(&["recorded"], Effect::Class(EffectClass::Recorded)).unwrap();
+        assert!(authorize_effect_class_within(&["recorded"], Effect::Undeclared).is_err());
+        assert!(authorize_effect_class_within(&["recorded"], Effect::Live).is_err());
+        authorize_effect_class_within(&["live", "recorded"], Effect::Undeclared).unwrap();
+        authorize_effect_class_within(&["live", "recorded"], Effect::Live).unwrap();
+        authorize_effect_class_within(&["recorded"], Effect::NoDirectEffect).unwrap();
         authorize_workspace_access_within(
             WorkspaceAccess::ImmutableCurrentGeneration,
-            Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration),
         )
         .unwrap();
         assert!(
-            authorize_workspace_access_within(WorkspaceAccess::ImmutableCurrentGeneration, None)
-                .is_err()
+            authorize_workspace_access_within(
+                WorkspaceAccess::ImmutableCurrentGeneration,
+                Workspace::Undeclared
+            )
+            .is_err()
+        );
+        assert_eq!(
+            authorize_workspace_access_within(
+                WorkspaceAccess::ImmutableCurrentGeneration,
+                Workspace::NoDirect
+            )
+            .unwrap(),
+            WorkspaceAccess::ImmutableCurrentGeneration
         );
     }
 

@@ -15856,6 +15856,40 @@ mod tests {
     }
 
     #[test]
+    fn a_none_declaration_does_not_cover_the_launchs_own_sealed_effect_authority() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace,
+        };
+        let recorded = recorded_bounded_ceiling();
+        // A directive that declares no direct effect and no direct workspace
+        // use passes the ceiling's projection gates...
+        ryeos_app::callback_token::authorize_thread_ceiling(
+            &recorded,
+            Effect::NoDirectEffect,
+            Workspace::NoDirect,
+        )
+        .unwrap();
+        // ...but its model calls are judged at launch by the sealed
+        // external-effect authority, which `none` does not cover.
+        let parent = ceiling_parent_context(recorded);
+        assert_eq!(
+            refusal_code_of(judge_launch_effect_under_ceiling(
+                Some(&parent),
+                None,
+                Some(&sealed_effect_authority(Some(EffectClass::Sealed)))
+            )),
+            ryeos_app::callback_token::THREAD_CEILING_LAUNCH_EFFECT_EXCEEDED
+        );
+        judge_launch_effect_under_ceiling(
+            Some(&parent),
+            None,
+            Some(&sealed_effect_authority(Some(EffectClass::Recorded))),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn a_continued_successor_keeps_the_ceiling_and_is_judged_again_at_its_launch() {
         use ryeos_effect_contract::EffectClass;
         let recorded = recorded_bounded_ceiling();

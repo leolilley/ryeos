@@ -513,9 +513,14 @@ async fn prepare_callback_dispatch(
             let authority = ryeos_effect_contract::PreparedEffectDispatchAuthority {
                 authorization,
                 action_digest: ryeos_runtime::callback::dispatch_action_digest(&params.action)?,
-                subject_effect_class_ceiling: preflight.effect_class_ceiling.ok_or_else(|| {
-                    anyhow::anyhow!("durable effect preflight lost its admitted subject ceiling")
-                })?,
+                subject_effect_class_ceiling: preflight
+                    .effect_class_ceiling
+                    .durable_class()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "durable effect preflight lost its admitted subject ceiling"
+                        )
+                    })?,
             };
             authority.validate()?;
             Ok::<_, anyhow::Error>(authority)
@@ -1008,8 +1013,8 @@ pub(crate) fn enforce_thread_ceiling_on_preflight(
 /// calling thread's workload ceiling. An unbounded ceiling admits everything.
 fn enforce_thread_ceiling(
     ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
-    effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
-    workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    effect_class_ceiling: ryeos_engine::kind_registry::ProjectedEffectClass,
+    workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
 ) -> Result<()> {
     ryeos_app::callback_token::authorize_thread_ceiling(
         ceiling,
@@ -4038,28 +4043,42 @@ pub(crate) mod tests {
     #[test]
     fn thread_ceiling_refuses_a_tool_above_it_at_the_call() {
         use ryeos_effect_contract::EffectClass;
-        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
         let ceiling = bounded_test_ceiling();
-        let immutable = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+        let immutable = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
 
-        enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), immutable).unwrap();
+        enforce_thread_ceiling(&ceiling, Effect::Class(EffectClass::Recorded), immutable).unwrap();
         assert_eq!(
             ceiling_refusal_code(
-                enforce_thread_ceiling(&ceiling, Some(EffectClass::Sealed), immutable).unwrap_err()
+                enforce_thread_ceiling(&ceiling, Effect::Class(EffectClass::Sealed), immutable)
+                    .unwrap_err()
             ),
             "thread_ceiling_effect_class_exceeded"
         );
         assert_eq!(
-            ceiling_refusal_code(enforce_thread_ceiling(&ceiling, None, immutable).unwrap_err()),
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Effect::Live, immutable).unwrap_err()
+            ),
             "thread_ceiling_effect_class_exceeded",
-            "a tool that declares no durable class runs live"
+            "a tool that declares live runs live"
         );
+        assert_eq!(
+            ceiling_refusal_code(
+                enforce_thread_ceiling(&ceiling, Effect::Undeclared, immutable).unwrap_err()
+            ),
+            "thread_ceiling_no_declared_projection",
+            "a child whose effect class is undeclared is refused, not read as live"
+        );
+        enforce_thread_ceiling(&ceiling, Effect::NoDirectEffect, immutable).unwrap();
+        enforce_thread_ceiling(&ceiling, Effect::NoDirectEffect, Workspace::NoDirect).unwrap();
         assert_eq!(
             ceiling_refusal_code(
                 enforce_thread_ceiling(
                     &ceiling,
-                    Some(EffectClass::Recorded),
-                    Some(WorkspaceAccess::SharedExclusive)
+                    Effect::Class(EffectClass::Recorded),
+                    Workspace::Access(WorkspaceAccess::SharedExclusive)
                 )
                 .unwrap_err()
             ),
@@ -4067,14 +4086,19 @@ pub(crate) mod tests {
         );
         assert_eq!(
             ceiling_refusal_code(
-                enforce_thread_ceiling(&ceiling, Some(EffectClass::Recorded), None).unwrap_err()
+                enforce_thread_ceiling(
+                    &ceiling,
+                    Effect::Class(EffectClass::Recorded),
+                    Workspace::Undeclared
+                )
+                .unwrap_err()
             ),
             "thread_ceiling_no_declared_projection"
         );
         enforce_thread_ceiling(
             &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
-            None,
-            None,
+            Effect::Undeclared,
+            Workspace::Undeclared,
         )
         .unwrap();
     }
