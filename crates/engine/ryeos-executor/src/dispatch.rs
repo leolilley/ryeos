@@ -127,6 +127,19 @@ impl ParentExecutionContext {
         }
     }
 
+    /// The context a detached child of a grant-bearing thread launches under:
+    /// the calling thread's ceiling narrowed by the ceiling the grant seals for
+    /// this detached item. The grant's ceiling can only narrow, never widen,
+    /// what the calling thread already carries.
+    pub fn for_detached_child_of(
+        cap: &ryeos_app::callback_token::CallbackCapability,
+        grant_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    ) -> Self {
+        let mut context = Self::for_child_of(cap);
+        context.thread_ceiling = context.thread_ceiling.meet(grant_ceiling);
+        context
+    }
+
     /// The durable form of this context, for a child admitted after the live
     /// callback context is gone.
     pub fn persisted(&self) -> ryeos_app::launch_metadata::PersistedParentExecutionContext {
@@ -7604,6 +7617,155 @@ metadata:
             &preflight,
         )
         .unwrap();
+    }
+
+    fn detached_judgement_code(error: anyhow::Error) -> String {
+        match error.downcast_ref::<DispatchError>() {
+            Some(DispatchError::LaunchPolicyForbidden { code, .. }) => code.clone(),
+            _ => format!("{error:#}"),
+        }
+    }
+
+    #[test]
+    fn detached_call_is_refused_from_the_childs_preflight_before_any_state_exists() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_state::objects::ThreadWorkloadCeiling;
+        let grant =
+            crate::execution::runtime_dispatch::tests::detached_test_grant(&["live", "recorded"]);
+        let unbounded = ThreadWorkloadCeiling::node_root();
+        let judged = |class: Option<EffectClass>, access: Option<WorkspaceAccess>| {
+            let mut preflight = effect_preflight(class, None);
+            preflight.workspace_access = access;
+            crate::execution::runtime_dispatch::judge_detached_call(
+                &grant,
+                &unbounded,
+                "tool:example/effectful",
+                &preflight,
+            )
+        };
+        let immutable = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+        // The child's class above what the grant lists is refused.
+        let error = judged(Some(EffectClass::Sealed), immutable).unwrap_err();
+        assert!(
+            detached_judgement_code(error).contains("exceeds the admitted ceiling"),
+            "a sealed child is above a grant that lists only live and recorded"
+        );
+        // No declared projection, and exclusive access, each have their code.
+        assert_eq!(
+            detached_judgement_code(judged(Some(EffectClass::Recorded), None).unwrap_err()),
+            "workload_detach_no_declared_projection"
+        );
+        assert_eq!(
+            detached_judgement_code(
+                judged(
+                    Some(EffectClass::Recorded),
+                    Some(WorkspaceAccess::SharedExclusive)
+                )
+                .unwrap_err()
+            ),
+            "workload_detach_shared_exclusive"
+        );
+        let (access, ceiling) = judged(Some(EffectClass::Recorded), immutable).unwrap();
+        assert_eq!(access, WorkspaceAccess::ImmutableCurrentGeneration);
+        assert!(ceiling.is_bounded());
+    }
+
+    #[test]
+    fn detached_call_is_also_judged_against_the_calling_threads_own_ceiling() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let grant = crate::execution::runtime_dispatch::tests::detached_test_grant(&[
+            "live", "recorded", "sealed",
+        ]);
+        let narrow_parent = ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ThreadEffectCeiling::Recorded,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let mut preflight = effect_preflight(Some(EffectClass::Sealed), None);
+        preflight.workspace_access = Some(WorkspaceAccess::ImmutableCurrentGeneration);
+        // The grant admits a sealed child; the calling thread's narrower
+        // ceiling does not.
+        crate::execution::runtime_dispatch::judge_detached_call(
+            &grant,
+            &ThreadWorkloadCeiling::node_root(),
+            "tool:example/effectful",
+            &preflight,
+        )
+        .unwrap();
+        let error = crate::execution::runtime_dispatch::judge_detached_call(
+            &grant,
+            &narrow_parent,
+            "tool:example/effectful",
+            &preflight,
+        )
+        .unwrap_err();
+        assert_eq!(
+            detached_judgement_code(error),
+            "thread_ceiling_effect_class_exceeded"
+        );
+    }
+
+    #[test]
+    fn detached_child_authority_is_never_wider_than_the_same_items_inline_authority() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_state::objects::ThreadWorkloadCeiling;
+        let lists: [&[&str]; 5] = [
+            &["recorded"],
+            &["live", "recorded"],
+            &["recorded", "sealed"],
+            &["live", "recorded", "sealed"],
+            &["live"],
+        ];
+        for list in lists {
+            let grant = crate::execution::runtime_dispatch::tests::detached_test_grant(list);
+            for class in [None, Some(EffectClass::Recorded), Some(EffectClass::Sealed)] {
+                for access in [
+                    None,
+                    Some(WorkspaceAccess::ImmutableCurrentGeneration),
+                    Some(WorkspaceAccess::SharedExclusive),
+                ] {
+                    let mut preflight = effect_preflight(class, None);
+                    preflight.workspace_access = access;
+                    let inline = grant
+                        .authorize_effect_class("tool:example/effectful", class)
+                        .and_then(|()| {
+                            grant
+                                .authorize_workspace_access("tool:example/effectful", access)
+                                .map(|_| ())
+                        });
+                    let detached = crate::execution::runtime_dispatch::judge_detached_call(
+                        &grant,
+                        &ThreadWorkloadCeiling::node_root(),
+                        "tool:example/effectful",
+                        &preflight,
+                    );
+                    if inline.is_err() {
+                        assert!(detached.is_err(), "{list:?} {class:?} {access:?}");
+                    }
+                    if let Ok((_, ceiling)) = detached {
+                        // Every class the child's calls may reach is a class
+                        // the grant lists for this item.
+                        let ThreadWorkloadCeiling::Bounded {
+                            max_effect_class, ..
+                        } = ceiling
+                        else {
+                            panic!("a detached child is always bounded");
+                        };
+                        for label in max_effect_class.admitted_labels() {
+                            assert!(
+                                list.contains(label),
+                                "{list:?} sealed a ceiling reaching `{label}`"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn effects_decl(

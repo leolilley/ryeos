@@ -7264,6 +7264,207 @@ mod tests {
         );
     }
 
+    fn detach_test_grant(detached: bool) -> ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+        let mut grant = ryeos_app::callback_token::AdmittedWorkloadClientGrant {
+            schema: ryeos_app::callback_token::AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: ryeos_runtime::workload_client::WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: "T-grant-detach".to_owned(),
+            placement_thread_id: "T-grant-detach".to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            executions: vec![
+                ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+                    item_ref: "tool:test/detachable".to_owned(),
+                    ref_bindings: std::collections::BTreeMap::new(),
+                    calls: vec![ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default],
+                    effect_classes: vec!["live".to_owned(), "recorded".to_owned()],
+                    workspace_access:
+                        ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                    detached,
+                },
+            ],
+            execution_product_selections: std::collections::BTreeMap::new(),
+            execution_presentation: serde_json::Value::Null,
+            effective_caps: vec!["ryeos.execute.tool.test/detachable".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        grant.execution_presentation = serde_json::Value::Array(
+            grant
+                .executions
+                .iter()
+                .map(|ceiling| {
+                    json!({
+                        "authority": ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling)
+                    })
+                })
+                .collect(),
+        );
+        grant
+    }
+
+    #[test]
+    fn grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists() {
+        on_daemon_worker_stack(
+            grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists_body,
+        );
+    }
+
+    async fn grant_bearing_detached_call_is_judged_at_the_call_before_any_intent_exists_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-grant-detach");
+        let cbt = generate_test_callback(
+            &state,
+            "T-grant-detach",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.test/detachable".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .set_workload_client_grant(&cbt.token, detach_test_grant(false))
+                .unwrap()
+        );
+        let call = |item_id: &str, bindings: serde_json::Value| {
+            json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-grant-detach",
+                "thread_auth_token": "tat-not-reached",
+                "action": {
+                    "operation_id": "1".repeat(64),
+                    "item_id": item_id,
+                    "ref_bindings": bindings,
+                    "product_selections": [],
+                    "thread": "detached",
+                },
+            })
+        };
+        // The grant does not opt the item in: refused with its own code.
+        let error = ryeos_executor::execution::runtime_dispatch::handle(
+            &call("tool:test/detachable", json!({})),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+                Some(ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                    code, ..
+                }) if code == "workload_detach_not_opted_in"
+            ),
+            "expected the typed not-opted-in refusal, got: {error:#}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists() {
+        on_daemon_worker_stack(
+            opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists_body,
+        );
+    }
+
+    async fn opted_in_detached_call_still_refuses_outside_the_grant_before_any_intent_exists_body()
+    {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-grant-detach");
+        let cbt = generate_test_callback(
+            &state,
+            "T-grant-detach",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.test/detachable".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .set_workload_client_grant(&cbt.token, detach_test_grant(true))
+                .unwrap()
+        );
+        let call = |item_id: &str, bindings: serde_json::Value| {
+            json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-grant-detach",
+                "thread_auth_token": "tat-not-reached",
+                "action": {
+                    "operation_id": "1".repeat(64),
+                    "item_id": item_id,
+                    "ref_bindings": bindings,
+                    "product_selections": [],
+                    "thread": "detached",
+                },
+            })
+        };
+        // A ref binding the grant never listed, and an item it never listed,
+        // are refused by the grant's own surface check; neither reaches an
+        // intent row.
+        for (item, bindings) in [
+            ("tool:test/detachable", json!({"input": "knowledge:x/y"})),
+            ("tool:test/unlisted", json!({})),
+        ] {
+            let error =
+                ryeos_executor::execution::runtime_dispatch::handle(&call(item, bindings), &state)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("outside the admitted grant"),
+                "expected the grant surface refusal for {item}, got: {error:#}"
+            );
+            assert!(
+                state
+                    .state_store
+                    .runtime_action_intents()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        // The opted-in, in-surface call passes the grant gate and is stopped
+        // later (it carries no trusted ingress provenance): not by the opt-in.
+        let error = ryeos_executor::execution::runtime_dispatch::handle(
+            &call("tool:test/detachable", json!({})),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no trusted ingress provenance"),
+            "expected the call to pass the grant gate, got: {error:#}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         on_daemon_worker_stack(runtime_callback_with_empty_caps_is_denied_at_uds_boundary_body);

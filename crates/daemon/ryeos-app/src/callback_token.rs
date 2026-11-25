@@ -381,6 +381,41 @@ impl AdmittedWorkloadClientGrant {
         if action.thread != "inline" || action.facets.is_some() || action.launch_window.is_some() {
             bail!("workload-client grant admits only unary inline execution");
         }
+        self.authorize_execution_surface(action).map(|_| ())
+    }
+
+    /// Admit a detached launch of one granted item. Only an execution whose
+    /// ceiling opts in admits it; the item, ref-binding and call surface are
+    /// judged exactly as for an inline call. `authorize_action` is untouched
+    /// and still refuses every detached action, so nothing reaches this
+    /// function until a later change routes the broker to it.
+    pub fn authorize_detached_ceiling(
+        &self,
+        action: &ryeos_runtime::callback::ActionPayload,
+    ) -> Result<()> {
+        if action.thread != "detached" || action.facets.is_some() || action.launch_window.is_some()
+        {
+            bail!("workload-client detached admission applies only to a plain detached launch");
+        }
+        let execution = self.authorize_execution_surface(action)?;
+        if !execution.detached {
+            return Err(anyhow::Error::new(ThreadCeilingRefusal {
+                code: WORKLOAD_DETACH_NOT_OPTED_IN,
+                message: format!(
+                    "the grant does not allow `{}` to be launched detached",
+                    action.item_id
+                ),
+            }));
+        }
+        Ok(())
+    }
+
+    /// The item, product-selection, ref-binding and call checks shared by
+    /// every action mode. Mode and facet handling belong to the callers.
+    fn authorize_execution_surface(
+        &self,
+        action: &ryeos_runtime::callback::ActionPayload,
+    ) -> Result<&ryeos_runtime::workload_client::WorkloadClientExecutionCeiling> {
         let execution = self
             .executions
             .binary_search_by(|entry| entry.item_ref.as_str().cmp(&action.item_id))
@@ -409,7 +444,98 @@ impl AdmittedWorkloadClientGrant {
         if execution.calls.binary_search(&admitted_call).is_err() {
             bail!("workload-client method is outside the admitted grant");
         }
-        Ok(())
+        Ok(execution)
+    }
+
+    /// Judge a detached child's own declared projections against the grant and
+    /// derive the workload ceiling its launch is sealed under.
+    ///
+    /// The child's declared effect class and workspace access are judged by
+    /// the same functions an inline call of the item is judged by
+    /// ([`Self::authorize_effect_class`], [`Self::authorize_workspace_access`]),
+    /// so a detached child is never admitted where the inline call would not
+    /// be. A child that declares no workspace-access projection executes
+    /// without any declared bound and is refused, whatever its kind, and
+    /// exclusive access is refused outright: exclusivity needs the parent
+    /// quiesced for the child's lifetime, and a detached child outlives the
+    /// call. The returned ceiling is built from the grant's own entry for the
+    /// item and bounds every call the child and its descendants make.
+    pub fn authorize_detached_child(
+        &self,
+        item_ref: &str,
+        effect_class: Option<ryeos_effect_contract::EffectClass>,
+        workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    ) -> Result<(
+        ryeos_engine::kind_registry::WorkspaceAccess,
+        ryeos_state::objects::ThreadWorkloadCeiling,
+    )> {
+        let execution = self
+            .executions
+            .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+            .ok()
+            .and_then(|index| self.executions.get(index))
+            .ok_or_else(|| anyhow::anyhow!("workload-client item is outside the admitted grant"))?;
+        if !execution.detached {
+            return Err(anyhow::Error::new(ThreadCeilingRefusal {
+                code: WORKLOAD_DETACH_NOT_OPTED_IN,
+                message: format!("the grant does not allow `{item_ref}` to be launched detached"),
+            }));
+        }
+        match workspace_access {
+            None => {
+                return Err(anyhow::Error::new(ThreadCeilingRefusal {
+                    code: WORKLOAD_DETACH_NO_DECLARED_PROJECTION,
+                    message: format!(
+                        "`{item_ref}` declares no signed workspace-access projection, so nothing \
+                         bounds a detached child of it"
+                    ),
+                }));
+            }
+            Some(ryeos_engine::kind_registry::WorkspaceAccess::SharedExclusive) => {
+                return Err(anyhow::Error::new(ThreadCeilingRefusal {
+                    code: WORKLOAD_DETACH_SHARED_EXCLUSIVE,
+                    message: format!(
+                        "`{item_ref}` declares exclusive workspace access, which a detached child \
+                         cannot hold"
+                    ),
+                }));
+            }
+            Some(ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration) => {}
+        }
+        self.authorize_effect_class(item_ref, effect_class)?;
+        let access = self.authorize_workspace_access(item_ref, workspace_access)?;
+        let max_effect_class = [
+            ryeos_state::objects::ThreadEffectCeiling::Live,
+            ryeos_state::objects::ThreadEffectCeiling::Sealed,
+            ryeos_state::objects::ThreadEffectCeiling::Recorded,
+        ]
+        .into_iter()
+        .find(|candidate| {
+            candidate.admitted_labels().iter().all(|label| {
+                execution
+                    .effect_classes
+                    .iter()
+                    .any(|admitted| admitted == label)
+            })
+        })
+        .ok_or_else(|| {
+            anyhow::Error::new(ThreadCeilingRefusal {
+                code: WORKLOAD_DETACH_EFFECT_CEILING_UNREPRESENTABLE,
+                message: format!(
+                    "the effect classes the grant lists for `{item_ref}` do not include every \
+                     class a thread ceiling of any height admits, so no ceiling can be sealed \
+                     for its detached child"
+                ),
+            })
+        })?;
+        Ok((
+            access,
+            ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+                max_effect_class,
+                workspace_access:
+                    ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+            },
+        ))
     }
 
     pub fn product_selections_for_action(
@@ -483,6 +609,26 @@ pub fn authorize_workspace_access_within(
     }
     Ok(access)
 }
+
+/// A detached launch the grant does not allow for the item.
+pub const WORKLOAD_DETACH_NOT_OPTED_IN: &str = "workload_detach_not_opted_in";
+/// A detached launch of an item that declares no signed workspace-access
+/// projection.
+pub const WORKLOAD_DETACH_NO_DECLARED_PROJECTION: &str = "workload_detach_no_declared_projection";
+/// A detached launch of an item that declares exclusive workspace access.
+pub const WORKLOAD_DETACH_SHARED_EXCLUSIVE: &str = "workload_detach_shared_exclusive";
+/// A detached launch from a parent whose project is the live project.
+pub const WORKLOAD_DETACH_LIVE_PROJECT_PARENT: &str = "workload_detach_live_project_parent";
+/// A detached launch from a parent that does not run in a private pinned
+/// copy-on-write workspace the daemon can capture an input generation from.
+pub const WORKLOAD_DETACH_PARENT_NOT_PRIVATE_WORKSPACE: &str =
+    "workload_detach_parent_not_private_workspace";
+/// A detached launch on a node that cannot quiesce the parent's workspace
+/// borrowers to capture the input generation.
+pub const WORKLOAD_DETACH_NO_QUIESCENCE: &str = "workload_detach_no_quiescence";
+/// A grant whose listed effect classes cannot be sealed as a thread ceiling.
+pub const WORKLOAD_DETACH_EFFECT_CEILING_UNREPRESENTABLE: &str =
+    "workload_detach_effect_ceiling_unrepresentable";
 
 pub const THREAD_CEILING_EFFECT_CLASS_EXCEEDED: &str = "thread_ceiling_effect_class_exceeded";
 pub const THREAD_CEILING_WORKSPACE_ACCESS_EXCEEDED: &str =
@@ -2568,6 +2714,7 @@ mod tests {
                     effect_classes: vec!["live".to_owned(), "recorded".to_owned()],
                     workspace_access:
                         ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                    detached: false,
                 },
             ],
             execution_product_selections: std::collections::BTreeMap::new(),
@@ -2630,6 +2777,266 @@ mod tests {
         let mut detached = workload_client_action();
         detached.thread = "detached".to_owned();
         assert!(grant.authorize_action(&detached).is_err());
+    }
+
+    fn detached_action() -> ryeos_runtime::callback::ActionPayload {
+        let mut action = workload_client_action();
+        action.thread = "detached".to_owned();
+        action
+    }
+
+    fn typed_refusal_code(error: anyhow::Error) -> &'static str {
+        error
+            .downcast_ref::<ThreadCeilingRefusal>()
+            .unwrap_or_else(|| panic!("expected a typed refusal, got {error:#}"))
+            .code
+    }
+
+    fn detached_grant(effect_classes: &[&str]) -> AdmittedWorkloadClientGrant {
+        let mut grant = workload_client_grant();
+        grant.executions[0].detached = true;
+        grant.executions[0].effect_classes = effect_classes
+            .iter()
+            .map(|class| (*class).to_owned())
+            .collect();
+        // The presentation is derived from the ceilings; rebuild it after the
+        // fixture's ceiling changed.
+        grant.execution_presentation = serde_json::Value::Array(
+            grant
+                .executions
+                .iter()
+                .map(|ceiling| {
+                    serde_json::json!({
+                        "authority": ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling)
+                    })
+                })
+                .collect(),
+        );
+        grant.validate().unwrap();
+        grant
+    }
+
+    #[test]
+    fn detached_is_admitted_only_when_the_item_ceiling_opts_in() {
+        // Absent opt-in: the detached surface refuses with its own code, and
+        // the production surface refuses detached outright.
+        let plain = workload_client_grant();
+        assert!(plain.authorize_action(&detached_action()).is_err());
+        assert_eq!(
+            typed_refusal_code(
+                plain
+                    .authorize_detached_ceiling(&detached_action())
+                    .unwrap_err()
+            ),
+            WORKLOAD_DETACH_NOT_OPTED_IN
+        );
+
+        let opted_in = detached_grant(&["live", "recorded"]);
+        opted_in
+            .authorize_detached_ceiling(&detached_action())
+            .unwrap();
+        // The production surface still refuses it, whatever the ceiling says.
+        assert!(opted_in.authorize_action(&detached_action()).is_err());
+        // The detached surface is not an inline surface and admits neither
+        // follow, facets nor a launch window.
+        assert!(
+            opted_in
+                .authorize_detached_ceiling(&workload_client_action())
+                .is_err()
+        );
+        let mut follow = detached_action();
+        follow.thread = "follow".to_owned();
+        assert!(opted_in.authorize_detached_ceiling(&follow).is_err());
+        let mut faceted = detached_action();
+        faceted.facets = Some(serde_json::json!({"fleet": "a"}));
+        assert!(opted_in.authorize_detached_ceiling(&faceted).is_err());
+        let mut windowed = detached_action();
+        windowed.launch_window = Some(ryeos_runtime::callback::LaunchWindow {
+            key: "k".to_owned(),
+            width: 1,
+        });
+        assert!(opted_in.authorize_detached_ceiling(&windowed).is_err());
+    }
+
+    #[test]
+    fn detached_ref_bindings_outside_the_grant_are_refused_like_inline() {
+        let grant = detached_grant(&["live", "recorded"]);
+        let mut outside = detached_action();
+        outside
+            .ref_bindings
+            .insert("input".to_owned(), "knowledge:project/other".to_owned());
+        assert!(grant.authorize_detached_ceiling(&outside).is_err());
+        let mut unnamed = detached_action();
+        unnamed
+            .ref_bindings
+            .insert("extra".to_owned(), "knowledge:project/source".to_owned());
+        assert!(grant.authorize_detached_ceiling(&unnamed).is_err());
+        let mut elsewhere = detached_action();
+        elsewhere.item_id = "tool:project/unlisted".to_owned();
+        assert!(grant.authorize_detached_ceiling(&elsewhere).is_err());
+    }
+
+    #[test]
+    fn detached_child_is_judged_by_the_same_gates_as_the_inline_call() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        let grant = detached_grant(&["live", "recorded"]);
+        let projections = [None, Some(EffectClass::Recorded), Some(EffectClass::Sealed)];
+        let access = [
+            None,
+            Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            Some(WorkspaceAccess::SharedExclusive),
+        ];
+        for effect in projections {
+            for workspace in access {
+                let inline = grant
+                    .authorize_effect_class("tool:project/check", effect)
+                    .and_then(|()| {
+                        grant.authorize_workspace_access("tool:project/check", workspace)
+                    });
+                let detached =
+                    grant.authorize_detached_child("tool:project/check", effect, workspace);
+                // A detached child is never admitted where the inline call
+                // of the same item would be refused.
+                if inline.is_err() {
+                    assert!(detached.is_err(), "{effect:?} {workspace:?}");
+                }
+                if let Ok((admitted_access, ceiling)) = detached {
+                    assert_eq!(Some(admitted_access), workspace);
+                    assert!(ceiling.is_bounded());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detached_child_with_a_sealed_class_the_grant_lists_only_live_is_refused() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        let grant = detached_grant(&["live", "recorded"]);
+        let error = grant
+            .authorize_detached_child(
+                "tool:project/check",
+                Some(EffectClass::Sealed),
+                Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds the admitted ceiling"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn detached_child_without_a_declared_projection_or_with_exclusive_access_is_refused_typed() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        let grant = detached_grant(&["live", "recorded"]);
+        assert_eq!(
+            typed_refusal_code(
+                grant
+                    .authorize_detached_child(
+                        "tool:project/check",
+                        Some(EffectClass::Recorded),
+                        None
+                    )
+                    .unwrap_err()
+            ),
+            WORKLOAD_DETACH_NO_DECLARED_PROJECTION
+        );
+        assert_eq!(
+            typed_refusal_code(
+                grant
+                    .authorize_detached_child(
+                        "tool:project/check",
+                        Some(EffectClass::Recorded),
+                        Some(WorkspaceAccess::SharedExclusive),
+                    )
+                    .unwrap_err()
+            ),
+            WORKLOAD_DETACH_SHARED_EXCLUSIVE
+        );
+        // An item the grant does not let the session detach is refused before
+        // its projections are read.
+        let plain = workload_client_grant();
+        assert_eq!(
+            typed_refusal_code(
+                plain
+                    .authorize_detached_child(
+                        "tool:project/check",
+                        Some(EffectClass::Recorded),
+                        Some(WorkspaceAccess::ImmutableCurrentGeneration),
+                    )
+                    .unwrap_err()
+            ),
+            WORKLOAD_DETACH_NOT_OPTED_IN
+        );
+    }
+
+    #[test]
+    fn detached_child_ceiling_is_sealed_from_the_grants_own_entry() {
+        use ryeos_engine::kind_registry::WorkspaceAccess;
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let sealed_for = |classes: &[&str]| {
+            detached_grant(classes).authorize_detached_child(
+                "tool:project/check",
+                Some(ryeos_effect_contract::EffectClass::Recorded),
+                Some(WorkspaceAccess::ImmutableCurrentGeneration),
+            )
+        };
+        let expected = |max_effect_class| ThreadWorkloadCeiling::Bounded {
+            max_effect_class,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        assert_eq!(
+            sealed_for(&["live", "recorded", "sealed"]).unwrap().1,
+            expected(ThreadEffectCeiling::Live)
+        );
+        assert_eq!(
+            sealed_for(&["recorded", "sealed"]).unwrap().1,
+            expected(ThreadEffectCeiling::Sealed)
+        );
+        assert_eq!(
+            sealed_for(&["recorded"]).unwrap().1,
+            expected(ThreadEffectCeiling::Recorded)
+        );
+        // A list with a gap cannot be sealed as a wider ceiling than it
+        // names: live without sealed seals the narrower recorded ceiling.
+        assert_eq!(
+            sealed_for(&["live", "recorded"]).unwrap().1,
+            expected(ThreadEffectCeiling::Recorded)
+        );
+        // The ceiling can only narrow what the calling thread carries.
+        let narrowed =
+            ThreadWorkloadCeiling::node_root().meet(sealed_for(&["recorded", "sealed"]).unwrap().1);
+        assert_eq!(narrowed, expected(ThreadEffectCeiling::Sealed));
+        // A list naming no class a ceiling can be built from is refused.
+        let unrepresentable = detached_grant(&["live"]).authorize_detached_child(
+            "tool:project/check",
+            None,
+            Some(WorkspaceAccess::ImmutableCurrentGeneration),
+        );
+        assert_eq!(
+            typed_refusal_code(unrepresentable.unwrap_err()),
+            WORKLOAD_DETACH_EFFECT_CEILING_UNREPRESENTABLE
+        );
+    }
+
+    #[test]
+    fn detached_refusal_codes_are_distinct() {
+        let codes = [
+            WORKLOAD_DETACH_NOT_OPTED_IN,
+            WORKLOAD_DETACH_NO_DECLARED_PROJECTION,
+            WORKLOAD_DETACH_SHARED_EXCLUSIVE,
+            WORKLOAD_DETACH_LIVE_PROJECT_PARENT,
+            WORKLOAD_DETACH_PARENT_NOT_PRIVATE_WORKSPACE,
+            WORKLOAD_DETACH_NO_QUIESCENCE,
+            WORKLOAD_DETACH_EFFECT_CEILING_UNREPRESENTABLE,
+        ];
+        let distinct: std::collections::BTreeSet<_> = codes.iter().collect();
+        assert_eq!(distinct.len(), codes.len());
     }
 
     #[test]
