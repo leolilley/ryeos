@@ -280,6 +280,14 @@ pub fn shape_result(
     let paths: Vec<&[KeepSegment]> = tier.iter().map(KeepPath::segments).collect();
     let kept = project(&result, &paths).unwrap_or(Value::Null);
     if longest_array(&kept) > usize::try_from(bounds.max_items).unwrap_or(usize::MAX) {
+        // Logged for the operator only; the caller's refusal carries no path.
+        let (path, length) = longest_array_path(&kept);
+        tracing::warn!(
+            array_path = %path,
+            array_length = length,
+            max_items = bounds.max_items,
+            "an answer array is over the item's limit"
+        );
         return Err(DisclosureRefusal::TooManyItems);
     }
     let fits = serde_json::to_vec(&kept)
@@ -387,6 +395,32 @@ pub fn project(value: &Value, paths: &[&[KeepSegment]]) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// The path (JSON pointer, `*` for an index) and length of the longest array
+/// anywhere in `value`, for the operator's log.
+pub fn longest_array_path(value: &Value) -> (String, usize) {
+    fn walk(value: &Value, path: &str, best: &mut (String, usize)) {
+        match value {
+            Value::Array(items) => {
+                if items.len() > best.1 {
+                    *best = (path.to_owned(), items.len());
+                }
+                for item in items {
+                    walk(item, &format!("{path}/*"), best);
+                }
+            }
+            Value::Object(map) => {
+                for (key, child) in map {
+                    walk(child, &format!("{path}/{key}"), best);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = (String::new(), 0);
+    walk(value, "", &mut best);
+    best
 }
 
 /// The longest array anywhere in `value`.
