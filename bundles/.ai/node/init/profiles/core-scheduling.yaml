@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:ee4aa3da120fcf8282404baf1d6baf51165cccba0d78296db8d56b2f5e3e986b:6D1z/esTexhP1Ph81CRFfVY703iJvfNof8zy5Arw356vsjSTT8kF0JLhYHKRWtY6yt7xsZKmYowKmHN+tmk7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:06:14Z:87d91dee356f05266360c1603d42ed464e2bb7119e4a414f17e5f47fe0efd608:9J8VwOIDLiYfI9y8okZ6zwMhMq2whSp2b8mFrJ5fVlviHhUB7nJMDnJ0Le5LppfAFaaCNWp5qlXLKw04yYmoAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -156,6 +156,13 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  approval_ceiling:
+    schema: 1
+    # Which classes of worker approval request an owner may accept on this node.
+    # Narrow-only: `allow` still needs the admitted profile to allow it, and
+    # `refuse` is final. A class not listed is refused, so no class is accepted
+    # until it is listed `allow` here.
+    classes: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

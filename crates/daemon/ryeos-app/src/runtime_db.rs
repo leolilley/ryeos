@@ -2771,7 +2771,13 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // epoch-143 store is a predecessor and is reset without decoding, with the
 // project heads: `--schema-cut-from 143 --schema-cut-to 144
 // --include-project-heads --confirm-project-heads`.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 144;
+// Epoch 145: stored `launch_metadata` is launch-metadata schema 39 sealing
+// admitted launch capsule schema 40. Every resume identity and every
+// persisted parent context carries a required thread workload ceiling, and
+// the capsule commits it; an epoch-144 store holds launch rows without it,
+// which the strict launch decode refuses, so it is a predecessor and is reset
+// without decoding: `--schema-cut-from 144 --schema-cut-to 145`.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 145;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -19274,9 +19280,11 @@ impl RuntimeDb {
                 (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, NULL)
              ON CONFLICT(seat_thread_id) DO UPDATE SET
-                owner=excluded.owner, surface=excluded.surface,
-                client_ref=excluded.client_ref, last_seen_at_ms=excluded.last_seen_at_ms
-             WHERE seat_lease.reaping_at_ms IS NULL",
+                last_seen_at_ms=excluded.last_seen_at_ms
+             WHERE seat_lease.reaping_at_ms IS NULL
+                AND seat_lease.owner=excluded.owner
+                AND seat_lease.surface=excluded.surface
+                AND seat_lease.client_ref=excluded.client_ref",
                 params![seat_thread_id, owner, surface, client_ref, now],
             )? > 0)
         })
@@ -19328,6 +19336,20 @@ impl RuntimeDb {
             )?;
             let rows = stmt.query_map(params![cutoff_ms], |row| row.get(0))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Whether the seat's lease is held by a holder other than `holder`. A
+    /// seat with no lease yet is held by no one. Read while the caller holds
+    /// the authoritative chain runtime-pin lock.
+    pub fn seat_lease_held_by_another(&self, seat_thread_id: &str, holder: &str) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM seat_lease
+             WHERE seat_thread_id=?1 AND owner<>?2)",
+                params![seat_thread_id, holder],
+                |row| row.get(0),
+            )?)
         })
     }
 
@@ -24778,6 +24800,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:storage-fixture".to_owned()),
             runtime_ref: Some("runtime:storage-fixture".to_owned()),
         };
@@ -30227,7 +30250,8 @@ mod tests {
         value["follow_parent_context"] = serde_json::json!({
             "parent_thread_id": "T-parent",
             "hard_limits": nested,
-            "depth": 1
+            "depth": 1,
+            "thread_ceiling": {"ceiling": "unbounded"}
         });
         let raw = lillux::canonical_json(&value).unwrap();
 

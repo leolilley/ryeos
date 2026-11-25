@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:9b52ac20146c9a6b791fa8ba7f83f1738d7b1b6ee38df5232e49cd5406d6804d:m4tXvsASXIhqimZr8H3a1hD/+81TYdF7xXgN6hBsFuuETRH3qqeHExt5MKO99yYrhM+tAC5SX4VXG0h8ihknBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T07:56:08Z:70760cad42e298b42d2a3e4a8bdacf4614ca17f9149d98e8e8b676d996b7656b:mPjKZ8GofUMHwBbjF82l3Dnj3o9dl4JSqQxOtqOr1oKj2XpvLTpE7718x5VvVCW7pc4MBvunlFiUJB4nfsjxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 name: ryeos-ui/surfaces/resume
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: Resume one principal-owned saved Surface with its explicit authored origin and all ordered particular tabs under fresh admission.
 endpoint: ui.ryeos.surfaces.resume
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: resume_particular_surface
 schema:

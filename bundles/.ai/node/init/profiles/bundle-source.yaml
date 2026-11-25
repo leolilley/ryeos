@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:0311b4a6c0cfac0dac8ecec9fcca381d6a1829aa81be786fea53199d1a8842a0:h/Ok6CxWWD/qJxxUg4hL1eH1++lbu3i5zpv9BE/7L56JXg6AjJxFhSdn/ueswrFWnHE2F53c2SJgdL7bpRsXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:06:14Z:08cb8130b5d06a258222bb215b59a12c8182d4687335039dc78495d502a679a1:d1K1VoB0EFZHBVe4xapZ8WO51ZXo+eTAi/d3ggkpLGhvrdHO5DhuWVctZ0fdrqGgS4ZOpogzswEB/ykstg55Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -160,6 +160,13 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  approval_ceiling:
+    schema: 1
+    # Which classes of worker approval request an owner may accept on this node.
+    # Narrow-only: `allow` still needs the admitted profile to allow it, and
+    # `refuse` is final. A class not listed is refused, so no class is accepted
+    # until it is listed `allow` here.
+    classes: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

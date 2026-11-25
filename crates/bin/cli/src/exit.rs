@@ -39,6 +39,7 @@ pub fn transport_exit_code(error: &CliTransportError) -> i32 {
         CliTransportError::BodyDecode { .. } => EX_SOFTWARE,
         CliTransportError::SigningKeyMissing { .. } => EX_TEMPFAIL,
         CliTransportError::SigningKeyUnloadable { .. } => EX_CONFIG,
+        CliTransportError::ClientKeyUnreadable { .. } => EX_CONFIG,
         CliTransportError::AudienceDiscoveryFailed { .. } => EX_TEMPFAIL,
     }
 }

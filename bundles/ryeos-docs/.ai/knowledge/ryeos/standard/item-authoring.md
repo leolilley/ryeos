@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:24:31Z:82be60673049b9b96321e930288e7109ad4596e3521076142c94415eb69d2fcb:Z97AMNo/uuHnjXufZwXeU8zgLvs1RaBcp9y9P3Rz8QCgDjB3sGthFZNPutIHjt0MnJ0/FypReilkTtuTj7RRCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T01:26:35Z:b9375fe2b9f8bd6d0cced03240eec21db19af8362556912e108fde39971c9c60:cfazrYvuIXvYMMOO1JYP1R8KhdsVqUW01QOpEQaHW48/nUi9ScogVM/5it5kb7Gc9xLymNXXR/uYU3hd2s8rCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -274,14 +274,17 @@ endorsing it, which leaves the item and its authoring signature untouched:
 ```bash
 ryeos trust show <authoring-fingerprint>           # the record and its events
 ryeos --project . endorse --item knowledge:notes/draft      # these exact bytes
-ryeos --project . endorse --standing --kind knowledge       # the kind, in this project
+ryeos --project . endorse --standing --kind knowledge --lifetime-secs 604800   # the kind, in this project, for a week
 ryeos endorse list
 ryeos endorse revoke --endorsement <digest>
 ```
 
 After a per-change endorsement the item resolves as `trusted_project` for those
 exact bytes; one changed byte returns it to `untrusted_project`. A standing
-endorsement covers the named kinds in that project and nothing else. Revoking
+endorsement covers the named kinds in that project and nothing else, for at most
+30 days, and only for kinds whose schema allows one (`knowledge`, `picture`,
+`view_set`); directives, tools, views and every other kind that runs or invokes
+are endorsed per change. Revoking
 returns the covered items to `untrusted_project`. `ryeos trust scope` refuses to
 widen the authoring key (`trust_authoring_scope_retired`). The node key does not
 sign project items: its own scope is the node space only. The operator's

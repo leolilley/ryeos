@@ -2121,18 +2121,20 @@ impl Runner {
     }
 
     pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
-        let (input_tokens, output_tokens, spend_usd, retained_spawns) = resume
-            .thread_usage
-            .as_ref()
-            .map(|usage| {
-                (
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.spend_usd,
-                    usage.spawns_used,
-                )
-            })
-            .unwrap_or((0, 0, ryeos_runtime::envelope::UsdNanos::ZERO, 0));
+        let (input_tokens, output_tokens, spend_usd, retained_spawns, resumed_usage_status) =
+            resume
+                .thread_usage
+                .as_ref()
+                .map(|usage| {
+                    (
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.spend_usd,
+                        usage.spawns_used,
+                        Some(usage.usage_status),
+                    )
+                })
+                .unwrap_or((0, 0, ryeos_runtime::envelope::UsdNanos::ZERO, 0, None));
         let resumed_tokens = input_tokens
             .checked_add(output_tokens)
             .ok_or_else(|| anyhow::anyhow!("resume usage token count overflow"))?;
@@ -2147,7 +2149,7 @@ impl Runner {
         .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
         config
             .budget
-            .reseed(input_tokens, output_tokens, spend_usd)
+            .reseed(input_tokens, output_tokens, spend_usd, resumed_usage_status)
             .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
         let result_guard = resume.result_guard;
         let image_run = resume.images;
@@ -6885,6 +6887,7 @@ impl Runner {
             settled_at: lillux::time::iso8601_now(),
             last_settled_turn_seq: turn as u64,
             elapsed_ms,
+            usage_status: self.budget.cost().usage_status,
             provider_id: Some(self.provider_id.clone()),
             model: Some(self.model_name.clone()),
             profile: self.matched_profile.clone(),
@@ -7592,6 +7595,7 @@ impl Runner {
             settled_at: lillux::time::iso8601_now(),
             last_settled_turn_seq: turn as u64,
             elapsed_ms,
+            usage_status: self.budget.cost().usage_status,
             provider_id: Some(self.provider_id.clone()),
             model: Some(self.model_name.clone()),
             profile: self.matched_profile.clone(),

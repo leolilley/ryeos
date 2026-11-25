@@ -393,3 +393,19 @@ layout_line="$(sed -n '/^resolve_install_layout "\$install_prefix_argument"/=' "
 target_line="$(sed -n '/^target_dir="\$cargo_target_root\/release"/=' "$installer")"
 [[ -n "$layout_line" && -n "$target_line" && "$layout_line" -lt "$target_line" ]]
 printf 'installer prefix layout: passed\n'
+
+# An inherited RYEOS_APP_ROOT never selects the node on its own. The refusal
+# comes right after argument parsing, before any build, sudo or node action.
+if inherited_out="$(RYEOS_APP_ROOT=/srv/inherited-node bash "$installer" --no-init 2>&1)"; then
+    echo 'installer accepted an inherited RYEOS_APP_ROOT without confirmation' >&2
+    exit 1
+fi
+[[ "$inherited_out" == *"RYEOS_APP_ROOT=/srv/inherited-node is inherited"* ]] || {
+    printf 'unexpected refusal: %s\n' "$inherited_out" >&2
+    exit 1
+}
+if RYEOS_APP_ROOT=/srv/inherited-node bash "$installer" --no-init --app-root /srv/other-node >/dev/null 2>&1; then
+    echo 'installer accepted --app-root contradicting RYEOS_APP_ROOT' >&2
+    exit 1
+fi
+printf 'installer inherited app root: passed\n'

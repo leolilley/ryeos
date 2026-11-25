@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 38;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 39;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -294,6 +294,9 @@ pub struct PersistedParentExecutionContext {
     /// children admitted after the live callback context is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Parent's workload ceiling, already narrowed for this spawn. The child
+    /// can never hold a wider one.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -506,6 +509,12 @@ pub struct ResumeContext {
     /// as capabilities held by the child.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub parent_delegation_caps: Option<Vec<String>>,
+    /// Bound on the workload authority of every tool call made from this
+    /// thread's tree. Sealed into the admitted launch capsule and carried on
+    /// the thread's callback bearer; recovery and continuation copy it, a
+    /// spawn only narrows it. Required: only a launch with no parent
+    /// execution context states `Unbounded`.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
     /// graph — carry no item `executor_id`, so a continuation successor
@@ -1228,6 +1237,7 @@ impl RuntimeLaunchMetadata {
             )?,
             source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1333,6 +1343,7 @@ impl RuntimeLaunchMetadata {
                 anyhow::anyhow!("sealed launch has no admitted execution closure")
             })?,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_owned(),
@@ -1730,6 +1741,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
@@ -2236,6 +2248,7 @@ mod tests {
                 hard_limits: serde_json::json!({"max_depth": 2}),
                 depth: 1,
                 accounting_scope: None,
+                thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             }),
             follow_launch_window: Some(FollowLaunchWindow {
                 key: "follow:source".to_string(),
@@ -2480,6 +2493,7 @@ mod tests {
             ),
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:test-runtime".to_string()),
             runtime_ref: Some("runtime:test".to_string()),
         };

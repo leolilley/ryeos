@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:36:15Z:37c9a47e4c3a0b2c859007a45993ae2b317c73ce88c6203159201d40d5f5642d:C1qF9JZW7P5awms4He7zGEwiJMR3E71wk4UMgNEtX2uctUYorGPLzbHW47wQKF85e0zkRbHWOXgenuUPINEmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T02:48:44Z:b163e7c841e84effd602c5d4a3f4305b6bef9c0305cc60c3ae5115c5660ac608:y0XPAUyPzJmIJzqiOvSsjNl7CSkzIR+o5sdLTVhCjsRXb4FhTH3AWXwBkI7jgCqJs4SLMBuisE41w554ZWe+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -348,6 +348,10 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the thread workload ceiling cut, epoch 145.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 144 --schema-cut-to 145` on its next upgrade. Admitted launch capsule schema 40 and launch metadata schema 39 seal a required thread workload ceiling for every launch: `unbounded` for a root launch, otherwise the narrower of the parent thread's ceiling and anything derived at the spawn. The reset discards launch rows written without it, and dispatch-effect replay moves to operational replay-index epoch 19 with the same capsule schema. Nothing in this cut yet creates a bounded ceiling; a node that has not enabled detached children from a worker session sees no behaviour change.
 
 Operator note for the owner+name project identity cut, epoch 144.
 
@@ -1005,7 +1009,7 @@ the operator key inside the CLI and submitted to the running node; see
 | Verb | Effect |
 |---|---|
 | `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `pid:v1:<owner>/<declared name>` with the operator's principal as owner (printed before signing) |
-| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes when given |
+| `ryeos --project <dir> endorse --standing --kind <kind>... --lifetime-secs <n>` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes (required, at most 30 days; the expiry is printed before signing). Only kinds whose schema allows a standing endorsement can be named; others are refused with `endorsement_kind_not_standing` |
 | `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |

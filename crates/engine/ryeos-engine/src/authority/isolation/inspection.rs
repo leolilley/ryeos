@@ -380,7 +380,7 @@ impl IsolationInspection {
                 ISOLATION_ENFORCED,
                 enforced,
                 "descriptor-mounted isolation is enforced",
-                "isolation is not enforced on this node",
+                "isolation is not enforced on this node: runs execute as the daemon user and can read its keys, so runs are operator-equivalent here",
             ),
             (
                 FILESYSTEM_CAPTURED_EXECUTION,

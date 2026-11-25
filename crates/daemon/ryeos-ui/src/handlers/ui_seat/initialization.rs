@@ -31,7 +31,7 @@ pub(crate) fn materialize_unclaimed(
         .browser_sessions
         .resolve_attachment(&session.session_id, &root)
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    let owner = super::seat_owner(session);
+    let launcher = super::seat_launcher(session).to_owned();
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let admission = {
         let _timing = crate::phase_timing::PhaseTimer::start(
@@ -42,7 +42,7 @@ pub(crate) fn materialize_unclaimed(
             state,
             &attachment.root_ref,
             project_access.as_ref(),
-            &owner,
+            &launcher,
             session.granted_caps.clone(),
         )?
     };
@@ -90,7 +90,7 @@ pub(crate) fn materialize_unclaimed(
                 current_site_id: site.clone(),
                 origin_site_id: site,
                 upstream_thread_id: None,
-                requested_by: Some(owner),
+                requested_by: Some(launcher),
                 project_root: admission.project_root().map(std::path::Path::to_path_buf),
                 project_authority: admission.project_authority().clone(),
                 base_project_snapshot_hash: None,
@@ -131,11 +131,12 @@ pub(crate) fn materialize_unclaimed(
     if let Some(anchor) = unclaimed_anchor {
         // Even a non-UI lifecycle writer cannot advance this signed cut
         // between the absence proof and lease renewal.
-        let owner = super::seat_owner(session);
+        let holder = super::seat_holder(session);
         if !state.state_store.touch_seat_lease_if_anchors(
             &ExactSeat {
                 root_id: chain,
-                owner: &owner,
+                launcher: super::seat_launcher(session),
+                holder: &holder,
                 item_ref: &detail.item_ref,
                 executor_ref: &detail.executor_ref,
             },
@@ -317,7 +318,7 @@ fn ensure_current(
     })?;
     let payload = serde_json::to_value(record(membership))
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    let owner = super::seat_owner(session);
+    let holder = super::seat_holder(session);
     // The initialization record is durable and is never withdrawn. Verify the
     // installed bundles once more here, after the admission was re-resolved
     // and immediately before the append, so the record is never written from
@@ -330,7 +331,8 @@ fn ensure_current(
         .append_seat_events_and_renew_if_anchor(
             &ExactSeat {
                 root_id: &detail.chain_root_id,
-                owner: &owner,
+                launcher: super::seat_launcher(session),
+                holder: &holder,
                 item_ref: &detail.item_ref,
                 executor_ref: &detail.executor_ref,
             },

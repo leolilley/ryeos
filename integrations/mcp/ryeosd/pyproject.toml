@@ -12,7 +12,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp",
+    "mcp>=2.3,<3",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +37,7 @@ packages = ["ryeosd_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 # Upstream pytest-asyncio uses asyncio APIs deprecated on Python 3.14;
 # importlib.metadata also emits an implicit-None deprecation. Neither
 # is our code; ignore these specific warnings only.

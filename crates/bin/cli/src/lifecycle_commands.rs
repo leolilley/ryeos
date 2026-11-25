@@ -372,6 +372,7 @@ pub async fn try_dispatch(
     if argv.is_empty() {
         return Ok(false);
     }
+    require_operator_key_for_node_files(argv)?;
     match (argv[0].as_str(), argv.get(1).map(String::as_str)) {
         ("identity", _) => {
             run_identity_command(&argv[1..], console).map_err(map_local_err)?;
@@ -1773,8 +1774,14 @@ fn run_execution_history_reset_command(
                 |rows| rows.to_string(),
             ),
         ),
+        // The dry run counts the fire journal files it would retire; a
+        // performed reset counts the signed retirement records it published.
         crate::tty::Row::key_value(
-            "scheduler journal artifacts",
+            if report.dry_run {
+                "scheduler fire journal files"
+            } else {
+                "scheduler retirement records"
+            },
             report.scheduler_journal_artifacts.to_string(),
         ),
         crate::tty::Row::key_value(
@@ -2327,10 +2334,10 @@ async fn run_node_offline_operation_facts_command(
     // The authority the signing key holds here, so `sign --facts` signs under
     // it. Without a key to name, the facts name no signer and `sign` refuses
     // them rather than guess.
-    let key_path = args
-        .signing_key
-        .clone()
-        .unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&app_root));
+    let key_path = match args.signing_key.clone() {
+        Some(path) => path,
+        None => crate::transport::signing::client_signing_key_path(&app_root)?,
+    };
     let signer = match lillux::crypto::load_signing_key(&key_path) {
         Ok(key) => Some(ryeos_node::offline_operation::deliver::local_signer_report(
             &app_root,
@@ -3239,7 +3246,13 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         checks.push(process_quarantine_check(&config.app_root));
         checks.push(sync_apply_quarantine_check(&config.app_root));
         checks.push(stale_publication_check(&config.app_root));
+        checks.push(node_journal_check(&config.app_root));
     } else {
+        checks.push(check(
+            "node_journal",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
         checks.push(check(
             "stale_publication",
             NA,
@@ -4179,6 +4192,59 @@ fn sync_apply_quarantine_details(
     })
 }
 
+/// The node journal must verify for the daemon to append to it: a project open
+/// whose journal write fails is refused with `journal_write_failed`. Reading
+/// the chain here finds a broken journal before an open does.
+fn node_journal_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::WARN;
+    let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let node = match ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())
+    {
+        Ok(node) => node,
+        Err(error) => {
+            return check(
+                "node_journal",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "the node key is needed to verify the journal's signatures",
+                }),
+            );
+        }
+    };
+    node_journal_check_with(ryeos_node::node_journal::NodeJournal::for_app_root(
+        app_root, node,
+    ))
+}
+
+fn node_journal_check_with(
+    journal: ryeos_node::node_journal::NodeJournal,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match journal.load() {
+        Ok(state) => check(
+            "node_journal",
+            OK,
+            serde_json::json!({
+                "last_sequence": state.last_sequence,
+                "retained": state.retained,
+                "dropped_records": state.dropped_records,
+                "head": state.head,
+            }),
+        ),
+        Err(error) => check(
+            "node_journal",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "the journal does not verify, so every project open is refused with `journal_write_failed` (cause `chain_integrity`) until it is repaired",
+            }),
+        ),
+    }
+}
+
 fn stale_publication_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -4452,11 +4518,16 @@ fn inspect_capability_report(
             None,
         ),
         Ok(Some(signed)) => {
-            // The same policy generation digest the daemon recorded.
+            // The report records the whole node policy generation, not the
+            // isolation policy's own digest.
             let policy_generation =
-                ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+                crate::node_descriptors::load_verified_policy_snapshot(app_root)
                     .ok()
-                    .and_then(|runtime| runtime.digest().map(str::to_owned));
+                    .map(|snapshot| {
+                        ryeos_node::capability_report::report_policy_generation(
+                            snapshot.generation_digest(),
+                        )
+                    });
             let staleness = signed
                 .staleness(policy_generation.as_deref())
                 .map_err(|error| format!("{error:#}"));
@@ -6263,6 +6334,25 @@ pub(crate) fn parse_or_render_help<P: Parser>(
     }
 }
 
+/// Lifecycle commands act directly on a node's files, with no daemon to check
+/// the caller, so they need the node's operator key. With another key selected
+/// (`RYEOS_CLIENT_KEY`) they refuse; `help`-style entries touch no node files.
+fn require_operator_key_for_node_files(argv: &[String]) -> Result<(), CliError> {
+    let acts_on_node_files = LOCAL_COMMANDS.iter().any(|descriptor| {
+        descriptor.category != "meta"
+            && argv.len() >= descriptor.tokens.len()
+            && descriptor
+                .tokens
+                .iter()
+                .zip(argv)
+                .all(|(want, got)| want == got)
+    });
+    if acts_on_node_files {
+        crate::client_key::require_operator_key(&default_app_root())?;
+    }
+    Ok(())
+}
+
 fn default_app_root() -> PathBuf {
     if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
         return PathBuf::from(p);
@@ -6316,6 +6406,49 @@ mod tests {
         let fix = stale["fix"].as_str().unwrap();
         assert!(fix.contains("compose it again"));
         assert!(fix.contains("ryeos node external-execution retire external_execution/w9"));
+    }
+
+    mod node_journal_doctor {
+        use super::*;
+        use ryeos_core_tools::actions::doctor::{FAIL, OK};
+
+        fn journal(root: &std::path::Path) -> ryeos_node::node_journal::NodeJournal {
+            let key =
+                ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).node_signing_key_path();
+            let node = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
+            ryeos_node::node_journal::NodeJournal::for_app_root(root, node)
+        }
+
+        #[test]
+        fn a_verifying_journal_is_ok() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, OK, "{:?}", result.detail);
+            assert_eq!(result.detail["last_sequence"], 1);
+        }
+
+        #[test]
+        fn a_journal_that_does_not_verify_fails_and_names_the_refusal() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let record = ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf())
+                .state()
+                .join("node-journal")
+                .join(format!("{:020}.json", 1));
+            let text = std::fs::read_to_string(&record).unwrap();
+            std::fs::write(&record, text.replacen("standard", "tampered", 1)).unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, FAIL, "{:?}", result.detail);
+            assert!(
+                result.detail["note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("journal_write_failed")
+            );
+        }
     }
 
     mod sync_apply_quarantine_doctor {

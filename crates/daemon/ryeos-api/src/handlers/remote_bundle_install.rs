@@ -46,8 +46,6 @@ pub struct Request {
 #[serde(deny_unknown_fields)]
 struct BundleExportResponse {
     bundle_name: String,
-    #[serde(rename = "bundle_path")]
-    _bundle_path: String,
     file_count: usize,
     total_bytes: u64,
     entries: Vec<BundleExportEntry>,
@@ -1093,7 +1091,6 @@ mod tests {
     fn response(entries: Vec<BundleExportEntry>) -> BundleExportResponse {
         BundleExportResponse {
             bundle_name: "demo".to_string(),
-            _bundle_path: "/remote/demo".to_string(),
             file_count: entries.len(),
             total_bytes: entries.iter().map(|entry| entry.size).sum(),
             entries,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T00:06:36Z:1f0bf5f8def2a62692284019d7767b1ab520f4d84505b3e3b20fa2d71b1908bc:i7C5iKO4yh9okhHS/bQ616D4CYtJXXt6n4DHgQlCOI9zHOldg+8Bk25zyKoNXY8HCuI9jFnXlHoYPn9hZcszAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T03:07:54Z:aa8ec4bc85741aa9300cc8146a768a30c2a19e511c82ed931a17ba1e190c4084:d2Iu9aFkgQT1JJG9HGFytXy/U8TmNrnE6Fu2w2WiQZYcHz6y9hjMy+MceznIR9fbHb/q8ikike2FN/Rmb9mOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -903,6 +903,21 @@ refiring possible contact. Listing approvals is read-only. A signed workload
 profile must mark an approval class deny-only unless its accepted upstream
 effect is proven to remain inside the identical frozen permission profile;
 displayable fields alone are not proof that consent preserves the ceiling.
+
+Whether an owner's accept is taken is decided by the daemon, never by the
+worker's report, in three narrowing steps: the worker must have offered accept;
+the admitted profile's rule for the request's upstream `method` must allow it (a
+method the profile does not name, or a reported class that is not that rule's
+class, is refused as `approval_method_unnamed` or `approval_class_mismatch`, and a
+`deny_only` rule as `approval_accept_refused_by_profile`); and the node's signed
+`approval_ceiling` policy must list the request's `operation_class` as `allow`
+(`approval_accept_refused_by_node_policy` otherwise). The policy is narrow-only:
+`refuse` is final and `allow` still needs the profile to allow. A placement does
+not yet record a measured enclosure, so every placement counts as unmeasured and a
+class the policy does not list is refused: shipped profiles list none, so no
+accept is taken until the operator lists a class `allow`. The policy is read when
+the owner accepts, so tightening it applies to approvals already pending, and the
+approval lists and attention items offer accept only where all three allow it.
 
 Worker facts are `worker_asserted` or `upstream_reported`, not proof of success.
 Reserved I/O boundaries are `daemon_reserved_io`; observed responses are

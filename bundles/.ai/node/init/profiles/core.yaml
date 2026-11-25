@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T07:10:43Z:3b6e5e12147672264335ba784df7bd176b0ff96e059397630c83cdc7d6666dc1:/S1x8oBdaJFO2bbwgUxpfyfU/HtB2luqBbcCKSnN8JhiQokzI2gHxdMwFMxKOuzBB0oMhezB3qCilxxV+08wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T03:06:14Z:769faf6fbf2c924e9c43e42daeebba1ecd9466f977d8bc0b041945191c05d76d:y026UyL30jseX2cSZQ8/1aB82Nl0anBmH5AU36hqF9nuzNDsJgtJO9v/WuzVpxoXSMe5RvLjgRlq1dR5r9ItCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -153,6 +153,13 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  approval_ceiling:
+    schema: 1
+    # Which classes of worker approval request an owner may accept on this node.
+    # Narrow-only: `allow` still needs the admitted profile to allow it, and
+    # `refuse` is final. A class not listed is refused, so no class is accepted
+    # until it is listed `allow` here.
+    classes: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

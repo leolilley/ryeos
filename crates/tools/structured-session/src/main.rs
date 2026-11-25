@@ -3740,6 +3740,10 @@ impl StructuredWorkload {
                     "event_type":"approval.requested",
                     "payload":{
                         "request_id":id,
+                        // The upstream method the rule matched. The daemon
+                        // derives the class and the deny-only fact from the
+                        // frozen profile's rule for this method.
+                        "method":rule.method,
                         "operation_class":rule.operation_class,
                         "upstream_session_id":upstream_session_id,
                         "operation_id":operation_id,
