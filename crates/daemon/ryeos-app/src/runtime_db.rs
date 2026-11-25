@@ -2918,6 +2918,14 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // carries its release too (0 when nothing is released). A link with no draw
 // settles with `settled_at_ms` alone, written by the child's terminal path.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
+
+/// Most steps up the child links a launch-lineage walk takes before it refuses
+/// to answer. Real ancestry is a handful of chains deep; a longer walk is a
+/// cycle in the links.
+const LINEAGE_WALK_MAX_DEPTH: usize = 64;
+
+/// Most distinct parent chains one step of a launch-lineage walk may reach.
+const LINEAGE_WALK_MAX_CHAINS_PER_STEP: usize = 4096;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -23600,6 +23608,75 @@ impl RuntimeDb {
         })
     }
 
+    /// Whether the launch ancestry of `origin_chain` reaches `source_chain`.
+    ///
+    /// `origin_chain` is the origin a launch sealed: a chain root id, or the id
+    /// of a thread inside a chain, which resolves to its chain. The walk goes
+    /// up, one chain per step: every thread of a chain that was spawned by
+    /// another thread names that thread's chain as its parent chain, through
+    /// the child link, whatever its relation. The answer is true as soon as
+    /// the source chain is among the chains reached, including the origin
+    /// itself.
+    ///
+    /// The walk is bounded and fails closed: a parent thread with no runtime
+    /// row, a chain count above [`LINEAGE_WALK_MAX_CHAINS_PER_STEP`], or an
+    /// ancestry still unresolved after [`LINEAGE_WALK_MAX_DEPTH`] steps (a
+    /// cycle in the links never resolves) is an error, never a "no".
+    pub fn lineage_reaches_chain(&self, origin_chain: &str, source_chain: &str) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let start = conn
+                .query_row(
+                    "SELECT chain_root_id FROM thread_runtime WHERE thread_id = ?1",
+                    params![origin_chain],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| origin_chain.to_owned());
+            let mut parents = conn.prepare(
+                "SELECT parent.chain_root_id
+                   FROM thread_runtime AS member
+                   JOIN thread_child_link AS link ON link.child_thread_id = member.thread_id
+              LEFT JOIN thread_runtime AS parent ON parent.thread_id = link.parent_thread_id
+                  WHERE member.chain_root_id = ?1",
+            )?;
+            let mut frontier = BTreeSet::from([start]);
+            for _ in 0..=LINEAGE_WALK_MAX_DEPTH {
+                if frontier.contains(source_chain) {
+                    return Ok(true);
+                }
+                if frontier.is_empty() {
+                    return Ok(false);
+                }
+                let mut next = BTreeSet::new();
+                for chain in &frontier {
+                    let reached = parents
+                        .query_map(params![chain], |row| row.get::<_, Option<String>>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    for parent_chain in reached {
+                        let parent_chain = parent_chain.ok_or_else(|| {
+                            anyhow!(
+                                "launch lineage of chain {chain} names a parent thread with no runtime row"
+                            )
+                        })?;
+                        // A child spawned inside its own chain adds nothing.
+                        if &parent_chain != chain {
+                            next.insert(parent_chain);
+                        }
+                    }
+                }
+                if next.len() > LINEAGE_WALK_MAX_CHAINS_PER_STEP {
+                    bail!(
+                        "launch lineage of {origin_chain} reaches more than {LINEAGE_WALK_MAX_CHAINS_PER_STEP} chains in one step"
+                    );
+                }
+                frontier = next;
+            }
+            bail!(
+                "launch lineage of {origin_chain} is unresolved after {LINEAGE_WALK_MAX_DEPTH} steps"
+            )
+        })
+    }
+
     // ── Follow waiters ───────────────────────────────────────────────────
 
     /// Get-or-create a follow reservation by `follow_key` (idempotent). On a
@@ -33054,6 +33131,60 @@ mod tests {
         assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["a1", "a2"]);
         // A leaf has none.
         assert!(db.descendant_thread_ids("a2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn lineage_walk_reaches_the_source_chain_through_nested_children() {
+        let (_tmp, db) = fresh_db();
+        // session -> child (own chain, dispatch link) -> grandchild (own chain,
+        // dispatch link); an inline thread inside the session chain; an
+        // unrelated person-launched chain.
+        for (thread, chain) in [
+            ("S", "S"),
+            ("S-inline", "S"),
+            ("D1", "D1"),
+            ("D2", "D2"),
+            ("U", "U"),
+        ] {
+            db.insert_thread_runtime(thread, chain).unwrap();
+        }
+        db.record_child_link("S", "S-inline", "dispatch").unwrap();
+        db.record_child_link("S-inline", "D1", "dispatch").unwrap();
+        db.record_child_link("D1", "D2", "dispatch").unwrap();
+
+        assert!(db.lineage_reaches_chain("S", "S").unwrap());
+        assert!(db.lineage_reaches_chain("D1", "S").unwrap());
+        assert!(db.lineage_reaches_chain("D2", "S").unwrap());
+        // An origin named by a thread inside a chain resolves to its chain.
+        assert!(db.lineage_reaches_chain("S-inline", "S").unwrap());
+        assert!(!db.lineage_reaches_chain("U", "S").unwrap());
+        // Ancestry only goes up: the session does not descend from its child.
+        assert!(!db.lineage_reaches_chain("S", "D2").unwrap());
+        // An origin no thread knows is its own unlinked chain.
+        assert!(!db.lineage_reaches_chain("T-unknown", "S").unwrap());
+    }
+
+    #[test]
+    fn lineage_walk_fails_closed_on_a_cycle_and_on_a_missing_parent() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("A", "A").unwrap();
+        db.insert_thread_runtime("B", "B").unwrap();
+        db.record_child_link("A", "B", "dispatch").unwrap();
+        db.record_child_link("B", "A", "dispatch").unwrap();
+        // The walk ends with an error, never with a "no".
+        let error = db
+            .lineage_reaches_chain("A", "SOURCE")
+            .expect_err("a cycle never resolves");
+        assert!(error.to_string().contains("unresolved"), "{error:#}");
+        // The source is still found if it lies on the cycle.
+        assert!(db.lineage_reaches_chain("A", "B").unwrap());
+
+        db.insert_thread_runtime("C", "C").unwrap();
+        db.record_child_link("GONE", "C", "dispatch").unwrap();
+        let error = db
+            .lineage_reaches_chain("C", "SOURCE")
+            .expect_err("a parent with no runtime row cannot be proved unrelated");
+        assert!(error.to_string().contains("no runtime row"), "{error:#}");
     }
 
     #[test]

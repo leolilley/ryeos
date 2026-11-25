@@ -110,6 +110,12 @@ pub struct ParentExecutionContext {
     /// derives. The child's own ceiling is this value; it is never read from
     /// runtime-supplied params or fields.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Chain the child's launch originated from: the launching thread's own
+    /// origin when it has one, otherwise its own chain. The child seals this
+    /// as its evaluator origin chain. It is never read from runtime-supplied
+    /// params or fields. Absent only on a context rebuilt from a persisted
+    /// follow parent, whose child already carries the sealed value.
+    pub evaluator_origin_chain: Option<String>,
 }
 
 impl ParentExecutionContext {
@@ -124,7 +130,26 @@ impl ParentExecutionContext {
             depth: cap.depth,
             accounting_scope: cap.accounting_scope.clone(),
             thread_ceiling: cap.thread_ceiling,
+            evaluator_origin_chain: Some(cap.launch_origin_chain()),
         }
+    }
+
+    /// The origin chain a launch records when no sealed identity already
+    /// carries one: the parent context's stamp for a callback-dispatched
+    /// child, else the stamp of the service call that made the launch from
+    /// inside an execution, else none (a person's root launch). Every
+    /// non-continuation launch resolves its stamp here.
+    pub fn launch_origin(
+        parent: Option<&Self>,
+        handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    ) -> Option<String> {
+        parent
+            .and_then(|parent| parent.evaluator_origin_chain.clone())
+            .or_else(|| {
+                handler_context
+                    .and_then(|context| context.launch_origin_chain())
+                    .map(str::to_owned)
+            })
     }
 
     /// The context a detached child of a grant-bearing thread launches under:

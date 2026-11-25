@@ -299,6 +299,20 @@ pub struct PersistedParentExecutionContext {
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 }
 
+/// The origin chain a launch made from inside an execution records: the
+/// launching thread's own sealed origin when it has one, otherwise the launching
+/// thread's own chain root. This is the one rule every launching site shares, so
+/// a launch made from inside any execution names where it came from. A null
+/// origin is left only to a launch no execution made, a person's root launch.
+pub fn child_launch_origin_chain(
+    launcher_sealed_origin: Option<&str>,
+    launcher_chain_root_id: &str,
+) -> String {
+    launcher_sealed_origin
+        .unwrap_or(launcher_chain_root_id)
+        .to_owned()
+}
+
 impl Default for RuntimeLaunchMetadata {
     fn default() -> Self {
         Self {

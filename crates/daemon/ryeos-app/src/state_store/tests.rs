@@ -8,6 +8,7 @@ use tempfile::tempdir;
 mod birth_tests;
 mod core_tests;
 mod launch_tests;
+mod lineage_tests;
 mod workspace_handoff_tests;
 mod workspace_input_roots_tests;
 

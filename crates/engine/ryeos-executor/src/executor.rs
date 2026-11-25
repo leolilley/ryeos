@@ -1008,6 +1008,25 @@ pub async fn execute_service_verified(
             || invocation_id.clone(),
             |parent| parent.chain_root_id.clone(),
         );
+        // A service called from inside an execution records, on every launch
+        // its handler makes, the chain that execution originated from: the
+        // callback parent's own sealed origin when it has one, else the
+        // parent's chain. A direct invocation was made by no execution and
+        // records none.
+        let service_launch_origin = inline_parent
+            .as_ref()
+            .map(|parent| -> Result<String> {
+                let sealed_origin = state
+                    .state_store
+                    .get_launch_metadata(&parent.thread_id)?
+                    .and_then(|metadata| metadata.resume_context)
+                    .and_then(|resume| resume.evaluator_origin_chain);
+                Ok(ryeos_app::launch_metadata::child_launch_origin_chain(
+                    sealed_origin.as_deref(),
+                    &parent.chain_root_id,
+                ))
+            })
+            .transpose()?;
         // Registration precedes publication, while launch metadata and the
         // created→running transition commit atomically with the birth.
         let mut lifecycle_guard =
@@ -1065,6 +1084,7 @@ pub async fn execute_service_verified(
         let task_endpoint = endpoint.clone();
         let task_service_ref = service_ref.to_string();
         let task_invocation_id = invocation_id.clone();
+        let task_launch_origin = service_launch_origin;
         let task_principal = ctx.principal_fingerprint.clone();
         let task_scopes = ctx.caller_scopes.clone();
         let task_current_site_id = ctx.plan_ctx.current_site_id.clone();
@@ -1081,7 +1101,8 @@ pub async fn execute_service_verified(
                     &task_current_site_id,
                     &task_origin_site_id,
                 )?
-                .with_recorded_service_root_id(task_invocation_id.clone())?;
+                .with_recorded_service_root_id(task_invocation_id.clone())?
+                .with_launch_origin_chain(task_launch_origin);
                 let handler = task_state
                     .services
                     .get(&task_endpoint)

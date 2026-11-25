@@ -313,6 +313,12 @@ pub(super) fn prepare_for_dedicated_boot(
         {
             bail!("workload-client callback disappeared during boot admission");
         }
+        if !state.callback_tokens.set_evaluator_origin_chain(
+            &callback_token,
+            root_capability.evaluator_origin_chain.clone(),
+        ) {
+            bail!("workload-client callback disappeared during origin binding");
+        }
         if !state.callback_tokens.restrict_runtime_methods(
             &callback_token,
             CallbackRuntimeMethodSurface::exact(vec![

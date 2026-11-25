@@ -715,4 +715,31 @@ composed_value_contract:
         judge(&referencing(TrustClass::TrustedProject), no_admissions()).unwrap();
         judge(&referencing(TrustClass::TrustedBundle), no_admissions()).unwrap();
     }
+
+    /// The general trust floor: an unsigned item under a project is not
+    /// runnable for anyone, whoever authored it and whatever the operator
+    /// admits. The gate takes no caller at all, so no launch can be exempted
+    /// by what made it.
+    #[test]
+    fn an_unsigned_project_root_is_refused_whoever_authored_it() {
+        let mut resolution = referencing(TrustClass::TrustedProject);
+        resolution.root = knowledge_item(
+            "knowledge:notes/root",
+            ItemSpace::Project,
+            TrustClass::Unsigned,
+        );
+        resolution.effective_trust_class = TrustClass::Unsigned;
+        for operator in [
+            no_admissions(),
+            NodeLaunchTrustPolicy::admitting(&[("knowledge", &[TrustClass::UntrustedProject])]),
+        ] {
+            let Err(DispatchError::LaunchPolicyForbidden { code, message, .. }) =
+                judge(&resolution, operator)
+            else {
+                panic!("expected a launch-policy refusal");
+            };
+            assert_eq!(code, "effective_trust_unsigned");
+            assert!(message.contains("trust class unsigned"), "{message}");
+        }
+    }
 }

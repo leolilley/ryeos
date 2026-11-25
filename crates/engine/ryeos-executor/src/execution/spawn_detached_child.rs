@@ -106,19 +106,6 @@ pub(crate) async fn spawn_detached_child(
         })?;
     let parent_lifecycle_authority = parent_resume.lifecycle_authority;
     let scheduled_fire = parent_resume.scheduled_fire.clone();
-    // A child launched for a grant-bearing parent records the session chain it
-    // originated from: the chain the parent itself originated from when it
-    // already carries one, otherwise the parent's own chain root. Any other
-    // parent passes its own origin on unchanged.
-    let evaluator_origin_chain = match workload {
-        Some(_) => Some(
-            parent_resume
-                .evaluator_origin_chain
-                .clone()
-                .unwrap_or_else(|| parent.chain_root_id.clone()),
-        ),
-        None => parent_resume.evaluator_origin_chain.clone(),
-    };
     if !parent_resume.product_selections.is_empty() {
         anyhow::bail!(
             "detach: product-selected executions cannot spawn callback children in the first composition lane"
@@ -630,7 +617,9 @@ pub(crate) async fn spawn_detached_child(
             ),
             thread_ceiling: launch_parent_context.thread_ceiling,
             workspace_input: workspace_input.clone(),
-            evaluator_origin_chain: evaluator_origin_chain.clone(),
+            // Recorded for every detached child, from the one shared builder: the
+            // spawning thread's own origin, else its chain.
+            evaluator_origin_chain: launch_parent_context.evaluator_origin_chain.clone(),
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         });

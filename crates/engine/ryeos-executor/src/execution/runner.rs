@@ -135,6 +135,11 @@ pub struct ExecutionParams {
     /// launch's thread tree. A callback-dispatched tool carries its parent's
     /// ceiling; only a launch with no parent execution context is unbounded.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Chain this launch originated from, sealed into its launch identity: the
+    /// stamp of the execution that launched it (a callback parent's context or
+    /// the service call that made the launch), `None` for a person's root
+    /// launch, and the sealed value for a launch rebuilt from its identity.
+    pub evaluator_origin_chain: Option<String>,
 }
 
 /// Bound a callback-dispatched tool's process timeout by its caller's hard
@@ -4747,7 +4752,7 @@ fn admitted_root_launch_metadata(
         parent_delegation_caps: None,
         thread_ceiling: params.thread_ceiling,
         workspace_input: None,
-        evaluator_origin_chain: None,
+        evaluator_origin_chain: params.evaluator_origin_chain.clone(),
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
@@ -9019,6 +9024,8 @@ pub fn execution_params_from_sealed_root_request(
         deadline_end_at_ms: None,
         // The ceiling sealed with the original launch.
         thread_ceiling: operational_resume.thread_ceiling,
+        // The origin sealed with the original launch.
+        evaluator_origin_chain: operational_resume.evaluator_origin_chain.clone(),
     })
 }
 

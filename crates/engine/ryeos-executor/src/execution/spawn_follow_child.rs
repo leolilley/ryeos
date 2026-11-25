@@ -1329,7 +1329,7 @@ async fn prepare_follow_children(
                     ),
                     thread_ceiling: launch_parent_context.thread_ceiling,
                     workspace_input: None,
-                    evaluator_origin_chain: None,
+                    evaluator_origin_chain: launch_parent_context.evaluator_origin_chain.clone(),
                     executor_ref: Some(child_execution.executor_ref.clone()),
                     runtime_ref: Some(runtime_ref),
                 });

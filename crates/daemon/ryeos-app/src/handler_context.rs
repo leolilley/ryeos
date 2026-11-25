@@ -197,6 +197,13 @@ pub struct HandlerContext {
     /// input or portable authority.
     #[serde(skip)]
     recorded_service_root_id: Option<String>,
+    /// Chain a launch made by this handler records as its origin, when the
+    /// service call itself was made from inside an execution (an inline child
+    /// of a callback parent). `None` for a call no execution made. Local
+    /// dispatch context only: never serialized and never caller input; it
+    /// survives narrowing, so a nested launch still names where it came from.
+    #[serde(skip)]
+    launch_origin_chain: Option<String>,
     /// Original managed caller budget. Service audit-root birth and JSON
     /// deserialization cannot create, locate or renew this authority.
     #[serde(skip)]
@@ -219,6 +226,7 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
         }
@@ -240,6 +248,7 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
         }
@@ -262,6 +271,7 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
         }
@@ -285,6 +295,7 @@ impl HandlerContext {
             signed_request_digest: None,
             delegated_via: None,
             recorded_service_root_id: None,
+            launch_origin_chain: None,
             original_execution_budget: None,
             task_scope: None,
         }
@@ -310,6 +321,19 @@ impl HandlerContext {
             anyhow::bail!("recorded service handler context already has an invocation root");
         }
         Ok(self)
+    }
+
+    /// Bind the origin chain launches made by this handler record. Set by the
+    /// executor only for a service call made from inside an execution.
+    pub fn with_launch_origin_chain(mut self, origin_chain: Option<String>) -> Self {
+        self.launch_origin_chain = origin_chain;
+        self
+    }
+
+    /// Origin chain launches made by this handler record, if the call was made
+    /// from inside an execution.
+    pub fn launch_origin_chain(&self) -> Option<&str> {
+        self.launch_origin_chain.as_deref()
     }
 
     /// Record the content hash of the signed request that authenticated this
@@ -1124,6 +1148,22 @@ pub mod budget_test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_calls_launch_origin_survives_narrowing_for_a_nested_launch() {
+        let direct = HandlerContext::new("fp".into(), vec!["cap".into()], true);
+        assert_eq!(direct.launch_origin_chain(), None);
+        let from_inside = direct.with_launch_origin_chain(Some("T-session".into()));
+        let narrowed = from_inside
+            .narrowed_for_execution(vec!["cap".into()], "site:a", "site:a")
+            .unwrap();
+        assert_eq!(narrowed.launch_origin_chain(), Some("T-session"));
+        assert_eq!(
+            narrowed.recorded_service_root_id(),
+            None,
+            "the service's own root never crosses, its origin does"
+        );
+    }
 
     #[test]
     fn verified_remote_origin_is_authoritative() {

@@ -1021,6 +1021,12 @@ pub struct CallbackCapability {
     /// only ever narrowed for a child; never accepted from runtime-supplied
     /// fields.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Chain the minting thread's own launch originated from, read from the
+    /// sealed launch identity when the bearer is minted. `None` for a thread
+    /// that is a person's root launch. Never accepted from runtime-supplied
+    /// fields; a child launched through this bearer inherits it through
+    /// [`CallbackCapability::launch_origin_chain`].
+    pub evaluator_origin_chain: Option<String>,
     /// Optional boot-local narrowing for the generic hosted workload client.
     /// Absence preserves the ordinary callback contract. This is bound once
     /// before the protected child channel is exposed and can never be widened.
@@ -1033,6 +1039,17 @@ pub struct CallbackCapability {
 }
 
 impl CallbackCapability {
+    /// The origin chain every launch made through this bearer records: the
+    /// minting thread's own origin when it has one, otherwise its own chain.
+    /// Lineage is ancestry, so a child launched from anywhere inside an
+    /// execution names the chain that execution originated from.
+    pub fn launch_origin_chain(&self) -> String {
+        crate::launch_metadata::child_launch_origin_chain(
+            self.evaluator_origin_chain.as_deref(),
+            &self.chain_root_id,
+        )
+    }
+
     /// Confirm this cap's carried `chain_root_id` against the authoritative
     /// chain root from state. The cap value is a convenience carrier, never
     /// trusted on its own — cross-chain wiring keys on the validated result of
@@ -1208,6 +1225,7 @@ impl CallbackCapabilityStore {
             depth,
             accounting_scope: None,
             thread_ceiling,
+            evaluator_origin_chain: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
@@ -1290,6 +1308,18 @@ impl CallbackCapabilityStore {
         match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
                 cap.chain_root_id = chain_root_id.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Bind the minting thread's sealed origin chain to a freshly minted cap.
+    /// Returns whether the token was found.
+    pub fn set_evaluator_origin_chain(&self, token: &str, origin: Option<String>) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.evaluator_origin_chain = origin;
                 true
             }
             None => false,
@@ -2523,6 +2553,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            evaluator_origin_chain: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
             remote_consumer_grant: None,
