@@ -4347,6 +4347,69 @@ mod tests {
         assert_eq!(totals.output_tokens, 25);
     }
 
+    fn project_cumulative_usage(
+        db: &ProjectionDb,
+        chain_seq: u64,
+        completed_turns: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let event = NewEvent::new("chain-A", "T-1", "thread_usage")
+            .chain_seq(chain_seq)
+            .thread_seq(chain_seq)
+            .payload(json!({
+                "completed_turns": completed_turns,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "spend_usd": ryeos_accounting::UsdNanos::from_nanos(
+                    i64::try_from((input_tokens + output_tokens) * 1_000_000).unwrap()
+                )
+                .unwrap(),
+                "spawns_used": 0,
+                "started_at": "2026-06-01T00:00:00Z",
+                "settled_at": "2026-06-01T00:05:00Z",
+                "last_settled_turn_seq": completed_turns,
+                "elapsed_ms": 100,
+            }))
+            .build_with_ts("2026-06-01T00:05:00Z".to_string());
+        project_event(db, &event).unwrap();
+    }
+
+    #[test]
+    fn thread_usage_latest_keeps_the_greater_cumulative_value_not_the_later_chain_seq() {
+        let db = test_db();
+        insert_thread(&db, "T-1", "chain-A", ThreadStatus::Running);
+
+        // The higher chain position carries the lower cumulative figures, so
+        // it is not a newer reading and the row stays on the greater one.
+        project_cumulative_usage(&db, 3, 3, 300, 30);
+        project_cumulative_usage(&db, 9, 2, 200, 20);
+        let held = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(held.chain_seq, 3);
+        assert_eq!(held.completed_turns, 3);
+        assert_eq!(held.input_tokens, 300);
+
+        // A mixed event (some figures higher, one lower) is not cumulative
+        // either, whatever its position.
+        project_cumulative_usage(&db, 10, 4, 250, 40);
+        let held = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(held.chain_seq, 3);
+
+        // An earlier chain position that carries the greater cumulative
+        // figures takes the row.
+        project_cumulative_usage(&db, 2, 5, 500, 50);
+        let held = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(held.chain_seq, 2);
+        assert_eq!(held.completed_turns, 5);
+        assert_eq!(held.output_tokens, 50);
+
+        // Re-projecting the same event changes nothing.
+        project_cumulative_usage(&db, 2, 5, 500, 50);
+        let held = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(held.chain_seq, 2);
+        assert_eq!(held.input_tokens, 500);
+    }
+
     #[test]
     fn thread_usage_latest_projects_provider_model_metadata() {
         let db = test_db();

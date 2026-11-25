@@ -231,10 +231,17 @@ async fn inline_in_process_service_child_is_a_same_chain_child_of_the_graph_thre
         spawned[0].get("child_thread_id").and_then(Value::as_str),
         Some(child_thread.as_str())
     );
-    assert_eq!(
-        spawned[0].get("node").and_then(Value::as_str),
-        Some("inspect")
+    // The daemon writes the event from the retained action intent, so it
+    // names the occurrence's operation and carries no graph node or step.
+    assert!(
+        spawned[0]
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .is_some_and(|operation_id| operation_id.len() == 64),
+        "the lineage event names the dispatch occurrence: {:#?}",
+        spawned[0]
     );
+    assert!(spawned[0].get("node").is_none());
     assert_eq!(
         spawned[0].get("item_id").and_then(Value::as_str),
         Some("service:health/status")

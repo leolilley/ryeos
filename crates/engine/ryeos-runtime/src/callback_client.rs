@@ -1411,15 +1411,6 @@ impl CallbackClient {
         Ok((media_type, bytes))
     }
 
-    /// Advisory: warn-and-continue OK when disconnected.
-    pub async fn emit_thread_continued(&self, previous_id: &str) -> Result<()> {
-        self.append_runtime_event(
-            RuntimeEventType::ThreadContinued,
-            serde_json::json!({"previous_thread_id": previous_id}),
-        )
-        .await
-    }
-
     /// Resume-critical: must hard-fail on disconnect.
     /// Emits a `thread_usage` event with the cumulative ThreadUsage
     /// payload. The daemon persists this so resumed threads can reseed
@@ -2318,12 +2309,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_thread_continued_noop_when_disconnected() {
-        let client = make_client();
-        client.emit_thread_continued("T-prev").await.unwrap();
-    }
-
-    #[tokio::test]
     async fn get_facets_noop_when_disconnected() {
         let client = make_client();
         let result = client.get_facets().await.unwrap();
@@ -2351,7 +2336,8 @@ mod tests {
     }
 
     /// Every typed event the runtime emits must serialize to a name and storage
-    /// class accepted by the daemon.
+    /// class accepted by the daemon. The mirror lists only the types a runtime
+    /// may append; daemon-authored types are refused by the validator.
     ///
     /// We mirror the validator's two allow-lists rather than depending
     /// on `ryeosd` (which would be a circular dep).
@@ -2360,19 +2346,6 @@ mod tests {
         const VALIDATOR_EVENTS: &[&str] = &[
             "thread_created",
             "thread_started",
-            "thread_completed",
-            "thread_failed",
-            "thread_cancelled",
-            "thread_killed",
-            "thread_timed_out",
-            "thread_continued",
-            "edge_recorded",
-            "child_thread_spawned",
-            "continuation_requested",
-            "continuation_accepted",
-            "command_submitted",
-            "command_claimed",
-            "command_completed",
             "stream_opened",
             "token_delta",
             "stream_snapshot",
@@ -2401,7 +2374,6 @@ mod tests {
             RuntimeEventType::CognitionOut,
             RuntimeEventType::ToolCallStart,
             RuntimeEventType::ToolCallResult,
-            RuntimeEventType::ThreadContinued,
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamOpened,
             RuntimeEventType::CognitionReasoning,

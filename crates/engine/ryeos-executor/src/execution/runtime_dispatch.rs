@@ -2266,6 +2266,30 @@ async fn handle_execute(
             );
         }
     }
+    // The daemon owns the parent's `child_thread_spawned` lineage event: a
+    // runtime may not append one. Launch sites record it as the child is
+    // linked; this is the one place that holds the retained action intent for
+    // every inline child, so a child born by a path with no launch-site record
+    // (a method or in-process service child) still gets its edge. The append
+    // is idempotent and never fails the caller's result.
+    if let Some(child_thread_id) = retained_runtime_action_child_id.as_deref()
+        && state.threads.get_thread(child_thread_id)?.is_some()
+    {
+        match state.threads.record_dispatch_child_lineage(child_thread_id) {
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+            )) => tracing::warn!(
+                child_thread_id,
+                "parent settled before the dispatched child's lineage event was recorded"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                child_thread_id,
+                error = %error,
+                "failed to record the dispatched child's lineage event"
+            ),
+        }
+    }
     match hook_ledger {
         None => result.map_err(anyhow::Error::new),
         Some((dispatch_key, request_hash, identity)) => {

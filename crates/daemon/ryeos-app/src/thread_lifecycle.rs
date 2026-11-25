@@ -6751,8 +6751,8 @@ impl ThreadLifecycleService {
     }
 
     /// Record the portable parent→child lineage event for a child created
-    /// through a runtime's `runtime.dispatch_action` callback, unless the
-    /// calling runtime declares (`writes_child_lineage`) that it writes its own.
+    /// through a runtime's `runtime.dispatch_action` callback. The daemon is
+    /// the only writer: a runtime append of `child_thread_spawned` is refused.
     ///
     /// The caller is the operation's first caller, read from the retained
     /// action intent, so a replay from a later thread of the same chain
@@ -6778,26 +6778,6 @@ impl ThreadLifecycleService {
                 ChildLineageAppendOutcome::ParentSettled,
             ));
         };
-        let parent_identity = self
-            .state_store
-            .get_launch_metadata(parent_thread_id)?
-            .and_then(|metadata| metadata.admitted_artifact_identity);
-        if let Some(ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
-            runtime_ref,
-            ..
-        }) = parent_identity
-        {
-            let canonical = CanonicalRef::parse(&runtime_ref)
-                .map_err(|error| anyhow!("parent runtime ref `{runtime_ref}`: {error}"))?;
-            let runtime = self.engine.runtimes.lookup_by_ref(&canonical).ok_or_else(|| {
-                anyhow!(
-                    "runtime `{runtime_ref}` of thread {parent_thread_id} is not in the runtime registry"
-                )
-            })?;
-            if runtime.yaml.writes_child_lineage {
-                return Ok(DispatchChildLineage::NotOwed);
-            }
-        }
         let child = self
             .state_store
             .get_thread(child_thread_id)?

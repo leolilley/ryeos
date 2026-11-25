@@ -148,9 +148,8 @@ pub struct ActionSuccess {
     /// in-process service child, which the daemon records in this graph's
     /// chain with the graph thread as upstream. `None` for subprocess/tool
     /// leaves, unrecorded service reads, bare values, and cache hits —
-    /// nothing new was spawned. The walker emits a `child_thread_spawned`
-    /// event from this so the dispatch edge lands in the parent's portable
-    /// braid.
+    /// nothing new was spawned. The daemon records the parent's portable
+    /// `child_thread_spawned` lineage event itself when it creates the child.
     pub child_thread_id: Option<String>,
     /// The durable effect record this result was replayed from, when the
     /// daemon substituted a recorded result for execution. Flows into the
@@ -295,9 +294,9 @@ pub async fn dispatch_action(
     // (`continuation_id` at its top level) is then rejected loudly.
     // A native child snapshot identifies a spawned directive/sub-graph child
     // and a recorded service envelope identifies an inline in-process child;
-    // capture the id BEFORE classifying `result` so the walker can emit a
-    // `child_thread_spawned` event. Unrecorded service envelopes carry only an
-    // invocation id for a hot read and are excluded below.
+    // capture the id BEFORE classifying `result` so the walker can name the
+    // child in its dispatch evidence. Unrecorded service envelopes carry only
+    // an invocation id for a hot read and are excluded below.
     let (child_thread_id, child_thread_id_error) = callback_child_thread_identity(&response.thread);
 
     response
@@ -430,8 +429,8 @@ pub async fn dispatch_action(
 /// produces a lineage edge; a recorded service ran as a thread. When that
 /// thread has a runtime thread id it is the inline in-process child the
 /// callback pre-minted, recorded in this graph's chain with the graph thread
-/// as upstream, so it produces the same `child_thread_spawned` edge as a
-/// native child. A recorded `svc-*` id is a direct invocation's own chain
+/// as upstream, so the daemon records the same `child_thread_spawned` edge for
+/// it as for a native child. A recorded `svc-*` id is a direct invocation's own chain
 /// root and is not a child of this graph.
 fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
     match thread.get("recorded") {
