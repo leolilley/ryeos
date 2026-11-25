@@ -5,6 +5,7 @@
 //! reader. It bounds the node's bill, not its availability: a stranger can use
 //! up the day's cap. `max_lifetime_days` is how far ahead a publication's
 //! `not_after` may be; code adds a hard maximum that node data cannot raise.
+//! `max_in_flight` bounds how many `/published` requests are worked at once.
 
 use std::sync::Arc;
 
@@ -16,12 +17,18 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 
 pub const SECTION_NAME: &str = "publication";
 
+/// Largest in-flight limit node data may set.
+pub const MAX_IN_FLIGHT_CEILING: u32 = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationPolicy {
     pub schema: u32,
     pub daily_bytes: u64,
     pub max_lifetime_days: u32,
+    /// Most `/published` requests the node works on at once, node-wide. A
+    /// request beyond it is answered `publication_busy` before any read.
+    pub max_in_flight: u32,
 }
 
 impl PublicationPolicy {
@@ -40,6 +47,9 @@ impl PublicationPolicy {
                 ryeos_engine::trust::PUBLICATION_HARD_MAX_LIFETIME_DAYS
             );
         }
+        if self.max_in_flight == 0 || self.max_in_flight > MAX_IN_FLIGHT_CEILING {
+            bail!("node publication policy max_in_flight must be 1 to {MAX_IN_FLIGHT_CEILING}");
+        }
         Ok(())
     }
 
@@ -51,6 +61,7 @@ impl PublicationPolicy {
             schema: 1,
             daily_bytes: 1 << 30,
             max_lifetime_days: 90,
+            max_in_flight: 16,
         }
     }
 }
@@ -91,6 +102,9 @@ mod tests {
         let mut far = PublicationPolicy::as_shipped();
         far.max_lifetime_days = ryeos_engine::trust::PUBLICATION_HARD_MAX_LIFETIME_DAYS + 1;
         assert!(far.validate().is_err());
+        let mut busy = PublicationPolicy::as_shipped();
+        busy.max_in_flight = 0;
+        assert!(busy.validate().is_err());
         let mut none = PublicationPolicy::as_shipped();
         none.max_lifetime_days = 0;
         assert!(none.validate().is_err());

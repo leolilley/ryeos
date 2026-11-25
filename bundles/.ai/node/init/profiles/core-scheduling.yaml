@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T03:36:11Z:8f9eb9694fe51767922f217cb431deaf234faefbf4f4e86f2525db7c06339b34:r8lZz5Sc1Q1p/mE+BPRoVzivuRw2pfwyq54wOJ6BhmbvAM6blFPlesukhPk2/Hd74feKMWcbESqtghQli2aADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T06:49:09Z:d6827f53bafe66e1e7ae8d36e4b4869bad37a64cde9303efd26f8f83ea91b729:4iVqlNFgiWWvOwxqrZsbei0PRmLWVW1AN4CHoGEIPFlhrInKiJkwud1sGIp+ktqkSoTwkSoZ+4k26VOgd/neCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -172,6 +172,9 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

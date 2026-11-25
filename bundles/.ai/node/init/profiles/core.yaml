@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T03:36:11Z:641515d95debb39e8bc37454b034be701586f3070ee70e29e199a1277d0482da:SaeUyk7/6hFRt1oD1hlL/LksxIl/jGwr99MnLmmZyTIYxtfAU4QBW6JC22aY4OTBv0BobADH+CybK1HrmSkvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T06:49:09Z:a7441801c951aaa632ba5ccd6e947bca07ace0fcce681a2de46b55f25e18160b:rvEZEP0zkbNrJCRuvjm0JIXiTs/f7pA54Iqty7Hk0sjTdJSFcXFOwtpbm1QYLVChIXW1BctbpDVY1ayv4NQFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -169,6 +169,9 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
