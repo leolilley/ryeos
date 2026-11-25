@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Browser smoke for an installed RyeOS distribution: initialize an isolated
 # node, start it, mint a launch URL through `ryeos web`, and drive the browser
-# client headless (smoke.mjs) through launch, session, seat claim and the
-# launcher. Needs Node with @playwright/test and its Chromium installed.
+# client headless (smoke.mjs) through launch, session, seat claim, the launcher
+# and the drawn Surface ground (theme catalogue, granted picture fetches,
+# refusals, and a canvas that differs from the flat Surface). The installed
+# ryeos-ui bundle must ship its picture blobs and the populated signed picture
+# manifest; the smoke fails when it does not. Needs Node with @playwright/test and its Chromium installed.
 
 set -euo pipefail
 
@@ -109,6 +112,17 @@ LAUNCH_URL="$(timeout 30 ryeos web --presentation config:ryeos/ui/presentation -
   ryeos_term_fail "ryeos web printed no launch URL"
   exit 1
 }
+
+ui_ai="$BUNDLE_SOURCE/ryeos-ui/.ai"
+[[ -f "$ui_ai/refs/bundles/pictures" ]] || {
+  ryeos_term_fail "the installed ryeos-ui bundle has no signed picture manifest at $ui_ai/refs/bundles/pictures"
+  exit 1
+}
+[[ -n "$(ls -A "$ui_ai/pictures/blobs" 2>/dev/null)" ]] || {
+  ryeos_term_fail "the installed ryeos-ui bundle ships no picture blobs under $ui_ai/pictures/blobs"
+  exit 1
+}
+export RYEOS_SMOKE_PICTURE_BLOBS="$ui_ai/pictures/blobs"
 
 ryeos_term_info "driving the browser client"
 timeout "$BROWSER_TIMEOUT" node "$script_dir/smoke.mjs" "$LAUNCH_URL" "$SHOTS"

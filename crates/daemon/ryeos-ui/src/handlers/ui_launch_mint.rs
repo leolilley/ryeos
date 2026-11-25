@@ -990,7 +990,7 @@ mod tests {
             SeatPolicy, SharedPresentationPolicyLimits, UiBrowserSessionPolicy,
         };
         UiBrowserSessionPolicy {
-            schema: 5,
+            schema: 6,
             session_ttl_secs: 28800,
             session_idle_secs: 3600,
             launch_token_ttl_secs: 60,
@@ -999,6 +999,7 @@ mod tests {
             max_live_binding_attachments_per_session: 16,
             max_presentations_per_session: 16,
             max_surface_instances_per_presentation: 16,
+            max_art_grants: 256,
             shared_presentation: SharedPresentationPolicyLimits {
                 max_declaration_bytes: 65536,
                 max_dialogs: 16,

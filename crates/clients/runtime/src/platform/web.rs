@@ -567,6 +567,24 @@ impl Transport for WebTransport {
         Self::text(path, &response).await
     }
 
+    async fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError> {
+        let (response, _request) = self.send(path, "GET", "image/*", None).await?;
+        if !response.ok() {
+            return Err(Self::refusal(path, &response).await);
+        }
+        let unreadable = || RuntimeError::UnreadableResponse {
+            path: path.to_owned(),
+        };
+        let buffer = JsFuture::from(response.array_buffer().map_err(|_| unreadable())?)
+            .await
+            .map_err(|_| unreadable())?;
+        let bytes = js_sys::Uint8Array::new(&buffer);
+        if bytes.length() as usize > max_bytes {
+            return Err(unreadable());
+        }
+        Ok(bytes.to_vec())
+    }
+
     async fn post_encoded(&self, path: &str, body: String) -> Result<String, RuntimeError> {
         let (response, _request) = self
             .send(path, "POST", "application/json", Some(body))

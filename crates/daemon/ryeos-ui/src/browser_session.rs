@@ -744,12 +744,9 @@ pub struct BrowserSession {
     pub(crate) next_surface_ordinal: u64,
     /// Picture hashes this session may be served beyond those its bindings
     /// name: pictures a service run for this session handed it. Bounded by
-    /// [`MAX_ART_GRANTS_PER_SESSION`] and gone with the session.
+    /// the node policy's `max_art_grants` and gone with the session.
     pub art_grants: BTreeSet<String>,
 }
-
-/// Most picture hashes one session's grant set may hold.
-pub const MAX_ART_GRANTS_PER_SESSION: usize = 256;
 
 /// Why a picture grant was not recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1012,11 +1009,16 @@ impl BrowserSessionStore {
     /// Add one picture hash to a live session's grant set. The set is the
     /// only way a session is served a picture its bindings do not name.
     ///
-    /// Nothing in production calls this yet. A future caller must be a
-    /// service running for this session that itself returned the hash, and
-    /// must first check the hash is in the `ArtIndex`. It must never be wired
-    /// to a request field.
-    pub fn grant_art(&self, session_id: &str, sha256: &str) -> Result<(), ArtGrantRefusal> {
+    /// A caller must be a service running for this session that itself
+    /// returned the hash, and must first check the hash is in the `ArtIndex`.
+    /// It must never be wired to a request field. `max_art_grants` is the
+    /// node policy's bound on the set; a full set is a typed refusal.
+    pub fn grant_art(
+        &self,
+        session_id: &str,
+        sha256: &str,
+        max_art_grants: usize,
+    ) -> Result<(), ArtGrantRefusal> {
         if !ryeos_client_base::art::is_art_hash(sha256) {
             return Err(ArtGrantRefusal::MalformedHash);
         }
@@ -1027,7 +1029,7 @@ impl BrowserSessionStore {
         if session.art_grants.contains(sha256) {
             return Ok(());
         }
-        if session.art_grants.len() >= MAX_ART_GRANTS_PER_SESSION {
+        if session.art_grants.len() >= max_art_grants {
             return Err(ArtGrantRefusal::SetFull);
         }
         session.art_grants.insert(sha256.to_owned());
