@@ -385,8 +385,10 @@ mod tests {
 
     /// The original execution budget the fixtures issue. It is far longer than
     /// any setup a loaded runner can stall, so a test never starts with its
-    /// budget already spent.
-    const ORIGINAL_BUDGET: Duration = Duration::from_secs(30);
+    /// budget already spent, and strictly below the 30 s accepted-contact
+    /// ceiling so a deadline derived from the ceiling is told apart from one
+    /// derived from the original.
+    const ORIGINAL_BUDGET: Duration = Duration::from_secs(20);
     /// How long a stalled peer is waited on. The tests own this clock: it
     /// starts where the contact is made, not where the fixture was built.
     const OWN_EXPIRY: Duration = Duration::from_millis(250);
@@ -640,6 +642,7 @@ mod tests {
                 );
                 let derived = remote_contact_deadline(&request, &fixture.context).unwrap();
                 // Derived from the original budget, not the 30 s accepted-contact ceiling.
+                assert!(ORIGINAL_BUDGET < super::ACCEPTED_CONTACT_MAX);
                 assert!(derived.remaining() <= ORIGINAL_BUDGET);
                 let deadline = derived.min(lillux::time::MonotonicDeadline::after(OWN_EXPIRY));
                 tokio::time::sleep(Duration::from_millis(20)).await;
