@@ -55,8 +55,7 @@ pub const PUBLICATION_STATEMENT: &str = "published by the operator of this node;
 /// What the tombstone and the capability report state about who retired.
 pub const PUBLICATION_RETIREMENT_NOTE: &str = "version 1 does not record which operator request retired a publication; the tombstone is node-signed and names only when and why";
 /// What the capability report states about node key rotation.
-pub const PUBLICATION_KEY_ROTATION_NOTE: &str =
-    "a node key rotation makes every existing publication link stop verifying; re-share them";
+pub const PUBLICATION_KEY_ROTATION_NOTE: &str = "a node key rotation invalidates every printed node pin: existing publication links stop verifying; re-share them";
 
 const OPERATOR_DOMAIN: &str = "ryeos-publication-v1";
 const NODE_DOMAIN: &str = "ryeos-publication-node-v1";
