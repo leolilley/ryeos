@@ -53,7 +53,7 @@ fn refusal_error(refusal: &PublicationRefusal) -> HandlerError {
 /// The calling operator's fingerprint, without the `fp:` prefix. The caller
 /// must be an active operator in the signer registry and must be the node's
 /// own operator, not a forwarded request.
-fn operator_caller(ctx: &HandlerContext, state: &AppState) -> HandlerResult<String> {
+pub(crate) fn operator_caller(ctx: &HandlerContext, state: &AppState) -> HandlerResult<String> {
     ctx.require_verified()?;
     if ctx.authenticated_origin_site_id.is_some() || ctx.delegated_via.is_some() {
         return Err(HandlerError::Forbidden(

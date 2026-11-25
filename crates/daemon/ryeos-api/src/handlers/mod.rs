@@ -25,6 +25,7 @@ pub mod bundle_catalog_publish;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
+pub mod bundle_pull;
 pub mod bundle_release;
 pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
@@ -306,6 +307,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     worker_placements::ADOPT_DESCRIPTOR,
     worker_placements::ABORT_DESCRIPTOR,
     bundle_install::DESCRIPTOR,
+    bundle_pull::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     trust_list::LIST_DESCRIPTOR,
