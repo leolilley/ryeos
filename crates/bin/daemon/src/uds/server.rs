@@ -2392,6 +2392,7 @@ mod tests {
                 Some(root_raw_content_digest),
                 hard_limits,
                 depth,
+                ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             ),
         )
     }
@@ -3884,6 +3885,7 @@ mod tests {
                 scheduled_fire: None,
                 effective_caps: vec![],
                 parent_delegation_caps: None,
+                thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })
@@ -4110,6 +4112,7 @@ mod tests {
                 scheduled_fire: None,
                 effective_caps: Vec::new(),
                 parent_delegation_caps: Some(Vec::new()),
+                thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })
@@ -4151,6 +4154,7 @@ mod tests {
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
         });
         state
             .state_store
@@ -7032,6 +7036,78 @@ mod tests {
                 "auth must succeed; downstream errors are fine: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn bounded_thread_ceiling_refuses_detached_dispatch_at_the_call() {
+        on_daemon_worker_stack(bounded_thread_ceiling_refuses_detached_dispatch_at_the_call_body);
+    }
+
+    async fn bounded_thread_ceiling_refuses_detached_dispatch_at_the_call_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ceilinged");
+        let cbt = bind_test_callback_owner(
+            &state,
+            state.callback_tokens.generate_with_context(
+                "T-ceilinged",
+                std::path::PathBuf::from("/p"),
+                std::time::Duration::from_secs(300),
+                vec!["*".to_string()],
+                test_provenance(&state, "/p"),
+                None,
+                None,
+                "0".repeat(64),
+                Some("0".repeat(64)),
+                serde_json::Value::Null,
+                0,
+                ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+                    max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+                    workspace_access:
+                        ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+                },
+            ),
+        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-ceilinged",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
+        // A spawn mode other than a unary inline call has no exact child
+        // preflight to judge, so a ceilinged thread cannot reach it; the
+        // refusal comes at the dispatch call itself, before any child exists.
+        let error = ryeos_executor::execution::runtime_dispatch::handle(
+            &json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-ceilinged",
+                "thread_auth_token": tat.token,
+                "action": {
+                    "operation_id": "1".repeat(64),
+                    "item_id": "tool:test/ceilinged",
+                    "ref_bindings": {},
+                    "product_selections": [],
+                    "thread": "detached",
+                },
+            }),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+                Some(ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                    code, ..
+                }) if code == "thread_ceiling_spawn_mode_refused"
+            ),
+            "expected the typed spawn-mode refusal, got: {error:#}"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T03:32:53Z:942448d31d111cd88e8cc09eb3da6bad1f8250f9e91149cf129da633c6287319:i8sKYN95KWXWRd8R0kKWjZwmHc1bSqE4vpiF8gfnrnznVVM4THsfxX6aI/fMEIxB2oZXw8OMFme6oDrnwUKOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T02:48:44Z:b163e7c841e84effd602c5d4a3f4305b6bef9c0305cc60c3ae5115c5660ac608:y0XPAUyPzJmIJzqiOvSsjNl7CSkzIR+o5sdLTVhCjsRXb4FhTH3AWXwBkI7jgCqJs4SLMBuisE41w554ZWe+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -348,6 +348,10 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the thread workload ceiling cut, epoch 145.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 144 --schema-cut-to 145` on its next upgrade. Admitted launch capsule schema 40 and launch metadata schema 39 seal a required thread workload ceiling for every launch: `unbounded` for a root launch, otherwise the narrower of the parent thread's ceiling and anything derived at the spawn. The reset discards launch rows written without it, and dispatch-effect replay moves to operational replay-index epoch 19 with the same capsule schema. Nothing in this cut yet creates a bounded ceiling; a node that has not enabled detached children from a worker session sees no behaviour change.
 
 Operator note for the owner+name project identity cut, epoch 144.
 

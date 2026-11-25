@@ -75,7 +75,8 @@ pub use admitted_launch_capsule::{
     DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
     DirectRuntimeSourceSpace, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, REBOUND_PREPARED_LAUNCH_FIELDS,
     RetainedItemSpaceV1, RetainedRuntimeBinarySelectionV1, RetainedRuntimeDefinitionOwnerV1,
-    RetainedTrustClassV1, SelectedBundleIdentityV1, admitted_direct_command_execution_path,
+    RetainedTrustClassV1, SelectedBundleIdentityV1, ThreadEffectCeiling, ThreadWorkloadCeiling,
+    ThreadWorkspaceCeiling, admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{

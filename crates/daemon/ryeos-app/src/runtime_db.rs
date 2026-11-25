@@ -2771,7 +2771,13 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // epoch-143 store is a predecessor and is reset without decoding, with the
 // project heads: `--schema-cut-from 143 --schema-cut-to 144
 // --include-project-heads --confirm-project-heads`.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 144;
+// Epoch 145: stored `launch_metadata` is launch-metadata schema 39 sealing
+// admitted launch capsule schema 40. Every resume identity and every
+// persisted parent context carries a required thread workload ceiling, and
+// the capsule commits it; an epoch-144 store holds launch rows without it,
+// which the strict launch decode refuses, so it is a predecessor and is reset
+// without decoding: `--schema-cut-from 144 --schema-cut-to 145`.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 145;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -24794,6 +24800,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:storage-fixture".to_owned()),
             runtime_ref: Some("runtime:storage-fixture".to_owned()),
         };
@@ -30243,7 +30250,8 @@ mod tests {
         value["follow_parent_context"] = serde_json::json!({
             "parent_thread_id": "T-parent",
             "hard_limits": nested,
-            "depth": 1
+            "depth": 1,
+            "thread_ceiling": {"ceiling": "unbounded"}
         });
         let raw = lillux::canonical_json(&value).unwrap();
 
