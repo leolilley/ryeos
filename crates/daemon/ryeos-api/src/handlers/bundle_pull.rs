@@ -101,14 +101,6 @@ pub enum PullRefusal {
          again"
     )]
     PublisherUnpinned { fingerprint: String },
-    #[error(
-        "publication_bundle_not_authorized: this node's sealed command-registration policy names \
-         no authority for bundle `{0}`, and the policy cannot change after initialization. An \
-         ordinary `ryeos bundle install` of this bundle refuses the same way. The node must be \
-         initialized with a profile that lists `{0}` under `bundle_source_caps` (an empty list \
-         grants no command authority) before this bundle can be installed"
-    )]
-    BundleNotAuthorized(String),
 }
 
 impl PullRefusal {
@@ -125,7 +117,6 @@ impl PullRefusal {
             Self::ManifestMismatch(_) => "publication_manifest_mismatch",
             Self::BlobMismatch(_) => "publication_blob_mismatch",
             Self::PublisherUnpinned { .. } => "publication_publisher_unpinned",
-            Self::BundleNotAuthorized(_) => "publication_bundle_not_authorized",
         }
     }
 
@@ -163,25 +154,6 @@ fn classify(error: anyhow::Error) -> HandlerError {
             "error": format!("publication_install_failed: {error:#}"),
         }),
     }
-}
-
-/// The node's sealed command-registration policy must already name the bundle.
-/// Installation refuses a prospective set it does not cover, so say so before
-/// any blob moves and name the step.
-fn check_bundle_authorized(state: &AppState, bundle_name: &str) -> Result<(), PullRefusal> {
-    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
-    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
-        &state.config.app_root,
-        &state.engine.node_trust_store,
-        &policy_table,
-    )
-    .map_err(|error| PullRefusal::Malformed(format!("load node policy: {error:#}")))?;
-    let authority = snapshot
-        .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()
-        .map_err(|error| PullRefusal::Malformed(format!("node policy: {error:#}")))?;
-    authority
-        .require_bundle_sources([bundle_name])
-        .map_err(|_| PullRefusal::BundleNotAuthorized(bundle_name.to_owned()))
 }
 
 // ── The pins and the URL ────────────────────────────────────────────
@@ -665,7 +637,6 @@ pub async fn handle(
 
     // 4. Trust is the node's own: refuse before any blob moves.
     check_publisher_pinned(&state.engine.node_trust_store, &verified.manifest).map_err(refuse)?;
-    check_bundle_authorized(&state, &bundle_name).map_err(refuse)?;
     let response = export_response(&verified.manifest);
     validate_export_response(&response, &bundle_name)
         .map_err(|error| refuse(PullRefusal::BlobMismatch(format!("{error:#}"))))?;

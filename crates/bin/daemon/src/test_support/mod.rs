@@ -1143,23 +1143,16 @@ impl DaemonHarness {
     }
 
     /// A Core-only node with its own node and operator keys, for a test that
-    /// needs a second node holding no bundle beyond Core. The sealed policy
-    /// grants command-registration authority only to `authorized_bundles`.
+    /// needs a second node holding no bundle beyond Core.
     pub async fn start_fast_core_only_with_node_and_user_keys(
         node_key: SigningKey,
         user_key: SigningKey,
-        authorized_bundles: &[&str],
     ) -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             Some(user_key),
             FastBundleSelection::CoreOnly,
-            |state_path, _user_space, fixture| {
-                for bundle_name in authorized_bundles {
-                    fast_fixture::authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
-                }
-                Ok(())
-            },
+            |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
         .await
