@@ -144,6 +144,11 @@ pub struct WorkloadClientExecutionCeiling {
     /// kind projection. This is an assertion and narrowing boundary, never an
     /// alternative grant authored by the worker environment.
     pub workspace_access: ryeos_engine::kind_registry::WorkspaceAccess,
+    /// Whether the session may launch this item as a detached child. Absent
+    /// means false. The effect classes and workspace access above are the
+    /// ceiling a detached child's own calls are bound by, sealed with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -418,6 +423,12 @@ impl WorkloadClientNodePolicy {
             anyhow::bail!("workload-client request exceeds target node policy");
         }
         for execution in &request.executions {
+            if execution.detached {
+                anyhow::bail!(
+                    "workload-client execution `{}` asks to be detached, which this node does not admit",
+                    execution.item_ref
+                );
+            }
             if execution.ref_bindings.len() > usize::from(self.max_ref_bindings_per_execution)
                 || execution.calls.len() > usize::from(self.max_calls_per_execution)
                 || execution
@@ -872,6 +883,7 @@ mod tests {
             effect_classes: vec!["live".to_owned()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
         }
     }
 
@@ -1228,6 +1240,45 @@ mod tests {
         };
         let requested = request(vec![execution("tool:project/check")]);
         assert!(policy.admit_request(&requested).is_err());
+    }
+
+    #[test]
+    fn node_policy_does_not_admit_a_detached_opt_in() {
+        let policy = WorkloadClientNodePolicy {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            delegation_cap_ceiling: vec!["ryeos.execute.*".to_owned()],
+            allowed_effect_classes: vec!["live".to_owned()],
+            allowed_workspace_access: vec![
+                ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            ],
+            max_executions: 1,
+            max_ref_bindings_per_execution: 0,
+            max_calls_per_execution: 1,
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        let plain = request(vec![execution("tool:project/check")]);
+        policy.admit_request(&plain).unwrap();
+        let mut opted_in = execution("tool:project/check");
+        opted_in.detached = true;
+        let error = policy.admit_request(&request(vec![opted_in])).unwrap_err();
+        assert!(error.to_string().contains("detached"), "{error:#}");
+    }
+
+    #[test]
+    fn detached_opt_in_is_absent_from_the_wire_unless_set() {
+        let plain = serde_json::to_value(execution("tool:project/check")).unwrap();
+        assert!(plain.get("detached").is_none());
+        let decoded: WorkloadClientExecutionCeiling = serde_json::from_value(plain).unwrap();
+        assert!(!decoded.detached);
+        let mut opted_in = execution("tool:project/check");
+        opted_in.detached = true;
+        let value = serde_json::to_value(&opted_in).unwrap();
+        assert_eq!(value["detached"], serde_json::json!(true));
+        let decoded: WorkloadClientExecutionCeiling = serde_json::from_value(value).unwrap();
+        assert!(decoded.detached);
     }
 
     #[test]

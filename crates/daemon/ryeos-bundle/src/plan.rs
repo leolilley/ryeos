@@ -793,7 +793,7 @@ mod tests {
         }
         let plan = build_plan(BundlePlanMode::InitSourceSet, &inputs, &[]).unwrap();
 
-        for kind in ["client", "surface", "view", "view_set"] {
+        for kind in ["client", "surface", "theme", "view", "view_set"] {
             assert_eq!(
                 plan.provider_map.get(kind).map(String::as_str),
                 Some("ryeos-ui")

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,7 +20,9 @@ pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsT
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use session::{RyeOsChipMarkVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm};
+pub use session::{
+    RyeOsChipMarkVm, RyeOsProjectChipVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -187,9 +191,38 @@ pub struct RyeOsPresentationMetricsVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsThemeVm {
+    /// The stored preference: `system` or an installed theme's ref.
     pub id: String,
     pub tone: RyeOsTone,
+    /// The installed themes, when the daemon has delivered them. A renderer
+    /// resolves `id` against this (`system` follows the platform) and keeps
+    /// its boot palette until it arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<crate::theme_preference::ThemeCatalogue>,
+    /// The ground of the active Surface in each theme that has one, by theme
+    /// ref. A renderer draws the entry of the theme it resolved.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grounds: BTreeMap<String, RyeOsGroundVm>,
 }
+
+/// The picture drawn behind the active Surface's panels. `picture` is a hash
+/// the daemon granted this session; `picture_state` is `unavailable` when the
+/// ground's binding failed, and the Surface is then drawn flat. `origin` says
+/// which precedence tier supplied it, so a renderer can draw a theme's
+/// picture quieter than one the subject claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RyeOsGroundVm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::art::ArtRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_state: Option<String>,
+    pub origin: String,
+}
+
+/// The precedence tier a theme's Surface ground comes from. The tiers above
+/// it (the principal's choice, the node operator's overlay, the Surface's own
+/// binding) are consulted before it when they exist; none exists yet.
+pub const GROUND_ORIGIN_THEME: &str = "theme";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsPresentationChromeVm {
@@ -1076,6 +1109,8 @@ fn presentation_vm(
                 .clone()
                 .unwrap_or_else(|| crate::theme_preference::SYSTEM.to_string()),
             tone: RyeOsTone::Accent,
+            catalogue: core.data.theme_catalogue.clone(),
+            grounds: surface_grounds_vm(core),
         },
         chrome: RyeOsPresentationChromeVm {
             title: "Rye OS".to_string(),
@@ -1094,6 +1129,36 @@ fn presentation_vm(
         },
         motion: core.ui.motion.clone(),
     }
+}
+
+/// The active Surface's ground in every theme that names one, by theme ref.
+/// This is the theme tier of the ground's precedence; the tiers above
+/// it (principal choice, node operator, the Surface's own binding) are
+/// consulted ahead of it when they exist, and the flat Surface is the tier
+/// below. A ground whose binding failed stays an `unavailable` entry here, so
+/// no lower tier stands in for it.
+fn surface_grounds_vm(core: &RyeOsCore) -> BTreeMap<String, RyeOsGroundVm> {
+    let (Some(catalogue), Some(attachment)) = (
+        core.data.theme_catalogue.as_ref(),
+        core.active_surface_attachment(),
+    ) else {
+        return BTreeMap::new();
+    };
+    catalogue
+        .themes
+        .iter()
+        .filter_map(|theme| {
+            let ground = theme.surface_grounds.get(&attachment.root_ref)?;
+            Some((
+                theme.theme_ref.clone(),
+                RyeOsGroundVm {
+                    picture: ground.picture.clone(),
+                    picture_state: ground.picture_state.clone(),
+                    origin: GROUND_ORIGIN_THEME.to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The active Surface's declared style, or the defaults when there is none.
@@ -3139,6 +3204,22 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
         posture: surface
             .map(|attachment| attachment.posture)
             .unwrap_or_default(),
+        // The active Surface's own binding states the project drawn: a rebind
+        // replaces it with a later generation, while the root's never changes.
+        project_chip: core
+            .active_surface()
+            .and_then(|active| core.binding_attachment(&active.binding().binding_attachment_id))
+            .or(surface)
+            .and_then(|attachment| {
+                super::seat_project::project_chip(
+                    &attachment.seat_project,
+                    core.data.coverage_wording.as_ref(),
+                )
+            })
+            .map(|chip| session::RyeOsProjectChipVm {
+                text: chip.text,
+                tone: tone_from_name(Some(&chip.tone)),
+            }),
     }
 }
 
