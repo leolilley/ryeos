@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T03:51:26Z:a2a5bb7bb5aba349110e58bc69104eddb08fe4c8abd55758301f4767d6dd8d22:wwfxoRj414TMpJStSot1CEeiOABviNcewLYZ3GyUtyH6SKmNGc9RBMx3cuJp+C2e+h0gRsKRtoZDIN5V9WaEBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:da62c0d9bc1fdbaa26a10bac225336dd87235025f5ed999e73673e22484a708b:ux8CAQ/N4OsLVIo0ugE29zoaM+dMdHDvHvGk8VXnSg6KB05p8eS6G8Rur/cdacNMBPUP6qVLnkCwHIEJxJFbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
@@ -37,6 +37,7 @@ disclosure:
     - "/ui_transition/attachment/root_generation"
     - "/ui_transition/attachment/subject"
     - "/ui_transition/attachment/posture"
+    - "/ui_transition/attachment/seat_project"
     - "/ui_transition/attachment/binding_request_bounds"
     - "/ui_transition/attachment/named_items"
   free_text:

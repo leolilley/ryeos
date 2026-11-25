@@ -830,3 +830,31 @@ fn interim_free_text_is_exactly_the_reviewed_list_and_each_names_its_milestone()
         );
     }
 }
+
+/// The attachment descriptor carries the seat's stated project. A service that
+/// lists an attachment's typed leaves one by one lists it too, so a seat reads
+/// which project it is bound to. Services that carry the whole attachment as an
+/// interim subtree already include it.
+#[test]
+fn services_that_list_attachment_leaves_include_the_seat_project() {
+    for (name, body) in services() {
+        let Some(principal) = body
+            .get("disclosure")
+            .and_then(|block| block.get("principal"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let leaves: Vec<&str> = principal.iter().filter_map(Value::as_str).collect();
+        let attachment = leaves
+            .iter()
+            .find(|leaf| leaf.ends_with("attachment/posture"));
+        if let Some(posture) = attachment {
+            let expected = posture.replace("posture", "seat_project");
+            assert!(
+                leaves.contains(&expected.as_str()),
+                "{name} lists `{posture}` but not `{expected}`"
+            );
+        }
+    }
+}

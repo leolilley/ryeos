@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:66e78841b0276f2f74684665bbb35681a2363d30cf09a9bd15496693fb3e086a:agP8lyGlmGHvIk85qC0wIXHQl16X5Xpx3LWqwncOF/USMWj11YQdekkJEpsLZwVs0pJ9NlMlRXyvv7aFvpgoBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:1fd7edbafba91556b4cadae9be008ce9ecd5dec23d4c6db94d9e0a6d215defc6:Qv3p5zMYn4oAoi9/m2Njj+zgzAjSYQQLZfSIFualKhu5l67jIeDN/0H91KXzqyPHx278hz1NG9XKiaLz8L1IBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: invocations/dispatch
 version: "1.0.0"
@@ -18,3 +18,5 @@ disclosure:
     - "/binding_digest"
   interim_free_text:
     - "/result"  # removed by: per-chain publication
+  max_items: 12000
+  max_result_bytes: 8388608
