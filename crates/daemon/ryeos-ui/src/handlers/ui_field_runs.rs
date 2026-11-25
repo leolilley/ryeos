@@ -110,6 +110,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         facet: None,
         active_only: false,
         exclude_item_prefixes: Vec::new(),
+        // A seat is the UI's own session thread, not a run.
+        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
         project_root: None,
     };
     // The projection is a bounded locator, not authority. Check each raw

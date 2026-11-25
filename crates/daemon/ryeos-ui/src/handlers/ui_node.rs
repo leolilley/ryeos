@@ -65,6 +65,8 @@ pub(crate) fn observe_authorized_subjects(
             .is_none()
             .then(|| caller.principal_id().to_string()),
         project_root,
+        // A seat is the UI's own session thread, not observed activity.
+        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(state)?],
         ..Default::default()
     };
     let sort = ryeos_app::thread_lifecycle::ThreadSort::Watch;

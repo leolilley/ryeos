@@ -1427,7 +1427,10 @@ fn resolve_particular_work(
     let lineage = state.threads.continuation_lineage(chain_root_id)?;
     let root = lineage.first().ok_or(HandlerError::NotFound)?;
     let head = lineage.last().ok_or(HandlerError::NotFound)?;
-    if root.thread.thread_id != chain_root_id {
+    // A seat is the UI's own session thread, never particular work.
+    if root.thread.thread_id != chain_root_id
+        || root.thread.kind == crate::handlers::ui_seat::seat_kind(state)?
+    {
         return Err(HandlerError::NotFound.into());
     }
     for placement in &lineage {

@@ -646,57 +646,7 @@ impl<'de> Deserialize<'de> for RuntimeResult {
 /// double-counts. Absent basis = cost this thread itself incurred.
 pub const COST_BASIS_ROLLUP: &str = "rollup";
 
-/// How much of the real usage a reported cost figure accounts for.
-///
-/// `Complete` is the default and is never serialized, so a complete cost is
-/// byte-identical to one written before this field existed. A figure that is
-/// `Partial` omits usage some member of it could not report; `Unavailable`
-/// carries no real usage at all (its token and spend values are zero
-/// placeholders, not measurements).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageStatus {
-    #[default]
-    Complete,
-    Partial,
-    Unavailable,
-}
-
-impl UsageStatus {
-    /// Serde `skip_serializing_if` predicate: only non-complete figures name
-    /// their status on the wire.
-    pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Complete)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Complete => "complete",
-            Self::Partial => "partial",
-            Self::Unavailable => "unavailable",
-        }
-    }
-
-    /// Parse the snapshot-facet spelling. Absent means `Complete`.
-    pub fn from_facet(value: Option<&str>) -> Result<Self, RuntimeCostError> {
-        match value {
-            None | Some("complete") => Ok(Self::Complete),
-            Some("partial") => Ok(Self::Partial),
-            Some("unavailable") => Ok(Self::Unavailable),
-            Some(other) => Err(RuntimeCostError::InvalidUsageStatus(other.to_string())),
-        }
-    }
-
-    /// Status of an aggregate of two members: complete only when both are,
-    /// unavailable only when both are, otherwise partial.
-    pub fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Complete, Self::Complete) => Self::Complete,
-            (Self::Unavailable, Self::Unavailable) => Self::Unavailable,
-            _ => Self::Partial,
-        }
-    }
-}
+pub use ryeos_accounting::UsageStatus;
 
 /// A runtime cost failed the shared accounting contract.
 ///
@@ -717,8 +667,8 @@ pub enum RuntimeCostError {
     OutputTokensOutOfRange,
     #[error("runtime cost basis `{0}` is invalid; expected `rollup` or null")]
     InvalidBasis(String),
-    #[error("cost usage_status `{0}` is invalid; expected `complete`, `partial` or `unavailable`")]
-    InvalidUsageStatus(String),
+    #[error(transparent)]
+    InvalidUsageStatus(#[from] ryeos_accounting::InvalidUsageStatus),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

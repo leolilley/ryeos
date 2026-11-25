@@ -31,7 +31,7 @@ use super::composition::{self, VerifiedHistory};
 use super::paired_read::CutSet;
 use super::{
     BrowserSession, ProducerState, SeatFrontier, browser_session, get_ui_state, read_seat_frontier,
-    require_presentation_seat_for_read, seat_kind, seat_owner,
+    require_presentation_seat_for_read, seat_holder, seat_kind, seat_launcher,
 };
 use crate::browser_session::transfer_reservation::CompletedPairedCut;
 use crate::browser_session::{
@@ -137,12 +137,14 @@ struct AuthenticatedSeat {
 impl AuthenticatedSeat {
     fn context<'a>(
         &'a self,
-        owner: &'a str,
+        launcher: &'a str,
+        holder: &'a str,
         expected: &'a TransferSeat,
     ) -> TransferSeatContext<'a> {
         TransferSeatContext {
             anchor: &self.anchor,
-            owner,
+            launcher,
+            holder,
             surface: &self.detail.item_ref,
             client_ref: &self.detail.executor_ref,
             presentation_id: &expected.presentation_id,
@@ -773,9 +775,10 @@ fn accept_transfer(
     let import_digest =
         ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(&reservation_value)
             .map_err(|error| HandlerError::Conflict(error.to_string()))?;
-    let owner = seat_owner(session);
-    let source_context = source.context(&owner, &transfer.source);
-    let destination_context = destination.context(&owner, &transfer.destination);
+    let holder = seat_holder(session);
+    let source_context = source.context(seat_launcher(session), &holder, &transfer.source);
+    let destination_context =
+        destination.context(seat_launcher(session), &holder, &transfer.destination);
     let publication = Publication::read(state, session, [&proof.source, &proof.destination])?;
     let created = std::cell::Cell::new(false);
     let result = ui
@@ -951,9 +954,10 @@ fn source_decision(
                 .map_err(|error| HandlerError::Conflict(error.to_string()))?;
         }
     }
-    let owner = seat_owner(session);
-    let source_context = source.context(&owner, &transfer.source);
-    let destination_context = destination.context(&owner, &transfer.destination);
+    let holder = seat_holder(session);
+    let source_context = source.context(seat_launcher(session), &holder, &transfer.source);
+    let destination_context =
+        destination.context(seat_launcher(session), &holder, &transfer.destination);
     let publication = Publication::read(state, session, [&proof.source, &proof.destination])?;
     let result = ui
         .browser_sessions
@@ -1086,9 +1090,11 @@ async fn activate_ingress(
                         policy_digest,
                     )
                     .map_err(|error| HandlerError::Conflict(error.to_string()))?;
-                let owner = seat_owner(&session);
-                let source_context = source.context(&owner, &transfer.source);
-                let destination_context = destination.context(&owner, &transfer.destination);
+                let holder = seat_holder(&session);
+                let source_context =
+                    source.context(seat_launcher(&session), &holder, &transfer.source);
+                let destination_context =
+                    destination.context(seat_launcher(&session), &holder, &transfer.destination);
                 let publication =
                     Publication::read(&state, &session, [&proof.source, &proof.destination])?;
                 let result = ui
@@ -1330,9 +1336,11 @@ async fn cancel_freeze_ingress(
                 &source_seat.membership,
                 &export,
             )?;
-            let owner = seat_owner(&session);
-            let source_context = source_seat.context(&owner, &transfer.source);
-            let destination_context = destination_seat.context(&owner, &transfer.destination);
+            let holder = seat_holder(&session);
+            let source_context =
+                source_seat.context(seat_launcher(&session), &holder, &transfer.source);
+            let destination_context =
+                destination_seat.context(seat_launcher(&session), &holder, &transfer.destination);
             let publication = Publication::read(&state, &session, [&source, &destination])?;
             let policy_digest = state.node_policy.generation_digest();
             let source_membership = source_seat.membership.clone();
@@ -1638,9 +1646,10 @@ fn prepare_transfer(
         .validate_snapshot(transfer, &source.verified.replay, source.max_append_bytes)
         .map_err(HandlerError::Conflict)?;
     revalidate_export_bindings(generation, state, session, &source.membership, &decoded)?;
-    let owner = seat_owner(session);
-    let source_context = source.context(&owner, &transfer.source);
-    let destination_context = destination.context(&owner, &transfer.destination);
+    let holder = seat_holder(session);
+    let source_context = source.context(seat_launcher(session), &holder, &transfer.source);
+    let destination_context =
+        destination.context(seat_launcher(session), &holder, &transfer.destination);
     let publication = Publication::read(state, session, [source_frontier, destination_frontier])?;
     let next_attachment_generation = session.next_attachment_generation;
     let pair = TransferSeatPair {
