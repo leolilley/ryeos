@@ -1054,6 +1054,7 @@ async fn a_rebound_surface_is_accepted_by_history_dispatch_and_detach() {
                 compiled_binding: old.compiled_binding.clone(),
                 presentation: old.presentation.clone(),
                 project_authority: old.project_authority.clone(),
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             },
             16,
             &policy,
@@ -1249,6 +1250,7 @@ fn candidate_of(
         compiled_binding: attachment.compiled_binding.clone(),
         presentation: attachment.presentation.clone(),
         project_authority: attachment.project_authority.clone(),
+        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
     }
 }
 

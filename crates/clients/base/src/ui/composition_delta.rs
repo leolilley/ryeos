@@ -387,6 +387,52 @@ mod tests {
         );
     }
     #[test]
+    fn a_rebind_carries_a_newer_seat_project_and_a_late_one_cannot_move_it_back() {
+        let (composition, mut request, descriptors, frontier) = fixture();
+        let successor = rebind_request(&mut request, &descriptors);
+        let from = request.owner.binding().clone();
+        // The successor generation carries the newer judgement.
+        let mut newer = successor.clone();
+        newer.seat_project = super::super::seat_project::UiSeatProject::Absent {
+            absence: super::super::seat_project::UiSeatAbsence::Unregistered,
+        };
+        let CompositionMutation::RebindAttachment { to, .. } = request.mutation.clone() else {
+            unreachable!()
+        };
+        request.mutation = CompositionMutation::RebindAttachment {
+            from: from.clone(),
+            to: to.clone(),
+            descriptor: Box::new(newer.clone()),
+        };
+        assert!(
+            stage_composition_delta(&composition, &request, 0, frontier, &descriptors, 65536)
+                .is_ok()
+        );
+        // Once that generation is retained, an update at the source's own or
+        // an older generation is not a successor, whatever state it carries.
+        let mut retained = descriptors.clone();
+        retained.insert(to.binding_attachment_id.clone(), newer.clone());
+        let mut late = newer.clone();
+        late.binding_generation = descriptors[&from.binding_attachment_id].binding_generation;
+        late.seat_project = descriptors[&from.binding_attachment_id]
+            .seat_project
+            .clone();
+        let mut late_request = request.clone();
+        late_request.mutation = CompositionMutation::RebindAttachment {
+            from,
+            to: super::super::binding::UiBindingAttachmentCoordinate {
+                binding_attachment_id: late.binding_attachment_id.clone(),
+                binding_generation: late.binding_generation,
+                binding_digest: late.binding_digest.clone(),
+            },
+            descriptor: Box::new(late),
+        };
+        assert!(
+            stage_composition_delta(&composition, &late_request, 0, frontier, &retained, 65536)
+                .is_err()
+        );
+    }
+    #[test]
     fn rebind_closes_a_tile_whose_view_left_the_successor() {
         let (composition, request, descriptors, _) = fixture();
         let owner = request.owner.surface_instance_id().unwrap().clone();

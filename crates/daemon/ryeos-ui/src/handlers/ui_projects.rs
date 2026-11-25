@@ -348,12 +348,15 @@ fn compile_saved_surface_context(
             );
         }
     };
+    let seat_project =
+        crate::seat_project::resolve_for_binding(state, &compiled, &session.granted_caps)?;
     Ok((
         crate::browser_session::BindingAttachmentCandidate {
             registered_project_id: project.map(|project| project.local_id),
             compiled_binding: Arc::new(compiled),
             presentation,
             project_authority: authority,
+            seat_project,
         },
         proof,
     ))
@@ -975,6 +978,11 @@ pub async fn handle_projects_open(
                     Some(project_resolution.as_path()),
                     Some(project_authority.as_ref()),
                 )?;
+                let seat_project = crate::seat_project::resolve_for_binding(
+                    &state,
+                    &compiled_binding,
+                    &session.granted_caps,
+                )?;
                 let published = state.state_store.with_exact_seat_action_if_mixed_cut(&checked.seat(), &checked.cut(), || {
                 ui.browser_sessions.reconcile_presentation_mount_frontier(
                     &session.session_id, &producer.presentation_id, &membership.root_coordinate,
@@ -991,6 +999,7 @@ pub async fn handle_projects_open(
                             compiled_binding: Arc::new(compiled_binding),
                             presentation,
                             project_authority: Some(project_authority.clone()),
+                            seat_project,
                         },
                         &limits,
                         state.node_policy.generation_digest(),
@@ -1411,6 +1420,11 @@ pub async fn handle_particular_view_set_resume(
                     project_resolution.as_deref(),
                     project_authority.as_deref(),
                 )?;
+                let seat_project = crate::seat_project::resolve_for_binding(
+                    &state,
+                    &binding,
+                    &session.granted_caps,
+                )?;
                 let published = state.state_store.with_exact_seat_action_if_mixed_cut(&checked.seat(), &checked.cut(), || {
                 ui.browser_sessions.reconcile_presentation_mount_frontier(
                     &session.session_id, &producer.presentation_id, &membership.root_coordinate,
@@ -1429,6 +1443,7 @@ pub async fn handle_particular_view_set_resume(
                             compiled_binding: Arc::new(binding),
                             presentation,
                             project_authority: project_authority.clone(),
+                            seat_project,
                         },
                         &limits,
                         state.node_policy.generation_digest(),

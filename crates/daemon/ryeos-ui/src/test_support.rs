@@ -450,6 +450,7 @@ pub fn launch_context(
             )
         }),
         registered_project_id: None,
+        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
     }
 }
 
