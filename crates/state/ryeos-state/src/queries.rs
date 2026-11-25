@@ -1084,6 +1084,30 @@ pub fn thread_edge_exists(
     })
 }
 
+/// Whether a `child_thread_spawned` event already derived the parent→child
+/// edge. A same-chain child also has an edge derived from its
+/// `upstream_thread_id` (no source event); that edge does not count, so the
+/// lineage event is still owed for such a child.
+pub fn thread_spawn_event_edge_exists(
+    db: &ProjectionDb,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+) -> anyhow::Result<bool> {
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM thread_edges
+                    WHERE parent_thread_id = ?1 AND child_thread_id = ?2
+                      AND source_event_hash IS NOT NULL
+                )",
+                rusqlite::params![parent_thread_id, child_thread_id],
+                |row| row.get(0),
+            )
+            .context("query thread_spawn_event_edge_exists")
+    })
+}
+
 /// Resolve `selected_thread_id` to the oldest reachable execution ancestor,
 /// then return a deterministic pre-order closure over both durable edge kinds:
 /// continuation (`threads.upstream_thread_id`) and cross-chain spawn

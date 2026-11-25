@@ -6815,8 +6815,9 @@ impl ThreadLifecycleService {
     /// was not created through the callback and is not owed an event. The
     /// spawn reason is the child's effective link relation, which differs
     /// from the requested one for a follow child. The append is idempotent: a
-    /// child that already has an edge (a same-chain child, or a repeated
-    /// drive) yields `AlreadyPresent` and writes nothing.
+    /// child whose lineage event is already written (a repeated drive) yields
+    /// `AlreadyPresent` and writes nothing; an edge derived only from the
+    /// child's `upstream_thread_id` (a same-chain child) is not the event.
     pub fn record_dispatch_child_lineage(
         &self,
         child_thread_id: &str,
