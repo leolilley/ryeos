@@ -360,7 +360,7 @@ async fn session_local_invocation_publishes_to_session_bus() {
             },
             "payload": {
                 "kind": "selection",
-                "record": { "root": state.config.app_root }
+                "record": { "root": folder.path() }
             }
             }
         }),
@@ -376,6 +376,14 @@ async fn session_local_invocation_publishes_to_session_bus() {
                 if code == "local_operator_required"
         ),
         "expected local_operator_required, got: {refused:#}"
+    );
+    // The refusal comes before any effect: nothing was registered.
+    let registered = test_state::non_operator_registered_roots(&state).await;
+    assert!(
+        !registered
+            .iter()
+            .any(|root| std::path::Path::new(root) == folder.path()),
+        "the refused seat registered {registered:?}"
     );
 }
 
@@ -533,6 +541,44 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         )
     });
     assert_eq!(replayed["result"]["thread"]["recorded"], false);
+
+    // The default channel is the folded timeline of the same chain: items,
+    // not raw events.
+    let folded = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
+        serde_json::json!({
+            "producer": producer,
+            "binding": {
+            "binding_attachment_id": coordinate.binding_attachment_id,
+            "binding_generation": coordinate.binding_generation,
+            "binding_digest": coordinate.binding_digest,
+            "coordinate": {
+                "kind": "source",
+                "view_ref": "view:ryeos/thread/transcript",
+                "channel": "default"
+            },
+            "payload": {
+                "kind": "source_parameters",
+                // The client resolves the signed `limit` default (`|200`)
+                // before it dispatches.
+                "params": { "chain_root_id": owned_chain, "limit": 200 }
+            }
+            }
+        }),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "fetch folded timeline source: {:?}",
+            ryeos_app::handler_error::extract_handler_error(&error)
+        )
+    });
+    assert_eq!(folded["result"]["thread"]["recorded"], false);
+    assert!(
+        folded["result"]["result"]["items"].is_array(),
+        "the default channel returns timeline items: {folded}"
+    );
     let retained = state
         .events
         .replay(&ryeos_app::event_store_service::EventReplayParams {

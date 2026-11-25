@@ -153,6 +153,24 @@ pub fn register_operator_checkout(
     identity
 }
 
+/// The host folders registered in the verified non-operator fixture
+/// principal's private registry.
+pub async fn non_operator_registered_roots(state: &AppState) -> Vec<String> {
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let resolver =
+        ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
+    let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
+        .await
+        .unwrap();
+    let projects: crate::handlers::ui_projects::ProjectsFile =
+        store.load_yaml(&store.paths().projects_config()).unwrap();
+    projects
+        .projects
+        .into_iter()
+        .map(|entry| entry.root)
+        .collect()
+}
+
 /// Append `project_root` to the verified non-operator fixture principal's
 /// private registry and return its local id. Seat registration through `projects/add` is a
 /// local-operator act, so a non-operator fixture seeds its registry here.
