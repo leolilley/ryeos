@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:64fa1922c2e5b43a0b5236bce4e8d2c4be3f25ea3d93e265946576d8d4df8689:VPOeYSprfzZmt6WOfE4HYQpQ5RZ+TFiwtOwoP7+v7nowSNAkVE1XUnMVi/JMhTSZtwJPnQLQp81R4Dn3iWWfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:da62c0d9bc1fdbaa26a10bac225336dd87235025f5ed999e73673e22484a708b:ux8CAQ/N4OsLVIo0ugE29zoaM+dMdHDvHvGk8VXnSg6KB05p8eS6G8Rur/cdacNMBPUP6qVLnkCwHIEJxJFbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: Open an explicitly selected Surface for a registered project in the current presentation.
 endpoint: projects.open
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: surface_opening
 schema:
@@ -36,6 +37,7 @@ disclosure:
     - "/ui_transition/attachment/root_generation"
     - "/ui_transition/attachment/subject"
     - "/ui_transition/attachment/posture"
+    - "/ui_transition/attachment/seat_project"
     - "/ui_transition/attachment/binding_request_bounds"
     - "/ui_transition/attachment/named_items"
   free_text:

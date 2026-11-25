@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:19Z:22955939f8002837d608cdd2bf76781c12d935d5d52033bfce98cbd57526519c:L9THbbc3P510IQZy1H5SS7GtMsKy4c6xmd0VrPFItbYAh+MbKplt/JDWynOBQ1uGrjVU/LvOjKppXL9GQzYSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:9735fccb741cea904ed1a88484c42b9415be32d90b93a846498ae8108e7d7fdf:xybML2rKkzalXQKc3zUAaAmte9FQB++weZ+NSlQ/OQLRS+JDEEkYoR5QVB9AGaCbse5Mwjn1HLbMSwCeKygbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: system.routes
 availability: daemon_only
@@ -7,3 +7,5 @@ schema:
   path: string
   method: string
 description: "Diagnostics: loaded route table (ids, methods, paths, source files) and registered bundles with installed paths"
+# Route and bundle diagnostics carry installed paths and source files; the node operator only.
+disclosure: {}

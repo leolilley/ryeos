@@ -65,6 +65,7 @@ impl NodePolicyTable {
     pub fn new() -> Self {
         Self::from_sections(vec![
             Box::new(sections::accounting::NodeAccountingPolicySection),
+            Box::new(sections::approval_ceiling::ApprovalCeilingPolicySection),
             Box::new(sections::authorization::NodeAuthorizationPolicySection),
             Box::new(sections::bundle_publication::BundlePublicationPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
@@ -205,6 +206,13 @@ pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
 #[cfg(any(test, feature = "test-support"))]
 pub fn shipped_event_storage_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::event_storage::EventStoragePolicy::as_shipped())
+}
+
+/// The shipped `approval_ceiling` policy record: no class listed, so no accept
+/// is allowed. Test snapshots include it wherever an approval is judged.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shipped_approval_ceiling_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::approval_ceiling::ApprovalCeilingPolicy::as_shipped())
 }
 
 /// The shipped `thread_attachments` policy record. Exact test snapshots

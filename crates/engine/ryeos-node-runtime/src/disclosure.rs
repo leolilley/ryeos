@@ -219,7 +219,7 @@ pub struct DisclosureBounds {
 /// Largest bound an item may declare for itself. An answer bigger than this is
 /// never disclosed to a non-operator, whatever the item says.
 pub const CEILING_MAX_RESULT_BYTES: u64 = 8 * 1024 * 1024;
-pub const CEILING_MAX_ITEMS: u32 = 4096;
+pub const CEILING_MAX_ITEMS: u32 = 16384;
 
 fn declared_bounds(map: &Map<String, Value>) -> Result<DisclosureBounds> {
     let mut bounds = DisclosureBounds::default();
@@ -280,6 +280,14 @@ pub fn shape_result(
     let paths: Vec<&[KeepSegment]> = tier.iter().map(KeepPath::segments).collect();
     let kept = project(&result, &paths).unwrap_or(Value::Null);
     if longest_array(&kept) > usize::try_from(bounds.max_items).unwrap_or(usize::MAX) {
+        // For the operator's log only; the caller's refusal carries no path.
+        let (path, length) = longest_array_path(&kept);
+        tracing::warn!(
+            array_path = %path,
+            array_length = length,
+            max_items = bounds.max_items,
+            "an answer array is over the item's limit"
+        );
         return Err(DisclosureRefusal::TooManyItems);
     }
     let fits = serde_json::to_vec(&kept)
@@ -389,6 +397,32 @@ pub fn project(value: &Value, paths: &[&[KeepSegment]]) -> Option<Value> {
     }
 }
 
+/// The path (JSON pointer, `*` for an index) and length of the longest array
+/// anywhere in `value`, for the operator's log.
+pub fn longest_array_path(value: &Value) -> (String, usize) {
+    fn walk(value: &Value, path: &str, best: &mut (String, usize)) {
+        match value {
+            Value::Array(items) => {
+                if items.len() > best.1 {
+                    *best = (path.to_owned(), items.len());
+                }
+                for item in items {
+                    walk(item, &format!("{path}/*"), best);
+                }
+            }
+            Value::Object(map) => {
+                for (key, child) in map {
+                    walk(child, &format!("{path}/{key}"), best);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = (String::new(), 0);
+    walk(value, "", &mut best);
+    best
+}
+
 /// The longest array anywhere in `value`.
 pub fn longest_array(value: &Value) -> usize {
     match value {
@@ -470,20 +504,77 @@ mod tests {
     fn an_item_may_raise_its_own_bounds_within_the_ceiling_and_no_further() {
         let wide = declared(json!({
             "principal": ["/rows/*/id"],
-            "max_items": 4096,
+            "max_items": 16384,
             "max_result_bytes": 1_000_000,
         }));
-        assert_eq!(wide.bounds().max_items, 4096);
+        assert_eq!(wide.bounds().max_items, 16384);
         assert_eq!(wide.bounds().max_result_bytes, 1_000_000);
         assert_eq!(declared(json!({})).bounds(), DisclosureBounds::default());
         for bad in [
-            json!({"max_items": 4097}),
+            json!({"max_items": 16385}),
             json!({"max_items": 0}),
             json!({"max_result_bytes": 8 * 1024 * 1024 + 1}),
             json!({"max_items": "many"}),
         ] {
             assert!(ServiceDisclosure::parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn twelve_thousand_and_one_items_are_refused_where_twelve_thousand_is_declared() {
+        let declared = declared(json!({
+            "principal": ["/rows/*/id"],
+            "max_items": 12000,
+            // 12,000 rows are about 150 KB: over the 64 KiB default, so the
+            // item states its bytes, as every service with a long list does.
+            "max_result_bytes": 1_048_576,
+        }));
+        let rows = |count: usize| json!({"rows": (0..count).map(|n| json!({"id": n})).collect::<Vec<_>>()});
+        let fits = shape_result(
+            DisclosureClass::Principal,
+            Some(&declared),
+            rows(12000),
+            declared.bounds(),
+        );
+        assert!(fits.is_ok());
+        let over = shape_result(
+            DisclosureClass::Principal,
+            Some(&declared),
+            rows(12001),
+            declared.bounds(),
+        );
+        // Refused for its item count, not its size.
+        assert_eq!(over, Err(DisclosureRefusal::TooManyItems));
+    }
+
+    #[test]
+    fn an_inner_services_own_bound_refuses_before_a_wide_wrapper_sees_the_answer() {
+        // A dispatched read is shaped by its own block first. A wrapper that
+        // allows 12000 items never sees an answer the inner block refused.
+        let inner = declared(json!({"principal": ["/rows/*/id"], "max_items": 2}));
+        let wrapper = declared(json!({"principal": ["/result/rows/*/id"], "max_items": 12000}));
+        let answer = json!({"rows": [{"id": 1}, {"id": 2}, {"id": 3}]});
+        let inner_result = shape_result(
+            DisclosureClass::Principal,
+            Some(&inner),
+            answer,
+            inner.bounds(),
+        );
+        assert_eq!(inner_result, Err(DisclosureRefusal::TooManyItems));
+        // The wrapper alone would have let the same three rows through.
+        let wrapped = shape_result(
+            DisclosureClass::Principal,
+            Some(&wrapper),
+            json!({"result": {"rows": [{"id": 1}, {"id": 2}, {"id": 3}]}}),
+            wrapper.bounds(),
+        );
+        assert!(wrapped.is_ok());
+    }
+
+    #[test]
+    fn the_longest_array_path_names_where_it_is() {
+        let value = json!({"a": {"b": [1, 2, 3]}, "c": [[1, 2, 3, 4]]});
+        assert_eq!(longest_array_path(&value), ("/c/*".to_owned(), 4));
     }
 
     #[test]

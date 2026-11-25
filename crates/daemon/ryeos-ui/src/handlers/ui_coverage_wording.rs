@@ -108,6 +108,24 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_config_has_a_sentence_for_each_seat_project_absence() {
+        let response = response_from_config(shipped()).unwrap();
+        let wording = RyeOsCoverageWordingDto::from_response(&response).unwrap();
+        for code in [
+            "unregistered",
+            "owner_key_not_active",
+            "no_project_name",
+            "checkout_name_changed",
+        ] {
+            let entry = wording
+                .reasons
+                .get(&format!("seat_project_{code}"))
+                .unwrap_or_else(|| panic!("no sentence for {code}"));
+            assert!(!entry.label.trim().is_empty(), "{code}");
+        }
+    }
+
+    #[test]
     fn a_bad_tone_an_empty_sentence_or_a_stray_field_is_refused() {
         let mut bad_tone = shipped();
         bad_tone["states"]["failed"]["tone"] = json!("loud");

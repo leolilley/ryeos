@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 38;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 39;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -294,6 +294,9 @@ pub struct PersistedParentExecutionContext {
     /// children admitted after the live callback context is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Parent's workload ceiling, already narrowed for this spawn. The child
+    /// can never hold a wider one.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -506,6 +509,12 @@ pub struct ResumeContext {
     /// as capabilities held by the child.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub parent_delegation_caps: Option<Vec<String>>,
+    /// Bound on the workload authority of every tool call made from this
+    /// thread's tree. Sealed into the admitted launch capsule and carried on
+    /// the thread's callback bearer; recovery and continuation copy it, a
+    /// spawn only narrows it. Required: only a launch with no parent
+    /// execution context states `Unbounded`.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
     /// graph — carry no item `executor_id`, so a continuation successor
@@ -1228,6 +1237,7 @@ impl RuntimeLaunchMetadata {
             )?,
             source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1333,6 +1343,7 @@ impl RuntimeLaunchMetadata {
                 anyhow::anyhow!("sealed launch has no admitted execution closure")
             })?,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_owned(),
@@ -1730,6 +1741,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
@@ -1837,6 +1849,65 @@ mod tests {
             .product_selections
             .push(duplicate.product_selections[0].clone());
         assert!(duplicate.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn a_continuation_successor_keeps_the_bounded_ceiling_and_cannot_widen_it() {
+        let project = tempfile::tempdir().unwrap();
+        let bounded = ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+            workspace_access:
+                ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.thread_ceiling = bounded;
+
+        // The seed a continuation derives keeps the sealed ceiling, not an
+        // unbounded one.
+        let metadata = RuntimeLaunchMetadata {
+            resume_context: Some(source.clone()),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let seed = metadata
+            .for_continuation_successor("T-source", PathBuf::from("/state/successor/checkpoints"));
+        assert_eq!(
+            seed.resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+        let machine_seed = metadata.continuation_successor_seed(source.clone());
+        assert_eq!(
+            machine_seed
+                .resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+
+        // A successor that states the same ceiling is the same authority; one
+        // that states a wider ceiling differs outside its typed transition.
+        source
+            .clone()
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            )
+            .unwrap();
+        let mut widened = source.clone();
+        widened.thread_ceiling = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+        assert!(
+            widened
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -2236,6 +2307,7 @@ mod tests {
                 hard_limits: serde_json::json!({"max_depth": 2}),
                 depth: 1,
                 accounting_scope: None,
+                thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             }),
             follow_launch_window: Some(FollowLaunchWindow {
                 key: "follow:source".to_string(),
@@ -2480,6 +2552,7 @@ mod tests {
             ),
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: Some("native:test-runtime".to_string()),
             runtime_ref: Some("runtime:test".to_string()),
         };

@@ -1,9 +1,7 @@
-// A seat's own thread records the browser session it was opened through as
-// its launcher (`session:<id>`). A browser session is a credential minted for
-// one key: a read through that session, while it is live and minted for the
-// reading key, reads the thread. Another session of the same key, another
-// key's session, the session once ended, and the session's key once retired
-// get `NotFound`, exactly like an absent thread.
+// A seat's thread is launched by the key its browser session was minted for.
+// Reading follows that key: any session of the key reads it, through the
+// session's own dispatch or another's; another key's session and a retired
+// key read `NotFound`, exactly like an absent thread.
 
 use std::sync::Arc;
 
@@ -130,17 +128,16 @@ fn is_not_found(result: &anyhow::Result<serde_json::Value>) -> bool {
 }
 
 #[tokio::test]
-async fn only_the_live_launching_session_of_the_key_reads_its_seat_thread() {
+async fn every_session_of_the_launching_key_reads_its_seat_thread_and_no_other_key_does() {
     let (_tmp, _owner, state) = test_state::build_test_state();
     let key = test_state::FIXTURE_KEY;
     let (own, own_attachment) = session_for(&state, key);
     let (sibling, sibling_attachment) = session_for(&state, key);
     let (foreign, foreign_attachment) = session_for(&state, BETA);
-    let seat_thread = format!("session:{}", own.session_id);
-    create_thread(&state, "T-seat", &seat_thread);
+    create_thread(&state, "T-seat", key);
     let state = Arc::new(state);
 
-    let read = inspect(&state, &own, own_attachment.clone(), "T-seat").await;
+    let read = inspect(&state, &own, own_attachment, "T-seat").await;
     assert!(
         read.is_ok(),
         "the launching session reads its seat thread: {read:?}"
@@ -148,17 +145,12 @@ async fn only_the_live_launching_session_of_the_key_reads_its_seat_thread() {
 
     let read = inspect(&state, &sibling, sibling_attachment, "T-seat").await;
     assert!(
-        is_not_found(&read),
-        "another session of the same key: {read:?}"
+        read.is_ok(),
+        "another session of the same key reads it: {read:?}"
     );
 
     let read = inspect(&state, &foreign, foreign_attachment, "T-seat").await;
     assert!(is_not_found(&read), "another key's session: {read:?}");
-
-    let ui = get_ui_state(&state).expect("UI state");
-    assert!(ui.browser_sessions.end_session(&own.session_id));
-    let read = inspect(&state, &own, own_attachment, "T-seat").await;
-    assert!(is_not_found(&read), "the same session once ended: {read:?}");
 }
 
 fn record(key: &lillux::crypto::SigningKey, status: SignerStatus) -> SignerRecord {
@@ -202,8 +194,8 @@ async fn a_session_of_a_retired_key_reads_nothing_it_launched() {
 
     let (old, old_attachment) = session_for(&state, &format!("fp:{retired_fp}"));
     let (now, now_attachment) = session_for(&state, &format!("fp:{successor_fp}"));
-    create_thread(&state, "T-old-seat", &format!("session:{}", old.session_id));
-    create_thread(&state, "T-now-seat", &format!("session:{}", now.session_id));
+    create_thread(&state, "T-old-seat", &format!("fp:{retired_fp}"));
+    create_thread(&state, "T-now-seat", &format!("fp:{successor_fp}"));
     let state = Arc::new(state);
 
     let read = inspect(&state, &now, now_attachment, "T-now-seat").await;

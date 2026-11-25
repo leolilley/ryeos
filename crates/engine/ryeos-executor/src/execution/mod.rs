@@ -8,6 +8,7 @@ mod admitted_callback_authority;
 pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
+mod detached_workspace_input;
 mod direct_output;
 pub mod effective_program_projection;
 pub(crate) mod execution_realization;
@@ -3295,6 +3296,102 @@ mod pinned_child_authority_tests {
         assert_eq!(std::fs::read(&second_file).unwrap(), bytes);
         shared.ensure_path_binding().unwrap();
         second.ensure_path_binding().unwrap();
+    }
+
+    /// Store one project snapshot of exactly these files and return its hash.
+    #[cfg(target_os = "linux")]
+    fn store_test_snapshot(
+        authority: &ryeos_state::PinnedStateAuthority,
+        files: &[(&str, &str)],
+    ) -> String {
+        let cas = authority.cas_store().unwrap();
+        let mut tree_files = BTreeMap::new();
+        for (path, text) in files {
+            let bytes = text.as_bytes();
+            let blob_hash = cas.store_blob(bytes).unwrap();
+            let project_file = ProjectFile {
+                blob_hash,
+                size: bytes.len() as u64,
+                normalized_mode: ProjectFile::REGULAR_MODE,
+            };
+            tree_files.insert(
+                (*path).to_owned(),
+                cas.store_object(&project_file.to_value()).unwrap(),
+            );
+        }
+        let tree = ProjectTree { files: tree_files };
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let policy = ProjectSnapshotPolicy::from_matcher(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            &ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-11-25T00:00:00Z".to_owned(),
+            source: "control-tree-test".to_owned(),
+        };
+        cas.store_object(&snapshot.to_value()).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn control_tree_guard_compares_only_the_control_files_of_two_generations() {
+        let (_temp, _store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        let authority = pinned_state_authority(&state).unwrap();
+        let base = store_test_snapshot(
+            &authority,
+            &[
+                (".ai/tools/x.yaml", "control v1\n"),
+                ("data/a.txt", "data v1\n"),
+            ],
+        );
+        // The same generation is trivially unchanged.
+        ensure_control_tree_unchanged(&state, &base, &base).unwrap();
+        // A different data file leaves the control tree unchanged.
+        let data_changed = store_test_snapshot(
+            &authority,
+            &[
+                (".ai/tools/x.yaml", "control v1\n"),
+                ("data/a.txt", "data v2\n"),
+            ],
+        );
+        assert_ne!(base, data_changed);
+        ensure_control_tree_unchanged(&state, &base, &data_changed).unwrap();
+        // A changed, added or removed control file is refused.
+        let control_changed = store_test_snapshot(
+            &authority,
+            &[
+                (".ai/tools/x.yaml", "control v2\n"),
+                ("data/a.txt", "data v1\n"),
+            ],
+        );
+        let control_added = store_test_snapshot(
+            &authority,
+            &[
+                (".ai/tools/x.yaml", "control v1\n"),
+                (".ai/tools/y.yaml", "new control\n"),
+                ("data/a.txt", "data v1\n"),
+            ],
+        );
+        let control_removed = store_test_snapshot(&authority, &[("data/a.txt", "data v1\n")]);
+        for after in [&control_changed, &control_added, &control_removed] {
+            let error = ensure_control_tree_unchanged(&state, &base, after)
+                .expect_err("a changed control tree must be refused");
+            assert!(
+                format!("{error:#}").contains("changed .ai control files"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]

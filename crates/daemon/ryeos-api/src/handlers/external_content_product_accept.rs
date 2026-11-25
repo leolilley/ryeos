@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
@@ -34,15 +35,30 @@ pub struct Request {
 impl Request {
     fn validate(&self) -> Result<()> {
         if self.staging_id.is_empty() || self.staging_id.len() > 256 {
-            bail!("product accept requires the staging_id issued by product-offer");
+            return Err(typed_refusal(
+                "product_accept_staging_id_invalid",
+                400,
+                "product accept requires the staging_id issued by product-offer",
+            )
+            .into());
         }
         for hash in [&self.witness_hash, &self.origin_admission_hash] {
             if !is_canonical_hash(hash) {
-                bail!("product accept requires exact canonical witness and admission hashes");
+                return Err(typed_refusal(
+                    "product_accept_hashes_invalid",
+                    400,
+                    "product accept requires exact canonical witness and admission hashes",
+                )
+                .into());
             }
         }
         if self.maximum_bytes == 0 {
-            bail!("product accept requires a positive byte bound");
+            return Err(typed_refusal(
+                "product_accept_byte_bound_invalid",
+                400,
+                "product accept requires a positive byte bound",
+            )
+            .into());
         }
         Ok(())
     }
@@ -55,7 +71,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .node_policy
         .require::<ExternalContentImportPolicyRecord>()?;
     if req.maximum_bytes > policy.limits.max_total_bytes {
-        bail!("product accept byte bound exceeds current import policy");
+        return Err(typed_refusal(
+            "product_accept_byte_bound_exceeds_policy",
+            422,
+            "product accept byte bound exceeds current import policy",
+        )
+        .into());
     }
     tokio::task::spawn_blocking(move || accept_blocking(&state, &authority, &req))
         .await
@@ -100,9 +121,14 @@ fn accept_blocking(
                 None => false,
             };
             if !resident {
-                bail!(
-                    "large object {hash} is absent from this node's store; stage its chunks first"
-                );
+                return Err(typed_refusal(
+                    "large_object_absent",
+                    409,
+                    format!(
+                        "large object {hash} is absent from this node's store; stage its chunks first"
+                    ),
+                )
+                .into());
             }
         }
         stage.admitted_target_hash().map(str::to_owned)

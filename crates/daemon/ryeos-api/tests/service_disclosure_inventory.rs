@@ -55,37 +55,6 @@ fn services() -> Vec<(String, Value)> {
     found
 }
 
-fn find<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    match value {
-        Value::Object(map) => map
-            .get(key)
-            .or_else(|| map.values().find_map(|inner| find(inner, key))),
-        Value::Array(items) => items.iter().find_map(|inner| find(inner, key)),
-        _ => None,
-    }
-}
-
-/// The service scopes a hosted browser session is minted with.
-fn session_service_patterns() -> Vec<String> {
-    let profile = yaml(&repo().join("bundles/.ai/node/init/profiles/core.yaml"));
-    find(&profile, "ui_browser_sessions")
-        .and_then(|section| section.get("session_scopes"))
-        .and_then(Value::as_array)
-        .expect("core profile names the browser session scopes")
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(|scope| scope.strip_prefix("ryeos.execute.service."))
-        .map(str::to_owned)
-        .collect()
-}
-
-fn covers(pattern: &str, name: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => name.starts_with(prefix),
-        None => pattern == name,
-    }
-}
-
 /// The services each route serves, with whether the route needs no
 /// authentication. A route's caller is whoever the route admits, so a service
 /// behind one is reachable by callers other than the operator.
@@ -116,35 +85,122 @@ fn route_targets() -> Vec<(String, bool)> {
     found
 }
 
-fn is_reachable(name: &str, body: &Value, patterns: &[String], routed: &BTreeSet<String>) -> bool {
-    let open = body
-        .get("required_caps")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty);
-    open || name.starts_with("ui/")
-        || routed.contains(name)
-        || patterns.iter().any(|pattern| covers(pattern, name))
-}
-
 /// Services deliberately served to no caller but the operator. Adding to this
 /// list is a decision to be reviewed, never a way to silence the test.
 const OPERATOR_ONLY: &[&str] = &[
+    "bundle-release/authority-calibrate",
+    "bundle-release/authority-measure",
+    "bundle-release/catalog-remote-publish",
+    "bundle-release/catalog-request-publication",
+    "bundle-release/core-seed-build",
+    "bundle-release/core-seed-capture",
+    "bundle-release/core-seed-inspect",
+    "bundle-release/core-seed-qualify",
+    "bundle-release/generation-build",
+    "bundle-release/generation-capture",
+    "bundle-release/generation-finalize",
+    "bundle-release/generation-qualify",
+    "bundle-release/genesis-set-compose",
+    "bundle-release/input-inspect",
+    "bundle-release/request-authorization",
+    "bundle-release/request-tree-signing",
+    "bundle-release/set-compose",
+    "bundle-release/status",
+    "bundle-release/submit",
+    "bundle-release/substrate-build",
+    "bundle-release/substrate-qualify",
+    "bundle-release/substrate-release-authorization",
+    "bundle-release/substrate-release-finalize",
+    "bundle/install",
     "bundle/manifest-sign",
     "bundle/profile-sign",
     "bundle/publish",
+    "bundle/remove",
     "bundle/sign",
+    "bundle/smoke",
+    "bundle/verify",
+    "credential-profiles/abandon-login",
+    "credential-profiles/delete",
+    "credential-profiles/get",
+    "external-content/activate",
+    "external-content/bind",
+    "external-content/bindings",
+    "external-content/bootstrap-runtime-source",
+    "external-content/bootstrap-runtime-source-operation",
+    "external-content/bootstrap-runtime-source-termination",
+    "external-content/capture-product",
+    "external-content/compose-product",
+    "external-content/continue-runtime-snapshot-create",
+    "external-content/create-runtime-snapshot-qualification",
+    "external-content/derive-consumer-qualification-context",
     "external-content/export-qualification-testimony",
+    "external-content/import",
+    "external-content/launch-content-qualification",
+    "external-content/launch-product-qualification",
+    "external-content/observe-bootstrap-runtime-source",
+    "external-content/observe-runtime-snapshot-qualification",
+    "external-content/observe-runtime-snapshot-readiness",
+    "external-content/produce-runtime-snapshot",
+    "external-content/product",
     "external-content/push-product",
+    "external-content/qualify-content",
+    "external-content/qualify-product",
+    "external-content/rebind",
+    "external-content/receive-product",
+    "external-content/release",
+    "external-content/run-product-qualification-worker",
+    "external-content/runtime-snapshot",
+    "external-content/runtime-snapshot-qualification",
+    "external-content/runtime-snapshot-qualification-termination",
+    "external-content/scrub",
+    "external-content/terminate-bootstrap-runtime-source",
+    "external-content/terminate-runtime-snapshot-qualification",
+    "external-content/unregister",
+    "external-content/verify-runtime-snapshot-qualification",
+    "external-execution/admit-candidate-program",
+    "external-execution/admit-product-program",
+    "external-execution/provider-inventory",
+    "external-execution/settle-unknown-allocation",
+    "external-execution/status",
+    "fetch",
+    "identity/authorize-client",
+    "identity/mint-admission-token",
+    "maintenance/gc",
     "node/doctor",
+    "node/journal",
     "node/logs",
+    "node/machine/declare",
+    "node/machine/remove",
+    "project/snapshot-status",
+    "projection/rebuild",
+    "projection/verify",
+    "remote-worker-workflows/query",
+    "remote-worker-workflows/resume",
+    "remote-worker-workflows/start",
+    "remote/bind-project",
+    "remote/bundle-install",
+    "remote/configure",
+    "remote/doctor",
+    "remote/pin",
+    "remote/reconcile-project-head",
+    "remote/threads",
+    "system/routes",
+    "threads/accounting/summary",
+    "trust/show",
     "ui/sessions/list",
+    "verify",
+    "worker-executions/candidate-result",
+    "worker-executions/command",
+    "worker-executions/discard",
+    "worker-executions/publish",
+    "worker-executions/qualify-candidate",
+    "worker-executions/start-candidate-integration",
+    "worker-executions/status",
 ];
 
 #[test]
 fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
-    let patterns = session_service_patterns();
     let routes = route_targets();
-    let routed: BTreeSet<String> = routes.iter().map(|(name, _)| name.clone()).collect();
     let unauthenticated: BTreeSet<String> = routes
         .iter()
         .filter(|(_, open)| *open)
@@ -154,9 +210,6 @@ fn every_service_a_hosted_session_reaches_declares_its_disclosure() {
     let mut missing = Vec::new();
     let mut declared_operator_only = BTreeSet::new();
     for (name, body) in services() {
-        if !is_reachable(&name, &body, &patterns, &routed) {
-            continue;
-        }
         let Some(block) = body.get("disclosure") else {
             missing.push(name);
             continue;
@@ -227,6 +280,52 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
         "/approvals/*/requested_authority/display",
         "per-chain publication",
     ),
+    (
+        "worker-placements/prepare",
+        "/credential_reservation/profile_id",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/credential_reservation/owner_principal",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/credential_reservation/upstream_session_id",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/credential_reservation/profile_id",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/credential_reservation/owner_principal",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/credential_reservation/upstream_session_id",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/owner_principal",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/target_operator_authority",
+        "m4",
+    ),
+    (
+        "worker-placements/prepare",
+        "/placement/project_rebind",
+        "m4",
+    ),
+    ("worker-placements/prepare", "/placement/accounting", "m4"),
     ("projects/list", "/projects/*/root", "m4"),
     ("projects/open", "/ui_transition/surface/title", "m4"),
     (
@@ -249,11 +348,6 @@ const INTERIM_FREE_TEXT: &[(&str, &str, &str)] = &[
         "/result",
         "per-chain publication",
     ),
-    ("ui/projects/open", "/ui_transition/surface", "m4"),
-    ("ui/projects/open", "/ui_transition/attachment", "m4"),
-    ("ui/projects/open", "/ui_transition/opening", "m4"),
-    ("ui/projects/open", "/ui_transition/tab_attachments", "m4"),
-    ("ui/projects/open", "/ui_transition/prepared", "m4"),
     ("ui/ryeos-ui/config/get", "/saved_view_sets", "m4"),
     ("ui/ryeos-ui/config/get", "/particular_view_sets", "m4"),
     ("ui/ryeos-ui/config/get", "/reusable_surfaces", "m4"),
@@ -736,5 +830,33 @@ fn interim_free_text_is_exactly_the_reviewed_list_and_each_names_its_milestone()
             matches!(milestone.as_str(), "m4" | "per-chain publication"),
             "{service} {pointer}: unknown removal milestone `{milestone}`"
         );
+    }
+}
+
+/// The attachment descriptor carries the seat's stated project. A service that
+/// lists an attachment's typed leaves one by one lists it too, so a seat reads
+/// which project it is bound to. Services that carry the whole attachment as an
+/// interim subtree already include it.
+#[test]
+fn services_that_list_attachment_leaves_include_the_seat_project() {
+    for (name, body) in services() {
+        let Some(principal) = body
+            .get("disclosure")
+            .and_then(|block| block.get("principal"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let leaves: Vec<&str> = principal.iter().filter_map(Value::as_str).collect();
+        let attachment = leaves
+            .iter()
+            .find(|leaf| leaf.ends_with("attachment/posture"));
+        if let Some(posture) = attachment {
+            let expected = posture.replace("posture", "seat_project");
+            assert!(
+                leaves.contains(&expected.as_str()),
+                "{name} lists `{posture}` but not `{expected}`"
+            );
+        }
     }
 }

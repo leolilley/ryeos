@@ -131,6 +131,10 @@ pub struct ExecutionParams {
     /// tool's process timeout never outlasts it. `None` outside a deadlined
     /// callback dispatch.
     pub deadline_end_at_ms: Option<i64>,
+    /// Bound on the workload authority of every tool call made from this
+    /// launch's thread tree. A callback-dispatched tool carries its parent's
+    /// ceiling; only a launch with no parent execution context is unbounded.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 }
 
 /// Bound a callback-dispatched tool's process timeout by its caller's hard
@@ -3298,6 +3302,7 @@ fn build_protocol_launch_env(
     scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
     remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
     bundle_state_home: Option<&ryeos_engine::isolation::IsolationBundleStateHome>,
+    thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 ) -> Result<ProtocolLaunchEnv> {
     let callback_socket_requested = protocol
         .descriptor
@@ -3367,6 +3372,7 @@ fn build_protocol_launch_env(
                     remote_consumer_grant.as_ref().map(|grant| grant.purpose.verifier_realized_definition_digest.clone()),
                     serde_json::Value::Null,
                     0,
+                    thread_ceiling,
                 )
                 .token;
             mint_guard.callback = Some(token.clone());
@@ -4662,6 +4668,7 @@ fn admitted_root_launch_metadata(
         scheduled_fire: params.resolved.plan_context.scheduled_fire.clone(),
         effective_caps: params.effective_caps.clone(),
         parent_delegation_caps: None,
+        thread_ceiling: params.thread_ceiling,
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
@@ -5758,6 +5765,7 @@ pub async fn run_and_wait(
         wait_scoped_producer_grant.clone(),
         wait_remote_consumer_grant,
         wait_bundle_state_home.as_ref(),
+        params.thread_ceiling,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = wait_bound_external.as_ref() {
@@ -6814,6 +6822,7 @@ pub async fn run_detached(
         None,
         None,
         bg_bundle_state_home.as_ref(),
+        params.thread_ceiling,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = bg_bound_external.as_ref() {
@@ -8897,6 +8906,8 @@ pub fn execution_params_from_sealed_root_request(
         host_access: None,
         // A recovered root is not a callback-dispatched tool, so no caller bounds it.
         deadline_end_at_ms: None,
+        // The ceiling sealed with the original launch.
+        thread_ceiling: operational_resume.thread_ceiling,
     })
 }
 
@@ -9703,6 +9714,7 @@ async fn run_existing_recovered_thread(
             &params.resolved.root_raw_content_digest,
         )?,
         bg_bundle_state_home.as_ref(),
+        params.thread_ceiling,
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;
     if let Some(bound) = bg_external_realizations.as_ref() {
@@ -10628,6 +10640,7 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             executor_ref: None,
             runtime_ref: None,
         }

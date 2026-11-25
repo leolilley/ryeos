@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:27:27Z:f3b85db77c0531bc10aa192c172d5481ae67d14cccb5a35c397e4bdc02a89ada:JX9vnUTymVphfN/RiyPtVO8dNBnn2TmlRhDBt6KyCrbLxVTjS7pdV6uOiYH5A5cKNP+bM9V7H2bgkcNiRhwWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:24b5389c6b0d1227d47fbd74bed5038c57d7684d73f3076a2d8d6958f46c0181:ZKbs1nS2rkIca/OjTzhQKtfIjZMJL/biaIDMGyagLE0CwnXM4KUBSyG4cnkMElt4S1/RSqi7QQcZWXFQYV3/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/execution/occurrence
 version: "1.0.0"
@@ -53,5 +53,5 @@ disclosure:
   interim_free_text:
     - "/evidence/*/attributes"  # removed by: per-chain publication
     - "/coverage/*/warnings"  # removed by: per-chain publication
-  max_items: 1024
-  max_result_bytes: 2097152
+  max_items: 12000
+  max_result_bytes: 4194304

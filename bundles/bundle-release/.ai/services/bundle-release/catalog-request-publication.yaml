@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:b0ceb670344110df2809162bd4652fa65ff8212f3c9920dadba8b2c4163b4bcf:YMPc5brZFd1hMYIlORXx+bZWBUZirvtMkh35so48yhjOsR7mVm0+Hx0pVyxPDyR0/skcvlp8dX8RSuKogGBuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:703733e99074b70920a92ec5a647038214be280256298f32427bb891b6e338cb:Eqfds3YvlETagTR10gR37VPK9k/YP1+svRh+t09rDBcu9q91RPKcRNuk/p47jRdbsuBXiV1nCbKNqWE3IbkhDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: catalog-request-publication
 version: "1.0.0"
@@ -16,3 +16,5 @@ schema:
   bundle_set_hash: string
   predecessor_publication_attestation_hash: string?
   expected_sequence: integer
+# Release authority operation: run by the node operator's release graph only; a principal is served nothing.
+disclosure: {}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:f8377b23f91d3a5ae4aeed87d49323d4d0adc49ec0d910dcc7a9cc5dd09b51e5:Lde17pVjtfutniEcqu2F/bi9m+JROfjExMJtDUadxJuuDqvkAw1Bc6bFjvt9MVerIwDGO/GussHBZ9lk2kQWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:d31ed71d067a0b83d7a1d0122e7955f8e9bdc3aa5ec2d5b4dd9cd7544d421611:GjuPwM74tYYDn61B1jFsI2s4jjhrMSohpunO3EXVOtrTeDXPEx4BWupy2+h1Tcx5QJ8nSASuqPnq4Kz/VIxVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: status
 version: "1.0.0"
@@ -13,3 +13,5 @@ schema:
   operation_id: string
   include_events: boolean?
   event_limit: integer?
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

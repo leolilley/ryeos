@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use anyhow::{Context, Result, anyhow};
 use hmac::{Hmac, Mac};
 use lillux::cas::CasStore;
+use ryeos_app::handler_error::typed_refusal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -306,7 +307,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     .map_err(|refusal| ryeos_app::handler_error::HandlerError::Forbidden(refusal.to_string()))?;
     let canonical_project_path = project_path
         .to_str()
-        .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?
+        .ok_or_else(|| {
+            typed_refusal(
+                "project_path_not_utf8",
+                400,
+                "canonical project_path is not valid UTF-8",
+            )
+        })?
         .to_owned();
     let project_directory = lillux::PinnedDirectory::open(&project_path)?
         .ok_or_else(|| anyhow!("canonical project directory disappeared"))?;
@@ -330,12 +337,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .state_store
         .with_state_db(|db| db.read_project_head(&head_key))?;
     if pushed_head.as_deref() != Some(req.snapshot_hash.as_str()) {
-        anyhow::bail!(
-            "project.apply-snapshot refused: caller's staged HEAD for project '{}' is {:?}, not requested snapshot {}",
+        return Err(typed_refusal("project_apply_head_mismatch", 409, format!("project.apply-snapshot refused: caller's staged HEAD for project '{}' is {:?}, not requested snapshot {}",
             canonical_project_path,
             pushed_head,
-            req.snapshot_hash
-        );
+            req.snapshot_hash)).into());
     }
 
     let snapshot_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
@@ -354,10 +359,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
     if policy.sync_scope != ProjectSyncScope::AiOnly {
-        anyhow::bail!(
-            "project.apply-snapshot only accepts ai_only snapshots in v1 (got {:?})",
-            policy.sync_scope
-        );
+        return Err(typed_refusal(
+            "project_apply_scope_unsupported",
+            422,
+            format!(
+                "project.apply-snapshot only accepts ai_only snapshots in v1 (got {:?})",
+                policy.sync_scope
+            ),
+        )
+        .into());
     }
     let tree_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
         &cas,
@@ -368,11 +378,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let declared =
         ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)?;
     if declared.as_ref() != Some(&req.project_name) {
-        anyhow::bail!(
-            "project_name_mismatch: apply-snapshot names project {} but the snapshot declares {}",
+        return Err(typed_refusal("project_name_mismatch", 422, format!("project_name_mismatch: apply-snapshot names project {} but the snapshot declares {}",
             req.project_name,
-            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
-        );
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string()))).into());
     }
     ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy, &state.sync_include)?;
     ryeos_state::project_sync::validate_project_tree_against_target_ignore(
@@ -389,12 +397,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     if previous_deployed_hash.as_deref() != Some(req.snapshot_hash.as_str())
         && previous_deployed_hash.as_deref() != expected_deployed_hash
     {
-        anyhow::bail!(
-            "deployed project conflict for '{}': expected {:?}, got {:?}",
-            canonical_project_path,
-            expected_deployed_hash,
-            previous_deployed_hash
-        );
+        return Err(typed_refusal(
+            "deployed_project_conflict",
+            409,
+            format!(
+                "deployed project conflict for '{}': expected {:?}, got {:?}",
+                canonical_project_path, expected_deployed_hash, previous_deployed_hash
+            ),
+        )
+        .into());
     }
     // Validate the complete typed snapshot DAG on every apply, including a
     // first deployment. Using the head itself as the search target preserves
@@ -404,11 +415,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     if let Some(expected) = expected_deployed_hash
         && !contains_expected
     {
-        anyhow::bail!(
-            "project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
+        return Err(typed_refusal("project_apply_ancestry_conflict", 409, format!("project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
             req.snapshot_hash,
-            expected
-        );
+            expected)).into());
     }
     if previous_deployed_hash.as_deref() == Some(req.snapshot_hash.as_str()) {
         return Ok(serde_json::json!({
@@ -643,11 +652,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 return Ok(());
             }
             if current.as_deref() != expected_deployed_hash {
-                anyhow::bail!(
-                    "deployed project changed during apply: expected {:?}, got {:?}",
+                return Err(anyhow::Error::new(ryeos_app::handler_error::HandlerError::Conflict(format!("deployed project changed during apply: expected {:?}, got {:?}",
                     expected_deployed_hash,
-                    current
-                );
+                    current))));
             }
             match expected_deployed_hash {
                 Some(expected) => db.advance_deployed_project_ref(
@@ -923,16 +930,31 @@ pub(crate) fn project_apply_lock(project_hash: &str) -> Arc<tokio::sync::Mutex<(
 pub(crate) fn canonical_existing_project_path(project_path: &str) -> Result<PathBuf> {
     let path = Path::new(project_path);
     if !path.is_absolute() {
-        anyhow::bail!("project_path '{}' is not absolute", project_path);
+        return Err(typed_refusal(
+            "project_path_not_absolute",
+            400,
+            format!("project_path '{}' is not absolute", project_path),
+        )
+        .into());
     }
-    let canonical = path.canonicalize().with_context(|| {
-        format!(
+    let canonical = path.canonicalize().map_err(|error| {
+        let message = format!(
             "cannot canonicalize project_path '{}'; ensure it exists",
             project_path
-        )
+        );
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::from(typed_refusal("project_path_not_found", 404, message))
+        } else {
+            anyhow::Error::new(error).context(message)
+        }
     })?;
     if !canonical.is_dir() {
-        anyhow::bail!("project_path '{}' is not a directory", canonical.display());
+        return Err(typed_refusal(
+            "project_path_not_directory",
+            400,
+            format!("project_path '{}' is not a directory", canonical.display()),
+        )
+        .into());
     }
     Ok(canonical)
 }
@@ -965,7 +987,12 @@ pub(crate) fn snapshot_history_contains(cas: &CasStore, head: &str, wanted: &str
         }
         states.insert(hash.clone(), VisitState::Visiting);
         if states.len() > limits.max_objects {
-            anyhow::bail!("project snapshot ancestry exceeds the object traversal limit");
+            return Err(typed_refusal(
+                "project_snapshot_history_too_large",
+                422,
+                "project snapshot ancestry exceeds the object traversal limit",
+            )
+            .into());
         }
         let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
             cas,
@@ -975,7 +1002,12 @@ pub(crate) fn snapshot_history_contains(cas: &CasStore, head: &str, wanted: &str
         let snapshot = ProjectSnapshot::from_value(&value)?;
         let mut parents = snapshot.parent_hashes;
         if parents.len() > limits.max_links_per_object {
-            anyhow::bail!("project snapshot has too many parent links");
+            return Err(typed_refusal(
+                "project_snapshot_history_too_large",
+                422,
+                "project snapshot has too many parent links",
+            )
+            .into());
         }
         parents.sort();
         pending.push((hash, true));

@@ -52,8 +52,12 @@ pub async fn handle(
     }
 
     if !spec.enabled {
-        super::scheduler_register::verify_schedule_enabled(&scheduler, &spec, false)
-            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+        super::scheduler_register::verify_schedule_enabled(&scheduler, &spec, false).map_err(
+            |e| {
+                crate::handler_error::extract_handler_error(&e)
+                    .unwrap_or_else(|| HandlerError::Internal(format!("{e:#}")))
+            },
+        )?;
         return Ok(serde_json::json!({
             "schedule_id": req.schedule_id,
             "enabled": false,
@@ -61,7 +65,10 @@ pub async fn handle(
     }
 
     let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, false, None)
-        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+        .map_err(|e| {
+        crate::handler_error::extract_handler_error(&e)
+            .unwrap_or_else(|| HandlerError::Internal(format!("{e:#}")))
+    })?;
     scheduler_db
         .upsert_spec(&rec)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;

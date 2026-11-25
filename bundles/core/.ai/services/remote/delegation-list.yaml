@@ -1,6 +1,17 @@
-# ryeos:signed:2026-11-13T14:29:21Z:50403308f6e0e9fe4e1530db33ccaa23fa7199ce8dc393cfa1c279125c2745e1:kKFPuQBM/If9hLtl76MMhFRFVxVDj2ST+ZrJe/7+fiC3XS1EhuKY6kMoOL+GjvYju7FyIPBp5AlmWF+M0avtCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:924a3807360f2fad3150ec6643920064faa0d3d3f027c5946bf0142646e9aa68:Dd0DBPnB2wKel5Ntqp6/r4O7daulS8Z/CavwtQqRL6UpEGI2LR5HHENivmrI6slfhFeJDqU1KdVJkR5iAzRzCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.delegation-list
 required_caps: ["ryeos.execute.service.remote/delegation-list"]
 schema: {}
 description: "List the delegations stored for the caller, with their remotes, scopes and expiry"
+disclosure:
+  principal:
+    - "/delegator"
+    - "/now"
+    - "/delegations/*/remote"
+    - "/delegations/*/digest"
+    - "/delegations/*/not_after"
+    - "/delegations/*/scopes"
+    - "/delegations/*/audience_site"
+  free_text:
+    - "/delegations/*/audience_node"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:bbdec1a2fe89b0e059025af9372368775755b5d6ba02fb624f0ce2595cdf13c8:zpeK1/k59O6STszlE7Uglr2KD/rbQUOWMhzSy/g5FvAysOthQvfQEN6x3ZnAsfUfdAykxgbF8jsQmIbbhsaYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T21:42:46Z:3278275129637cf7fd6b98dd013926f57ccd93285897ad1cf3a1907abeaed6c0:R8Z7+lbWqSsMbza4xi2QR9fM+A0Wk8u+QQ/f5tfvWSC0STS3Obff9Tj07iMsqQ6LE/Cx5DcmiGYjCOUG7xe6DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "explain"
 kind: service
@@ -30,6 +30,7 @@ disclosure:
     - /cursor_fresh
     - /decision
     - /decision_reason
+    - /paused_reason
     - /total_fires
     - /lifetime
     - /authority/valid
@@ -52,7 +53,6 @@ disclosure:
     - /signer_fingerprint
     - /execution
     - /limits
-    - /paused_reason
     - /authority/detail
     - /authority/error
     - /last_fire/signer_fingerprint

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:23:42Z:3d99bf7986273e6a4bd877ce3b659da8961dd652e70a53662b889a3a5a6187bd:wIMoD9leICLyXZ5TnyhdXfy0p5NePk49nvVvgAS0A46WObq5szkCgc0TDMrYgCYT/kDKO2pdSRcQUvCtALYjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T03:51:26Z:7a97f426d3b29ab198a2623bfe40d0d834f51bbb7bd2d50974f6b394f3b6677c:ylzw3NedysVP9iNaIXF12TbmFwuhoaCZoGbZ1ask2btLOXviSpX2g+Bqd5z6TmvSfrL3i034smSVJ+8951uLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/ryeos-ui/view-sets/resume"]
 name: ryeos-ui/view-sets/resume
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: Re-resolve and resume one durable particular view set without restoring session authority.
 endpoint: ui.ryeos.view-sets.resume
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: resume_particular_view_set
 schema:
@@ -13,7 +14,6 @@ schema:
   expected_revision: integer
   surface_ref: string
   creation_request_id: string
-# Session-local transition: a principal gets the acknowledgement only; the descriptors carry titles, project paths and binding material.
 disclosure:
   principal:
     - /ui_transition/kind

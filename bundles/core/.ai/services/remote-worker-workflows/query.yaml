@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T03:32:01Z:d91aa1f43cd2357f7fc0bbb123cdf2570044067e19930799a25134bff8f9e07b:3NTmKKqtXgaxIHHNZ+l/iWUUQ1WutqyKI/GqIWsgCbRqR8s+AtPo88OXSyYXdDODoa6zPld0Xw5bcUzP7ZszAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:73ba511de9a70261ec7744db21a16abecfd332dbf0dad0f0f80681c17815872c:POU9DE10Apcxv564UAAkaApF0D/mf4rzuk6me1yF4aIOymOcO2iNPXN8ZOrUG0CQ4yCzau6FFhn/FF5cX9lGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote-worker-workflows.query
 availability: daemon_only
@@ -8,3 +8,5 @@ required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   source_work_id: string
 description: "Read the compact local projection for one operator-owned remote-worker workflow, including its closed allowed_next_action. This service never advances recovery, contacts the target, or pulls a candidate."
+# Reads an operator-owned workflow; requires the local configured operator.
+disclosure: {}

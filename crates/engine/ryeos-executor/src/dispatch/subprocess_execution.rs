@@ -1243,6 +1243,9 @@ async fn dispatch_tool_subprocess(
             request.parent_execution_context.as_ref(),
         )
         .map_err(DispatchError::Internal)?,
+        thread_ceiling: crate::dispatch::ParentExecutionContext::launch_ceiling(
+            request.parent_execution_context.as_ref(),
+        ),
     };
 
     if request.launch_mode == "detached" {

@@ -2050,6 +2050,25 @@ pub struct KindSchema {
     /// Whether a runtime may author or remove items of this kind through the
     /// daemon-mediated authoring callback. Absent means it may.
     pub runtime_authoring: RuntimeAuthoring,
+    /// Whether a standing endorsement may name this kind. Absent means it may
+    /// not: a standing endorsement trusts everything the authoring key signs
+    /// of the kind, which is safe only for kinds that never execute or act.
+    pub standing_endorsement: StandingEndorsement,
+}
+
+/// The signed, kind-owned answer to whether a standing endorsement may name
+/// the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandingEndorsement {
+    /// No standing endorsement may name the kind; an operator approves its
+    /// items one change at a time, by digest.
+    #[default]
+    Refused,
+    /// An operator may endorse the kind as a standing grant: its items carry
+    /// no process, tool or invocation, so trusting them in bulk acts on
+    /// nothing.
+    Allowed,
 }
 
 /// The signed, kind-owned answer to whether a runtime callback may write items
@@ -2408,6 +2427,17 @@ impl KindRegistry {
     /// Cache-key fingerprint. Changes when kind schema config changes.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// The kinds whose signed schema allows a standing endorsement. The
+    /// answer comes only from this registry, which is the node's installed and
+    /// verified one.
+    pub fn standing_endorsement_kinds(&self) -> Vec<String> {
+        self.schemas
+            .iter()
+            .filter(|(_, schema)| schema.standing_endorsement == StandingEndorsement::Allowed)
+            .map(|(kind, _)| kind.clone())
+            .collect()
     }
 
     /// All registered kind names.
@@ -2829,6 +2859,16 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
         _ => RuntimeAuthoring::default(),
     };
+    let standing_endorsement = match data.get("standing_endorsement") {
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<StandingEndorsement>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `standing_endorsement`: {error}"),
+                }
+            })?
+        }
+        _ => StandingEndorsement::default(),
+    };
     let root_executable = execution
         .as_ref()
         .and_then(|execution| execution.thread_profile.as_ref())
@@ -2874,6 +2914,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         launch_trust,
         project_shadowing,
         runtime_authoring,
+        standing_endorsement,
     })
 }
 
@@ -2943,6 +2984,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "launch_trust",
     "project_shadowing",
     "runtime_authoring",
+    "standing_endorsement",
     "thread_profile",
 ];
 
@@ -5381,6 +5423,39 @@ formats:
         assert_eq!(
             registry.get("ledger").unwrap().runtime_authoring,
             RuntimeAuthoring::Refused
+        );
+    }
+
+    #[test]
+    fn standing_endorsement_defaults_to_refused_and_a_kind_can_allow_it() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let allowing = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nstanding_endorsement: allowed\n";
+        sign_and_write_schema(&tmp, "note", allowing, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry.get("directive").unwrap().standing_endorsement,
+            StandingEndorsement::Refused
+        );
+        assert_eq!(
+            registry.get("note").unwrap().standing_endorsement,
+            StandingEndorsement::Allowed
+        );
+    }
+
+    #[test]
+    fn standing_endorsement_with_an_unknown_value_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let bad = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nstanding_endorsement: sometimes\n";
+        sign_and_write_schema(&tmp, "note", bad, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains("standing_endorsement"),
+            "{error}"
         );
     }
 

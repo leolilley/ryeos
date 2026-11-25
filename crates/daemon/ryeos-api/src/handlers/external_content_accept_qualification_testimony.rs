@@ -9,8 +9,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::operator_external_content::qualification_testimony::accept_testimony_for_owner;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -30,10 +31,21 @@ pub struct Request {
 impl Request {
     fn attestation(&self) -> Result<Attestation> {
         if !self.testimony.is_object() {
-            bail!("qualification testimony must be a signed attestation object");
+            return Err(typed_refusal(
+                "qualification_testimony_not_an_object",
+                400,
+                "qualification testimony must be a signed attestation object",
+            )
+            .into());
         }
-        Attestation::from_value(&self.testimony)
-            .context("qualification testimony is not a signed attestation")
+        Attestation::from_value(&self.testimony).map_err(|error| {
+            typed_refusal(
+                "qualification_testimony_not_signed_attestation",
+                400,
+                format!("qualification testimony is not a signed attestation: {error:#}"),
+            )
+            .into()
+        })
     }
 }
 

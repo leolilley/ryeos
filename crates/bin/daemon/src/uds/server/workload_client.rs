@@ -293,6 +293,9 @@ pub(super) fn prepare_for_dedicated_boot(
         root_capability.effective_definition_digest.clone(),
         root_capability.hard_limits.clone(),
         root_capability.depth,
+        // The worker session is a child of its root thread: it can hold no
+        // wider ceiling than the root bearer it is derived from.
+        root_capability.thread_ceiling,
     );
     let callback_token = callback.token.clone();
     let mut minted_thread_auth_token = None;
@@ -901,6 +904,7 @@ mod tests {
             effect_classes: vec!["live".to_owned()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
         }
     }
 

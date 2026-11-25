@@ -162,10 +162,15 @@ impl ItemAuthorship {
         }
     }
 
-    /// Signer label, or the trust word when the item has no signer.
+    /// Signer label, or the trust word when the item has no signer. An item
+    /// that is not trusted (untrusted, unendorsed or unsigned) always leads
+    /// with its trust word, so a signer's name never reads as admission.
     pub fn mark_tail(&self) -> String {
-        self.signer_label()
-            .unwrap_or_else(|| self.trust_word().to_owned())
+        match self.signer_label() {
+            Some(signer) if self.trust_class == "trusted_project" => signer,
+            Some(signer) => format!("{} \u{b7} {signer}", self.trust_word()),
+            None => self.trust_word().to_owned(),
+        }
     }
 }
 
@@ -840,7 +845,15 @@ pub struct TableColumn {
     /// value (`directive_run` as `directive`). Applied before `present`, and
     /// `time_relative` reads its `yesterday` entry from the same map.
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Signed drop priority, `0..=15`: when a tile is too narrow, a column
+    /// with a lower value leaves before one with a higher value. `None` when
+    /// the column declares none, or the value is not an integer in range;
+    /// the column then leaves by its role's default order.
+    pub priority: Option<u8>,
 }
+
+/// The largest signed column priority the view kind schema admits.
+pub const COLUMN_PRIORITY_MAX: u8 = 15;
 
 /// Optional structural projection for a hierarchy-aware table. The source owns
 /// semantic ancestry; the client owns indentation, connectors, and local folds.
@@ -986,7 +999,7 @@ fn present_time_date(value: &str) -> Option<String> {
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, role?, tone?, present?, fallback?}` (label defaults to the field
+/// `{label, field, role?, priority?, tone?, present?, fallback?}` (label defaults to the field
 /// path). A column missing a field is skipped; absent `columns` → empty (the
 /// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
@@ -1016,6 +1029,11 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("fallback")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        priority: col
+                            .get("priority")
+                            .and_then(Value::as_u64)
+                            .and_then(|priority| u8::try_from(priority).ok())
+                            .filter(|priority| *priority <= COLUMN_PRIORITY_MAX),
                         labels: col
                             .get("labels")
                             .and_then(Value::as_object)
@@ -1761,6 +1779,31 @@ mod local_projection_contract_tests {
                 serde_json::json!({"widget":"rows","input":{"id":"query","mode":"live_filter"}})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_column_priority_is_read_only_when_it_is_an_integer_in_range() {
+        let binding: ViewBinding = serde_json::from_value(serde_json::json!({
+            "widget": "table",
+            "projections": {"columns": [
+                {"field": "a", "priority": 0},
+                {"field": "b", "priority": 15},
+                {"field": "c", "priority": 16},
+                {"field": "d", "priority": -1},
+                {"field": "e", "priority": "3"},
+                {"field": "f", "priority": 2.5},
+                {"field": "g"}
+            ]}
+        }))
+        .unwrap();
+        let priorities: Vec<Option<u8>> = table_columns(&binding)
+            .iter()
+            .map(|column| column.priority)
+            .collect();
+        assert_eq!(
+            priorities,
+            [Some(0), Some(15), None, None, None, None, None]
         );
     }
 
@@ -2618,6 +2661,26 @@ mod tests {
         assert_eq!(authorship.signer, None);
         assert!(authorship.source_refs.is_empty());
         assert_eq!(authorship.mark_tail(), "untrusted");
+    }
+
+    #[test]
+    fn an_untrusted_signer_never_hides_the_trust_word() {
+        let authorship = |trust_class: &str| ItemAuthorship {
+            space: "project".into(),
+            trust_class: trust_class.into(),
+            item_ref: None,
+            signer: Some(ItemSigner {
+                fingerprint: "0123456789abcdef".into(),
+                name: Some("leo".into()),
+            }),
+            source_refs: Vec::new(),
+        };
+        assert_eq!(authorship("trusted_project").mark_tail(), "leo");
+        assert_eq!(
+            authorship("untrusted_project").mark_tail(),
+            "untrusted \u{b7} leo"
+        );
+        assert_eq!(authorship("unsigned").mark_tail(), "unsigned \u{b7} leo");
     }
 
     #[test]

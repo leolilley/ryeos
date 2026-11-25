@@ -735,8 +735,12 @@ pub fn rewrite_project_bindings(
 ) -> Result<PathBuf> {
     let report = load_remotes_report(app_root)?;
     let loaded = get_loaded_remote(&report.remotes, name).map_err(|_| {
-        anyhow::anyhow!(
-            "remote '{name}' is not pinned on this node; run `ryeos remote configure {name} --url <url> --expect-fingerprint <fingerprint>` first"
+        refusal(
+            "remote_not_pinned",
+            409,
+            format!(
+                "remote '{name}' is not pinned on this node; run `ryeos remote configure {name} --url <url> --expect-fingerprint <fingerprint>` first"
+            ),
         )
     })?;
     let mut config = loaded.config;
@@ -750,31 +754,52 @@ pub fn rewrite_project_bindings(
     )
 }
 
+/// A refusal the caller caused, typed with its code and status. The sentence
+/// stays the error's own text, so a log or a test reads it as before.
+fn refusal(code: &str, status: u16, message: String) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code,
+        status,
+        message.clone(),
+    ))
+    .context(message)
+}
+
 /// Get a named remote. Returns an error if not found.
 pub fn get_remote(remotes: &HashMap<String, RemoteConfig>, name: &str) -> Result<RemoteConfig> {
-    remotes
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", name))
+    remotes.get(name).cloned().ok_or_else(|| {
+        refusal(
+            "remote_not_found",
+            404,
+            format!("remote '{}' not found in config", name),
+        )
+    })
 }
 
 pub fn get_loaded_remote(
     remotes: &HashMap<String, LoadedRemote>,
     name: &str,
 ) -> Result<LoadedRemote> {
-    remotes
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", name))
+    remotes.get(name).cloned().ok_or_else(|| {
+        refusal(
+            "remote_not_found",
+            404,
+            format!("remote '{}' not found in config", name),
+        )
+    })
 }
 
 /// Canonicalize a local project path for config lookup.
 pub fn canonical_local_project_path(project_path: &Path) -> Result<PathBuf> {
     if !project_path.is_absolute() {
-        anyhow::bail!(
-            "project '{}' is not absolute: pass an absolute project path",
-            project_path.display()
-        );
+        return Err(refusal(
+            "project_path_not_absolute",
+            400,
+            format!(
+                "project '{}' is not absolute: pass an absolute project path",
+                project_path.display()
+            ),
+        ));
     }
     project_path.canonicalize().with_context(|| {
         format!(
@@ -803,12 +828,13 @@ pub fn resolve_project_binding(
     let canonical = canonical_local_project_path(local_project_path)?;
     let key = local_project_identity(&canonical)?;
     let binding = remote.project_bindings.get(key).ok_or_else(|| {
-        anyhow::anyhow!(
-            "remote '{}' has no project binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`",
-            remote.name,
-            key,
-            remote.name,
-            key,
+        refusal(
+            "remote_project_binding_missing",
+            409,
+            format!(
+                "remote '{}' has no project binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`",
+                remote.name, key, remote.name, key,
+            ),
         )
     })?;
     validate_remote_project_path(&binding.remote_project_path)?;

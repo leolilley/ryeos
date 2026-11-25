@@ -1,4 +1,5 @@
 pub mod accounting;
+pub mod approval_ceiling;
 pub mod authorization;
 pub mod bundle_publication;
 pub mod command_registration;

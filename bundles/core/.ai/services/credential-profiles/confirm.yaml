@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-19T00:43:21Z:3ada96759e2bfb9f46d6e549f5c77888db099a3501662255ee2e3ac6e4861649:S7YaUC+7RPZr6qen4EBNyzfjMz9oyVMD7JEdQ06yYEeaJLBTq8hgDSX+quSJx3Atqx5QeLwO+x4IRc5kyqeCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:e269365237ea2dd831dafa75d6f0c556791f11fd5c1d541fdb9fbde59a2e2a12:JKRBnsEvpFGNm6bl5pO9QRvD7G3QSCeqSPrnoOjdPf6yVtF0yT3kL/J8vbdDN7VHDtNkm+WnLI/9yIfwUbH8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: credential-profiles.confirm
 required_caps: ["ryeos.execute.service.credential-profiles/confirm"]
@@ -7,3 +7,9 @@ schema:
   login_epoch: integer
   expected_account_digest: string
 description: "Confirm an observed account and activate its owner-bound credential generation"
+disclosure:
+  principal:
+    - "/profile_id"
+    - "/state"
+    - "/credential_generation"
+    - "/confirmed_account_digest"

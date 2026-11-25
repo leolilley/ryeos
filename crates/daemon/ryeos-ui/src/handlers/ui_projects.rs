@@ -346,12 +346,15 @@ fn compile_saved_surface_context(
             );
         }
     };
+    let seat_project =
+        crate::seat_project::resolve_for_binding(state, &compiled, &session.granted_caps)?;
     Ok((
         crate::browser_session::BindingAttachmentCandidate {
             registered_project_id: project.map(|project| project.local_id),
             compiled_binding: Arc::new(compiled),
             presentation,
             project_authority: authority,
+            seat_project,
         },
         proof,
     ))
@@ -781,6 +784,20 @@ pub async fn handle_projects_resolve(
     Ok(json!({ "project": project_view(project, None, true) }))
 }
 
+/// The row of one principal's own registry for `local_id`. The registry a
+/// store loads is that principal's alone, so another principal's row, or an
+/// id nobody registered, is absent here and opens nothing.
+fn registered_project(
+    projects: ProjectsFile,
+    local_id: &str,
+) -> std::result::Result<ProjectEntry, HandlerError> {
+    projects
+        .projects
+        .into_iter()
+        .find(|entry| entry.local_id == local_id)
+        .ok_or(HandlerError::NotFound)
+}
+
 pub async fn handle_projects_open(
     params: Value,
     ctx: HandlerContext,
@@ -853,12 +870,7 @@ pub async fn handle_projects_open(
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project = {
         let store = locked_principal_store(&ctx, &state).await?;
-        store
-            .load_projects()?
-            .projects
-            .into_iter()
-            .find(|entry| entry.local_id == req.local_id)
-            .ok_or(HandlerError::NotFound)?
+        registered_project(store.load_projects()?, &req.local_id)?
     };
     let canonical = canonical_project_root(&project.root, &state.config.app_root)?;
     let root = canonical.display().to_string();
@@ -913,6 +925,7 @@ pub async fn handle_projects_open(
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = completed_admission_append_limit(&state)?;
     let mut admitted_result = None;
+    let mut journal_failure: Option<HandlerError> = None;
     let root_resolution = root_attachment
         .project_authority
         .as_ref()
@@ -962,6 +975,11 @@ pub async fn handle_projects_open(
                     Some(project_resolution.as_path()),
                     Some(project_authority.as_ref()),
                 )?;
+                let seat_project = crate::seat_project::resolve_for_binding(
+                    &state,
+                    &compiled_binding,
+                    &session.granted_caps,
+                )?;
                 let published = state.state_store.with_exact_seat_action_if_mixed_cut(&checked.seat(), &checked.cut(), || {
                 ui.browser_sessions.reconcile_presentation_mount_frontier(
                     &session.session_id, &producer.presentation_id, &membership.root_coordinate,
@@ -978,6 +996,7 @@ pub async fn handle_projects_open(
                             compiled_binding: Arc::new(compiled_binding),
                             presentation,
                             project_authority: Some(project_authority.clone()),
+                            seat_project,
                         },
                         &limits,
                         state.node_policy.generation_digest(),
@@ -992,11 +1011,40 @@ pub async fn handle_projects_open(
                             });
                             validate_completed_admission_size(&result,&producer,&req.creation_request_id,
                                 request_bounds.max_request_bytes,append_limit.min(request_bounds.max_seat_append_bytes))?;
+                            // The node's own record, written before the grant is
+                            // observable: a node that cannot journal it admits
+                            // nothing. The seat rows are producer-authored and
+                            // do not stand in for it.
+                            let attachment_id = attachment.coordinate().binding_attachment_id;
+                            if let Err(error) = ryeos_node::node_journal::NodeJournal::for_app_root(
+                                &state.config.app_root,
+                                (*state.identity).clone(),
+                            )
+                            .record_project_attachment_opened(
+                                &ryeos_node::node_journal::ProjectAttachmentFacts {
+                                    principal: session.principal_id.as_str(),
+                                    local_id: &project.local_id,
+                                    root: &root,
+                                    session_id: &session.session_id,
+                                    presentation_id: &producer.presentation_id,
+                                    requesting_attachment_id: &origin
+                                        .coordinate()
+                                        .binding_attachment_id,
+                                    attachment_id: &attachment_id,
+                                    creation_request_id: &req.creation_request_id,
+                                },
+                            ) {
+                                journal_failure = Some(journal_write_refusal(&error));
+                                return Err(crate::browser_session::AttachmentStoreError::PresentationInvalid);
+                            }
                             admitted_result = Some(result);
                             Ok(())
                         },
                     )
-                    .map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+                    .map_err(|error| match journal_failure.take() {
+                        Some(refusal) => anyhow::Error::from(refusal),
+                        None => anyhow::Error::from(HandlerError::Conflict(error.to_string())),
+                    })
                     })?;
                 published.ok_or_else(|| anyhow::Error::from(HandlerError::Conflict("seat action anchor changed before publication".into())))
             })?
@@ -1368,6 +1416,11 @@ pub async fn handle_particular_view_set_resume(
                     project_resolution.as_deref(),
                     project_authority.as_deref(),
                 )?;
+                let seat_project = crate::seat_project::resolve_for_binding(
+                    &state,
+                    &binding,
+                    &session.granted_caps,
+                )?;
                 let published = state.state_store.with_exact_seat_action_if_mixed_cut(&checked.seat(), &checked.cut(), || {
                 ui.browser_sessions.reconcile_presentation_mount_frontier(
                     &session.session_id, &producer.presentation_id, &membership.root_coordinate,
@@ -1386,6 +1439,7 @@ pub async fn handle_particular_view_set_resume(
                             compiled_binding: Arc::new(binding),
                             presentation,
                             project_authority: project_authority.clone(),
+                            seat_project,
                         },
                         &limits,
                         state.node_policy.generation_digest(),
@@ -1423,7 +1477,10 @@ fn resolve_particular_work(
     let lineage = state.threads.continuation_lineage(chain_root_id)?;
     let root = lineage.first().ok_or(HandlerError::NotFound)?;
     let head = lineage.last().ok_or(HandlerError::NotFound)?;
-    if root.thread.thread_id != chain_root_id {
+    // A seat is the UI's own session thread, never particular work.
+    if root.thread.thread_id != chain_root_id
+        || root.thread.kind == crate::handlers::ui_seat::seat_kind(state)?
+    {
         return Err(HandlerError::NotFound.into());
     }
     for placement in &lineage {
@@ -1473,6 +1530,41 @@ pub async fn handle_recent_list(
     Ok(json!(recent))
 }
 
+/// The catalogue for the calling session: each theme's palette, and for the
+/// themes the stored preference may draw, their Surface grounds resolved
+/// through the picture index and granted to this session. A caller that is
+/// not a browser session (an operator client) is granted nothing and gets no
+/// grounds.
+fn theme_catalogue_for(
+    ctx: &HandlerContext,
+    state: &AppState,
+    installed: &crate::themes::InstalledThemes,
+    stored: &str,
+) -> Result<ryeos_client_base::theme_preference::ThemeCatalogue> {
+    let Ok((session, _attachment)) = crate::seat_auth::require_compiled_ui_session(ctx, state)
+    else {
+        return Ok(crate::themes::build_catalogue(installed, stored, None));
+    };
+    let ui = crate::state::get_ui_state(state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let index = ui.art_index.index_for(&state.engine);
+    let max_grants = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()?
+        .max_art_grants as usize;
+    let sessions = ui.browser_sessions.clone();
+    let session_id = session.session_id;
+    let mut grant = move |sha256: &str| sessions.grant_art(&session_id, sha256, max_grants);
+    Ok(crate::themes::build_catalogue(
+        installed,
+        stored,
+        Some(crate::themes::GroundGrants {
+            index: &index,
+            grant: &mut grant,
+        }),
+    ))
+}
+
 pub async fn handle_config_get(
     _params: Value,
     ctx: HandlerContext,
@@ -1480,10 +1572,22 @@ pub async fn handle_config_get(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
-    let config = store.load_ui_config()?;
+    let mut config = store.load_ui_config()?;
     let registered_project_id = crate::seat_auth::compiled_ui_attachment()
         .and_then(|attachment| attachment.registered_project_id.clone());
+    // A stored theme that names no installed theme reads as `system`, with a
+    // warning, exactly as a malformed one does.
+    let installed = crate::themes::load_installed(&state)?;
+    if !installed.allows(&config.theme) {
+        tracing::warn!(
+            stored = %config.theme,
+            "stored theme names no installed theme and reads as system; change the theme in the UI"
+        );
+        config.theme = ryeos_client_base::theme_preference::SYSTEM.to_string();
+    }
+    let catalogue = theme_catalogue_for(&ctx, &state, &installed, &config.theme)?;
     let mut response = json!(config);
+    response["theme_catalogue"] = json!(catalogue);
     // Each ordinary selection row carries the revision actually observed by
     // this source and its saved logical Surface. Neither is ambient authority.
     if let Some(rows) = response["particular_view_sets"].as_array_mut() {
@@ -1553,6 +1657,21 @@ pub async fn handle_config_update(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: UpdateConfigRequest = parse_request(params)?;
+    if let Some(theme) = req.theme.as_deref() {
+        let installed = crate::themes::load_installed(&state)?;
+        if !installed.allows(theme) {
+            return Err(HandlerError::BadRequest(format!(
+                "invalid theme value '{theme}'; expected `system` or an installed theme: {}",
+                installed
+                    .themes
+                    .iter()
+                    .map(|theme| theme.theme_ref.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .into());
+        }
+    }
     let store = locked_principal_store(&ctx, &state).await?;
     let mut config = store.load_ui_config()?;
     apply_config_update(&mut config, req)?;
@@ -1574,13 +1693,6 @@ fn apply_config_update_staged(
     config: &mut RyeOsConfigFile,
     req: UpdateConfigRequest,
 ) -> Result<()> {
-    if let Some(theme) = req.theme.as_deref() {
-        validate_choice(
-            "theme",
-            theme,
-            &ryeos_client_base::theme_preference::ALLOWED,
-        )?;
-    }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
     }
@@ -1695,16 +1807,16 @@ impl RyeOsPrincipalStoreExt for PrincipalStore {
     fn load_ui_config(&self) -> Result<RyeOsConfigFile> {
         let path = self.paths().ryeos_config();
         let mut config: RyeOsConfigFile = self.load_yaml(&path)?;
-        // A stored theme outside the allowed list (the earlier `light` and
-        // `dark` values) must not take every config read and update down with
-        // it. It reads as `system`, and the next config update writes a valid
-        // value back. The cure is named so the file can also be fixed by hand.
-        if !ryeos_client_base::theme_preference::ALLOWED.contains(&config.theme.as_str()) {
+        // A stored theme that is not `system` or a theme ref (the earlier
+        // palette ids, `light` and `dark`) must not take every config read
+        // and update down with it. It reads as `system`, and the next config
+        // update writes a valid value back. Whether a well-formed ref names an
+        // installed theme is judged where the installed set is known.
+        if !ryeos_client_base::theme_preference::is_preference_shape(&config.theme) {
             tracing::warn!(
                 file = %path.display(),
                 stored = %config.theme,
-                allowed = %ryeos_client_base::theme_preference::ALLOWED.join(", "),
-                "stored theme is not an allowed value and reads as system; set the `theme:` line in this file to one of the allowed values, or change the theme in the UI"
+                "stored theme is not `system` or a theme ref and reads as system; set the `theme:` line in this file to `system` or an installed theme's ref, or change the theme in the UI"
             );
             config.theme = ryeos_client_base::theme_preference::SYSTEM.to_string();
         }
@@ -1826,11 +1938,13 @@ fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
 
 fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
     ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
-    validate_choice(
-        "theme",
-        &config.theme,
-        &ryeos_client_base::theme_preference::ALLOWED,
-    )?;
+    if !ryeos_client_base::theme_preference::is_preference_shape(&config.theme) {
+        return Err(HandlerError::BadRequest(format!(
+            "invalid theme value '{}'; expected `system` or a theme ref",
+            config.theme
+        ))
+        .into());
+    }
     validate_choice("landing_view", &config.landing_view, &["projects"])?;
     validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
     validate_particular_view_set_resumes(&config.particular_view_sets)
@@ -2054,13 +2168,6 @@ descriptor!(
     handle_projects_resolve
 );
 descriptor!(
-    UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/projects/open",
-    "ui.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
-);
-descriptor!(
     RYEOS_UI_PROJECTS_LIST_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/list",
     "ui.ryeos.projects.list",
@@ -2084,13 +2191,6 @@ descriptor!(
     "service:ui/ryeos-ui/projects/resolve",
     "ui.ryeos.projects.resolve",
     handle_projects_resolve
-);
-descriptor!(
-    RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/ryeos-ui/projects/open",
-    "ui.ryeos.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,
@@ -2132,8 +2232,49 @@ descriptor!(
     &["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 );
 
+/// The typed refusal for a project open the node could not journal. The cause
+/// names which half failed: the retained chain does not verify, or the record
+/// could not be written (disk, permissions). Nothing was admitted.
+fn journal_write_refusal(error: &ryeos_node::node_journal::JournalError) -> HandlerError {
+    let cause = match error {
+        ryeos_node::node_journal::JournalError::Integrity(_) => "chain_integrity",
+        ryeos_node::node_journal::JournalError::Write(_) => "write",
+    };
+    HandlerError::Structured {
+        code: "journal_write_failed".into(),
+        status: 500,
+        body: serde_json::json!({
+            "code": "journal_write_failed",
+            "cause": cause,
+            "error": format!("the project was not opened: {error}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_journal_failure_refuses_the_open_with_a_typed_cause() {
+        use ryeos_node::node_journal::JournalError;
+        for (error, cause) in [
+            (
+                JournalError::Integrity(anyhow::anyhow!("bad chain")),
+                "chain_integrity",
+            ),
+            (JournalError::Write(anyhow::anyhow!("disk full")), "write"),
+        ] {
+            match journal_write_refusal(&error) {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, "journal_write_failed");
+                    assert_eq!(status, 500);
+                    assert_eq!(body["cause"], cause);
+                    assert!(body["error"].as_str().unwrap().contains("not opened"));
+                }
+                other => panic!("expected the typed refusal, got {other:?}"),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2143,8 +2284,6 @@ mod tests {
             (&UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&RYEOS_UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
             (&CONFIG_UPDATE_DESCRIPTOR, "ui/ryeos-ui/config/update"),
             (
                 &PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
@@ -2218,6 +2357,54 @@ mod tests {
         assert!(
             validate_completed_admission_size(&result, &producer, &operation, 0, 65536).is_err()
         );
+    }
+
+    #[test]
+    fn a_project_opens_only_from_the_callers_own_registry() {
+        let app_root = tempfile::tempdir().unwrap();
+        let resolver = HostedPrincipalResolver::for_app_root(app_root.path());
+        let owner =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "a".repeat(64))).unwrap();
+        let caller =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "b".repeat(64))).unwrap();
+        let row = |local_id: &str, root: &str| ProjectEntry {
+            local_id: local_id.into(),
+            name: local_id.into(),
+            root: root.into(),
+            added_at: "2026-11-22T00:00:00Z".into(),
+            tags: Vec::new(),
+        };
+        ryeos_app::principal::write_yaml_atomic(
+            &owner.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("owned-by-other", "/srv/other")],
+            },
+        )
+        .unwrap();
+        ryeos_app::principal::write_yaml_atomic(
+            &caller.paths().projects_config(),
+            &ProjectsFile {
+                version: PROJECTS_VERSION,
+                projects: vec![row("mine", "/srv/mine")],
+            },
+        )
+        .unwrap();
+
+        let found = registered_project(caller.load_projects().unwrap(), "mine").unwrap();
+        assert_eq!(found.root, "/srv/mine");
+        // Another principal's row, and an id nobody registered, are both absent.
+        for local_id in ["owned-by-other", "never-registered"] {
+            assert!(
+                matches!(
+                    registered_project(caller.load_projects().unwrap(), local_id),
+                    Err(HandlerError::NotFound)
+                ),
+                "{local_id} must not open for a caller that did not register it"
+            );
+        }
+        // The other principal's own registry still holds its row.
+        assert!(registered_project(owner.load_projects().unwrap(), "owned-by-other").is_ok());
     }
 
     #[test]
@@ -2531,15 +2718,19 @@ mod tests {
 
     #[test]
     fn invalid_config_choices_are_rejected() {
-        let allowed = &ryeos_client_base::theme_preference::ALLOWED;
-        let err = validate_choice("theme", "neon", allowed).unwrap_err();
-        assert!(err.to_string().contains("invalid theme value 'neon'"));
-        // The earlier light/dark values are not palettes and are refused.
-        for old in ["light", "dark"] {
-            assert!(validate_choice("theme", old, allowed).is_err());
+        use ryeos_client_base::theme_preference::is_preference_shape;
+        validate_choice("landing_view", "projects", &["projects"]).unwrap();
+        let err = validate_choice("landing_view", "neon", &["projects"]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid landing_view value 'neon'")
+        );
+        // The earlier palette ids and light/dark values are not theme refs.
+        for old in ["light", "dark", "night", "paper", "gruvbox", "neon"] {
+            assert!(!is_preference_shape(old), "{old}");
         }
-        for accepted in ["system", "night", "paper", "gruvbox"] {
-            validate_choice("theme", accepted, allowed).unwrap();
+        for accepted in ["system", "theme:ryeos/night"] {
+            assert!(is_preference_shape(accepted), "{accepted}");
         }
     }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T00:33:45Z:6ebd065576086dd38585d9c60e60de6228698fa4d69c83ca95099f5b180597ef:W8xHxTAnCmI5TeSUY5fT0afwFwRN9pFGpgsblFZZvA2n/MM3t69tA7x7MUHQLnDOHwec0/kXIsFXZh073VwbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:0a96843175d295da89cc2137872e3b4872ac5d0490a562c4b4e2fd49e6d88fb1:CAY+1JNakPcurAxnrnaYrf8x+tPHSNZlMJHWyFoAyRrCJUK2FGEbq2HuwUgr/xGqQRAPnvSL73f4oYFkzIDYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.execute
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -12,3 +12,17 @@ schema:
   execution_policy: object
   call: object?
 description: "Execute an item on a remote node"
+disclosure:
+  principal:
+    - "/job_id"
+    - "/push/snapshot_hash"
+    - "/push/tree_entries"
+    - "/push/blobs_uploaded"
+    - "/push/blobs_skipped"
+    - "/remote/snapshot_hash"
+    - "/pull/snapshot_hash"
+    - "/pull/cas_objects_fetched"
+    - "/pull/files_updated"
+    - "/pull/files_deleted"
+  free_text:
+    - "/remote/result"

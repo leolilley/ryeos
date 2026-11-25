@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -21,12 +22,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if !lillux::valid_hash(&req.subject_hash)
         || req.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
     {
-        anyhow::bail!("invalid admission subject hash: {}", req.subject_hash);
+        return Err(typed_refusal(
+            "invalid_admission_subject_hash",
+            400,
+            format!("invalid admission subject hash: {}", req.subject_hash),
+        )
+        .into());
     }
     if let Some(policy) = req.policy.as_deref()
         && policy.is_empty()
     {
-        anyhow::bail!("admission policy must not be empty");
+        return Err(typed_refusal(
+            "empty_admission_policy",
+            400,
+            "admission policy must not be empty",
+        )
+        .into());
     }
     let cas_read = state.acquire_cas_read()?;
     let attestations = state.state_store.with_state_db(|db| {

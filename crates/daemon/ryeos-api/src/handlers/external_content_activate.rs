@@ -17,6 +17,7 @@ use sha2::{Digest as _, Sha256};
 use crate::handler_context::HandlerContext;
 use crate::registry::ServiceDescriptor;
 use lillux::time::Duration;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::managed_external_content::{
     ManagedActivationSource, ManagedMemberDisposition, ResolvedManagedExternalContentActivation,
 };
@@ -292,14 +293,19 @@ fn submit_operation_with_status(
         });
     }
     if existing.state == ryeos_state::SyncJobState::Cancelled {
-        bail!(
-            "managed activation job {} is terminal in state cancelled: {}",
-            job_id,
-            existing
-                .last_error
-                .as_deref()
-                .unwrap_or("no retained diagnostic")
-        );
+        return Err(typed_refusal(
+            "activation_job_terminal",
+            409,
+            format!(
+                "managed activation job {} is terminal in state cancelled: {}",
+                job_id,
+                existing
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("no retained diagnostic")
+            ),
+        )
+        .into());
     }
     let has_running_attempt = state.state_store.with_state_db(|db| {
         Ok(db
@@ -369,15 +375,20 @@ fn submit_operation_with_status(
         existing.state,
         ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
     ) {
-        bail!(
-            "managed activation job {} is terminal in state {}: {}",
-            job_id,
-            existing.state.as_str(),
-            existing
-                .last_error
-                .as_deref()
-                .unwrap_or("no retained diagnostic")
-        );
+        return Err(typed_refusal(
+            "activation_job_terminal",
+            409,
+            format!(
+                "managed activation job {} is terminal in state {}: {}",
+                job_id,
+                existing.state.as_str(),
+                existing
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("no retained diagnostic")
+            ),
+        )
+        .into());
     }
 
     let submitted =
@@ -401,16 +412,21 @@ fn submit_operation_with_status(
         submitted.job.state,
         ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
     ) {
-        bail!(
-            "managed activation job {} is terminal in state {}: {}",
-            job_id,
-            submitted.job.state.as_str(),
-            submitted
-                .job
-                .last_error
-                .as_deref()
-                .unwrap_or("no retained diagnostic")
-        );
+        return Err(typed_refusal(
+            "activation_job_terminal",
+            409,
+            format!(
+                "managed activation job {} is terminal in state {}: {}",
+                job_id,
+                submitted.job.state.as_str(),
+                submitted
+                    .job
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("no retained diagnostic")
+            ),
+        )
+        .into());
     }
 
     let response = Response {
@@ -2307,11 +2323,18 @@ fn managed_policy(
 ) -> Result<
     &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 >{
-    state
+    let policy = state
         .node_policy
-        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
-        .managed_activation
-        .require_enabled()
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
+    if !policy.managed_activation.enabled {
+        return Err(typed_refusal(
+            "managed_activation_disabled",
+            403,
+            "managed external-content activation is disabled by node policy",
+        )
+        .into());
+    }
+    policy.managed_activation.require_enabled()
 }
 
 fn external_content_policy(

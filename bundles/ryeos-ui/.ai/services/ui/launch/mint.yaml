@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:7f9aab69dc83fcdc486a9f31b11ebcc8e3491803f7808b2fe9a3833b7b2f923e:KsJOmo8GJ67zy0WlG2bDJ1mZVXS8S5Vnna+FMDfV0bZlppXjh5Zgt3N9xnV9JAJJZYd3JdDWrsBT2p09BO/nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T12:26:26Z:7f1bdefdd9de5dfea989fc7078e9ea9ac4e05ded9af5dc1c75cb54a8b76a519e:zJyxX/E2htBLAxfgdT0Da2h+klDb071IRHI5RgDbv2qwi8TJYh89T4kbhTl1UXgaUFFOnqkPU1j4IPl6HGXuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: launch-mint
 version: "1.0.0"
@@ -20,6 +20,7 @@ disclosure:
     - "/attachment/presentation"
     - "/attachment/subject"
     - "/attachment/posture"
+    - "/attachment/seat_project"
     - "/attachment/binding_request_bounds"
     - "/attachment/named_items"
   free_text:

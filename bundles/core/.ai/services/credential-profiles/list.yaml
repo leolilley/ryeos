@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T02:30:03Z:8768ea4d0c1b4f6926d05ab94688b1fc04bbc433af30c1d7e87588b1b3ecadbc:/VDBHgPB2FnTehfLTYy4TffwLvPSjNsm+eP/ja+ivbJU521G62eWzNtofxfW4oEcl9u9Ql9To2uVRJKNb3vYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:d4ff558aee172492296bc0036c2c35181b27c87b90c5e07287e872e0001bb1cb:sY+V8kBj+1HNFl18Ii8z9FSqBiSpLt7q8jiyd9M+wytPqg35Cbk9czNzVmUfN4E2oTw+HOLw7CXIRZy46XbxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: credential-profiles.list
 required_caps: ["ryeos.execute.service.credential-profiles/list"]
@@ -8,3 +8,13 @@ schema:
   limit: integer?
   after: string?
 description: "List sanitized credential-profile metadata for the authenticated operator only; defaults to 50 entries, maximum 200, with next_cursor for subsequent pages"
+disclosure:
+  principal:
+    - "/profiles/*/profile_id"
+    - "/profiles/*/state"
+    - "/profiles/*/credential_generation"
+    - "/profiles/*/in_use"
+    - "/profiles/*/created_at_ms"
+    - "/profiles/*/updated_at_ms"
+    - "/next_cursor"
+  max_items: 256

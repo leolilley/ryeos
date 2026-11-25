@@ -189,8 +189,14 @@ fn endorsed_changes(
     }
     let identity = endorsed_project(state, root, caller)?;
     let index: Arc<EndorsementIndex> = state.engine.trust_store.endorsement_index();
+    let inert = state.engine.trust_store.endorsement_inert();
     let Some((_, body)) = index
         .for_project(&identity)
+        .filter(|(candidate, _)| {
+            !inert
+                .iter()
+                .any(|(digest, _)| digest.as_str() == *candidate)
+        })
         .find(|(candidate, _)| *candidate == digest)
     else {
         return Err(refusal(
