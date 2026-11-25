@@ -25,11 +25,32 @@ async fn mint_live_session(
 /// A durable chain owned by the browser session's principal, the only kind of
 /// chain a verified service may replay for it. A seat is owned by its browser
 /// session itself, so its history is read through the seat stream instead.
-fn create_principal_owned_chain(state: &ryeos_app::state::AppState, thread_id: &str, owner: &str) {
+///
+/// The seat is bound to the fixture checkout, so the chain lives in that
+/// checkout: a project seat lists only its own project's threads.
+fn create_principal_owned_chain(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+    owner: &str,
+    project_root: &std::path::Path,
+) {
     use ryeos_state::objects::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
-        CapturedThreadHistoryPolicy, ExecutionProjectAuthority, ThreadHistoryRetention,
+        CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        LiveFilesystemConfinement, LiveProjectAccess, ThreadHistoryRetention,
     };
+    let project_root = project_root
+        .canonicalize()
+        .expect("canonical fixture project");
+    let project_authority = ExecutionProjectAuthority::live(
+        project_root.clone(),
+        format!("local:{}", project_root.display()),
+        LiveProjectAccess::ReadOnly,
+        LiveFilesystemConfinement::standard_fixed_parents(),
+        EnvironmentAuthority::None,
+        Vec::new(),
+    )
+    .expect("live fixture project authority");
     let hash = "a".repeat(64);
     state
         .state_store
@@ -44,11 +65,8 @@ fn create_principal_owned_chain(state: &ryeos_app::state::AppState, thread_id: &
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some(owner.to_string()),
-            project_root: None,
-            project_authority: ExecutionProjectAuthority::projectless(
-                ryeos_state::objects::EnvironmentAuthority::None,
-            )
-            .expect("projectless authority"),
+            project_root: Some(project_root),
+            project_authority,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -268,8 +286,13 @@ async fn session_cookie_required() {
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, ctx, producer, coordinate) =
-        test_state::live_shipped_presentation(&state).await;
+    let (session_id, ctx, producer, coordinate) = test_state::live_shipped_presentation_in_project(
+        &state,
+        &test_state::fixture_project_root(&state),
+    )
+    .await;
+    let state = Arc::new(state);
+    let folder = tempfile::TempDir::new().expect("folder to register");
 
     // Subscribe to the session bus before invoking.
     let mut rx = get_ui_state(&state)
@@ -291,12 +314,12 @@ async fn session_local_invocation_publishes_to_session_bus() {
             },
             "payload": {
                 "kind": "selection",
-                "record": { "root": state.config.app_root }
+                "record": { "root": folder.path() }
             }
             }
         }),
         ctx,
-        Arc::new(state),
+        state.clone(),
     )
     .await
     .unwrap_or_else(|error| {
@@ -318,6 +341,42 @@ async fn session_local_invocation_publishes_to_session_bus() {
     assert_eq!(event.payload["target"]["kind"], "ref");
     assert_eq!(event.payload["target"]["ref"], "service:projects/add");
     assert_eq!(event.payload["invocation_id"], invocation_id);
+
+    // Registering a host folder is the node operator's act: a seat minted for
+    // another principal dispatches the same affordance and is refused.
+    let (_other_session, other_ctx, other_producer, other_coordinate) =
+        test_state::live_shipped_presentation(&state).await;
+    let refused = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
+        serde_json::json!({
+            "producer": other_producer,
+            "binding": {
+            "binding_attachment_id": other_coordinate.binding_attachment_id,
+            "binding_generation": other_coordinate.binding_generation,
+            "binding_digest": other_coordinate.binding_digest,
+            "coordinate": {
+                "kind": "affordance",
+                "view_ref": "view:ryeos/projects/list",
+                "affordance_id": "register-project"
+            },
+            "payload": {
+                "kind": "selection",
+                "record": { "root": state.config.app_root }
+            }
+            }
+        }),
+        other_ctx,
+        state.clone(),
+    )
+    .await
+    .expect_err("a non-operator seat may not register a project");
+    assert!(
+        matches!(
+            ryeos_app::handler_error::extract_handler_error(&refused),
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status: 403, .. })
+                if code == "local_operator_required"
+        ),
+        "expected local_operator_required, got: {refused:#}"
+    );
 }
 
 #[tokio::test]
@@ -369,7 +428,12 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         .principal_id
         .clone();
     let owned_chain = "T-owned-chain";
-    create_principal_owned_chain(&state, owned_chain, &session_owner);
+    create_principal_owned_chain(
+        &state,
+        owned_chain,
+        &session_owner,
+        &test_state::fixture_project_root(&state),
+    );
     let rows_before = state
         .state_store
         .list_threads_filtered(100, None)

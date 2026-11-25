@@ -115,6 +115,44 @@ pub fn operator_launch_context(state: &AppState) -> ryeos_app::handler_context::
     local_operator_context(state, vec!["*".into()])
 }
 
+/// Register `checkout` for the node operator's owner under `name`, the way
+/// `node.project.register` does, and declare the same name in the checkout's
+/// manifest. A seat the operator launches on that checkout then states the
+/// returned project.
+pub fn register_operator_checkout(
+    state: &AppState,
+    checkout: &std::path::Path,
+    name: &str,
+) -> ryeos_state::project_identity::ProjectIdentity {
+    let canonical = checkout.canonicalize().expect("canonical checkout");
+    std::fs::create_dir_all(canonical.join(".ai")).expect("create the checkout's .ai");
+    std::fs::write(
+        canonical.join(ryeos_state::project_identity::PROJECT_DECLARATION_PATH),
+        format!("name: {name}\n"),
+    )
+    .expect("declare the project name");
+    let operator = operator_launch_context(state);
+    let owner = state
+        .engine
+        .trust_store
+        .owner_for(&operator.fingerprint)
+        .expect("the operator key acts for an owner")
+        .principal;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(
+        owner,
+        name.parse().expect("fixture project name"),
+    );
+    ryeos_node::project_registry::register(&ryeos_node::project_registry::RegistrationChange {
+        app_root: &state.config.app_root,
+        node: &state.identity,
+        request_digest: &"0".repeat(64),
+        path: &canonical,
+        identity: &identity,
+    })
+    .expect("register the operator's checkout");
+    identity
+}
+
 /// Append `project_root` to the verified non-operator fixture principal's
 /// private registry and return its local id. Seat registration through `projects/add` is a
 /// local-operator act, so a non-operator fixture seeds its registry here.
