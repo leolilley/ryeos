@@ -420,20 +420,25 @@ impl AdmittedWorkloadClientGrant {
 
     /// Admit the collection of one child's result. The facts come from the
     /// daemon's own records, never from the request: `link` is the child's
-    /// recorded `(parent thread, relation)` and `child_requested_by` is the
-    /// key that launched the child. Collectable is exactly a direct
-    /// `dispatch` child of this session's thread launched by the grant's own
-    /// owner. Every other case, including a child that does not exist, is the
-    /// same refusal with the same text, so the answer is no oracle for which
-    /// thread ids exist or who owns them.
+    /// recorded `(chain root of the link's parent thread, relation)` and
+    /// `child_requested_by` is the key that launched the child. Collectable is
+    /// exactly a `dispatch` child linked to a thread of THIS session's chain
+    /// that was launched by the grant's own owner. The session is its chain,
+    /// not one segment of it, so a session that continued still collects what
+    /// an earlier segment launched, and the same key scopes the session's
+    /// spend and its end-of-session stop. A detached child is its own chain
+    /// root, so a grandchild is linked to a thread outside the session's chain
+    /// and is refused. Every other case, including a child that does not
+    /// exist, is the same refusal with the same text, so the answer is no
+    /// oracle for which thread ids exist or who owns them.
     pub fn authorize_collect(
         &self,
         link: Option<(&str, &str)>,
         child_requested_by: Option<&str>,
     ) -> std::result::Result<(), ThreadCeilingRefusal> {
         let permitted = self.admits_collect()
-            && link.is_some_and(|(parent, relation)| {
-                parent == self.placement_thread_id && relation == "dispatch"
+            && link.is_some_and(|(parent_chain_root, relation)| {
+                parent_chain_root == self.chain_root_id && relation == "dispatch"
             })
             && child_requested_by == Some(self.owner_principal.as_str());
         if permitted {
@@ -2939,14 +2944,19 @@ mod tests {
     }
 
     #[test]
-    fn collect_is_admitted_only_for_a_direct_dispatch_child_of_this_session_by_its_owner() {
+    fn collect_is_admitted_only_for_a_dispatch_child_of_this_sessions_chain_by_its_owner() {
         use ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE;
         let grant = collecting_grant();
         assert!(grant.admits_collect());
         let owner = grant.owner_principal.clone();
-        let session = grant.placement_thread_id.clone();
+        // The link's parent is a thread of the session's chain: the chain
+        // root is what the broker reads from the parent's thread record, so a
+        // child launched by an earlier segment of a continued session and one
+        // launched by the current segment present the same chain root.
+        let chain = grant.chain_root_id.clone();
+        assert_ne!(chain, grant.placement_thread_id);
         grant
-            .authorize_collect(Some((session.as_str(), "dispatch")), Some(owner.as_str()))
+            .authorize_collect(Some((chain.as_str(), "dispatch")), Some(owner.as_str()))
             .unwrap();
 
         let refusals = [
@@ -2954,21 +2964,16 @@ mod tests {
             grant.authorize_collect(None, None),
             // A thread that exists and is the owner's but was never linked.
             grant.authorize_collect(None, Some(owner.as_str())),
-            // A sibling session's child.
+            // Another session's child: its link's parent is in another chain.
             grant.authorize_collect(Some(("T-other-session", "dispatch")), Some(owner.as_str())),
-            // A grandchild: its link names the child, not this session.
+            // A grandchild: its link names the child, a detached child that is
+            // its own chain root and so not in this session's chain.
             grant.authorize_collect(Some(("T-child", "dispatch")), Some(owner.as_str())),
             // This session's own link under another relation.
-            grant.authorize_collect(
-                Some((session.as_str(), "continuation")),
-                Some(owner.as_str()),
-            ),
-            // A direct child launched by another key.
-            grant.authorize_collect(
-                Some((session.as_str(), "dispatch")),
-                Some("fp:someone-else"),
-            ),
-            grant.authorize_collect(Some((session.as_str(), "dispatch")), None),
+            grant.authorize_collect(Some((chain.as_str(), "continuation")), Some(owner.as_str())),
+            // A child of the session launched by another key.
+            grant.authorize_collect(Some((chain.as_str(), "dispatch")), Some("fp:someone-else")),
+            grant.authorize_collect(Some((chain.as_str(), "dispatch")), None),
         ];
         let first = refusals[0].as_ref().unwrap_err();
         assert_eq!(first.code, WORKLOAD_COLLECT_NOT_PERMITTED_CODE);
@@ -2982,7 +2987,7 @@ mod tests {
     fn collect_needs_the_grant_to_launch_detached_and_to_collect() {
         let owner_link = |grant: &AdmittedWorkloadClientGrant| {
             grant.authorize_collect(
-                Some((grant.placement_thread_id.as_str(), "dispatch")),
+                Some((grant.chain_root_id.as_str(), "dispatch")),
                 Some(grant.owner_principal.as_str()),
             )
         };

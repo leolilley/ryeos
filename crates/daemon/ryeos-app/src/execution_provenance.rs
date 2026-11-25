@@ -117,6 +117,16 @@ pub enum ExecutionProvenance {
         /// The process sees it as a private copy materialized by hash; it is
         /// never an item-resolution source, and a borrowed child derived from
         /// this root does not inherit it.
+        ///
+        /// Two isolation authorities meet here and describe different things.
+        /// The child's recorded project authority (a copy-on-write pinned
+        /// workspace whose terminal publication discards) is the child's OWN
+        /// pinned workspace, which its process is never given as input. The
+        /// ephemeral scratch copy materialized by hash from this generation is
+        /// what the process actually sees. Both discard everything and write
+        /// nothing back, so they do not disagree about write-back; they name
+        /// different roots. This generation, as sealed in the capsule, is the
+        /// record of what the process saw.
         workspace_input: Option<ryeos_state::objects::WorkspaceGenerationPair>,
         __seal: ProvenanceSeal,
     },

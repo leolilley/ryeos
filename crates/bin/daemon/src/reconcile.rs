@@ -1371,6 +1371,41 @@ fn mirror_process_quarantine_report(state: &AppState) {
 /// Retire every predecessor qualification child before root recovery can
 /// select a new launch. No phase here authorizes another allocation, process
 /// attachment, release, natural-exit claim, or provider contact.
+/// Retire the detached intents that never got a child, so the workspace input
+/// they captured stops being a garbage-collection root. Runs at startup and on
+/// every periodic recovery pass. Only an unsealed intent older than the
+/// bounded age (see `abandoned_detached_intent_age`) is retired; a sealed one
+/// is rebuilt into its child by `repair_root_runtime_action_links`. A failure
+/// is logged and retried by the next pass: it never fails the recovery pass.
+fn reconcile_abandoned_detached_intents(state: &AppState) {
+    let age = ryeos_app::state_store::abandoned_detached_intent_age(None);
+    match state
+        .state_store
+        .retire_abandoned_detached_intents(lillux::time::timestamp_millis(), age)
+    {
+        Ok(report) => {
+            if !report.retired.is_empty() {
+                tracing::warn!(
+                    retired = report.retired.len(),
+                    operations = ?report.retired,
+                    "retired detached intents that never got a child"
+                );
+            }
+            if !report.draw_bearing_links.is_empty() {
+                tracing::warn!(
+                    count = report.draw_bearing_links.len(),
+                    children = ?report.draw_bearing_links,
+                    "abandoned detached children whose links carry an unreleased spend draw"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to retire abandoned detached intents; the next pass retries"
+        ),
+    }
+}
+
 /// Links read per page when settling the links of children that ended without
 /// settling theirs.
 const CHILD_LINK_RECONCILE_BATCH: usize = 256;
@@ -1585,6 +1620,7 @@ async fn reconcile_active_threads_inner(
     let blocked_workspace_operations =
         reconcile_runtime_workspace_operations_before_thread_recovery(state, mode)?;
     repair_root_runtime_action_links(state)?;
+    reconcile_abandoned_detached_intents(state);
     reconcile_accounting(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
     if mode == ActiveReconcileMode::Startup {
@@ -5503,6 +5539,273 @@ mod tests {
         let (event_type, payload) = terminal_event(&state, "T-live-child");
         assert_eq!(event_type, "thread_cancelled");
         assert_eq!(payload["outcome_code"], "cancelled");
+    }
+
+    /// Continue `first` as `second`: the successor joins `first`'s chain and
+    /// `first` settles as `continued`. The successor is left `created`, which
+    /// is a live segment.
+    fn continue_session(state: &AppState, first: &str, second: &str) {
+        let mut successor = lineage_thread(second);
+        successor.chain_root_id = first.to_string();
+        successor.upstream_thread_id = Some(first.to_string());
+        successor.captured_history_policy = None;
+        state
+            .state_store
+            .create_continuation_for_test(&successor, first, first, Some("continue"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_continued_sessions_flagged_children_stop_when_its_tail_ends_not_at_a_segment() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let store = &state.state_store;
+        running_thread(&state, "T-seg-a");
+        running_thread(&state, "T-seg-a-child");
+        store
+            .record_child_link_with_cancel_flag("T-seg-a", "T-seg-a-child", "dispatch", true)
+            .unwrap();
+        continue_session(&state, "T-seg-a", "T-seg-b");
+        // The tail launches its own flagged child.
+        running_thread(&state, "T-seg-b-child");
+        store
+            .record_child_link_with_cancel_flag("T-seg-b", "T-seg-b-child", "dispatch", true)
+            .unwrap();
+        assert_eq!(
+            store.get_thread("T-seg-a").unwrap().unwrap().status,
+            "continued"
+        );
+
+        // Segment A is over but the session is not: its tail still runs.
+        let zero = std::time::Duration::ZERO;
+        assert_eq!(
+            ryeos_app::cascade::stop_flagged_children_of_ended_parents(&state, zero).unwrap(),
+            ryeos_app::cascade::ParentEndStopReport::default()
+        );
+        assert_eq!(
+            ryeos_app::cascade::stop_flagged_children_on_parent_end(&state, "T-seg-a", zero)
+                .unwrap(),
+            ryeos_app::cascade::ParentEndStopReport::default()
+        );
+        assert_untouched(&state, "T-seg-a-child");
+        assert_untouched(&state, "T-seg-b-child");
+
+        // The tail ends: the children of every segment stop, once.
+        store
+            .finalize_thread("T-seg-b", &finalize_record("completed"))
+            .unwrap();
+        let report =
+            ryeos_app::cascade::stop_flagged_children_of_ended_parents(&state, zero).unwrap();
+        assert_eq!(report.parents, 1, "one session, one stop");
+        let mut stopped = report.stopped.clone();
+        stopped.sort();
+        assert_eq!(
+            stopped,
+            vec!["T-seg-a-child".to_string(), "T-seg-b-child".to_string()]
+        );
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_stopped_by_parent_end(&state, "T-seg-a-child", "killed");
+        assert_stopped_by_parent_end(&state, "T-seg-b-child", "killed");
+    }
+
+    #[test]
+    fn a_continued_segment_with_no_successor_yet_is_not_an_ended_session() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        running_thread(&state, "T-gap");
+        running_thread(&state, "T-gap-child");
+        state
+            .state_store
+            .record_child_link_with_cancel_flag("T-gap", "T-gap-child", "dispatch", true)
+            .unwrap();
+        // Settled as a hand-off whose successor row has not been written.
+        state
+            .state_store
+            .set_thread_projection_status_for_test("T-gap", "continued")
+            .unwrap();
+        assert!(!ryeos_app::cascade::session_chain_has_ended(&state.state_store, "T-gap").unwrap());
+        let report = ryeos_app::cascade::stop_flagged_children_of_ended_parents(
+            &state,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(report, ryeos_app::cascade::ParentEndStopReport::default());
+        assert_untouched(&state, "T-gap-child");
+    }
+
+    #[test]
+    fn a_persons_cancel_of_a_flagged_child_after_its_session_ended_keeps_its_own_outcome() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        running_thread(&state, "T-person");
+        running_thread(&state, "T-person-child");
+        state
+            .state_store
+            .record_child_link_with_cancel_flag("T-person", "T-person-child", "dispatch", true)
+            .unwrap();
+        state
+            .state_store
+            .finalize_thread("T-person", &finalize_record("completed"))
+            .unwrap();
+        // The session is over and the sweep has not yet run: a person cancels.
+        state
+            .state_store
+            .request_thread_stop("T-person-child", ryeos_app::state_store::StopIntent::Cancel)
+            .unwrap();
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-person-child".to_string(),
+                status: "failed".to_string(),
+                outcome_code: Some("failed".to_string()),
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+        let (event_type, payload) = terminal_event(&state, "T-person-child");
+        assert_eq!(event_type, "thread_cancelled");
+        assert_eq!(payload["outcome_code"], "cancelled");
+        assert_eq!(payload["error"]["reason"], "durable_stop_intent");
+        // The sweep finds it already terminal and writes nothing.
+        let report = ryeos_app::cascade::stop_flagged_children_on_parent_end(
+            &state,
+            "T-person",
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert!(report.stopped.is_empty());
+        assert_eq!(report.already_terminal, vec!["T-person-child".to_string()]);
+    }
+
+    #[test]
+    fn a_persons_stop_written_before_the_sweep_keeps_its_label_through_the_sweeps_escalation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        running_thread(&state, "T-first");
+        running_thread(&state, "T-first-child");
+        state
+            .state_store
+            .record_child_link_with_cancel_flag("T-first", "T-first-child", "dispatch", true)
+            .unwrap();
+        state
+            .state_store
+            .request_thread_stop("T-first-child", ryeos_app::state_store::StopIntent::Cancel)
+            .unwrap();
+        state
+            .state_store
+            .finalize_thread("T-first", &finalize_record("completed"))
+            .unwrap();
+        // The sweep forces the stop (a kill). The first writer was a person,
+        // so the escalated stop is a plain kill, not a parent-end stop.
+        ryeos_app::cascade::stop_flagged_children_on_parent_end(
+            &state,
+            "T-first",
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        let (event_type, payload) = terminal_event(&state, "T-first-child");
+        assert_eq!(event_type, "thread_killed");
+        assert_eq!(payload["outcome_code"], "killed");
+        assert_eq!(payload["error"]["reason"], "durable_stop_intent");
+    }
+
+    #[test]
+    fn a_launch_that_ignores_the_graceful_stop_is_hard_stopped_after_the_grace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        running_thread(&state, "T-ignore");
+        running_thread(&state, "T-ignore-child");
+        state
+            .state_store
+            .record_child_link_with_cancel_flag("T-ignore", "T-ignore-child", "dispatch", true)
+            .unwrap();
+        state
+            .state_store
+            .finalize_thread("T-ignore", &finalize_record("completed"))
+            .unwrap();
+        let grace = std::time::Duration::from_millis(150);
+        let started = std::time::Instant::now();
+        // Stand-in for a launch that ignores the graceful stop: the tombstone
+        // lands and nothing ever finalizes the child; the graceful stop stays
+        // blocked until the forced stop reaches the child.
+        let worker = state.clone();
+        ryeos_app::cascade::stop_flagged_child_with(&state, "T-ignore-child", grace, move || {
+            worker.state_store.request_thread_stop_with_origin(
+                "T-ignore-child",
+                ryeos_app::state_store::StopIntent::Cancel,
+                ryeos_app::state_store::StopOrigin::ParentEnd,
+            )?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let child = worker
+                    .state_store
+                    .get_thread("T-ignore-child")?
+                    .ok_or_else(|| anyhow::anyhow!("child row vanished"))?;
+                if child.runtime.stop_intent == Some(ryeos_app::state_store::StopIntent::Kill) {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("the forced stop never arrived");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        })
+        .unwrap();
+        assert!(
+            started.elapsed() >= grace,
+            "the forced stop waited out the grace"
+        );
+        assert_stopped_by_parent_end(&state, "T-ignore-child", "killed");
+    }
+
+    #[test]
+    fn a_launch_that_finalizes_within_the_grace_gets_the_graceful_result() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        running_thread(&state, "T-obey");
+        running_thread(&state, "T-obey-child");
+        state
+            .state_store
+            .record_child_link_with_cancel_flag("T-obey", "T-obey-child", "dispatch", true)
+            .unwrap();
+        state
+            .state_store
+            .finalize_thread("T-obey", &finalize_record("completed"))
+            .unwrap();
+        let launcher = simulate_launcher(&state, "T-obey-child");
+        let worker = state.clone();
+        ryeos_app::cascade::stop_flagged_child_with(
+            &state,
+            "T-obey-child",
+            std::time::Duration::from_secs(20),
+            move || {
+                worker.state_store.request_thread_stop_with_origin(
+                    "T-obey-child",
+                    ryeos_app::state_store::StopIntent::Cancel,
+                    ryeos_app::state_store::StopOrigin::ParentEnd,
+                )?;
+                // The graceful stop returns once the launch has finalized.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while std::time::Instant::now() < deadline {
+                    let child = worker
+                        .state_store
+                        .get_thread("T-obey-child")?
+                        .ok_or_else(|| anyhow::anyhow!("child row vanished"))?;
+                    if ryeos_app::state_store::is_terminal_status(&child.status) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                anyhow::bail!("the launch never finalized")
+            },
+        )
+        .unwrap();
+        launcher.join().unwrap();
+        assert_stopped_by_parent_end(&state, "T-obey-child", "cancelled");
     }
 
     #[test]

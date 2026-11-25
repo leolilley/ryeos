@@ -32,7 +32,7 @@ pub use runtime_db::{
     LaunchPlanningRecord, NewCommandRecord, NewCredentialProfile, NewCredentialProfileReservation,
     NewDedicatedSession, NewDedicatedSessionApproval, NewDedicatedSessionCommand, NewHookDispatch,
     ObservationBatchReservation, ProcessQuarantine, ProcessQuarantineReason, QuarantinedProcess,
-    RuntimeInfo, StopIntent, WorkerProcessRecord,
+    RuntimeInfo, StopIntent, StopOrigin, WorkerProcessRecord,
 };
 
 mod live_destination_join;
@@ -130,6 +130,10 @@ mod commands_windows;
 mod events;
 mod follow;
 mod runtime_actions;
+pub use runtime_actions::{
+    ABANDONED_DETACHED_INTENT_AGE_DEFAULT, ABANDONED_DETACHED_INTENT_AGE_MAX,
+    AbandonedDetachedIntents, abandoned_detached_intent_age,
+};
 
 use projection_access::committed_value;
 

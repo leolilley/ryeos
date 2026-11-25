@@ -529,7 +529,11 @@ pub struct ResumeContext {
     /// spawn only narrows it. Required: only a launch with no parent
     /// execution context states `Unbounded`.
     pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
-    /// Parent workspace generation a detached child reads as data. It is
+    /// Parent workspace generation a detached child reads as data. This is
+    /// the reader's record of what the process saw: the project authority
+    /// describes the child's own pinned workspace, which the process is never
+    /// given, while the process sees a private scratch copy of this
+    /// generation. It is
     /// mounted read-only into the child's process by hash, re-attached on
     /// recovery, sealed into the admitted launch capsule, and its objects stay
     /// reachable for GC exactly while the thread is live. Required-nullable:

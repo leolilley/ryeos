@@ -5722,7 +5722,24 @@ impl ThreadLifecycleService {
         if terminal_status == ThreadStatus::Continued.as_str() {
             return;
         }
-        let children = match self.state_store.flagged_dispatch_children(thread_id) {
+        // The session ends with its tail: a chain that has not ended, or one
+        // with no flagged child in any segment, has nothing to wake.
+        match crate::cascade::session_chain_has_ended(&self.state_store, thread_id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to resolve the ended session's chain; the periodic sweep retries"
+                );
+                return;
+            }
+        }
+        let children = match crate::cascade::session_flagged_dispatch_children(
+            &self.state_store,
+            thread_id,
+        ) {
             Ok(children) => children,
             Err(error) => {
                 tracing::warn!(

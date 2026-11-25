@@ -146,3 +146,89 @@ fn a_released_intent_roots_its_input_only_until_its_child_exists() {
     birth_detached_child(&store, "T-bare-child", None);
     assert_eq!(rooted(&store, &pair), (false, false));
 }
+
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// An abandoned spawn: the capture released the parent's workspace and the
+/// child was never created. The intent keeps rooting the captured input until
+/// it is old enough to retire; the retirement then lets a sweep collect it.
+#[test]
+fn an_abandoned_detached_intent_is_retired_and_its_input_is_no_longer_rooted() {
+    let store = test_store();
+    let pair = input_pair("1", "2");
+    let operation_id = quiesced_detached_input(&store, "T-never-born", &pair);
+    release_operation(&store, &operation_id);
+    assert!(store.get_thread("T-never-born").unwrap().is_none());
+    assert_eq!(rooted(&store, &pair), (true, true), "no child yet");
+
+    let now = lillux::time::timestamp_millis();
+    let age = abandoned_detached_intent_age(None);
+    // A young intent is kept: its spawn may still be running.
+    let young = store.retire_abandoned_detached_intents(now, age).unwrap();
+    assert!(young.retired.is_empty());
+    assert_eq!(rooted(&store, &pair), (true, true), "young intent kept");
+
+    // Past the bound it is retired, and a sweep no longer roots the input.
+    let old = store
+        .retire_abandoned_detached_intents(now + 2 * HOUR_MS, age)
+        .unwrap();
+    assert_eq!(old.retired, vec![operation_id.clone()]);
+    assert!(
+        store
+            .get_runtime_action_intent(&operation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        rooted(&store, &pair),
+        (false, false),
+        "a sweep after the retirement collects the input"
+    );
+    // Retiring again finds nothing.
+    let again = store
+        .retire_abandoned_detached_intents(now + 2 * HOUR_MS, age)
+        .unwrap();
+    assert!(again.retired.is_empty());
+}
+
+/// An intent whose child exists is never retired, however old: the child's
+/// own authority owns its input from then on.
+#[test]
+fn an_old_detached_intent_with_a_child_is_not_retired() {
+    let store = test_store();
+    let pair = input_pair("3", "4");
+    let operation_id = quiesced_detached_input(&store, "T-born", &pair);
+    release_operation(&store, &operation_id);
+    birth_detached_child(&store, "T-born", Some(pair.clone()));
+    let report = store
+        .retire_abandoned_detached_intents(
+            lillux::time::timestamp_millis() + 48 * HOUR_MS,
+            abandoned_detached_intent_age(None),
+        )
+        .unwrap();
+    assert!(report.retired.is_empty());
+    assert!(
+        store
+            .get_runtime_action_intent(&operation_id)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(rooted(&store, &pair), (true, true));
+}
+
+#[test]
+fn the_abandoned_intent_age_defaults_and_clamps() {
+    use std::time::Duration;
+    assert_eq!(
+        abandoned_detached_intent_age(None),
+        Duration::from_secs(3600)
+    );
+    assert_eq!(
+        abandoned_detached_intent_age(Some(Duration::from_secs(60))),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        abandoned_detached_intent_age(Some(Duration::from_secs(10 * 24 * 3600))),
+        Duration::from_secs(24 * 3600)
+    );
+}

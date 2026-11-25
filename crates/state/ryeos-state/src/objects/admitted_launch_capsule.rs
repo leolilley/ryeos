@@ -1582,7 +1582,11 @@ pub struct AdmittedLaunchCapsule {
     /// only a launch with no parent execution context states `Unbounded`.
     pub thread_ceiling: ThreadWorkloadCeiling,
     /// Parent workspace generation a detached child reads as data: mounted
-    /// read-only into its process, never an item-resolution source. Required-
+    /// read-only into its process, never an item-resolution source. This is
+    /// the reader's record of what the process saw: the project authority
+    /// beside it describes the child's own pinned workspace, which the process
+    /// is never given, while the process sees a private scratch copy of this
+    /// generation. Required-
     /// nullable: `None` states the launch received no workspace input. It is
     /// data and lineage, not product authority, so it is absent from the
     /// product-build replay digest, and a launch carrying one is refused

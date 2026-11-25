@@ -51,6 +51,14 @@ pub const WORKLOAD_COLLECT_NOT_PERMITTED_MESSAGE: &str =
     "the grant does not permit collecting this thread";
 /// A permitted collect whose child result exceeds its byte cap.
 pub const WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE: &str = "workload_collect_result_too_large";
+/// A permitted collect whose child output contains a secret value the node
+/// holds. The output is withheld whole; it is never cut or masked.
+pub const WORKLOAD_COLLECT_RESULT_WITHHELD_CODE: &str = "workload_collect_result_withheld";
+pub const WORKLOAD_COLLECT_RESULT_WITHHELD_MESSAGE: &str =
+    "the child's output matches a secret value the node holds and is withheld";
+/// Shortest secret the exact-match floor looks for. A shorter value would
+/// match ordinary text by chance, so it is not checked.
+pub const MIN_COLLECT_SECRET_FLOOR_BYTES: usize = 8;
 const MAX_WORKLOAD_CLIENT_ERROR_CODE_BYTES: usize = 128;
 const MAX_WORKLOAD_CLIENT_IDENTIFIER_BYTES: usize = 256;
 const MAX_WORKLOAD_CLIENT_BINDING_NAME_BYTES: usize = 128;
@@ -907,6 +915,71 @@ pub fn validate_request_id(request_id: &str) -> anyhow::Result<()> {
 
 /// Produce error text accepted by the wire validator. The ceiling counts
 /// UTF-8 bytes, not characters; never split a code point or retain NUL.
+/// The exact-match secret floor on a child's output.
+///
+/// The child's output is the disclosure surface of a collect: whatever the
+/// child printed, the session can read. This is a floor under that surface,
+/// not a guarantee. It refuses output that contains, byte for byte, a secret
+/// value of at least [`MIN_COLLECT_SECRET_FLOOR_BYTES`] bytes: in the raw
+/// text of any string or key, in the compact serialized JSON (which catches a
+/// number and the JSON-escaped form of the value), and in the ASCII-escaped
+/// `\uXXXX` form of the value. It does not catch a secret that was encoded,
+/// hashed, split across fields or shortened, nor one that was never in
+/// `secrets`.
+pub fn value_contains_secret<S: AsRef<str>>(value: &Value, secrets: &[S]) -> bool {
+    let needles: Vec<String> = secrets
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|secret| secret.len() >= MIN_COLLECT_SECRET_FLOOR_BYTES)
+        .flat_map(secret_text_forms)
+        .collect();
+    if needles.is_empty() {
+        return false;
+    }
+    let contains_any = |text: &str| needles.iter().any(|needle| text.contains(needle.as_str()));
+    contains_any(&value.to_string()) || any_text(value, &contains_any)
+}
+
+/// The raw secret plus the JSON-escaped and ASCII-escaped forms of it.
+fn secret_text_forms(secret: &str) -> Vec<String> {
+    let mut forms = vec![secret.to_owned()];
+    if let Ok(quoted) = serde_json::to_string(secret) {
+        forms.push(quoted[1..quoted.len() - 1].to_owned());
+    }
+    if !secret.is_ascii() {
+        let mut lower = String::new();
+        let mut upper = String::new();
+        for character in secret.chars() {
+            if character.is_ascii() {
+                lower.push(character);
+                upper.push(character);
+            } else {
+                let mut units = [0u16; 2];
+                for unit in character.encode_utf16(&mut units).iter() {
+                    lower.push_str(&format!("\\u{unit:04x}"));
+                    upper.push_str(&format!("\\u{unit:04X}"));
+                }
+            }
+        }
+        forms.push(lower);
+        forms.push(upper);
+    }
+    forms.sort();
+    forms.dedup();
+    forms
+}
+
+fn any_text(value: &Value, test: &dyn Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(text) => test(text),
+        Value::Array(items) => items.iter().any(|item| any_text(item, test)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, field)| test(key) || any_text(field, test)),
+        _ => false,
+    }
+}
+
 pub fn bounded_error_message(message: &str) -> String {
     let mut result = String::new();
     for character in message.chars().filter(|character| *character != '\0') {
@@ -1558,5 +1631,80 @@ mod tests {
             .collect();
         let error = request(vec![oversized]).validate().unwrap_err();
         assert!(error.to_string().contains("retained fact bound"));
+    }
+
+    #[test]
+    fn the_secret_floor_matches_raw_escaped_and_numeric_forms() {
+        let secret = "sk-live-0123456789";
+        let secrets = [secret.to_owned()];
+        // Raw inside a string, inside a nested key, and inside a number.
+        assert!(value_contains_secret(
+            &serde_json::json!({"a": [format!("prefix {secret} suffix")]}),
+            &secrets
+        ));
+        let mut keyed = serde_json::Map::new();
+        keyed.insert(secret.to_owned(), serde_json::json!(1));
+        assert!(value_contains_secret(&Value::Object(keyed), &secrets));
+        assert!(value_contains_secret(
+            &serde_json::json!({"n": 1234567890123_u64}),
+            &["1234567890123".to_owned()]
+        ));
+        // A result without it passes.
+        assert!(!value_contains_secret(
+            &serde_json::json!({"answer": 42, "text": "nothing here"}),
+            &secrets
+        ));
+        assert!(!value_contains_secret(&serde_json::json!(null), &secrets));
+        // The JSON-escaped form: the secret holds a quote and a backslash, and
+        // the child printed an already-serialized document that holds it.
+        let tricky = "pa\"ss\\word-1234".to_owned();
+        let doc = serde_json::json!({"echo": serde_json::to_string(&tricky).unwrap()});
+        assert!(value_contains_secret(&doc, std::slice::from_ref(&tricky)));
+    }
+
+    #[test]
+    fn the_secret_floor_matches_the_ascii_escaped_unicode_form() {
+        let secret = "clé-secrète-été".to_owned();
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": secret.clone()}),
+            std::slice::from_ref(&secret)
+        ));
+        let escaped = "cl\\u00e9-secr\\u00e8te-\\u00e9t\\u00e9";
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": escaped}),
+            std::slice::from_ref(&secret)
+        ));
+        let upper = escaped.replace("00e", "00E");
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": upper}),
+            std::slice::from_ref(&secret)
+        ));
+        // A supplementary-plane character is escaped as a surrogate pair.
+        let astral = "key-\u{1F511}-material".to_owned();
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": "key-\\ud83d\\udd11-material"}),
+            std::slice::from_ref(&astral)
+        ));
+    }
+
+    #[test]
+    fn the_secret_floor_skips_values_below_its_minimum_length() {
+        let short = "abc1234".to_owned();
+        assert_eq!(short.len(), MIN_COLLECT_SECRET_FLOOR_BYTES - 1);
+        assert!(!value_contains_secret(
+            &serde_json::json!({"x": "contains abc1234 text"}),
+            std::slice::from_ref(&short)
+        ));
+        let exact = "abc12345".to_owned();
+        assert_eq!(exact.len(), MIN_COLLECT_SECRET_FLOOR_BYTES);
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": "contains abc12345 text"}),
+            std::slice::from_ref(&exact)
+        ));
+        // No secrets, or only short ones, never withholds anything.
+        assert!(!value_contains_secret::<String>(
+            &serde_json::json!("anything"),
+            &[]
+        ));
     }
 }

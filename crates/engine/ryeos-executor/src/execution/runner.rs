@@ -3757,6 +3757,14 @@ fn select_process_input_root(
     // A detached child's workspace input is data: it is materialized by hash
     // into a private root whatever the child's own project class, so the
     // process never reaches the parent's workspace or a shared checkout.
+    //
+    // Which authority describes which: the child's recorded project authority
+    // (a copy-on-write pinned workspace that discards at the end) belongs to
+    // the child's own pinned workspace, which the process is never given. The
+    // private by-hash root chosen here is an ephemeral scratch copy, and it is
+    // what the process sees. Both discard and neither writes back. The sealed
+    // `workspace_input` generation is the reader's record of what the process
+    // saw.
     if restore_outputs || by_hash_workspace_input {
         return ProcessInputRootSelection::PinnedReadOnlyPrivate;
     }
@@ -4363,6 +4371,8 @@ pub(crate) fn prepare_process_inputs(
     let immutable_input_generation = provenance.immutable_workspace_input_generation();
     // Only a pinned root carries a detached child's workspace input; an
     // immutable borrowed child already runs from its own input materialization.
+    // The process sees this input as a private scratch copy, not as the
+    // child's own pinned workspace (see `select_process_input_root`).
     let by_hash_workspace_input = matches!(
         provenance,
         ExecutionProvenance::RootPinnedGeneration {

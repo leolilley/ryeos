@@ -236,13 +236,57 @@ impl StopIntent {
     }
 
     fn parse(value: &str) -> Result<Self> {
-        match value {
-            "cancel" => Ok(Self::Cancel),
-            "kill" => Ok(Self::Kill),
-            other => bail!("invalid durable stop intent `{other}`"),
-        }
+        parse_stop_tombstone(value).map(|(intent, _)| intent)
     }
 }
+
+/// Who wrote a durable stop tombstone. The origin of the FIRST writer is kept
+/// for the life of the tombstone, as its timestamp is: a later writer can
+/// escalate the intent (cancel to kill) but never changes who stopped the
+/// thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOrigin {
+    /// An explicit stop: a person's cancel or kill, a cascade of one, or any
+    /// recovery path.
+    Requested,
+    /// The stop written because the flagged child's parent session ended: by
+    /// the parent-end sweep, or by the link of a flagged child born under an
+    /// ended or stopped parent. It is what makes a stopped child finalize as
+    /// `cancelled_by_parent_end`.
+    ParentEnd,
+}
+
+/// The stored text of a stop tombstone. The origin rides in the same column
+/// as the intent, as a value suffix, so no schema carries it.
+fn stop_tombstone_text(intent: StopIntent, origin: StopOrigin) -> &'static str {
+    match (intent, origin) {
+        (StopIntent::Cancel, StopOrigin::Requested) => "cancel",
+        (StopIntent::Kill, StopOrigin::Requested) => "kill",
+        (StopIntent::Cancel, StopOrigin::ParentEnd) => "cancel_parent_end",
+        (StopIntent::Kill, StopOrigin::ParentEnd) => "kill_parent_end",
+    }
+}
+
+fn parse_stop_tombstone(value: &str) -> Result<(StopIntent, StopOrigin)> {
+    match value {
+        "cancel" => Ok((StopIntent::Cancel, StopOrigin::Requested)),
+        "kill" => Ok((StopIntent::Kill, StopOrigin::Requested)),
+        "cancel_parent_end" => Ok((StopIntent::Cancel, StopOrigin::ParentEnd)),
+        "kill_parent_end" => Ok((StopIntent::Kill, StopOrigin::ParentEnd)),
+        other => bail!("invalid durable stop intent `{other}`"),
+    }
+}
+
+/// SQL expression merging a stop request (bound as `?3`, a stored tombstone
+/// text) into the `stop_intent` column. A kill dominates a cancel, and the
+/// origin of the first writer is kept.
+const MERGE_STOP_TOMBSTONE_SQL: &str = "CASE
+    WHEN stop_intent IS NULL THEN ?3
+    WHEN stop_intent IN ('kill', 'kill_parent_end') THEN stop_intent
+    WHEN ?3 IN ('kill', 'kill_parent_end') THEN
+        CASE WHEN stop_intent = 'cancel_parent_end' THEN 'kill_parent_end' ELSE 'kill' END
+    ELSE stop_intent
+END";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeInfo {
@@ -17765,6 +17809,63 @@ impl RuntimeDb {
         })
     }
 
+    /// `(operation_id, child_thread_id)` of every detached intent that a
+    /// reaper may consider retiring: its workspace operation is released, it
+    /// is older than `created_before_ms`, and it was never sealed (any of the
+    /// child's project authority, admitted capsule, launch metadata or
+    /// initial events is still absent). A sealed intent is never listed:
+    /// startup recovery rebuilds its child from the seal. The caller must
+    /// still prove that no child thread row exists before it retires one.
+    pub fn unsealed_released_detached_intents(
+        &self,
+        created_before_ms: i64,
+    ) -> Result<Vec<(String, String)>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation_id, child_thread_id FROM runtime_action_intent
+                  WHERE mode='detached' AND workspace_operation_phase='released'
+                    AND created_at_ms < ?1
+                    AND (child_project_authority IS NULL
+                         OR admitted_launch_capsule_hash IS NULL
+                         OR launch_metadata IS NULL
+                         OR initial_events IS NULL)
+                  ORDER BY created_at_ms, operation_id",
+            )?;
+            let rows = statement
+                .query_map(params![created_before_ms], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(anyhow::Error::from)?;
+            Ok(rows)
+        })
+    }
+
+    /// Delete one detached intent of the kind
+    /// [`Self::unsealed_released_detached_intents`] lists, by its exact
+    /// operation and child identity. The same predicate guards the delete, so
+    /// an intent that was sealed or moved out of `released` since it was
+    /// listed is left alone. Returns whether a row was deleted.
+    pub fn delete_unsealed_released_detached_intent(
+        &self,
+        operation_id: &str,
+        child_thread_id: &str,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let deleted = conn.execute(
+                "DELETE FROM runtime_action_intent
+                  WHERE operation_id=?1 AND child_thread_id=?2
+                    AND mode='detached' AND workspace_operation_phase='released'
+                    AND (child_project_authority IS NULL
+                         OR admitted_launch_capsule_hash IS NULL
+                         OR launch_metadata IS NULL
+                         OR initial_events IS NULL)",
+                params![operation_id, child_thread_id],
+            )?;
+            Ok(deleted == 1)
+        })
+    }
+
     pub fn get_runtime_action_intent(
         &self,
         operation_id: &str,
@@ -20731,7 +20832,8 @@ impl RuntimeDb {
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
                 "UPDATE thread_runtime SET stop_requested_at_ms=COALESCE(stop_requested_at_ms, ?4),
-                stop_intent='kill'
+                stop_intent=CASE WHEN stop_intent IN ('cancel_parent_end', 'kill_parent_end')
+                    THEN 'kill_parent_end' ELSE 'kill' END
               WHERE thread_id=?1 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND EXISTS(SELECT 1 FROM thread_process_scope_reservation
                     WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3)",
@@ -21152,23 +21254,51 @@ impl RuntimeDb {
     /// A concurrent attach is serialized by the StateStore lock: it either
     /// lands first and is returned here, or observes the tombstone and fails.
     pub fn request_thread_stop(&self, thread_id: &str, intent: StopIntent) -> Result<RuntimeInfo> {
+        self.request_thread_stop_with_origin(thread_id, intent, StopOrigin::Requested)
+    }
+
+    /// As [`Self::request_thread_stop`], recording who wrote the stop. Only
+    /// the first writer's origin is kept; see [`StopOrigin`].
+    pub fn request_thread_stop_with_origin(
+        &self,
+        thread_id: &str,
+        intent: StopIntent,
+        origin: StopOrigin,
+    ) -> Result<RuntimeInfo> {
         self.conn.with_sql(|conn| {
             let now_ms = lillux::time::timestamp_millis();
             let updated = conn.execute(
-                "UPDATE thread_runtime
+                &format!(
+                    "UPDATE thread_runtime
                 SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                    stop_intent = CASE
-                        WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
-                        ELSE 'cancel'
-                    END
-              WHERE thread_id = ?1",
-                params![thread_id, now_ms, intent.as_str()],
+                    stop_intent = {MERGE_STOP_TOMBSTONE_SQL}
+              WHERE thread_id = ?1"
+                ),
+                params![thread_id, now_ms, stop_tombstone_text(intent, origin)],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
             }
             self.get_runtime_info(thread_id)?
                 .ok_or_else(|| anyhow::anyhow!("thread_runtime row disappeared for {thread_id}"))
+        })
+    }
+
+    /// Whether the thread's stop tombstone was written by the parent-end stop
+    /// of a flagged child (see [`StopOrigin::ParentEnd`]).
+    pub fn thread_stopped_by_parent_end(&self, thread_id: &str) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let text: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT stop_intent FROM thread_runtime WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match text.flatten() {
+                Some(text) => Ok(parse_stop_tombstone(&text)?.1 == StopOrigin::ParentEnd),
+                None => Ok(false),
+            }
         })
     }
 
@@ -23334,18 +23464,30 @@ impl RuntimeDb {
                 ChildLinkStopPolicy::IfInserted(_) => None,
             };
             let effective_stop = if let Some(intent) = requested_stop {
+                // A stop inherited by a flagged dispatch child because its
+                // parent ended or was stopped is the parent-end stop.
+                let flagged: bool = tx.query_row(
+                    "SELECT relation = 'dispatch' AND cancel_on_parent_end = 1
+                       FROM thread_child_link WHERE child_thread_id = ?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )?;
+                let origin = if flagged {
+                    StopOrigin::ParentEnd
+                } else {
+                    StopOrigin::Requested
+                };
                 let updated = tx.execute(
-                    "UPDATE thread_runtime
+                    &format!(
+                        "UPDATE thread_runtime
                     SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                        stop_intent = CASE
-                            WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
-                            ELSE 'cancel'
-                        END
-                  WHERE thread_id = ?1",
+                        stop_intent = {MERGE_STOP_TOMBSTONE_SQL}
+                  WHERE thread_id = ?1"
+                    ),
                     params![
                         child_thread_id,
                         lillux::time::timestamp_millis(),
-                        intent.as_str()
+                        stop_tombstone_text(intent, origin)
                     ],
                 )?;
                 if updated == 0 {

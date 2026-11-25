@@ -1232,24 +1232,16 @@ pub fn is_terminal_status(status: &str) -> bool {
     )
 }
 
-/// Whether `thread_id` is a flagged `dispatch` child whose parent session has
-/// ended: the parent is terminal (a continued segment is not an end) or already
-/// carries a durable stop. A stop of such a child, from the parent's end or from
-/// the cascade of the parent's own cancel, finalizes with the parent-end outcome.
-/// A stop of a child whose parent is still running is an ordinary stop.
+/// Whether the stop that dominates `thread_id`'s finalization was written as
+/// a parent-end stop: by the sweep that stops a flagged `dispatch` child when
+/// its session ends, by the cascade of a stopped parent reaching a flagged
+/// child, or by the link of a flagged child born under an ended or stopped
+/// parent. Provenance of the stop decides the label, not the parent's state: a
+/// person's cancel or kill of a flagged child, written first, keeps the
+/// child's own cancelled or killed outcome whether or not its parent has
+/// ended since.
 fn stopped_by_parent_session_end(g: &Inner, thread_id: &str) -> Result<bool> {
-    let Some(parent_id) = g.runtime_db.flagged_dispatch_parent(thread_id)? else {
-        return Ok(false);
-    };
-    if let Some(parent) = g.state_db.get_thread(&parent_id)?
-        && is_terminal_status(&parent.status)
-        && parent.status != ThreadStatus::Continued.as_str()
-    {
-        return Ok(true);
-    }
-    Ok(g.runtime_db
-        .get_runtime_info(&parent_id)?
-        .is_some_and(|runtime| runtime.stop_intent.is_some()))
+    g.runtime_db.thread_stopped_by_parent_end(thread_id)
 }
 
 pub(super) fn terminal_event_type(status: &str) -> Result<&'static str> {
