@@ -114,6 +114,105 @@ pub enum ChildLinkInsertOutcome {
     AlreadyPresent,
 }
 
+/// The slice of a session's spend total reserved for one child, written with
+/// the child's link. `session_key` is the session chain root, so every session
+/// in a chain draws against one total. `usd_nanos` is the accounting money
+/// representation (non-negative integer nanos).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildSpendDraw {
+    pub usd_nanos: i64,
+    pub session_key: String,
+}
+
+/// The spend columns of one child link, as recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildLinkSpend {
+    pub draw: Option<ChildSpendDraw>,
+    pub released_usd_nanos: Option<i64>,
+    pub settled_at_ms: Option<i64>,
+}
+
+/// The account limit for a child: the smallest of what the child asked for,
+/// the node's cap, and the draw reserved for it on its link. The draw is the
+/// enforcement of the session total; the child's own account caps its real
+/// spend at this value.
+pub fn child_account_limit(child_request: i64, node_cap: i64, draw: i64) -> i64 {
+    child_request.min(node_cap).min(draw)
+}
+
+/// What a settlement releases back to the session. Only a complete usage
+/// status releases the unspent part of the draw (`draw - final_cost`, never
+/// negative); a partial or unavailable settlement releases nothing, so the
+/// live draw and the released amount stay separate facts.
+pub fn settlement_release_usd_nanos(draw: i64, final_cost: i64, usage_complete: bool) -> i64 {
+    if usage_complete {
+        draw.saturating_sub(final_cost).clamp(0, draw.max(0))
+    } else {
+        0
+    }
+}
+
+/// One spend-bearing link row, as the integrity check reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildLinkSpendRow {
+    pub child_thread_id: String,
+    pub draw: Option<i64>,
+    pub released: Option<i64>,
+    pub settled_at_ms: Option<i64>,
+    pub session_key: Option<String>,
+}
+
+/// Integrity findings over the link table's spend columns. Used by
+/// `ryeos node doctor` once it can read the runtime store. The table CHECKs
+/// make these states unreachable through the writers; the check finds a store
+/// written around them.
+///
+/// Covered: a release above its draw, a release without a settlement time, a
+/// release without a draw, a draw without a session key, a negative amount,
+/// and a per-session sum of unreleased draws that overflows.
+///
+/// Not covered here, because each needs data the link table does not hold: a
+/// session whose unreleased draws exceed its grant total needs the grant
+/// total (the grant is not stored), and a settled child whose account still
+/// has unsettled spend needs the accounting join. Both are supplied by the
+/// spend unit that writes draws.
+pub fn child_link_spend_findings(rows: &[ChildLinkSpendRow]) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut sums: BTreeMap<&str, Option<i64>> = BTreeMap::new();
+    for row in rows {
+        let id = &row.child_thread_id;
+        if row.draw.is_some_and(|d| d < 0) || row.released.is_some_and(|r| r < 0) {
+            findings.push(format!("{id}: negative spend amount"));
+        }
+        if row.draw.is_some() && row.session_key.is_none() {
+            findings.push(format!("{id}: draw without a session key"));
+        }
+        if let Some(released) = row.released {
+            match row.draw {
+                None => findings.push(format!("{id}: release without a draw")),
+                Some(draw) if released > draw => {
+                    findings.push(format!("{id}: release {released} exceeds draw {draw}"));
+                }
+                Some(_) => {}
+            }
+            if row.settled_at_ms.is_none() {
+                findings.push(format!("{id}: release without a settlement time"));
+            }
+        }
+        if let (Some(draw), Some(key)) = (row.draw, row.session_key.as_deref()) {
+            let unreleased = draw.saturating_sub(row.released.unwrap_or(0).min(draw));
+            let entry = sums.entry(key).or_insert(Some(0));
+            *entry = entry.and_then(|sum| sum.checked_add(unreleased));
+        }
+    }
+    for (key, sum) in sums {
+        if sum.is_none() {
+            findings.push(format!("session {key}: unreleased draws overflow"));
+        }
+    }
+    findings
+}
+
 /// Durable stop behavior coupled to a child-link write.
 ///
 /// Keeping this policy inside the runtime database transaction closes the
@@ -2403,11 +2502,23 @@ CREATE TABLE IF NOT EXISTS thread_child_link (
     parent_thread_id TEXT NOT NULL,
     relation TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
-    cancel_on_parent_end INTEGER NOT NULL DEFAULT 0 CHECK (cancel_on_parent_end IN (0, 1))
+    cancel_on_parent_end INTEGER NOT NULL DEFAULT 0 CHECK (cancel_on_parent_end IN (0, 1)),
+    spend_draw_usd_nanos INTEGER CHECK (spend_draw_usd_nanos IS NULL OR spend_draw_usd_nanos >= 0),
+    spend_released_usd_nanos INTEGER CHECK (spend_released_usd_nanos IS NULL OR spend_released_usd_nanos >= 0),
+    settled_at_ms INTEGER,
+    session_key TEXT,
+    CHECK (spend_draw_usd_nanos IS NULL OR session_key IS NOT NULL),
+    CHECK (spend_released_usd_nanos IS NULL
+           OR (spend_draw_usd_nanos IS NOT NULL
+               AND spend_released_usd_nanos <= spend_draw_usd_nanos
+               AND settled_at_ms IS NOT NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
     ON thread_child_link(parent_thread_id);
+
+CREATE INDEX IF NOT EXISTS idx_thread_child_link_session
+    ON thread_child_link(session_key);
 
 CREATE TABLE IF NOT EXISTS launch_window (
     child_chain_root_id TEXT PRIMARY KEY,
@@ -2790,6 +2901,14 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // link by a detached spawn from a grant-bearing parent, and lets a detached
 // runtime action carry an immutable workspace operation (the
 // `runtime_action_intent` workspace CHECK admits `detached` beside `inline`).
+// The same cut gives the link the session spend draw: `spend_draw_usd_nanos`
+// (the slice of the session total reserved for the child, written with the
+// link before the child's account exists), `session_key` (the session chain
+// root the draw is summed under, so a successor session cannot reset its
+// total), `spend_released_usd_nanos` and `settled_at_ms` (written together,
+// only after the child's accounting settlement is durable). CHECKs: a draw
+// carries a session key, a release carries a draw and a settlement time, and
+// a release never exceeds its draw.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
@@ -5800,6 +5919,30 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_draw_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_released_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "session_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -6812,6 +6955,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_thread_child_link_parent",
                 table: "thread_child_link",
                 columns: &["parent_thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_child_link_session",
+                table: "thread_child_link",
+                columns: &["session_key"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -23058,6 +23207,7 @@ impl RuntimeDb {
             relation,
             stop_policy,
             false,
+            None,
         )
     }
 
@@ -23067,6 +23217,13 @@ impl RuntimeDb {
     /// recovery paths replay the link without stating it (`false`) and leave
     /// the recorded value; the spawn that owns the flag replays it as `true`,
     /// which sets it on a link a recovery path happened to record first.
+    ///
+    /// `spend_draw`, when given, is written in the same statement, before the
+    /// child's account exists. A replay never changes a recorded draw: the
+    /// same draw is accepted, a different one is refused, and a replay that
+    /// states none keeps what is recorded. A draw stated on a replay of a link
+    /// that has none is refused rather than added, so a draw exists from the
+    /// link's birth or not at all.
     pub fn record_child_link_with_options(
         &self,
         parent_thread_id: &str,
@@ -23074,20 +23231,24 @@ impl RuntimeDb {
         relation: &str,
         stop_policy: ChildLinkStopPolicy,
         cancel_on_parent_end: bool,
+        spend_draw: Option<&ChildSpendDraw>,
     ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
         self.conn.with_sql(|conn| {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
                 "INSERT INTO thread_child_link
-                    (child_thread_id, parent_thread_id, relation, created_at_ms, cancel_on_parent_end)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                    (child_thread_id, parent_thread_id, relation, created_at_ms, cancel_on_parent_end,
+                     spend_draw_usd_nanos, session_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(child_thread_id) DO NOTHING",
                 params![
                     child_thread_id,
                     parent_thread_id,
                     relation,
                     lillux::time::timestamp_millis(),
-                    cancel_on_parent_end
+                    cancel_on_parent_end,
+                    spend_draw.map(|draw| draw.usd_nanos),
+                    spend_draw.map(|draw| draw.session_key.as_str())
                 ],
             )?;
             let outcome = if inserted == 1 {
@@ -23095,7 +23256,9 @@ impl RuntimeDb {
             } else {
                 let existing = tx
                     .query_row(
-                    "SELECT parent_thread_id, relation, cancel_on_parent_end FROM thread_child_link
+                    "SELECT parent_thread_id, relation, cancel_on_parent_end,
+                            spend_draw_usd_nanos, session_key
+                       FROM thread_child_link
                  WHERE child_thread_id = ?1",
                     params![child_thread_id],
                     |row| {
@@ -23103,6 +23266,8 @@ impl RuntimeDb {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, bool>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
                         ))
                     },
                 )
@@ -23118,6 +23283,19 @@ impl RuntimeDb {
                         existing.0,
                         existing.1
                     );
+                }
+                if let Some(draw) = spend_draw {
+                    let same = existing.3 == Some(draw.usd_nanos)
+                        && existing.4.as_deref() == Some(draw.session_key.as_str());
+                    if !same {
+                        bail!(
+                            "child {child_thread_id} link already records spend draw {:?} for session {:?}; refusing replay with draw {} for session {}",
+                            existing.3,
+                            existing.4,
+                            draw.usd_nanos,
+                            draw.session_key
+                        );
+                    }
                 }
                 if cancel_on_parent_end && !existing.2 {
                     tx.execute(
@@ -23184,6 +23362,140 @@ impl RuntimeDb {
             )
             .optional()
             .map_err(Into::into)
+        })
+    }
+
+    /// The spend columns of the child's link, or `None` when no link has been
+    /// recorded.
+    pub fn child_link_spend(&self, child_thread_id: &str) -> Result<Option<ChildLinkSpend>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT spend_draw_usd_nanos, session_key, spend_released_usd_nanos, settled_at_ms
+                   FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| {
+                    let draw: Option<i64> = row.get(0)?;
+                    let session_key: Option<String> = row.get(1)?;
+                    Ok(ChildLinkSpend {
+                        draw: match (draw, session_key) {
+                            (Some(usd_nanos), Some(session_key)) => Some(ChildSpendDraw {
+                                usd_nanos,
+                                session_key,
+                            }),
+                            _ => None,
+                        },
+                        released_usd_nanos: row.get(2)?,
+                        settled_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The draw recorded on the child's link, if any.
+    pub fn child_link_spend_draw(&self, child_thread_id: &str) -> Result<Option<ChildSpendDraw>> {
+        Ok(self
+            .child_link_spend(child_thread_id)?
+            .and_then(|spend| spend.draw))
+    }
+
+    /// The sum over the session of `draw - released` for every link carrying a
+    /// draw (an unreleased draw counts in full). Overflow is refused, never
+    /// wrapped or saturated.
+    pub fn session_unreleased_draw_total(&self, session_key: &str) -> Result<i64> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT spend_draw_usd_nanos - COALESCE(spend_released_usd_nanos, 0)
+                   FROM thread_child_link
+                  WHERE session_key = ?1 AND spend_draw_usd_nanos IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(params![session_key], |row| row.get::<_, i64>(0))?;
+            let mut total: i64 = 0;
+            for row in rows {
+                total = total.checked_add(row?).ok_or_else(|| {
+                    anyhow::anyhow!("unreleased spend draws for session {session_key} overflow")
+                })?;
+            }
+            Ok(total)
+        })
+    }
+
+    /// The number of live detached children of the session: dispatch links
+    /// flagged to be cancelled with their parent that have not settled.
+    pub fn session_live_count(&self, session_key: &str) -> Result<u64> {
+        self.conn.with_sql(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM thread_child_link
+                  WHERE session_key = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1 AND settled_at_ms IS NULL",
+                params![session_key],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+    }
+
+    /// Settle the child's link: record `released_usd_nanos` and the settlement
+    /// time in one statement, only when the link carries a draw and is not
+    /// already settled. Returns whether this call settled it. A release above
+    /// the draw is refused. Called only after the child's accounting
+    /// settlement is durable, with the amount derived from the accounting
+    /// record (see [`settlement_release_usd_nanos`]).
+    pub fn release_child_link_draw(
+        &self,
+        child_thread_id: &str,
+        released_usd_nanos: i64,
+        settled_at_ms: i64,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let draw: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT spend_draw_usd_nanos FROM thread_child_link WHERE child_thread_id=?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let draw = draw
+                .ok_or_else(|| anyhow::anyhow!("no child link for {child_thread_id}"))?
+                .ok_or_else(|| anyhow::anyhow!("child link {child_thread_id} carries no spend draw"))?;
+            if released_usd_nanos < 0 || released_usd_nanos > draw {
+                bail!(
+                    "release {released_usd_nanos} for child {child_thread_id} is outside its draw {draw}"
+                );
+            }
+            let updated = conn.execute(
+                "UPDATE thread_child_link
+                    SET spend_released_usd_nanos = ?2, settled_at_ms = ?3
+                  WHERE child_thread_id = ?1 AND settled_at_ms IS NULL",
+                params![child_thread_id, released_usd_nanos, settled_at_ms],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    /// Every spend-bearing or settled link row, for [`child_link_spend_findings`].
+    pub fn child_link_spend_rows(&self) -> Result<Vec<ChildLinkSpendRow>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id, spend_draw_usd_nanos, spend_released_usd_nanos,
+                        settled_at_ms, session_key
+                   FROM thread_child_link
+                  WHERE spend_draw_usd_nanos IS NOT NULL OR spend_released_usd_nanos IS NOT NULL
+                     OR settled_at_ms IS NOT NULL OR session_key IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ChildLinkSpendRow {
+                    child_thread_id: row.get(0)?,
+                    draw: row.get(1)?,
+                    released: row.get(2)?,
+                    settled_at_ms: row.get(3)?,
+                    session_key: row.get(4)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
         })
     }
 
@@ -32777,6 +33089,7 @@ mod tests {
                 "dispatch",
                 ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
                 true,
+                None,
             )
             .expect_err("missing stop target must roll back the link and its flag");
         assert!(error.to_string().contains("thread_runtime row missing"));
@@ -32797,6 +33110,7 @@ mod tests {
                 "dispatch",
                 ChildLinkStopPolicy::None,
                 true,
+                None,
             )
             .unwrap()
             .0,
@@ -32825,6 +33139,7 @@ mod tests {
                 "dispatch",
                 ChildLinkStopPolicy::None,
                 true,
+                None,
             )
             .unwrap()
             .0,
@@ -32848,6 +33163,7 @@ mod tests {
                 "dispatch",
                 ChildLinkStopPolicy::None,
                 true,
+                None,
             )
             .unwrap()
             .0,
@@ -32864,9 +33180,275 @@ mod tests {
                 "dispatch",
                 ChildLinkStopPolicy::None,
                 true,
+                None,
             )
             .expect_err("a conflicting parent is still refused");
         assert!(error.to_string().contains("refusing conflicting"));
+    }
+
+    fn draw(usd_nanos: i64, session_key: &str) -> ChildSpendDraw {
+        ChildSpendDraw {
+            usd_nanos,
+            session_key: session_key.to_owned(),
+        }
+    }
+
+    fn link_with_draw(
+        db: &RuntimeDb,
+        parent: &str,
+        child: &str,
+        spend: Option<&ChildSpendDraw>,
+    ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
+        db.record_child_link_with_options(
+            parent,
+            child,
+            "dispatch",
+            ChildLinkStopPolicy::None,
+            true,
+            spend,
+        )
+    }
+
+    fn raw_insert(db: &RuntimeDb, child: &str, columns: &str, values: &str) -> Result<usize> {
+        db.conn.with_sql(|conn| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO thread_child_link
+                        (child_thread_id, parent_thread_id, relation, created_at_ms, {columns})
+                     VALUES ('{child}', 'p', 'dispatch', 1, {values})"
+                ),
+                [],
+            )
+            .map_err(Into::into)
+        })
+    }
+
+    #[test]
+    fn link_spend_checks_refuse_each_violating_combination() {
+        let (_tmp, db) = fresh_db();
+        let cols = "spend_draw_usd_nanos, session_key, spend_released_usd_nanos, settled_at_ms";
+        // Valid shapes.
+        raw_insert(&db, "ok-draw", cols, "10, 's', NULL, NULL").unwrap();
+        raw_insert(&db, "ok-released", cols, "10, 's', 4, 99").unwrap();
+        raw_insert(&db, "ok-zero", cols, "10, 's', 0, 99").unwrap();
+        // Each violation is refused.
+        for (name, values) in [
+            ("negative-draw", "-1, 's', NULL, NULL"),
+            ("draw-no-key", "10, NULL, NULL, NULL"),
+            ("released-over-draw", "10, 's', 11, 99"),
+            ("released-no-settled", "10, 's', 4, NULL"),
+            ("released-no-draw", "NULL, NULL, 4, 99"),
+            ("negative-release", "10, 's', -1, 99"),
+        ] {
+            raw_insert(&db, name, cols, values).expect_err(&format!("{name} must violate a CHECK"));
+        }
+        // A settled link with no release and no draw is a plain non-spend link.
+        raw_insert(&db, "plain-settled", "settled_at_ms", "5").unwrap();
+    }
+
+    #[test]
+    fn child_link_spend_draw_rolls_back_with_the_link() {
+        let (_tmp, db) = fresh_db();
+        let d = draw(50, "session-1");
+        let error = db
+            .record_child_link_with_options(
+                "parent",
+                "missing-child-runtime",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+                Some(&d),
+            )
+            .expect_err("missing stop target must roll back the link and its draw");
+        assert!(error.to_string().contains("thread_runtime row missing"));
+        assert_eq!(db.child_link_spend("missing-child-runtime").unwrap(), None);
+        assert_eq!(db.session_unreleased_draw_total("session-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn child_link_spend_draw_replay_discipline() {
+        let (_tmp, db) = fresh_db();
+        let d = draw(50, "session-1");
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", Some(&d)).unwrap().0,
+            ChildLinkInsertOutcome::Inserted
+        );
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d.clone()));
+        // Equal replay is accepted; a replay stating none keeps the draw.
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", Some(&d)).unwrap().0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", None).unwrap().0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        db.record_child_link("parent", "child", "dispatch").unwrap();
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d.clone()));
+        // A different amount or session is refused and changes nothing.
+        link_with_draw(&db, "parent", "child", Some(&draw(51, "session-1")))
+            .expect_err("different amount");
+        link_with_draw(&db, "parent", "child", Some(&draw(50, "session-2")))
+            .expect_err("different session");
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d));
+        // A draw cannot be added to a link recorded without one.
+        link_with_draw(&db, "parent", "bare", None).unwrap();
+        link_with_draw(&db, "parent", "bare", Some(&draw(5, "session-1")))
+            .expect_err("a draw is written with the link or not at all");
+        assert_eq!(db.child_link_spend_draw("bare").unwrap(), None);
+        assert_eq!(db.child_link_spend_draw("absent").unwrap(), None);
+    }
+
+    #[test]
+    fn release_child_link_draw_settles_once_and_within_the_draw() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "parent", "child", Some(&draw(100, "s"))).unwrap();
+        link_with_draw(&db, "parent", "bare", None).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        db.release_child_link_draw("child", 101, 7)
+            .expect_err("a release above the draw is refused");
+        db.release_child_link_draw("child", -1, 7)
+            .expect_err("a negative release is refused");
+        db.release_child_link_draw("bare", 0, 7)
+            .expect_err("a link without a draw has nothing to release");
+        db.release_child_link_draw("absent", 0, 7)
+            .expect_err("no link");
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+
+        assert!(db.release_child_link_draw("child", 60, 7).unwrap());
+        let spend = db.child_link_spend("child").unwrap().unwrap();
+        assert_eq!(spend.released_usd_nanos, Some(60));
+        assert_eq!(spend.settled_at_ms, Some(7));
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 40);
+        // Settled once: a second release changes nothing.
+        assert!(!db.release_child_link_draw("child", 100, 9).unwrap());
+        let spend = db.child_link_spend("child").unwrap().unwrap();
+        assert_eq!(spend.released_usd_nanos, Some(60));
+        assert_eq!(spend.settled_at_ms, Some(7));
+    }
+
+    #[test]
+    fn settlement_releases_only_for_complete_usage() {
+        assert_eq!(settlement_release_usd_nanos(100, 30, true), 70);
+        assert_eq!(settlement_release_usd_nanos(100, 100, true), 0);
+        // Spend above the draw releases nothing, never a negative amount.
+        assert_eq!(settlement_release_usd_nanos(100, 150, true), 0);
+        // Partial or unavailable usage releases nothing: the draw stays live.
+        assert_eq!(settlement_release_usd_nanos(100, 30, false), 0);
+    }
+
+    #[test]
+    fn session_unreleased_total_overflow_is_refused_and_successors_share_the_total() {
+        let (_tmp, db) = fresh_db();
+        // A successor session is keyed by the chain root, so its draws add to
+        // the predecessor's under one total even under a different parent.
+        link_with_draw(&db, "session-a-thread", "c1", Some(&draw(40, "chain-root"))).unwrap();
+        link_with_draw(&db, "session-b-thread", "c2", Some(&draw(30, "chain-root"))).unwrap();
+        link_with_draw(&db, "other-thread", "c3", Some(&draw(5, "other-root"))).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("chain-root").unwrap(), 70);
+        assert_eq!(db.session_unreleased_draw_total("other-root").unwrap(), 5);
+        assert_eq!(db.session_unreleased_draw_total("none").unwrap(), 0);
+        db.release_child_link_draw("c1", 10, 1).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("chain-root").unwrap(), 60);
+
+        link_with_draw(&db, "x", "big1", Some(&draw(i64::MAX, "huge"))).unwrap();
+        link_with_draw(&db, "x", "big2", Some(&draw(1, "huge"))).unwrap();
+        let error = db
+            .session_unreleased_draw_total("huge")
+            .expect_err("overflow is refused");
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn session_live_count_counts_unsettled_flagged_dispatch_links() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "live1", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "live2", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "done", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "elsewhere", Some(&draw(10, "t"))).unwrap();
+        // Not flagged, or not a dispatch link: not live.
+        db.record_child_link_with_options(
+            "p",
+            "unflagged",
+            "dispatch",
+            ChildLinkStopPolicy::None,
+            false,
+            Some(&draw(10, "s")),
+        )
+        .unwrap();
+        db.record_child_link_with_options(
+            "p",
+            "follower",
+            "follow",
+            ChildLinkStopPolicy::None,
+            true,
+            Some(&draw(10, "s")),
+        )
+        .unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 3);
+        db.release_child_link_draw("done", 0, 1).unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 2);
+        assert_eq!(db.session_live_count("none").unwrap(), 0);
+    }
+
+    #[test]
+    fn child_account_limit_is_the_smallest_of_the_three() {
+        assert_eq!(child_account_limit(10, 20, 30), 10);
+        assert_eq!(child_account_limit(20, 10, 30), 10);
+        assert_eq!(child_account_limit(30, 20, 10), 10);
+        assert_eq!(child_account_limit(5, 5, 5), 5);
+    }
+
+    #[test]
+    fn child_link_spend_findings_flag_each_corruption() {
+        fn row(
+            id: &str,
+            draw: Option<i64>,
+            released: Option<i64>,
+            settled: Option<i64>,
+            key: Option<&str>,
+        ) -> ChildLinkSpendRow {
+            ChildLinkSpendRow {
+                child_thread_id: id.to_owned(),
+                draw,
+                released,
+                settled_at_ms: settled,
+                session_key: key.map(str::to_owned),
+            }
+        }
+        let clean = [
+            row("a", Some(10), None, None, Some("s")),
+            row("b", Some(10), Some(4), Some(1), Some("s")),
+        ];
+        assert!(child_link_spend_findings(&clean).is_empty());
+        let bad = [
+            row("over", Some(10), Some(11), Some(1), Some("s")),
+            row("nosettled", Some(10), Some(4), None, Some("s")),
+            row("nokey", Some(10), None, None, None),
+            row("nodraw", None, Some(4), Some(1), None),
+            row("max1", Some(i64::MAX), None, None, Some("huge")),
+            row("max2", Some(1), None, None, Some("huge")),
+        ];
+        let findings = child_link_spend_findings(&bad);
+        for needle in [
+            "over: release 11 exceeds draw 10",
+            "nosettled: release without a settlement time",
+            "nokey: draw without a session key",
+            "nodraw: release without a draw",
+            "session huge: unreleased draws overflow",
+        ] {
+            assert!(
+                findings.iter().any(|f| f == needle),
+                "missing {needle:?} in {findings:?}"
+            );
+        }
+        // The reader feeds the check from the table.
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "c", Some(&draw(10, "s"))).unwrap();
+        db.release_child_link_draw("c", 3, 1).unwrap();
+        let rows = db.child_link_spend_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(child_link_spend_findings(&rows).is_empty());
     }
 
     #[test]

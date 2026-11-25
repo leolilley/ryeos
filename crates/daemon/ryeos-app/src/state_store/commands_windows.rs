@@ -194,6 +194,31 @@ impl StateStore {
             .child_link_cancel_on_parent_end(child_thread_id)
     }
 
+    /// The spend columns of the child's link, or `None` when no link has been
+    /// recorded.
+    pub fn child_link_spend(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<runtime_db::ChildLinkSpend>> {
+        let g = self.lock()?;
+        g.runtime_db.child_link_spend(child_thread_id)
+    }
+
+    /// Settle the child's link, releasing `released_usd_nanos` of its draw.
+    /// Only after the child's accounting settlement is durable; see
+    /// [`runtime_db::RuntimeDb::release_child_link_draw`].
+    pub fn release_child_link_draw(
+        &self,
+        child_thread_id: &str,
+        released_usd_nanos: i64,
+        settled_at_ms: i64,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .release_child_link_draw(child_thread_id, released_usd_nanos, settled_at_ms)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was
@@ -267,6 +292,7 @@ impl StateStore {
                 relation,
                 runtime_db::ChildLinkStopPolicy::None,
                 cancel_on_parent_end,
+                None,
             ) {
                 tracing::warn!(
                     parent_thread_id,
@@ -344,6 +370,7 @@ impl StateStore {
             effective_relation,
             stop_policy,
             cancel_on_parent_end,
+            None,
         )?;
         Ok(effective_stop)
     }
