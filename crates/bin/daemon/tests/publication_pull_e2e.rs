@@ -514,3 +514,93 @@ async fn a_bundle_that_carries_more_than_items_is_refused_with_its_typed_code_an
         );
     }
 }
+
+/// A bundle of items only: one tool and one knowledge item, signed by the
+/// fixture publisher, its manifest declaring the two kinds it uses.
+const ITEMS_BUNDLE: &str = "lane-items";
+
+async fn start_publisher_with_items_bundle() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+            let tool_source =
+                std::fs::read_to_string(repo.join("bundles/web/.ai/tools/rye/web/fetch.yaml"))?;
+            let sign_at = |body: &str, prefix: &str, suffix: Option<&str>| {
+                lillux::signature::sign_content_at(
+                    body,
+                    &fixture.publisher,
+                    prefix,
+                    suffix,
+                    FAST_FIXTURE_TIME,
+                )
+            };
+            register_config_fixture_bundle(state_path, ITEMS_BUNDLE, fixture, |root| {
+                let tool = root.join(".ai/tools/rye/web/fetch.yaml");
+                std::fs::create_dir_all(tool.parent().expect("a parent directory"))?;
+                std::fs::write(
+                    tool,
+                    sign_at(
+                        &lillux::signature::strip_signature_lines(&tool_source),
+                        "#",
+                        None,
+                    ),
+                )?;
+                let note = root.join(".ai/knowledge/lane/demo/note.md");
+                std::fs::create_dir_all(note.parent().expect("a parent directory"))?;
+                std::fs::write(
+                    note,
+                    sign_at(
+                        "---\ncategory: lane/demo\ntags: [demo]\nversion: \"1.0.0\"\ndescription: >\n  A note carried by a publication-lane bundle.\n---\n\n# Demo note\n",
+                        "<!--",
+                        Some("-->"),
+                    ),
+                )?;
+                Ok(())
+            })?;
+            let manifest = state_path
+                .join(".ai/bundles")
+                .join(ITEMS_BUNDLE)
+                .join(".ai/manifest.yaml");
+            std::fs::write(
+                &manifest,
+                sign_at(
+                    &format!(
+                        "name: {ITEMS_BUNDLE}\nversion: 1.0.0\ndescription: items only\nprovides_kinds: []\nrequires_kinds:\n  - tool\n  - knowledge\nuses_kinds: []\n"
+                    ),
+                    "#",
+                    None,
+                ),
+            )?;
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the publishing node")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_of_a_tool_and_a_knowledge_item_installs_in_the_lane() {
+    let (a, a_fixture) = start_publisher_with_items_bundle().await;
+    let (b, _b_fixture) = start_puller().await;
+    let publication = publish_bundle_with_id(&a, &a_fixture, ITEMS_BUNDLE, 0x60).await;
+    let (status, result) = pull(
+        &b,
+        &publication.url,
+        &format!("fp:{}", publication.node_fingerprint),
+        &publication.record_hash,
+    )
+    .await;
+    assert_eq!(status, 200, "{result:#}");
+    let installed = b.state_path.join(".ai/bundles").join(ITEMS_BUNDLE);
+    assert!(installed.join(".ai/tools/rye/web/fetch.yaml").is_file());
+    assert!(installed.join(".ai/knowledge/lane/demo/note.md").is_file());
+    let registration = std::fs::read_to_string(
+        b.state_path
+            .join(".ai/node/bundles")
+            .join(format!("{ITEMS_BUNDLE}.yaml")),
+    )
+    .expect("the registration");
+    assert!(registration.contains("lane:"), "{registration}");
+    assert!(registration.contains("publication"), "{registration}");
+}
