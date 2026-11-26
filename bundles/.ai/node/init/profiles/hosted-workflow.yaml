@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:28:19Z:eb916e92941f55e5191a158912398e92eec90b1b179e625d6919f735e1fcffcc:gSvDdhIhE0nFWkezaLBGydAgG7RbGDPuJeNzHCREmhAizab+PImyYYZf4FA+6N2k+S83l6YeMjD2qCLjztZqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:30:44Z:58c5643d70aa51420098465c982bc26953bab530d1a3c61a0f95293aecd06927:JqJYA+PcWb77J8h6F3D7qpX7pCgRcaBBuwB96BuhsE7nxWxag27kQ8ANIPbjnC/q2wy5hG3D0Xb/sM224LM0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -193,6 +193,9 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

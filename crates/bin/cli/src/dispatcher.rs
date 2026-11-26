@@ -2505,13 +2505,13 @@ mod tests {
         let mut tail = s(&[
             "profile",
             "--environment",
-            "config:codex/environments/default",
+            "config:example/environments/default",
         ]);
         let flags = strip_declared_control_flags(&mut tail, &controls).unwrap();
         assert_eq!(tail, s(&["profile"]));
         assert_eq!(
             flags.ref_bindings.get("environment").map(String::as_str),
-            Some("config:codex/environments/default")
+            Some("config:example/environments/default")
         );
     }
 
@@ -3574,7 +3574,7 @@ mod tests {
                     "run",
                     "production",
                     "config:development/remote-worker",
-                    "codex-main",
+                    "example-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
@@ -3586,7 +3586,7 @@ mod tests {
                     "worker",
                     "run",
                     "config:development/remote-worker",
-                    "codex-main",
+                    "example-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
@@ -3607,7 +3607,7 @@ mod tests {
                 resolved.parameters["workflow_ref"],
                 "config:development/remote-worker"
             );
-            assert_eq!(resolved.parameters["credential_profile_id"], "codex-main");
+            assert_eq!(resolved.parameters["credential_profile_id"], "example-main");
             assert_eq!(
                 resolved.parameters["task"],
                 serde_json::json!({"goal": "fix the tests"})

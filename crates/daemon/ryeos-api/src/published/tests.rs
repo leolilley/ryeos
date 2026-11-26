@@ -99,3 +99,16 @@ fn a_garbled_journal_line_is_skipped() {
     let mut ledger = ByteLedger::load(path, 1_800_000_000_002);
     assert_eq!(ledger.used(1_800_000_000_002), 10);
 }
+
+#[test]
+fn a_full_limiter_answers_publication_busy_and_frees_with_the_slot() {
+    let limiter = Arc::new(tokio::sync::Semaphore::new(2));
+    let first = take_slot(&limiter).unwrap();
+    let _second = take_slot(&limiter).unwrap();
+    let busy = take_slot(&limiter).unwrap_err();
+    assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(busy.code, "publication_busy");
+    assert!(busy.retry_after);
+    drop(first);
+    assert!(take_slot(&limiter).is_ok());
+}

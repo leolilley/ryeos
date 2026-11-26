@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:28:19Z:7d4de201ec28eab957df28772df91278062d7785ee8e65b12a1e975fd3bfac20:3IJXbmFxL8FoAM00zHDBL3JhekgXWF08W7ASmnwuVE5C1YETMBQVcGHkbQhwqC4ImWOs/ZwX1+06f58R1UnWCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:30:44Z:fbde5075c584a2facc958d1d53ca9d410e91afd1d7cf1e75a9da5389de072749:1ybIv0e3B4i50z5mKH3RnMypeb9nkp1INXWiJlAKVNE5u5gU2AtnGikzxdzuyg0k1QU1eEbLT1O+5zi99gCtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -172,6 +172,9 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
