@@ -240,13 +240,10 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     {
         let policy = state
             .node_policy
-            .require::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::read_disclosure::ReadDisclosurePolicy>(
         )?;
         let admitted = crate::seat_read_policy::decide(
             policy,
-            ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass::of_session(
-                session.user_principal_id.as_deref(),
-            ),
             &item_ref,
             &bound.target.parameter_schema,
             Some(crate::seat_read_policy::RequestFacts {

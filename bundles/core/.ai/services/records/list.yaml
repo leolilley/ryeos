@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:06Z:27aaae3a0316f7c158652be3c8c566518dda697ac0c8e1a73953602608097541:afzCyUWfXbjFeYRTjqTjMCyCIe6hJlvLOeYrJJlKJq+m9E02h8QOQRZHO/RWLLW1Muz9Th6/KbmNlU70O+uXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T02:45:53Z:d7cbcfd2fd3861525daae0351bd048551919008773baf71c18e208956403b8ec:6oaWK0VRo32Vuwr2/JnFYfds3UE4hJlygw4Y2OzIaURmOtkpvtA7mxCNbg1pYBxkjbwcRQ0M/tFKdkddM7QbAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.list
 availability: both
@@ -6,29 +6,35 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.records/list"]
+schema:
+  record_kind: string
+  holder: string?
+  limit: integer?
+  cursor: string?
+  if_revision: string?
 description: "List the signed records of one declared kind, each with its key, hash, declared summary and verification"
 disclosure:
   principal:
-    - "/record_kind"
-    - "/next_cursor"
-    - "/records/*/key"
-    - "/records/*/hash"
-    - "/records/*/verify/status"
-    - "/records/*/verify/scheme"
-    - "/records/*/verify/fresh"
-    - "/key"
-    - "/hash"
-    - "/verify/status"
-    - "/verify/scheme"
-    - "/verify/fresh"
-    - "/stored_as"
-    - "/bytes"
-    - "/truncated"
+    - "/rows/*/record_kind"
+    - "/rows/*/key"
+    - "/rows/*/hash"
+    - "/rows/*/verify/status"
+    - "/rows/*/verify/scheme"
+    - "/rows/*/verify/fresh"
+    - "/schema"
+    - "/as_of"
+    - "/revision"
+    - "/coverage/state"
+    - "/coverage/reason"
+    - "/signers/*/status"
+    - "/not_modified"
+    - "/page/next_cursor"
+    - "/page/total"
+    - "/page/total_basis"
   free_text:
-    - "/records/*/summary"
-    - "/records/*/verify/signer"
-    - "/records/*/verify/reason"
-    - "/records/*/verify/detail"
-    - "/verify/signer"
-    - "/verify/reason"
-    - "/verify/detail"
+    - "/rows/*/summary"
+    - "/rows/*/verify/signer"
+    - "/rows/*/verify/reason"
+    - "/rows/*/verify/detail"
+    - "/signers/*/label"
+    - "/signers/*/role"
