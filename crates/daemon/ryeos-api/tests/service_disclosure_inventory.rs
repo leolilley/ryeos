@@ -858,3 +858,46 @@ fn services_that_list_attachment_leaves_include_the_seat_project() {
         }
     }
 }
+
+/// The target of a worker handoff is called by the peer node's key, which is
+/// not the operator, so its answer is shaped by the service item's tier. The
+/// source reads the target's stage timings from `qualification_measurements`
+/// (test builds only). A leaf in no tier is cut, and the qualification then
+/// reports an executed stage as unobserved, so both tiers name them.
+#[test]
+fn the_handoff_targets_tiers_carry_the_stage_timings_the_source_reads_back() {
+    let wanted: &[(&str, &[&str])] = &[
+        (
+            "worker-placements/prepare",
+            &[
+                "/qualification_measurements/schema",
+                "/qualification_measurements/project_materialization_ms",
+            ],
+        ),
+        (
+            "worker-placements/adopt",
+            &[
+                "/qualification_measurements/schema",
+                "/qualification_measurements/event_replay_ms",
+                "/qualification_measurements/worker_attach_recovery_ms",
+            ],
+        ),
+    ];
+    let all = services();
+    for (service, leaves) in wanted {
+        let body = &all
+            .iter()
+            .find(|(name, _)| name == service)
+            .unwrap_or_else(|| panic!("{service} is not a service"))
+            .1;
+        let tier: Vec<&str> = body["disclosure"]["principal"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{service} has no principal tier"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for leaf in *leaves {
+            assert!(tier.contains(leaf), "{service} tier does not list {leaf}");
+        }
+    }
+}
