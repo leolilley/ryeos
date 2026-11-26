@@ -58,6 +58,8 @@ pub enum UnlinkSelector {
 ///   (`key_link_linker_not_owner`);
 /// * the principal is not the node key's or the authoring key's, which own
 ///   nothing (`key_link_principal_is_node_key`, `key_link_principal_is_authoring_key`);
+/// * the added key is not the node key or an authoring key
+///   (`key_link_key_is_node_or_authoring`);
 /// * the added key has no succession lineage and is not already joined to
 ///   another principal (`key_link_key_has_lineage`, `key_link_key_has_owner`);
 /// * the link starts now and ends in the future (`key_link_not_current`).
@@ -111,6 +113,18 @@ pub fn link_key(
         !authoring_owns,
         "key_link_principal_is_authoring_key: the authoring key signs runtime drafts and a key \
          cannot be joined to it"
+    );
+
+    // The added key is never the node key or an authoring-role key: a linked
+    // one would speak for the operator.
+    ensure!(
+        key != node.fingerprint()
+            && !trust
+                .records()
+                .any(|record| record.role == SignerRole::Authoring && record.fingerprint == key),
+        "key_link_key_is_node_or_authoring: {} is the node key or an authoring key, which \
+         cannot be joined to a principal",
+        body.key
     );
 
     // The added key: no lineage, and no other owner.
@@ -490,6 +504,34 @@ mod tests {
             let error = link_key(rig.app_root.path(), &rig.node, &trust, link, NOW).unwrap_err();
             assert!(
                 format!("{error:#}").contains("key_link_not_current"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_node_key_and_an_authoring_key_cannot_be_the_added_key() {
+        let rig = rig();
+        let (operator, authoring) = (key(1), key(7));
+        let trust = store(
+            &rig,
+            vec![
+                operator_record(&operator, SignerStatus::Active),
+                SignerRecord::new(
+                    &authoring.verifying_key(),
+                    "authoring",
+                    SignerRole::Authoring,
+                    SignerScope::operator_default(),
+                    SignerStatus::Active,
+                ),
+            ],
+            &[],
+        );
+        for (added, nonce) in [(rig.node.signing_key(), 11), (&authoring, 12)] {
+            let link = signed(&trust, &operator, added, 86_400, nonce);
+            let error = link_key(rig.app_root.path(), &rig.node, &trust, link, NOW).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("key_link_key_is_node_or_authoring"),
                 "{error:#}"
             );
         }
