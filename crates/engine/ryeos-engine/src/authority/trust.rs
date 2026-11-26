@@ -29,9 +29,11 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
+mod key_link;
 mod ownership;
 mod registry;
 pub use endorsement::*;
+pub use key_link::*;
 pub use ownership::*;
 pub use registry::*;
 
@@ -509,7 +511,10 @@ impl TrustStore {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
         let chain = load_event_chain(&events_dir(app_root), &node_key)?;
-        let mut store = Self::from_registry(node_key, records)?.with_succession_chain(&chain);
+        let links = KeyLinkLedger::load(app_root, &node_key)?.entries()?;
+        let mut store = Self::from_registry(node_key, records)?
+            .with_succession_chain(&chain)
+            .with_key_links(links);
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, &store)?;
         tracing::debug!(
@@ -658,6 +663,15 @@ impl TrustStore {
     pub fn with_succession_chain(mut self, chain: &[TrustEvent]) -> Self {
         let records: Vec<SignerRecord> = self.records.values().cloned().collect();
         self.succession = Some(std::sync::Arc::new(SuccessionGraph::build(&records, chain)));
+        self
+    }
+
+    /// This store with the key links in force read into its owner graph. A
+    /// store with no graph (never given a succession chain) is unchanged.
+    pub fn with_key_links(mut self, links: Vec<KeyLinkEntry>) -> Self {
+        if let Some(graph) = self.succession.take() {
+            self.succession = Some(std::sync::Arc::new((*graph).clone().with_links(links)));
+        }
         self
     }
 

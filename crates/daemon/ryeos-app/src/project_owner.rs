@@ -90,6 +90,9 @@ pub fn head_advancer_in(
         via_root: match resolved.via {
             ryeos_engine::trust::OwnerVia::Solo => None,
             ryeos_engine::trust::OwnerVia::Lineage { root } => Some(root),
+            // A linked key advanced the head for the principal it was joined to;
+            // the link id is evidence, not a root key.
+            ryeos_engine::trust::OwnerVia::Linked { .. } => None,
         },
     })
 }
