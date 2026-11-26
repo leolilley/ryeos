@@ -1231,4 +1231,24 @@ mod tests {
         };
         assert!(tree_digest_from_dir("demo", &tree, &small).is_err());
     }
+
+    #[test]
+    fn the_staging_area_is_a_named_child_of_the_state_directory_and_outside_the_bundle_roots() {
+        let app = Path::new("/app-root");
+        let root = StagingArea::root_for(app);
+        let state = ryeos_engine::roots::RuntimeRoot::new(app.to_path_buf()).state();
+        assert_eq!(root, state.join("bundle-staging"));
+        assert!(!root.starts_with(app.join(ryeos_engine::AI_DIR).join("bundles")));
+        assert!(!root.starts_with(app.join(ryeos_engine::AI_DIR).join("node")));
+    }
+
+    #[test]
+    fn a_node_with_no_staging_area_opens_one_and_lists_nothing() {
+        // The doctor rows and state readers name the state children they read;
+        // none enumerates the state directory, so this directory is not seen
+        // by them. A fresh node simply has none.
+        let dir = tempfile::tempdir().unwrap();
+        let area = StagingArea::open(dir.path()).unwrap();
+        assert!(area.list(&key(1).verifying_key()).unwrap().is_empty());
+    }
 }
