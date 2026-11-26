@@ -202,6 +202,7 @@ pub async fn freeze(
         kind: PUBLICATION_MANIFEST_KIND.to_owned(),
         schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         bundle_name: req.bundle_name.clone(),
+        bundle_version: verified.manifest.version.clone(),
         bundle_manifest_digest: verified.body_digest,
         publisher_fingerprint: verified.signer_fingerprint,
         file_count: entries.len() as u64,
@@ -227,6 +228,7 @@ pub async fn freeze(
     let policy = policy(&state)?;
     Ok(json!({
         "bundle_name": req.bundle_name,
+        "bundle_version": manifest.bundle_version,
         "manifest_hash": outcome.hash,
         "file_count": manifest.file_count,
         "total_bytes": manifest.total_bytes,
@@ -289,6 +291,11 @@ pub async fn publish(
             "the record's bundle_name is not the frozen manifest's",
         ));
     }
+    if loaded.manifest.bundle_version != record.version {
+        return Err(malformed(
+            "the record's version is not the frozen manifest's bundle_version",
+        ));
+    }
     let limit = record.limits.max_bytes_per_read;
     if loaded.closure.largest_blob() > limit || loaded.bytes.len() as u64 > limit {
         return Err(malformed(
@@ -330,6 +337,7 @@ pub async fn publish(
         "record_hash": record_hash,
         "node_fingerprint": stored.record.node_fingerprint,
         "bundle_name": stored.record.bundle_name,
+        "version": stored.record.version,
         "not_after": stored.record.not_after,
         "path": format!("/published/{}", stored.record.id),
         "report": refresh_report(&state),
@@ -437,6 +445,7 @@ pub async fn list(
         publications.push(json!({
             "id": record.id,
             "bundle_name": record.bundle_name,
+            "version": record.version,
             "manifest_hash": record.root.manifest_hash,
             "not_after": record.not_after,
             "record_hash": record.body_hash().map_err(|refusal| refusal_error(&refusal))?,
