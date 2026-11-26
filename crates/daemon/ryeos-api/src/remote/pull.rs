@@ -1682,30 +1682,17 @@ impl Drop for PinnedScratchDirectory {
 fn ensure_no_pull_recovery_artifacts(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<(), PullResultsError> {
-    let found = std::cell::RefCell::new(None::<std::path::PathBuf>);
-    project_root.visit_regular_files_bounded(
-        lillux::DirectoryTraversalBudget::new(
-            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
-            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
-        ),
-        |relative, _directory| {
-            if is_pull_transaction_path(relative) {
-                *found.borrow_mut() = Some(relative.to_path_buf());
-                return Ok(true);
-            }
-            Ok(false)
-        },
-        |relative, _file| {
-            if is_pull_transaction_path(relative) {
-                *found.borrow_mut() = Some(relative.to_path_buf());
-            }
-            Ok(())
-        },
-    )?;
-    if let Some(relative) = found.into_inner() {
+    // Transactions are only ever created directly under the project root, so
+    // the root's own entries are the whole question. A walk of the tree would
+    // refuse any checkout that holds a symlink.
+    let found = project_root
+        .entry_names()?
+        .into_iter()
+        .find(|name| name.to_str().is_some_and(is_pull_transaction_artifact_name));
+    if let Some(name) = found {
         return Err(PullResultsError::RecoveryRequired(format!(
             "reserved transaction artifact {} is present; preserve it and recover the interrupted apply before retrying",
-            project_root.path().join(relative).display()
+            project_root.path().join(name).display()
         )));
     }
     Ok(())
@@ -2028,15 +2015,6 @@ fn surface_quarantined_files(
     }
     project_root.ensure_path_binding()?;
     Ok(notices)
-}
-
-fn is_pull_transaction_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        name.to_str().is_some_and(is_pull_transaction_artifact_name)
-    })
 }
 
 /// Roll back applied writes and deletes by restoring from backup.
