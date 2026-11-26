@@ -1942,10 +1942,9 @@ impl RemoteClient {
                 .as_str()
                 .context("missing fingerprint in authorize-key response")?
                 .to_string(),
-            label: resp["label"]
-                .as_str()
-                .context("missing label in authorize-key response")?
-                .to_string(),
+            // The label is operator-supplied free text the remote withholds
+            // from a non-operator's answer, so the caller's own is reported.
+            label: label.to_string(),
             scopes: resp["scopes"]
                 .as_array()
                 .map(|a| {
@@ -2096,6 +2095,14 @@ impl RemoteClient {
     /// GET /threads/{id} (authenticated) — get thread detail on remote.
     pub async fn threads_get(&self, thread_id: &str) -> Result<Value> {
         self.signed_get(&format!("/threads/{}", thread_id)).await
+    }
+
+    /// GET /threads/{id}/result (authenticated) — the body a thread finished
+    /// with, for the thread's owner. Names its own digest, which a caller
+    /// binds to the `result_digest` of the thread read.
+    pub async fn threads_result(&self, thread_id: &str) -> Result<Value> {
+        self.signed_get(&format!("/threads/{}/result", thread_id))
+            .await
     }
 
     /// POST /bundle/export (authenticated) — export a bundle as CAS objects.
@@ -3683,6 +3690,8 @@ pub struct ClosureMissingObject {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ClosureMalformedObject {
     pub hash: String,
+    /// Free text the remote shows only its operator.
+    #[serde(default)]
     pub reason: String,
 }
 

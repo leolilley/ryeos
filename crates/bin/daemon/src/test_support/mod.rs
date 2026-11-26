@@ -1552,6 +1552,11 @@ impl DaemonHarness {
                 serde_json::json!({ "thread_id": thread_id }),
             )
             .await?;
+        // A thread the daemon does not know answers NotFound, as one that is
+        // not the caller's does.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         anyhow::ensure!(status.is_success(), "threads/get failed: {status} {body}");
         Ok(body.get("result").filter(|value| !value.is_null()).cloned())
     }

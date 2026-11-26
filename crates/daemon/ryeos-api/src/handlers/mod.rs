@@ -160,6 +160,7 @@ pub mod threads_get;
 pub mod threads_input;
 pub mod threads_list;
 pub mod threads_receipts;
+pub mod threads_result;
 pub mod threads_set_facet;
 pub mod threads_tail;
 pub mod threads_timeline;
@@ -217,6 +218,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     launch_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
+    threads_result::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
     threads_tail::DESCRIPTOR,
     threads_timeline::DESCRIPTOR,
