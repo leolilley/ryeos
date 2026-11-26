@@ -1151,14 +1151,13 @@ mod tests {
             .block_on(materialise_verified_tree(source, entries, "demo", tree))
     }
 
-    #[test]
-    fn a_tree_materialised_under_umask_002_is_staged_with_exact_modes() {
-        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_002_is_staged_with_exact_modes";
-        if std::env::var_os(UMASK_CHILD).is_none() {
-            return rerun_in_child(NAME);
-        }
-        // umask 002 would leave directories group-writable (0o775).
-        lillux::tree_entry::test_support::set_process_umask(0o002);
+    /// Materialise the same entries under `mask`: the digest `materialise`
+    /// returns, the digest recomputed from the directory, and the digest of
+    /// the entry list must all be one value, whatever the umask was, and the
+    /// modes on disk are exact.
+    fn assert_same_tree_under_umask(mask: u32) {
+        use ryeos_node::bundle_staging as staging;
+        lillux::tree_entry::test_support::set_process_umask(mask);
         let (source, entries) = memory_bundle(&[
             (".ai/manifest.yaml", b"name: demo\n", 0o644),
             (".ai/tools/run.sh", b"#!/bin/sh\n", 0o755),
@@ -1170,16 +1169,27 @@ mod tests {
         let (files, bytes, digest) = materialise(&source, &entries, &tree).unwrap();
         assert_eq!(files, 3);
         assert_eq!(bytes, 11 + 10 + 1);
-        let on_disk = ryeos_node::bundle_staging::tree_digest_from_dir(
+        let on_disk = staging::tree_digest_from_dir(
             "demo",
             &tree,
-            &ryeos_node::bundle_staging::TreeLimits {
+            &staging::TreeLimits {
                 max_files: 100,
                 max_bytes: 1 << 20,
             },
         )
         .unwrap();
+        let listed: Vec<staging::TreeFile> = entries
+            .iter()
+            .map(|entry| staging::TreeFile {
+                path: entry.path.clone(),
+                hash: entry.hash.clone(),
+                size: entry.size,
+                mode: entry.mode,
+            })
+            .collect();
+        let from_list = staging::tree_digest("demo", &listed).unwrap();
         assert_eq!(on_disk.digest, digest);
+        assert_eq!(digest, from_list);
         let mode_of = |path: &str| {
             lillux::observe_tree_entry_no_follow(&tree.join(path))
                 .unwrap()
@@ -1189,6 +1199,25 @@ mod tests {
         assert_eq!(mode_of(".ai/deep/er"), 0o755);
         assert_eq!(mode_of(".ai/manifest.yaml"), 0o644);
         assert_eq!(mode_of(".ai/tools/run.sh"), 0o755);
+    }
+
+    #[test]
+    fn a_tree_materialised_under_umask_002_is_staged_with_exact_modes() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_002_is_staged_with_exact_modes";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        // umask 002 would leave directories group-writable (0o775).
+        assert_same_tree_under_umask(0o002);
+    }
+
+    #[test]
+    fn a_tree_materialised_under_umask_022_is_the_same_tree() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_022_is_the_same_tree";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        assert_same_tree_under_umask(0o022);
     }
 
     #[test]
