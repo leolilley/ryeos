@@ -159,3 +159,78 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     }
     assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
 }
+
+fn route_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            route_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "yaml") {
+            out.push(path);
+        }
+    }
+}
+
+/// The route invokers need no key admission because the live project path is
+/// data the operator signed in the route. That holds only while the path is a
+/// plain literal in every shipped route; the route compiler refuses an
+/// interpolated one (`require_literal_project_path`), and this checks the
+/// shipped files too.
+#[test]
+fn every_shipped_route_names_its_project_path_as_a_plain_literal() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let mut files = Vec::new();
+    for bundle in std::fs::read_dir(root.join("bundles")).unwrap() {
+        route_files(&bundle.unwrap().path().join(".ai/node/routes"), &mut files);
+    }
+    assert!(files.len() > 20, "the sweep found {} routes", files.len());
+    let mut with_path = 0;
+    let mut interpolated = Vec::new();
+    for file in &files {
+        let route: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        let Some(path) = route["response"]["source_config"]["project_path"].as_str() else {
+            continue;
+        };
+        with_path += 1;
+        if path.contains("${") {
+            interpolated.push(format!("{}: {path}", file.display()));
+        }
+    }
+    assert!(with_path > 0, "no shipped route names a project_path");
+    assert!(
+        interpolated.is_empty(),
+        "a route interpolates its project path:\n{}",
+        interpolated.join("\n")
+    );
+}
+
+/// Route items load only from the node's own space and from installed
+/// bundles, never from a project: a member's project cannot ship a route that
+/// names a path.
+#[test]
+fn the_route_loader_scans_node_space_and_installed_bundles_only() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let text =
+        std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
+            .unwrap();
+    let production = text
+        .find("#[cfg(test)]")
+        .map_or(text.as_str(), |end| &text[..end]);
+    assert!(production.contains("fn system_scan_root"));
+    assert!(production.contains("fn bundle_scan_root"));
+    for forbidden in [
+        "project_root",
+        "project_path",
+        "ProjectSource",
+        "live_project",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "the node-config loader names `{forbidden}`: route files must not load from a project"
+        );
+    }
+}

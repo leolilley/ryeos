@@ -77,6 +77,11 @@ impl ResponseMode for BrowserLaunchMode {
             &self.kinds,
         )?;
 
+        interpolation::require_literal_project_path(
+            &raw.response.source_config,
+            &raw.id,
+            self.key(),
+        )?;
         if !raw.response.source_config.is_null() {
             let declared = extract_path_captures(&raw.path);
             interpolation::validate_path_templates(

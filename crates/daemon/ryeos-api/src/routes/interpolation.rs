@@ -41,6 +41,35 @@ pub fn validate_path_templates(
     Ok(referenced)
 }
 
+/// Refuse, at route compile time, any interpolation in `source_config.project_path`.
+///
+/// A dispatch or launch route runs in the project its operator-signed route
+/// names. That is what makes the live-project admission unnecessary at those
+/// routes: no caller names the path. A `${...}` in it would let a request
+/// steer the path, so it is refused for every route mode that carries one,
+/// with an error that names the route.
+pub fn require_literal_project_path(
+    config: &Value,
+    route_id: &str,
+    mode: &str,
+) -> Result<(), RouteConfigError> {
+    let Some(path) = config.get("project_path").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if path.contains("${") {
+        return Err(RouteConfigError::InvalidSourceConfig {
+            id: route_id.to_owned(),
+            src: mode.to_owned(),
+            reason: format!(
+                "`source_config.project_path` must be a literal path, not `{path}`: a route \
+                 runs in the project its signed config names, and an interpolated path would \
+                 let a request choose it"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Interpolate `${path.<name>}` templates in `source_config` using actual
 /// capture values from the route match.
 ///
@@ -198,6 +227,30 @@ fn try_interpolate_string(
 
 #[cfg(test)]
 mod tests {
+    use super::require_literal_project_path;
+
+    #[test]
+    fn a_project_path_with_any_interpolation_fails_to_compile_and_names_the_route() {
+        for path in [
+            "${path.dir}",
+            "/srv/${path.dir}/project",
+            "/srv/x/${headers.h}",
+        ] {
+            let config = serde_json::json!({ "project_path": path });
+            let error = require_literal_project_path(&config, "route-7", "launch").unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("route-7"), "{text}");
+            assert!(text.contains("literal"), "{text}");
+        }
+        for config in [
+            serde_json::json!({ "project_path": "/srv/projects/demo" }),
+            serde_json::json!({ "item_ref": "tool:x/y" }),
+            serde_json::Value::Null,
+        ] {
+            require_literal_project_path(&config, "route-7", "launch").unwrap();
+        }
+    }
+
     use super::*;
 
     fn declared() -> Vec<String> {
