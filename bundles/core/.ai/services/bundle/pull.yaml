@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T22:09:15Z:983c61d8be9bea2be5c0c70fd0d0e97d62755fdef375208cead8d7532d05764a:UgG/sPKV4p0j1LrPZrQ1WEedB2EgxJHmWeJ6JR6V2hmvYSAH5P7O4kPC9IWHxtc0+VzHjB9r0uaNc3lSlcjyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:59:13Z:73935d97c8b1664074dcd46a0d3a28d800cb46110b9502cc7d3503995343e34d:TVOjAvNJby9a8Cp253ntmT7NBmHkCzBufP5tT/0SBhN/ZLn4P6bCL/lOxtBTnElMaptv838E/Xu8z7W8A9PHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.pull
 required_caps: ["ryeos.execute.service.bundle/pull"]
@@ -6,5 +6,6 @@ schema:
   url: string
   node: string
   expect: string
+  allow_internal: boolean?
 description: "Install a published bundle from a /published/<id> link, checking the pinned node key and record hash first. The publisher must already be trusted on this node; the pull never adds trust."
 disclosure: {}

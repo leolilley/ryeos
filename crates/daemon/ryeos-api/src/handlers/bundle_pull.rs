@@ -31,6 +31,9 @@
 //! request: no signed-request headers, cookies or key material.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +76,13 @@ pub enum PullRefusal {
     InsecureUrl(String),
     #[error("publication_fetch_failed: {0}")]
     FetchFailed(String),
+    #[error(
+        "publication_host_internal: {host} resolves to {address}, an address in a loopback, \
+         private, link-local, unique-local, unspecified or metadata range. Nothing was sent. A \
+         publication is pulled from a public host; if this node is meant to pull from inside \
+         its own network, repeat the pull with allow_internal=true"
+    )]
+    HostInternal { host: String, address: IpAddr },
     #[error("publication_node_mismatch: {0}")]
     NodeMismatch(String),
     #[error(
@@ -110,6 +120,7 @@ impl PullRefusal {
             Self::Malformed(_) => "publication_malformed",
             Self::InsecureUrl(_) => "publication_insecure_url",
             Self::FetchFailed(_) => "publication_fetch_failed",
+            Self::HostInternal { .. } => "publication_host_internal",
             Self::NodeMismatch(_) => "publication_node_mismatch",
             Self::VersionMismatch { .. } => "publication_version_mismatch",
             Self::HashMismatch(_) => "publication_hash_mismatch",
@@ -166,6 +177,11 @@ pub(crate) struct Pins {
     pub node: String,
     /// The publication record body hash.
     pub expect: String,
+    /// Lift the refusal of hosts that are, or resolve to, loopback, private,
+    /// link-local or metadata addresses, for a node pulling from inside its
+    /// own network.
+    #[serde(default)]
+    pub allow_internal: bool,
 }
 
 impl Pins {
@@ -205,10 +221,9 @@ fn is_loopback(host: Option<url::Host<&str>>) -> bool {
 }
 
 /// An IP-literal host in a range a public publication never lives in: private,
-/// link-local, unique-local, unspecified or cloud-metadata. Hostnames that
-/// resolve into these ranges are not checked here; that needs a resolver-level
-/// check in the egress client, a follow-up before a node inside a private
-/// network offers the pull.
+/// link-local, unique-local, unspecified or cloud-metadata. Loopback is not
+/// here (plain http to loopback is allowed). A hostname is checked after it
+/// resolves, by [`CheckedResolver`].
 fn is_internal_literal(host: Option<url::Host<&str>>) -> bool {
     match host {
         Some(url::Host::Ipv4(ip)) => {
@@ -230,6 +245,22 @@ fn is_internal_literal(host: Option<url::Host<&str>>) -> bool {
     }
 }
 
+/// An address a name must not resolve to unless the operator allowed it:
+/// everything [`is_internal_literal`] names, plus loopback and `0.0.0.0/8`.
+fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.octets()[0] == 0
+                || is_internal_literal(Some(url::Host::Ipv4(v4)))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_internal_ip(IpAddr::V4(v4)),
+            None => v6.is_loopback() || is_internal_literal(Some(url::Host::Ipv6(v6))),
+        },
+    }
+}
+
 /// A remote's error code is carried into the operator's message only when it
 /// is a plain token; anything else is dropped.
 fn is_plain_code(code: &str) -> bool {
@@ -241,7 +272,7 @@ fn is_plain_code(code: &str) -> bool {
 
 /// Parse `https://<host>/published/<id>`. Plain http is accepted only for a
 /// loopback address; credentials, a query and a fragment are refused.
-pub(crate) fn parse_target(raw: &str) -> Result<PullTarget, PullRefusal> {
+pub(crate) fn parse_target(raw: &str, allow_internal: bool) -> Result<PullTarget, PullRefusal> {
     let url = url::Url::parse(raw)
         .map_err(|error| PullRefusal::Malformed(format!("the URL does not parse: {error}")))?;
     match url.scheme() {
@@ -255,11 +286,11 @@ pub(crate) fn parse_target(raw: &str) -> Result<PullTarget, PullRefusal> {
             ));
         }
     }
-    if is_internal_literal(url.host()) {
+    if !allow_internal && is_internal_literal(url.host()) {
         return Err(PullRefusal::Malformed(
             "the host is an IP address in a private, link-local, unique-local, unspecified or \
-             metadata range; a publication is pulled from a public host. Hostnames that resolve \
-             into those ranges are not checked yet"
+             metadata range; a publication is pulled from a public host (allow_internal=true \
+             lifts this for a node pulling from inside its own network)"
                 .into(),
         ));
     }
@@ -465,19 +496,115 @@ pub(crate) fn export_response(manifest: &PublicationManifest) -> BundleExportRes
 
 // ── The public fetch ────────────────────────────────────────────────
 
+/// Resolves a name to socket addresses.
+pub(crate) type Lookup = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+fn system_lookup() -> Lookup {
+    Arc::new(|host: String| {
+        Box::pin(async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) })
+    })
+}
+
+/// The error a [`CheckedResolver`] hands the HTTP client, recovered from the
+/// client's error chain as a typed refusal.
+#[derive(Debug)]
+struct ResolvedInternal {
+    host: String,
+    address: IpAddr,
+}
+
+impl std::fmt::Display for ResolvedInternal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} resolves to internal address {}",
+            self.host, self.address
+        )
+    }
+}
+
+impl std::error::Error for ResolvedInternal {}
+
+/// The only name resolver the pull's client has. It resolves once per
+/// connection and returns the addresses it checked, and the client connects to
+/// exactly those, so DNS answering differently a moment later changes nothing:
+/// there is no second lookup to race. A name with any internal address among
+/// its answers is refused whole, since a name mixing a public and a private
+/// address is how a rebind is staged. The one carve-out is `localhost`
+/// resolving only to loopback, matching the plain-http-to-loopback rule.
+struct CheckedResolver {
+    lookup: Lookup,
+    allow_internal: bool,
+}
+
+impl reqwest::dns::Resolve for CheckedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let lookup = self.lookup.clone();
+        let allow_internal = self.allow_internal;
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let addrs = lookup(host.clone()).await?;
+            if addrs.is_empty() {
+                return Err(format!("{host} resolved to no address").into());
+            }
+            let loopback_name = host.eq_ignore_ascii_case("localhost")
+                && addrs.iter().all(|addr| addr.ip().is_loopback());
+            if !allow_internal && !loopback_name {
+                if let Some(bad) = addrs.iter().find(|addr| is_internal_ip(addr.ip())) {
+                    return Err(Box::new(ResolvedInternal {
+                        host,
+                        address: bad.ip(),
+                    })
+                        as Box<dyn std::error::Error + Send + Sync>);
+                }
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The typed refusal for a failed request: a resolver refusal anywhere in the
+/// error chain keeps its code, anything else is a plain fetch failure.
+fn fetch_refusal(url: &str, error: &reqwest::Error) -> PullRefusal {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = source {
+        if let Some(refused) = current.downcast_ref::<ResolvedInternal>() {
+            return PullRefusal::HostInternal {
+                host: refused.host.clone(),
+                address: refused.address,
+            };
+        }
+        source = current.source();
+    }
+    PullRefusal::FetchFailed(format!("GET {url}: {error}"))
+}
+
 /// A plain HTTP client for public reads. It carries no identity: nothing here
 /// signs a request, stores a cookie or attaches a key, and a redirect is an
-/// error rather than a second request.
+/// error rather than a second request, so a redirect to a private address is
+/// never followed or resolved.
 pub(crate) struct PublicHttp {
     client: reqwest::Client,
 }
 
 impl PublicHttp {
-    pub(crate) fn new() -> Result<Self, PullRefusal> {
+    pub(crate) fn new(allow_internal: bool) -> Result<Self, PullRefusal> {
+        Self::with_lookup(allow_internal, system_lookup())
+    }
+
+    pub(crate) fn with_lookup(allow_internal: bool, lookup: Lookup) -> Result<Self, PullRefusal> {
         let client = ryeos_http_egress::client_builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(CheckedResolver {
+                lookup,
+                allow_internal,
+            }))
             .build()
             .map_err(|error| PullRefusal::FetchFailed(format!("build the HTTP client: {error}")))?;
         Ok(Self { client })
@@ -489,7 +616,7 @@ impl PublicHttp {
             .get(url)
             .send()
             .await
-            .map_err(|error| PullRefusal::FetchFailed(format!("GET {url}: {error}")))?;
+            .map_err(|error| fetch_refusal(url, &error))?;
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -648,8 +775,8 @@ pub async fn handle(
     let refuse = PullRefusal::into_handler_error;
 
     let pins = Pins::parse(&req.node, &req.expect).map_err(refuse)?;
-    let target = parse_target(&req.url).map_err(refuse)?;
-    let http = PublicHttp::new().map_err(refuse)?;
+    let target = parse_target(&req.url, req.allow_internal).map_err(refuse)?;
+    let http = PublicHttp::new(req.allow_internal).map_err(refuse)?;
 
     // 1. The node at the URL is the pinned node, on a compatible build.
     let key_doc: PublicKeyDoc = serde_json::from_value(
