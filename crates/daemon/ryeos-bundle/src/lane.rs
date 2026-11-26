@@ -117,6 +117,52 @@ pub const NEVER_LIFTABLE: &[&str] = &[
     "external_providers",
     "external_lifecycle_adapters",
     "executors",
+    "shadows",
+    "sync_include",
+];
+
+/// How the lane treats each field of the signed bundle manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldClass {
+    /// Describes the bundle; changes nothing the node does.
+    Neutral,
+    /// Never admitted, whatever the policy says.
+    Floor,
+    /// A policy may lift it for a named bundle (see [`Facet`]).
+    Liftable,
+    /// Holds sub-declarations classified one by one.
+    Composite,
+}
+
+/// Every top-level manifest field and its class. A field added to the manifest
+/// is unclassified until it appears here, and a test fails until it does;
+/// until then the field reads as floor.
+pub const MANIFEST_FIELDS: &[(&str, FieldClass)] = &[
+    ("name", FieldClass::Neutral),
+    ("version", FieldClass::Neutral),
+    ("description", FieldClass::Neutral),
+    ("requires_kinds", FieldClass::Neutral),
+    ("uses_kinds", FieldClass::Neutral),
+    ("smoke", FieldClass::Neutral),
+    ("provides_kinds", FieldClass::Floor),
+    ("shadows", FieldClass::Floor),
+    ("sync_include", FieldClass::Floor),
+    ("isolation_backends", FieldClass::Floor),
+    ("external_providers", FieldClass::Floor),
+    ("external_lifecycle_adapters", FieldClass::Floor),
+    ("owns_namespaces", FieldClass::Liftable),
+    ("runtime_authority", FieldClass::Composite),
+];
+
+/// The classes of the runtime-authority families.
+pub const RUNTIME_AUTHORITY_FIELDS: &[(&str, FieldClass)] = &[
+    ("bundle_events", FieldClass::Liftable),
+    ("runtime_vault", FieldClass::Liftable),
+    ("item_authoring", FieldClass::Liftable),
+    ("project_snapshots", FieldClass::Liftable),
+    ("state_home", FieldClass::Floor),
+    ("operator_vault", FieldClass::Floor),
+    ("route_capabilities", FieldClass::Floor),
 ];
 
 /// What this node admits for one lane bundle, taken from its signed policy.
@@ -228,6 +274,8 @@ pub fn refuse_lane_manifest(
     }
     let authority = &manifest.runtime_authority;
     let never = [
+        (!manifest.shadows.is_empty(), "shadows"),
+        (!manifest.sync_include.is_empty(), "sync_include"),
         (authority.operator_vault, "operator_vault"),
         (authority.state_home.is_some(), "state_home"),
         (
@@ -933,6 +981,104 @@ mod tests {
         assert_code(
             &refusal(&tmp.path().join("missing")),
             "bundle_lane_unreadable",
+        );
+    }
+
+    /// The field names serde expects for a deny-unknown-fields type, read from
+    /// its own error so a field added later shows up here.
+    fn fields_of<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        let error = serde_json::from_value::<T>(serde_json::json!({"~unknown~": 1}))
+            .err()
+            .expect("an unknown field is refused")
+            .to_string();
+        let expected = error
+            .split("expected one of ")
+            .nth(1)
+            .or_else(|| error.split("expected ").nth(1))
+            .expect("the error lists the expected fields");
+        expected
+            .split(',')
+            .filter_map(|part| part.split('`').nth(1))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn every_manifest_field_is_classified_and_the_classes_agree_with_the_lane() {
+        let mut fields = fields_of::<BundleManifest>();
+        fields.sort();
+        let mut classified: Vec<String> = MANIFEST_FIELDS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        classified.sort();
+        assert_eq!(
+            fields, classified,
+            "a manifest field was added or removed: classify it in MANIFEST_FIELDS (an unclassified field reads as floor)"
+        );
+        let mut authority = fields_of::<crate::manifest::RuntimeAuthorityDecls>();
+        authority.sort();
+        let mut classified: Vec<String> = RUNTIME_AUTHORITY_FIELDS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        classified.sort();
+        assert_eq!(
+            authority, classified,
+            "a runtime-authority family was added or removed: classify it in RUNTIME_AUTHORITY_FIELDS"
+        );
+        // Every floor field is on the never-liftable list, and the liftable
+        // ones are exactly the facets a policy can name.
+        let all = MANIFEST_FIELDS
+            .iter()
+            .chain(RUNTIME_AUTHORITY_FIELDS.iter());
+        for (name, class) in all.clone() {
+            match class {
+                FieldClass::Floor => {
+                    assert!(
+                        NEVER_LIFTABLE.contains(name),
+                        "{name} is floor but not listed"
+                    );
+                    assert_eq!(Facet::parse(name), None, "{name}");
+                }
+                FieldClass::Liftable => {
+                    assert!(
+                        Facet::parse(name).is_some(),
+                        "{name} is liftable but not a facet"
+                    );
+                    assert!(!NEVER_LIFTABLE.contains(name), "{name}");
+                }
+                FieldClass::Neutral | FieldClass::Composite => {}
+            }
+        }
+        let liftable: Vec<&str> = all
+            .filter(|(_, class)| *class == FieldClass::Liftable)
+            .map(|(name, _)| *name)
+            .collect();
+        for facet in [
+            Facet::BundleEvents,
+            Facet::RuntimeVault,
+            Facet::ItemAuthoring,
+            Facet::ProjectSnapshots,
+            Facet::OwnsNamespaces,
+        ] {
+            assert!(liftable.contains(&facet.name()), "{}", facet.name());
+        }
+    }
+
+    #[test]
+    fn shadows_and_sync_include_are_floor_in_the_lane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shadows = manifest();
+        shadows.shadows = vec!["config:x".to_string()];
+        let everything = LaneGrants {
+            invoked: true,
+            kinds: Vec::new(),
+            facets: vec![Facet::OwnsNamespaces],
+        };
+        assert_code(
+            &check(tmp.path(), &shadows, &everything).unwrap_err(),
+            "publication_lane_never_admitted",
         );
     }
 
