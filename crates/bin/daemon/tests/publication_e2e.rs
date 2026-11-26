@@ -341,10 +341,7 @@ async fn the_version_is_the_frozen_manifests_and_a_mismatch_is_refused() {
     wrong.version = format!("{}-other", frozen.version);
     let (status, refused) = publish(&h, &wrong, &fixture.user).await;
     assert_eq!(status, 400, "{refused:#}");
-    assert_eq!(
-        refused["error"]["code"], "publication_malformed",
-        "{refused:#}"
-    );
+    assert_eq!(refused["code"], "publication_malformed", "{refused:#}");
     let right = record(&frozen, 0x23, 3600);
     let (status, published) = publish(&h, &right, &fixture.user).await;
     assert_eq!(status, 200, "{published:#}");
