@@ -114,21 +114,21 @@ pub fn link_key(
     );
 
     // The added key: no lineage, and no other owner.
-    if let Some(graph) = trust.succession() {
-        if let Some(node_record) = graph.node(&key) {
-            ensure!(
-                node_record.status == SignerStatus::Active,
-                "key_link_key_not_active: {} is {} on this node",
-                body.key,
-                node_record.status.as_str()
-            );
-            ensure!(
-                node_record.predecessor.is_none() && graph.successors(&key).next().is_none(),
-                "key_link_key_has_lineage: {} belongs to a key-succession lineage, and a key \
-                 has one owner",
-                body.key
-            );
-        }
+    if let Some(graph) = trust.succession()
+        && let Some(node_record) = graph.node(&key)
+    {
+        ensure!(
+            node_record.status == SignerStatus::Active,
+            "key_link_key_not_active: {} is {} on this node",
+            body.key,
+            node_record.status.as_str()
+        );
+        ensure!(
+            node_record.predecessor.is_none() && graph.successors(&key).next().is_none(),
+            "key_link_key_has_lineage: {} belongs to a key-succession lineage, and a key has \
+             one owner",
+            body.key
+        );
     }
     let id = link.id()?;
     let already_pinned = KeyLinkLedger::load(app_root, node.verifying_key())
@@ -272,7 +272,7 @@ mod tests {
     }
 
     fn store(rig: &Rig, records: Vec<SignerRecord>, chain: &[TrustEvent]) -> TrustStore {
-        TrustStore::from_registry(rig.node.verifying_key().clone(), records)
+        TrustStore::from_registry(*rig.node.verifying_key(), records)
             .unwrap()
             .with_succession_chain(chain)
     }
