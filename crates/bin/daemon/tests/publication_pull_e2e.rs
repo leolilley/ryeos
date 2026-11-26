@@ -15,7 +15,7 @@ use common::fast_fixture::{
     FAST_FIXTURE_TIME, FastFixture, register_config_fixture_bundle, register_workflow_bundles,
 };
 use lillux::crypto::SigningKey;
-use ryeos_engine::trust::{PublicationManifest, PublicationRecord};
+use ryeos_engine::trust::PublicationRecord;
 use serde_json::{Value, json};
 
 /// The demo: a bundle with no command registration, so a fresh node whose policy
@@ -125,7 +125,7 @@ async fn pull(b: &DaemonHarness, url: &str, node: &str, expect: &str) -> (u16, V
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_pins() {
     let (a, a_fixture) = start_publisher().await;
-    let (b, _b_fixture) = start_puller().await;
+    let (mut b, _b_fixture) = start_puller().await;
     let publication = publish_on(&a, &a_fixture).await;
     let node_pin = format!("fp:{}", publication.node_fingerprint);
 
@@ -166,39 +166,50 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
         "a refused pull left a bundle behind"
     );
 
-    // The pins together install the bundle.
-    let (status, pulled) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
-    assert_eq!(status, 200, "{pulled:#}");
-    let result = &pulled["result"];
-    assert_eq!(result["bundle_name"], BUNDLE, "{pulled:#}");
-    assert_eq!(result["publication_id"], json!(publication.id));
-    assert_eq!(result["journal"]["recorded"], true, "{pulled:#}");
+    // The right pins reach the install and are refused there: a live install
+    // would change the registrations the signed init completion record pins,
+    // so it is refused until live installs are staged. Nothing is written.
+    let (status, refused) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
+    assert_eq!(status, 501, "{refused:#}");
+    assert_eq!(
+        refused["code"], "live_install_staged_unavailable",
+        "{refused:#}"
+    );
+    assert!(
+        refused["error"].as_str().is_some_and(
+            |text| text.contains("live installs are staged; staging is not available yet")
+        ),
+        "{refused:#}"
+    );
+    assert!(
+        !b.state_path.join(".ai/bundles").join(BUNDLE).exists(),
+        "a refused pull left a bundle behind"
+    );
+    assert!(
+        !b.state_path
+            .join(".ai/node/bundles")
+            .join(format!("{BUNDLE}.yaml"))
+            .exists(),
+        "a refused pull left a registration behind"
+    );
 
-    // Every file B installed hashes to the entry A's frozen manifest names.
-    let described: Value = ryeos_http_egress::client_builder()
-        .build()
-        .expect("HTTP client")
-        .get(&publication.url)
-        .send()
+    // The refused pull was recorded as a thread whose terminal write
+    // succeeded (the 501 answer above), the node answers, and it boots again.
+    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    assert_eq!(status, 200, "{listed:#}");
+    b.restart()
         .await
-        .expect("describe")
-        .json()
-        .await
-        .expect("describe JSON");
-    let manifest: PublicationManifest =
-        serde_json::from_value(described["manifest"].clone()).expect("the manifest");
-    let installed = std::path::PathBuf::from(result["path"].as_str().expect("installed path"));
-    assert_eq!(result["files_installed"], json!(manifest.entries.len()));
-    for entry in &manifest.entries {
-        let bytes = std::fs::read(installed.join(&entry.path))
-            .unwrap_or_else(|error| panic!("{}: {error}", entry.path));
-        assert_eq!(lillux::sha256_hex(&bytes), entry.hash, "{}", entry.path);
-        assert_eq!(bytes.len() as u64, entry.size, "{}", entry.path);
-    }
-
-    // The bundle is now installed, so a second pull moves nothing.
-    let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
-    assert_ne!(status, 200, "{again:#}");
+        .expect("the node boots after the refusals");
+    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    assert_eq!(status, 200, "{listed:#}");
+    assert!(
+        !listed["result"]["bundles"]
+            .as_array()
+            .expect("bundles")
+            .iter()
+            .any(|entry| entry["name"] == BUNDLE),
+        "{listed:#}"
+    );
 }
 
 /// The unpinned publisher: A holds a bundle whose manifest is signed by a key

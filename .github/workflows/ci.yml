@@ -832,6 +832,72 @@ jobs:
           --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
           --partition "hash:${{ matrix.shard }}/8"
 
+  ui-ignored-tests:
+    name: Ignored UI seat tests
+    # The ryeos-ui tests marked #[ignore] need populated handler binaries, which
+    # the bundle state carries. Nothing else runs them, so a regression in a
+    # seat read, dispatch or authority path would pass every other job. They
+    # run here, in one place, and the count is exact: a test that is added,
+    # removed, skipped or failing changes it and fails the job. Raise EXPECTED
+    # when an ignored UI test is added, here and in the merge_gates
+    # changed-crates job's ryeos-ui step: the count is written in both places.
+    needs: [bundles, workspace-archive]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTC_WRAPPER: ""
+      EXPECTED: "15"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run the ignored ryeos-ui tests and require the exact count
+        env:
+          RUST_MIN_STACK: 8388608
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          ./scripts/gate.sh \
+            --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst" \
+            -p ryeos-ui --run-ignored only 2>&1 | tee "$log"
+          summary="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Summary .* tests run:' | tail -n 1)"
+          echo "summary: $summary"
+          # nextest leaves a zero count out of its summary, so a clean run has
+          # no "failed" word at all.
+          [[ "$summary" == *"$EXPECTED tests run: $EXPECTED passed"* && "$summary" != *" failed"* ]] \
+            || { echo "FAIL: expected exactly $EXPECTED ignored ryeos-ui tests to run and pass" >&2; exit 1; }
+
   multicall-coreutils:
     name: Multi-call coreutils (Ubuntu 26.04)
     # Ubuntu 26.04's Rust coreutils refuse unless the executable's own file
@@ -1186,6 +1252,28 @@ jobs:
           done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
           exit "$failed"
 
+      # The ryeos-ui tests marked #[ignore] need populated handler binaries, which this job
+      # has from the bundle state. They run when the change touches ryeos-ui, so a branch
+      # cannot merge a broken seat read, dispatch or authority test that only the next full CI
+      # would catch. The count is exact, as in the full CI's ui-ignored-tests job.
+      - name: Run the ignored ryeos-ui tests and require the exact count
+        if: ${{ contains(needs.classify.outputs.test_packages, '"ryeos-ui"') }}
+        env:
+          RUST_MIN_STACK: 8388608
+          EXPECTED: "15"
+        run: |
+          set -o pipefail
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
+          log="$(mktemp)"
+          ./scripts/gate.sh -p ryeos-ui --run-ignored only 2>&1 | tee "$log"
+          summary="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Summary .* tests run:' | tail -n 1)"
+          echo "summary: $summary"
+          [[ "$summary" == *"$EXPECTED tests run: $EXPECTED passed"* && "$summary" != *" failed"* ]] \
+            || { echo "FAIL: expected exactly $EXPECTED ignored ryeos-ui tests to run and pass" >&2; exit 1; }
+
   # Daemon end-to-end binaries (crates/bin/daemon/tests) for a merge_gates run. The classifier
   # picks them from the coverage map: binaries covering a changed package or path, a changed
   # test binary itself, or all of them when the daemon's sources or shared test helpers change.
@@ -1358,7 +1446,7 @@ jobs:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
     # check keeps its name and fails if any part failed or was skipped.
-    needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
+    needs: [bundles, workspace-archive, test-shard, ui-ignored-tests, multicall-coreutils, scheduler-compositions]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
@@ -1742,7 +1830,15 @@ jobs:
           # The credential-transition test re-executes the test binary as
           # uid 65534, which cannot traverse the runner's home: install the
           # exact binary where every account can execute it.
-          bin="$(cargo test -p lillux --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable')"
+          build_json="$RUNNER_TEMP/build-lillux.jsonl"
+          if ! cargo test -p lillux --locked --lib --no-run --message-format=json > "$build_json"; then
+            # cargo's stderr does not repeat the compiler's error text, which
+            # only the JSON stream holds: print it so a failed build says what failed.
+            echo "::error::building the lillux tests failed; the compiler's messages follow" >&2
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.rendered' "$build_json" >&2 || true
+            exit 1
+          fi
+          bin="$(jq -r 'select(.profile.test == true and .executable != null) | .executable' "$build_json")"
           [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one lillux test executable, got: $bin" >&2; exit 1; }
           sudo -n install -D -m 755 "$bin" /opt/ryeos-root-tests/lillux-tests
           sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_TEST_BINARY=/opt/ryeos-root-tests/lillux-tests "$RUNNER_TEMP/run-ignored" 2 \
@@ -1923,8 +2019,16 @@ jobs:
         run: |
           set -euo pipefail
           for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
-            exe="$(cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json \
-              | jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable')"
+            build_json="$RUNNER_TEMP/build-$suite.jsonl"
+            if ! cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json > "$build_json"; then
+              # The JSON stream holds the compiler's own error text, which
+              # cargo's stderr does not repeat: print it so a failed build
+              # says what failed.
+              echo "::error::building $suite failed; the compiler's messages follow" >&2
+              jq -r 'select(.reason == "compiler-message" and (.message.level == "error" or .message.level == "error: internal compiler error")) | .message.rendered' "$build_json" >&2 || true
+              exit 1
+            fi
+            exe="$(jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable' "$build_json")"
             [[ "$(printf '%s\n' "$exe" | wc -l)" == 1 && -x "$exe" ]] || { echo "FAIL: expected exactly one $suite executable, got: $exe" >&2; exit 1; }
             echo "$suite=$exe" >> "$RUNNER_TEMP/e2e-executables"
           done

@@ -640,6 +640,59 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
     Ok(())
 }
 
+/// A caller the origin authorizes (a stored delegation for the remote) is
+/// refused by the live-install rule, not by authority: it learns that live
+/// installs are staged, nothing is written on the origin, and the node boots
+/// again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_nothing() -> Result<()>
+{
+    let mut pair = start_pair().await?;
+    let u1 = common::fast_fixture::user_signing_key();
+    pair.delegate(&u1, &[VAULT_LIST]).await?;
+    let bundle = "staged-refusal-demo";
+
+    let (status, body) = pair
+        .origin_service(
+            &u1,
+            "service:remote/bundle-install",
+            json!({"remote": HOSTED_REMOTE, "bundle_name": bundle}),
+        )
+        .await?;
+    assert_eq!(status.as_u16(), 501, "{body}");
+    assert_eq!(body["code"], "live_install_staged_unavailable", "{body}");
+    let text = body["error"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("live installs are staged; staging is not available yet"),
+        "{body}"
+    );
+    assert!(
+        !pair
+            .origin
+            .state_path
+            .join(".ai/bundles")
+            .join(bundle)
+            .exists(),
+        "a refused install left a bundle behind"
+    );
+    assert!(
+        !pair
+            .origin
+            .state_path
+            .join(".ai/node/bundles")
+            .join(format!("{bundle}.yaml"))
+            .exists(),
+        "a refused install left a registration behind"
+    );
+
+    pair.origin.restart().await?;
+    let (status, listed) = pair
+        .origin_service(&u1, "service:bundle/list", json!({}))
+        .await?;
+    assert_eq!(status.as_u16(), 200, "{listed}");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hosted_refuses_wrong_audience_expired_tampered_and_transitive_delegations() -> Result<()> {
     let pair = start_pair().await?;

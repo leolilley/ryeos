@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-25T07:27:26Z:dc11d5a2f5ef81da77edd854e94ea774efb420c976a1c4d7d6fcf37bd900df1b:Qv31h2qWiV1dDbLhKUxOXF5SI31cmShcygtJbobayQVjf9ZMjV2zDIkUtq33cr3rRR44Rh1PeADZDvchv8y4CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:44:16Z:e74a2031156942d2886c18c89c048b60ccb34f4178fe3ef80acb62ce18789b15:zIZs0wpaqAU+YeSZJi7aWKfmt6KUPjlZ2FxkdkYQANZyN1eUAOZc4MhDVd41oTmj4Xv3xedJXbr6w4HPRnvDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1057,6 +1057,41 @@ checkout paths. Refusal codes: `project_manifest_missing`, `project_manifest_nam
 `project_manifest_name_invalid`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
+
+### Applying a published result to your checkout
+
+`ryeos project apply <project-name> <base-snapshot-hash> <result-snapshot-hash> [--checkout <path>]`
+writes a published result into a registered checkout of yours. The base is the
+snapshot the result was authored against and the result is the snapshot it
+produced. On a running node, service `project/apply-published`; it needs the
+live-project-write capability and its own execute capability.
+
+- The checkout is taken from your own registration of the project (name it with
+  `--checkout` when you registered several); a path is never accepted from the
+  request. A project registered by anyone else, or not at all, is refused the
+  same way. The registered checkout must still declare the project's name.
+- The result must be the project's published head or an ancestor of it, and the
+  base an ancestor of the result.
+- **Only the paths the result changes are checked.** A file you edited that the
+  result does not touch stays as it is and never blocks the apply. A path the
+  result changes must still equal the base (or already equal the result); a
+  path the result adds must not exist (or already equal the result); a path
+  inside a secret or node-owned control root is refused.
+- **Nothing is merged.** If any path conflicts, nothing is written and the
+  answer lists every conflicting path with a reason: `drifted` (you changed it),
+  `missing` (you removed it), `blocks_new_file` (a different file is already
+  there), `not_regular` (not a plain file, or a parent is a link),
+  `protected_path`. The list names at most 256 paths and carries the total and
+  a `truncated` flag. Move or commit those changes and apply again.
+- It is crash-safe and repeatable: the apply stages, backs up and swaps under
+  the same lock, journal and rollback as `ryeos remote pull`, an interrupted
+  apply must be recovered before another starts (`project_apply_recovery_required`),
+  and applying the same result again changes nothing.
+- A second result that touches paths the first already changed conflicts on
+  those paths until you commit the first.
+
+`ryeos remote pull` uses the same apply and now also checks only the paths the
+result changes.
 
 A registration is what lets a live checkout state its project identity: a run
 launched from a registered checkout, by the registering owner holding

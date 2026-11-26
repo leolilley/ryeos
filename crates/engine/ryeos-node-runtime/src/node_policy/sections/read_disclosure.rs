@@ -1,19 +1,23 @@
 //! Node-owned policy for what a UI seat may read through a bound source.
 //!
-//! A UI seat reaches a read service only when a node-authored Surface lists it
-//! in its source lane and the seat's own grant holds the service's
-//! capabilities. This section is a third, independent narrowing: for every
-//! service a seat reads it names the caller classes admitted, the parameters
-//! that must match or are forced, the parameters a seat may not send, the
-//! fields of the result that may be disclosed, and the size the disclosed
-//! result may reach. It never grants anything: a read with no entry is not
-//! admitted, and an entry cannot add a capability, a Surface lane, or a
-//! record the service itself would refuse.
+//! A service item declares what each caller class may see of its answer, and
+//! the executor shapes the answer to that tier. This section is the node's
+//! narrowing of the seat lane on top of it: for every service a seat reads it
+//! names the parameters that must match or are forced, the parameters a seat
+//! may not send, and optionally a narrower set of result fields and smaller
+//! bounds than the item declares. It never widens: a field outside the item's
+//! tier is already gone before this section sees the answer. A read with no
+//! entry is not admitted to a seat, and an entry cannot add a capability, a
+//! Surface lane, or a record the service itself would refuse.
+//!
+//! An event stream route has no service item, so its entry carries the whole
+//! disclosure: the fields it keeps and the bounds of every frame.
 //!
 //! The section knows services, parameter names and JSON pointers only. It
-//! names no screen, record kind or consumer. Registration makes it a required
-//! member of every complete node-policy generation; there is no daemon
-//! fallback and an absent section is not an empty one.
+//! names no screen, record kind or consumer, and no class of caller: the
+//! class that shapes an answer comes from the acting key's grant. Registration
+//! makes it a required member of every complete node-policy generation; there
+//! is no daemon fallback and an absent section is not an empty one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,7 +28,7 @@ use serde_json::Value;
 
 use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection, TypedNodePolicy};
 
-pub const SECTION_NAME: &str = "ui_seat_reads";
+pub const SECTION_NAME: &str = "read_disclosure";
 
 /// The only schema this section is read under.
 pub const CURRENT_SCHEMA: u32 = 1;
@@ -44,27 +48,6 @@ pub const TARGET_KIND_ROUTE: &str = "route";
 
 const SESSION_MARKER_PREFIX: &str = "@session:";
 const MAX_PARAMETER_NAME_BYTES: usize = 64;
-
-/// Who a seat is, as far as read policy goes. Derived from the one fact the
-/// daemon holds about a seat: whether its session carries a hosted principal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SeatClass {
-    /// A session minted on the local operator lane: no hosted principal.
-    LocalOperator,
-    /// A session minted for a hosted principal.
-    HostedPrincipal,
-}
-
-impl SeatClass {
-    /// The class of a session from its hosted-principal field.
-    pub fn of_session(user_principal_id: Option<&str>) -> Self {
-        match user_principal_id {
-            None => Self::LocalOperator,
-            Some(_) => Self::HostedPrincipal,
-        }
-    }
-}
 
 /// One segment of a keep pointer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,16 +123,13 @@ impl Serialize for KeepPath {
     }
 }
 
-/// One entry of the policy: the exact admission of one service for the
-/// classes it names.
+/// One entry of the policy: the exact admission of one service or stream
+/// route to the seat lane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SeatReadEntry {
+pub struct ReadEntry {
     /// One canonical `service:` ref, or the `route:` ref of an event stream.
     pub target: String,
-    /// Classes this entry admits. A class absent from every entry for the
-    /// target is refused.
-    pub classes: Vec<SeatClass>,
     /// Every listed parameter must be present after pinning with a value in
     /// its set. No entry here means any parameters match.
     #[serde(default)]
@@ -161,27 +141,27 @@ pub struct SeatReadEntry {
     /// Parameters a seat may not send. A call that carries one is refused.
     #[serde(default)]
     pub deny_params: Vec<String>,
-    /// Allowlist of the result fields disclosed. Anything not named, including
-    /// fields a later release adds, is dropped.
+    /// Allowlist of the result fields disclosed, narrower than the service
+    /// item's tier. Absent on a service entry means the item's tier as it is;
+    /// required on a stream route entry. Anything not named, including fields a
+    /// later release adds, is dropped.
+    #[serde(default)]
     pub keep: Vec<KeepPath>,
-    /// Largest disclosed result, as compact JSON. A larger result is refused.
-    pub max_result_bytes: u64,
-    /// Most elements any one array of the disclosed result may hold. A longer
-    /// array is refused, never cut.
-    pub max_items: u32,
+    /// Largest disclosed result, as compact JSON, at most the item's own
+    /// bound. A larger result is refused. Required on a stream route entry.
+    #[serde(default)]
+    pub max_result_bytes: Option<u64>,
+    /// Most elements any one array of the disclosed result may hold, at most
+    /// the item's own bound. A longer array is refused, never cut. Required on
+    /// a stream route entry.
+    #[serde(default)]
+    pub max_items: Option<u32>,
 }
 
-impl SeatReadEntry {
+impl ReadEntry {
     fn validate(&self, index: usize) -> Result<()> {
-        let at = format!("ui_seat_reads.reads[{index}]");
+        let at = format!("read_disclosure.reads[{index}]");
         validate_target_ref(&self.target).with_context(|| format!("{at}.target"))?;
-        if self.classes.is_empty() {
-            bail!("{at} names no class");
-        }
-        let distinct: BTreeSet<_> = self.classes.iter().collect();
-        if distinct.len() != self.classes.len() {
-            bail!("{at} repeats a class");
-        }
         for (name, set) in &self.when {
             validate_parameter_name(name).with_context(|| format!("{at}.when"))?;
             if set.is_empty() {
@@ -224,14 +204,19 @@ impl SeatReadEntry {
                 bail!("{at} both pins and denies parameter `{name}`");
             }
         }
-        if self.keep.is_empty() {
-            bail!("{at}.keep is empty: an entry must disclose something");
-        }
-        if self.max_result_bytes == 0 {
+        if self.max_result_bytes == Some(0) {
             bail!("{at}.max_result_bytes must be non-zero");
         }
-        if self.max_items == 0 {
+        if self.max_items == Some(0) {
             bail!("{at}.max_items must be non-zero");
+        }
+        if self.is_stream_route() {
+            if self.keep.is_empty() {
+                bail!("{at}.keep is empty: a stream route entry must disclose something");
+            }
+            if self.max_result_bytes.is_none() || self.max_items.is_none() {
+                bail!("{at} is a stream route and needs max_result_bytes and max_items");
+            }
         }
         Ok(())
     }
@@ -246,10 +231,9 @@ impl SeatReadEntry {
             .chain(self.deny_params.iter().map(String::as_str))
     }
 
-    fn shares_class_with(&self, other: &Self) -> bool {
-        self.classes
-            .iter()
-            .any(|class| other.classes.contains(class))
+    /// Whether this entry admits an event stream route rather than a service.
+    pub fn is_stream_route(&self) -> bool {
+        self.target.starts_with("route:")
     }
 
     /// Whether one parameter set could satisfy both `when` conditions. Each
@@ -265,19 +249,19 @@ impl SeatReadEntry {
     }
 }
 
-/// The compiled `ui_seat_reads` section.
+/// The compiled `read_disclosure` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UiSeatReadsPolicy {
+pub struct ReadDisclosurePolicy {
     pub schema: u32,
-    pub reads: Vec<SeatReadEntry>,
+    pub reads: Vec<ReadEntry>,
 }
 
-impl TypedNodePolicy for UiSeatReadsPolicy {
+impl TypedNodePolicy for ReadDisclosurePolicy {
     const SECTION_NAME: &'static str = SECTION_NAME;
 }
 
-impl UiSeatReadsPolicy {
+impl ReadDisclosurePolicy {
     /// A policy with no entry: every read is refused.
     pub fn admitting_nothing() -> Self {
         Self {
@@ -288,19 +272,16 @@ impl UiSeatReadsPolicy {
 
     pub fn validate(&self) -> Result<()> {
         if self.schema != CURRENT_SCHEMA {
-            bail!("UI seat reads node policy schema is not current");
+            bail!("read disclosure node policy schema is not current");
         }
         for (index, entry) in self.reads.iter().enumerate() {
             entry.validate(index)?;
         }
         for (index, entry) in self.reads.iter().enumerate() {
             for later in &self.reads[index + 1..] {
-                if entry.target == later.target
-                    && entry.shares_class_with(later)
-                    && entry.when_overlaps(later)
-                {
+                if entry.target == later.target && entry.when_overlaps(later) {
                     bail!(
-                        "ui_seat_reads has two entries for `{}` that can admit the same call",
+                        "read_disclosure has two entries for `{}` that can admit the same call",
                         entry.target
                     );
                 }
@@ -310,7 +291,7 @@ impl UiSeatReadsPolicy {
     }
 
     /// The entries for one target, in file order.
-    pub fn entries_for(&self, target: &str) -> Vec<&SeatReadEntry> {
+    pub fn entries_for(&self, target: &str) -> Vec<&ReadEntry> {
         self.reads
             .iter()
             .filter(|entry| entry.target == target)
@@ -345,9 +326,9 @@ fn validate_parameter_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct UiSeatReadsPolicySection;
+pub struct ReadDisclosurePolicySection;
 
-impl NodePolicySection for UiSeatReadsPolicySection {
+impl NodePolicySection for ReadDisclosurePolicySection {
     fn name(&self) -> &'static str {
         SECTION_NAME
     }
@@ -357,8 +338,8 @@ impl NodePolicySection for UiSeatReadsPolicySection {
         _context: &NodePolicyContext,
         body: &Value,
     ) -> Result<Arc<dyn ErasedNodePolicy>> {
-        let record: UiSeatReadsPolicy =
-            serde_json::from_value(body.clone()).context("parse UI seat reads node policy")?;
+        let record: ReadDisclosurePolicy =
+            serde_json::from_value(body.clone()).context("parse read disclosure node policy")?;
         record.validate()?;
         Ok(Arc::new(record))
     }
@@ -372,7 +353,7 @@ mod tests {
     fn context() -> NodePolicyContext {
         NodePolicyContext {
             section: SECTION_NAME.to_owned(),
-            source_file: "/node/policies/ui_seat_reads.yaml".into(),
+            source_file: "/node/policies/read_disclosure.yaml".into(),
             signer_fingerprint: "ab".repeat(32),
         }
     }
@@ -380,7 +361,6 @@ mod tests {
     fn entry() -> Value {
         json!({
             "target": "service:node/status",
-            "classes": ["local_operator", "hosted_principal"],
             "keep": ["/node_id", "/isolation/mode"],
             "max_result_bytes": 65536,
             "max_items": 50
@@ -392,7 +372,7 @@ mod tests {
     }
 
     fn parse(value: Value) -> Result<Arc<dyn ErasedNodePolicy>> {
-        UiSeatReadsPolicySection.parse(&context(), &value)
+        ReadDisclosurePolicySection.parse(&context(), &value)
     }
 
     #[test]
@@ -407,7 +387,10 @@ mod tests {
         });
         full["deny_params"] = json!(["include_unverified"]);
         let parsed = parse(body(vec![full])).unwrap();
-        let policy = parsed.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<ReadDisclosurePolicy>()
+            .unwrap();
         assert_eq!(policy.reads.len(), 1);
         assert_eq!(policy.reads[0].keep[1].text(), "/isolation/mode");
         assert_eq!(policy.entries_for("service:node/status").len(), 1);
@@ -417,9 +400,12 @@ mod tests {
     #[test]
     fn an_empty_read_list_is_valid_and_admits_nothing() {
         let parsed = parse(body(vec![])).unwrap();
-        let policy = parsed.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<ReadDisclosurePolicy>()
+            .unwrap();
         assert!(policy.reads.is_empty());
-        assert_eq!(policy, &UiSeatReadsPolicy::admitting_nothing());
+        assert_eq!(policy, &ReadDisclosurePolicy::admitting_nothing());
     }
 
     #[test]
@@ -430,11 +416,9 @@ mod tests {
             assert!(parse(json!({"schema": schema, "reads": []})).is_err());
         }
         assert!(parse(json!({"schema": 1, "reads": [], "fallback": 1})).is_err());
-        for name in ["target", "classes", "keep", "max_result_bytes", "max_items"] {
-            let mut missing = entry();
-            missing.as_object_mut().unwrap().remove(name);
-            assert!(parse(body(vec![missing])).is_err(), "missing {name}");
-        }
+        let mut missing = entry();
+        missing.as_object_mut().unwrap().remove("target");
+        assert!(parse(body(vec![missing])).is_err(), "missing target");
         let mut unknown = entry();
         unknown["grant"] = json!(["ryeos.execute.service.*"]);
         assert!(parse(body(vec![unknown])).is_err());
@@ -462,7 +446,10 @@ mod tests {
         let mut stream = entry();
         stream["target"] = json!("route:ui/events/chain");
         let parsed = parse(body(vec![stream])).unwrap();
-        let policy = parsed.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<ReadDisclosurePolicy>()
+            .unwrap();
         assert_eq!(policy.entries_for("route:ui/events/chain").len(), 1);
         assert_eq!(policy.entries_for("service:ui/events/chain").len(), 0);
         for target in [
@@ -479,21 +466,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_classes_and_bounds() {
-        for classes in [
-            json!([]),
-            json!(["local_operator", "local_operator"]),
-            json!(["remote_operator"]),
-        ] {
-            let mut bad = entry();
-            bad["classes"] = classes;
-            assert!(parse(body(vec![bad])).is_err());
-        }
+    fn rejects_zero_bounds_and_a_class_field() {
         for (field, value) in [("max_result_bytes", 0), ("max_items", 0)] {
             let mut bad = entry();
             bad[field] = json!(value);
             assert!(parse(body(vec![bad])).is_err(), "{field}");
         }
+        // The policy names no caller class: the class comes from the key.
+        let mut classed = entry();
+        classed["classes"] = json!(["principal"]);
+        assert!(parse(body(vec![classed])).is_err());
+    }
+
+    #[test]
+    fn a_service_entry_may_omit_its_narrowing_and_a_stream_route_may_not() {
+        let mut bare = json!({"target": "service:node/status"});
+        assert!(parse(body(vec![bare.clone()])).is_ok());
+        bare["target"] = json!("route:ui/events/chain");
+        assert!(parse(body(vec![bare.clone()])).is_err());
+        bare["keep"] = json!(["/event_type"]);
+        assert!(parse(body(vec![bare.clone()])).is_err());
+        bare["max_result_bytes"] = json!(4096);
+        bare["max_items"] = json!(4);
+        assert!(parse(body(vec![bare])).is_ok());
     }
 
     #[test]
@@ -503,9 +498,6 @@ mod tests {
             bad["keep"] = json!([pointer]);
             assert!(parse(body(vec![bad])).is_err(), "pointer `{pointer}`");
         }
-        let mut empty = entry();
-        empty["keep"] = json!([]);
-        assert!(parse(body(vec![empty])).is_err());
         assert_eq!(
             KeepPath::parse("/a~1b/~0/*/3").unwrap().segments(),
             &[
@@ -565,25 +557,9 @@ mod tests {
         elsewhere["when"] = json!({"j": ["a"]});
         assert!(parse(body(vec![conditional, elsewhere])).is_err());
 
-        // Disjoint classes never overlap, whatever the conditions.
-        let mut local = entry();
-        local["classes"] = json!(["local_operator"]);
-        let mut hosted = entry();
-        hosted["classes"] = json!(["hosted_principal"]);
-        assert!(parse(body(vec![local, hosted])).is_ok());
-
         // Different targets never overlap.
         let mut elsewhere = entry();
         elsewhere["target"] = json!("service:bundle/list");
         assert!(parse(body(vec![entry(), elsewhere])).is_ok());
-    }
-
-    #[test]
-    fn class_follows_the_hosted_principal_field() {
-        assert_eq!(SeatClass::of_session(None), SeatClass::LocalOperator);
-        assert_eq!(
-            SeatClass::of_session(Some("fp:abc")),
-            SeatClass::HostedPrincipal
-        );
     }
 }
