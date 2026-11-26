@@ -1200,9 +1200,9 @@ mod tests {
         };
         command.project.as_mut().unwrap().bind_parameter = None;
         command.project.as_mut().unwrap().request_project_path = true;
-        let compile = |reference: &str| {
+        let compile = |command: &CommandDef, reference: &str| {
             compile_command_invocation(
-                &command,
+                command,
                 &[reference.into(), "--no-project".into()],
                 &serde_json::json!({}),
                 None,
@@ -1215,7 +1215,7 @@ mod tests {
             ("tool:some/tool", "tool"),
             ("directive:some/plan", "directive"),
         ] {
-            match compile(reference) {
+            match compile(&command, reference) {
                 Err(CommandProjectPolicyError::ItemKindMismatch {
                     expected,
                     given: refused,
@@ -1228,7 +1228,9 @@ mod tests {
             }
         }
         assert_eq!(
-            compile("worker_execution:codex/session").unwrap().item_ref,
+            compile(&command, "worker_execution:codex/session")
+                .unwrap()
+                .item_ref,
             "worker_execution:codex/session"
         );
 
@@ -1236,7 +1238,7 @@ mod tests {
         if let CommandDispatch::DirectExecuteItemRef { item_kinds, .. } = &mut command.dispatch {
             *item_kinds = None;
         }
-        assert!(compile("tool:some/tool").is_ok());
+        assert!(compile(&command, "tool:some/tool").is_ok());
     }
 
     #[test]
