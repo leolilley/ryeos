@@ -215,7 +215,7 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
         std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
             .unwrap();
     let production = text
-        .find("#[cfg(test)]")
+        .find("#[cfg(test)]\nmod tests")
         .map_or(text.as_str(), |end| &text[..end]);
     assert!(production.contains("fn system_scan_root"));
     assert!(production.contains("fn bundle_scan_root"));
