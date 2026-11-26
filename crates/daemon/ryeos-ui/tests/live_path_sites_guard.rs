@@ -109,6 +109,10 @@ fn non_test_text(text: &str) -> &str {
 
 #[test]
 fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
+    // A new site or a moved exemption changes these counts and so fails here:
+    // add the file to the right list, with a reason if it is exempt.
+    assert_eq!(MUST_ADMIT.len(), 9, "the must-admit list changed");
+    assert_eq!(NEEDS_NO_ADMISSION.len(), 12, "the exemption list changed");
     let root = ryeos_engine::test_support::workspace_root();
     let mut files = Vec::new();
     workspace_files(&root, &root.join("crates"), &mut files);
