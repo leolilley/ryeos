@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:28:19Z:b8f0e8fa9b1b141eba72c5480fde5e84e88f4a10f2338acced99712f5940aba2:F3uidvmxCR2B7YPmZ4BI6W/cl7jwqRlOaOI20Lpni/8DXg5LM1pBwJ0/ugCgwHTx3WrDAZa+Jjbt1AvfkvTBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:30:44Z:7bcaa8cc7e858501383b6348af6a4517b900c54ba03f0ef04261d30d5c0cc04a:9AsZm1MbtIJZ3FVE1Kkpu8rxBBZI8xfHP3vnKRpCqIpf6MsR9/HN0df/GqP0M8xIBamoRAqdWIc8McWvFJkxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -198,6 +198,9 @@ policies:
     # not_after may be; code adds a hard maximum node data cannot raise.
     daily_bytes: 1073741824
     max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

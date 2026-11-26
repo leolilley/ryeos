@@ -217,6 +217,34 @@ fn ledger_for(app_root: &Path, now_ms: i64) -> SharedLedger {
         .clone()
 }
 
+// ── The in-flight limit ─────────────────────────────────────────────
+
+/// A node-wide limit on `/published` requests worked at once. The table sits
+/// outside the bundle-driven route table, whose per-route semaphore therefore
+/// does not cover it, and the outer router carries no concurrency layer.
+fn limiter_for(app_root: &Path, size: u32) -> Arc<tokio::sync::Semaphore> {
+    static LIMITERS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Semaphore>>>> =
+        OnceLock::new();
+    LIMITERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(app_root.to_path_buf())
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(size as usize)))
+        .clone()
+}
+
+/// Take one in-flight slot or answer `publication_busy`.
+fn take_slot(
+    limiter: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Refused> {
+    limiter.clone().try_acquire_owned().map_err(|_| {
+        let mut refused = Refused::new(StatusCode::SERVICE_UNAVAILABLE, "publication_busy");
+        refused.retry_after = true;
+        refused
+    })
+}
+
 // ── Derived manifests ───────────────────────────────────────────────
 
 /// A frozen manifest read from the content store, verified against its hash,
@@ -278,6 +306,7 @@ pub(crate) fn load_manifest(
 
 // ── Answers ─────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct Refused {
     status: StatusCode,
     code: &'static str,
@@ -493,6 +522,16 @@ fn handle(
 /// Serve one `/published` request. The request is read for its method and
 /// path only.
 pub async fn serve(app: Arc<AppState>, request: Request) -> Response {
+    // The slot is taken before anything else, so a flood of invalid ids or
+    // refused requests is bounded like any other.
+    let slots = match app.node_policy.require::<PublicationPolicy>() {
+        Ok(policy) => limiter_for(&app.config.app_root, policy.max_in_flight),
+        Err(error) => return Refused::unavailable(error).into_response(),
+    };
+    let slot = match take_slot(&slots) {
+        Ok(slot) => slot,
+        Err(refused) => return refused.into_response(),
+    };
     if request.method() != Method::GET {
         let mut response =
             Refused::new(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed").into_response();
@@ -506,7 +545,11 @@ pub async fn serve(app: Arc<AppState>, request: Request) -> Response {
     let Some((route, captures)) = match_route(&path) else {
         return Refused::new(StatusCode::NOT_FOUND, "not_found").into_response();
     };
-    let outcome = tokio::task::spawn_blocking(move || handle(&app, route, &captures)).await;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        handle(&app, route, &captures)
+    })
+    .await;
     match outcome {
         Ok(Ok(served)) => (
             StatusCode::OK,

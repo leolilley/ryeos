@@ -207,7 +207,7 @@ impl PublicationsReport {
             retired: Vec::new(),
             daily_byte_cap,
             store_error: None,
-            cap_note: "the daily cap protects the node's bill, not its availability: a stranger can use up the day's cap, after which every read is refused until the window rolls".to_owned(),
+            cap_note: "there are no per-address limits yet: a stranger can exhaust both the daily byte cap (every read is then refused until the window rolls) and the in-flight request slots (a request beyond them is answered publication_busy); the caps protect the node's bill, not its availability".to_owned(),
             per_address_limits: false,
             copies_note: ryeos_engine::trust::PUBLICATION_STATEMENT.to_owned(),
             retirement_note: ryeos_engine::trust::PUBLICATION_RETIREMENT_NOTE.to_owned(),
@@ -1140,11 +1140,14 @@ mod tests {
         assert_eq!(observed.store_error, None);
         assert_eq!(observed.daily_byte_cap, 1 << 20);
         assert!(!observed.per_address_limits);
-        assert!(
-            observed
-                .cap_note
-                .contains("a stranger can use up the day's cap")
-        );
+        for part in [
+            "no per-address limits yet",
+            "exhaust both the daily byte cap",
+            "in-flight request slots",
+            "not its availability",
+        ] {
+            assert!(observed.cap_note.contains(part), "{part}");
+        }
         assert!(
             observed
                 .node_key_rotation_note

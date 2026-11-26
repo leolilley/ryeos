@@ -390,3 +390,76 @@ async fn a_gc_pass_keeps_a_live_publication_and_reclaims_it_after_retire() {
         "the retired publication's manifest is no longer pinned: {swept:#}"
     );
 }
+
+/// Rewrite the node-signed publication policy so the day's cap is `bytes`,
+/// before the init completion seals the generation.
+fn set_daily_cap(
+    state_path: &std::path::Path,
+    node: &SigningKey,
+    bytes: u64,
+) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/publication.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    policy["daily_bytes"] = bytes.into();
+    let signed = lillux::signature::sign_content_at(
+        &serde_yaml::to_string(&policy)?,
+        node,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daily_cap_refuses_reads_once_the_day_is_spent() {
+    const CAP: u64 = 256 * 1024;
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            register_workflow_bundles(state_path, fixture)?;
+            set_daily_cap(state_path, &fixture.node, CAP)
+        },
+        |_| {},
+    )
+    .await
+    .expect("start daemon with a small daily cap");
+    let frozen = freeze(&h).await;
+    let record = record(&frozen, 0x41, 3600);
+    let id = record.id.clone();
+    let (status, published) = publish(&h, &record, &fixture.user).await;
+    assert_eq!(status, 200, "{published:#}");
+    assert_eq!(report(&h)["daily_byte_cap"], json!(CAP));
+
+    // Each read of the manifest reserves its size against the cap; the day
+    // runs out within a bounded number of reads.
+    let path = format!("/published/{id}/blob/{}", frozen.manifest_hash);
+    let mut served = 0_u32;
+    let refused = loop {
+        let (status, headers, body) = h
+            .raw_request(reqwest::Method::GET, &path)
+            .await
+            .expect("GET");
+        if status.as_u16() == 200 {
+            served += 1;
+            assert!(served < 100_000, "the cap never ran out");
+            continue;
+        }
+        break (status.as_u16(), headers, body);
+    };
+    assert!(served >= 1, "the first read fits under the cap");
+    let (status, headers, body) = refused;
+    assert_eq!(status, 429);
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "publication_quota_exhausted");
+    assert!(headers.contains_key(reqwest::header::RETRY_AFTER));
+    // An out-of-scope hash still gets its one answer, and a spent day does
+    // not turn it into a quota answer.
+    let (status, value) = get_json(&h, &format!("/published/{id}/blob/{}", "e".repeat(64))).await;
+    assert_eq!(
+        (status, &value["error"]["code"]),
+        (404, &json!("object_not_in_scope"))
+    );
+}
