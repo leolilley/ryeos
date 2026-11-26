@@ -2273,6 +2273,32 @@ impl StandaloneHarness {
         })
     }
 
+    /// Start the stopped node again, as an operator does after a stopped-node
+    /// change. Fails when the daemon refuses to boot on the state left behind.
+    pub async fn restart_node(&mut self) -> anyhow::Result<()> {
+        self.node.restart().await
+    }
+
+    /// Stop the node in order, so a stopped-node service can run again.
+    pub async fn stop_node(&mut self) -> anyhow::Result<()> {
+        self.node.stop_gracefully().await
+    }
+
+    /// The names `service:bundle/list` reports from the running node.
+    pub async fn listed_bundle_names(&self) -> anyhow::Result<Vec<String>> {
+        let (status, body) = self
+            .node
+            .post_execute("service:bundle/list", ".", serde_json::json!({}))
+            .await?;
+        anyhow::ensure!(status.as_u16() == 200, "bundle/list: {status} {body:#}");
+        Ok(body["result"]["bundles"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("bundle/list carried no bundles: {body:#}"))?
+            .iter()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect())
+    }
+
     /// Run `ryeosd run-service <service_ref> [--params <json>]` against
     /// the persistent state. Returns the process output.
     pub async fn run_service(
