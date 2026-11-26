@@ -1,0 +1,19 @@
+# ryeos:signed:2026-11-26T02:38:14Z:6303eb31321738f2807e77dac246044efd76dc36dd7a734ee33c8bb6ce8e885f:9IMPAbc8IWOHCmoRY8L13H2IMQQWhMi0aJKt2/utPodiPlM9GMwAparrPEp5t03BXFrm8IVSABxGM7MaI2+1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [project, apply]
+description: "Apply a published result to your registered checkout: the difference between the snapshot it was authored against and the snapshot it produced. Reports every conflicting path and writes nothing when there is one"
+help:
+  usage: "ryeos project apply <project-name> <base-snapshot-hash> <result-snapshot-hash> [--checkout <path>]"
+  examples:
+    - "ryeos project apply ryeos 3f0c…e1 a91b…07"
+forms:
+  - slots:
+      - field: project_name
+      - field: base_snapshot_hash
+      - field: result_snapshot_hash
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:project/apply-published
+  availability: daemon

@@ -1,0 +1,25 @@
+# ryeos:signed:2026-11-26T02:38:14Z:ee07405b9c5ce2fde563fee281212937c6e786f3bd0811e1f0e55fbfb89d1646:IFUhPUh2tA290hhuiadkEUSRHZDZ+zVKTt1SK3jXTfPNKRzmaOtT+NYwEGtBOwMovZUAWFgqKob/2R3MPWV8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: project.apply-published
+required_caps: ["ryeos.execute.service.project/apply-published"]
+schema:
+  project_name: string
+  base_snapshot_hash: string
+  result_snapshot_hash: string
+  checkout: json
+description: "Apply a published result (the difference between the snapshot it was authored against and the snapshot it produced) to the caller's registered checkout. Only paths the result changes are checked; every conflict is reported at once and nothing is written when there is one; nothing is merged"
+disclosure:
+  principal:
+    - "/applied"
+    - "/code"
+    - "/files_updated"
+    - "/files_deleted"
+    - "/total"
+    - "/truncated"
+    - "/base_snapshot_hash"
+    - "/result_snapshot_hash"
+    - "/conflicts/*/reason"
+  free_text:
+    - "/conflicts/*/path"
+  max_result_bytes: 262144
+  max_items: 256

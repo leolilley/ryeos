@@ -168,6 +168,34 @@ pub async fn pull_results(
     finish_pull_staged_roots(authority, &mut staged_roots, operation)
 }
 
+/// Apply the difference between two published project trees to a local
+/// checkout: the tree the result was authored against and the tree it produced,
+/// both already in the local store. No fetch and no lineage check happen here;
+/// the caller has proved the result is the published head and the base its
+/// ancestor. The conflict rules, locking, recovery journal, staging, atomic
+/// swap and rollback are those of [`pull_results`].
+pub async fn apply_published_result(
+    authority: &PinnedStateAuthority,
+    local_project_root: &Path,
+    base_tree: &ProjectTree,
+    result_tree: &ProjectTree,
+) -> Result<(usize, usize), PullResultsError> {
+    let local_cas = authority.cas_store().map_err(PullResultsError::Other)?;
+    let journal_auth_key = authority
+        .require_recovery()
+        .map_err(PullResultsError::Other)?
+        .workspace_journal_auth_key()
+        .map_err(PullResultsError::Other)?;
+    apply_tree_diff(
+        &local_cas,
+        local_project_root,
+        base_tree,
+        result_tree,
+        &journal_auth_key,
+    )
+    .await
+}
+
 // The staged pull transaction keeps its remote, authority, lease, and three
 // snapshot identities explicit so none can be silently substituted.
 async fn pull_results_staged(
