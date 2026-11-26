@@ -184,6 +184,8 @@ const OPERATOR_ONLY: &[&str] = &[
     "remote/pin",
     "remote/reconcile-project-head",
     "remote/threads",
+    "sync/jobs/inspect",
+    "sync/jobs/list",
     "system/routes",
     "threads/accounting/summary",
     "trust/show",
