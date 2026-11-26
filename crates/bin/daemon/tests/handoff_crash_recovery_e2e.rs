@@ -5008,6 +5008,15 @@ fn build_handoff_measurement_record(
     }
     authority.ensure_guard(&guard)?;
 
+    // A measured stage that is absent on a successful handoff is reported with
+    // the whole measurement document, which names the adoption path taken (a
+    // re-driven adoption skips the stages an earlier call already executed).
+    if failure_cut.is_none() {
+        eprintln!(
+            "handoff measurement for `{case_id}`: stage measurements as received: {}",
+            measurements.map_or_else(|| "absent".to_owned(), serde_json::Value::to_string)
+        );
+    }
     Ok(HandoffMeasurementRecord {
         schema: "ryeos.worker_handoff_qualification_record.v1".to_owned(),
         case_id: case_id.to_owned(),

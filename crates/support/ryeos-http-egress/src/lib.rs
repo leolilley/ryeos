@@ -50,6 +50,106 @@ pub fn proxies_from(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<Proxy> {
     proxies
 }
 
+/// The proxy host (`host` or `host:port`) that would carry a request to `url`
+/// under the environment `lookup` reads, or `None` when it goes direct. It
+/// follows the same variables and exemptions as [`proxies_from`]: the scheme's
+/// own proxy, else `ALL_PROXY`; loopback and the operator's `NO_PROXY` entries
+/// (`*`, an address, a CIDR range, or a domain that matches itself and its
+/// subdomains) go direct.
+pub fn proxy_for(url: &reqwest::Url, lookup: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let var = |upper: &str, lower: &str| {
+        lookup(upper)
+            .or_else(|| lookup(lower))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let proxy = match url.scheme() {
+        "https" => var("HTTPS_PROXY", "https_proxy"),
+        "http" => var("HTTP_PROXY", "http_proxy"),
+        _ => None,
+    }
+    .or_else(|| var("ALL_PROXY", "all_proxy"))?;
+    let host = url
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let exemptions = match var("NO_PROXY", "no_proxy") {
+        Some(operator) => format!("{LOOPBACK_EXEMPTIONS},{operator}"),
+        None => LOOPBACK_EXEMPTIONS.to_owned(),
+    };
+    if exemptions
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| no_proxy_matches(entry, host))
+    {
+        return None;
+    }
+    let with_scheme = if proxy.contains("://") {
+        proxy
+    } else {
+        format!("http://{proxy}")
+    };
+    Some(match reqwest::Url::parse(&with_scheme) {
+        Ok(parsed) => match (parsed.host_str(), parsed.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_owned(),
+            _ => "an unparseable proxy address".to_owned(),
+        },
+        Err(_) => "an unparseable proxy address".to_owned(),
+    })
+}
+
+fn no_proxy_matches(entry: &str, host: &str) -> bool {
+    if entry == "*" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Some((network, bits)) = entry.split_once('/') {
+            return match (network.parse::<std::net::IpAddr>(), bits.parse::<u32>()) {
+                (Ok(network), Ok(bits)) => cidr_contains(network, bits, ip),
+                _ => false,
+            };
+        }
+        return entry.parse::<std::net::IpAddr>().is_ok_and(|e| e == ip);
+    }
+    let entry = entry.trim_start_matches('.').to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    host == entry || host.ends_with(&format!(".{entry}"))
+}
+
+fn cidr_contains(network: std::net::IpAddr, bits: u32, ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    let (a, b, width) = match (network, ip) {
+        (V4(n), V4(i)) => (u128::from(u32::from(n)), u128::from(u32::from(i)), 32),
+        (V6(n), V6(i)) => (u128::from(n), u128::from(i), 128),
+        _ => return false,
+    };
+    if bits > width {
+        return false;
+    }
+    let mask = if bits == 0 {
+        0
+    } else {
+        let ones = if bits == 128 {
+            !0_u128
+        } else {
+            (1_u128 << bits) - 1
+        };
+        ones << (width - bits)
+    };
+    (a & mask) == (b & mask)
+}
+
+/// An async client builder with the proxies `lookup` asks for and loopback exempt.
+pub fn client_builder_from(lookup: &dyn Fn(&str) -> Option<String>) -> reqwest::ClientBuilder {
+    proxies_from(lookup)
+        .into_iter()
+        .fold(reqwest::Client::builder().no_proxy(), |builder, proxy| {
+            builder.proxy(proxy)
+        })
+}
+
 /// The proxies of this process's environment, loopback exempt.
 pub fn proxies() -> Vec<Proxy> {
     proxies_from(&|name| std::env::var(name).ok())
@@ -86,6 +186,50 @@ pub fn loopback_blocking_client_builder() -> reqwest::blocking::ClientBuilder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_for_follows_the_scheme_variable_and_the_exemptions() {
+        let url = |text: &str| reqwest::Url::parse(text).unwrap();
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let none = vars(&[]);
+        assert_eq!(proxy_for(&url("https://pull.example/x"), &none), None);
+        let https = vars(&[("HTTPS_PROXY", "http://proxy.corp:3128")]);
+        assert_eq!(
+            proxy_for(&url("https://pull.example/x"), &https).as_deref(),
+            Some("proxy.corp:3128")
+        );
+        assert_eq!(proxy_for(&url("http://pull.example/x"), &https), None);
+        let all = vars(&[("ALL_PROXY", "proxy.corp")]);
+        assert_eq!(
+            proxy_for(&url("http://pull.example/x"), &all).as_deref(),
+            Some("proxy.corp")
+        );
+        let exempt = vars(&[
+            ("HTTPS_PROXY", "http://proxy.corp:3128"),
+            ("NO_PROXY", "example.org, .pull.example,10.0.0.0/8"),
+        ]);
+        for direct in [
+            "https://pull.example/x",
+            "https://a.pull.example/x",
+            "https://example.org/x",
+            "https://10.1.2.3/x",
+            "https://localhost/x",
+            "https://127.0.0.1/x",
+        ] {
+            assert_eq!(proxy_for(&url(direct), &exempt), None, "{direct}");
+        }
+        assert!(proxy_for(&url("https://other.example/x"), &exempt).is_some());
+        assert!(proxy_for(&url("https://11.0.0.1/x"), &exempt).is_some());
+        let star = vars(&[("HTTPS_PROXY", "proxy.corp"), ("NO_PROXY", "*")]);
+        assert_eq!(proxy_for(&url("https://any.example/x"), &star), None);
+    }
+
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

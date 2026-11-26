@@ -8,7 +8,7 @@
 //! not CLI-specific.
 //!
 //! Ownership is enforced here at descriptor-issue time AND again by the SSE route
-//! on open. Returns null for an unknown thread (like `threads.get`, to avoid
+//! on open. Returns NotFound for an unknown thread (like `threads.get`, to avoid
 //! leaking existence).
 
 use std::sync::Arc;
@@ -52,9 +52,9 @@ pub async fn handle(
         .get_thread_view(&req.thread_id)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let Some(view) = thread else {
-        // Mirror threads.get: null (not 403) for an unknown thread avoids
-        // leaking existence to a non-owner.
-        return Ok(Value::Null);
+        // Mirror threads.get: a missing thread and one that is not the
+        // caller's are one answer (`NotFound`), so existence is not leaked.
+        return Err(HandlerError::NotFound);
     };
     ctx.require_owner(view.thread.requested_by.as_deref())?;
 

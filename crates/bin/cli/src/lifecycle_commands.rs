@@ -7355,6 +7355,7 @@ mod tests {
                 unmet: std::collections::BTreeMap::new(),
             },
             established_residency: None,
+            publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
         };
         let row = |section: &crate::tty::Section, key: &str| {
             section

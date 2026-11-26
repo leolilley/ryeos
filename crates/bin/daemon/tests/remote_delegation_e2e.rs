@@ -12,6 +12,15 @@
 //! Scenarios that drive HOSTED directly forge requests the way a compromised or
 //! mistaken origin could, signing with ORIGIN's node key, and prove HOSTED
 //! refuses wrong-audience, expired, tampered and transitive delegations.
+//!
+//! Run it under nextest (one process per test), or with `-- --test-threads 1`.
+//! The tests start two daemons each and set up their node policy in the test
+//! process, where the native SQLite host's process-wide guard
+//! (`ryeos_native_process_matches`) refuses a check made while another thread
+//! installs or closes the native region. Plain `cargo test` runs the tests as
+//! threads of one process and can hit "inherited native process authority
+//! refused" during setup; that is the suite sharing the guard, not a fault in
+//! the code under test.
 
 use ryeosd::test_support as common;
 
@@ -671,5 +680,49 @@ async fn hosted_refuses_wrong_audience_expired_tampered_and_transitive_delegatio
     // Positive control: the untampered delegation is admitted.
     let (status, text) = pair.hosted_as_node(&good, &probe).await?;
     ensure!(status.is_success(), "control request: {status} {text}");
+    Ok(())
+}
+
+/// `remote configure` and `remote status` run against a live peer, not a
+/// config written by the fixture: the peer's public-key document is read
+/// through its service tier as the public reads it, and it must carry the
+/// vault fingerprint the pin binds.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_and_status_read_a_live_peers_public_key_document() -> Result<()> {
+    let pair = start_pair().await?;
+    let operator = common::fast_fixture::user_signing_key();
+    let hosted_node = hosted_node_key();
+    let (status, configured) = pair
+        .origin_service(
+            &operator,
+            "service:remote/configure",
+            json!({
+                "remote": "live",
+                "url": format!("http://{}", pair.hosted.bind),
+                "expect_fingerprint": fingerprint(&hosted_node),
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "remote configure: {status} {configured}"
+    );
+    let vault = configured["result"]["vault_fingerprint"]
+        .as_str()
+        .with_context(|| format!("configure returned no vault fingerprint: {configured}"))?;
+    ensure!(!vault.is_empty(), "empty vault fingerprint: {configured}");
+
+    let (status, report) = pair
+        .origin_service(
+            &operator,
+            "service:remote/status",
+            json!({"remote": "live"}),
+        )
+        .await?;
+    ensure!(status.is_success(), "remote status: {status} {report}");
+    ensure!(
+        report["result"]["remote"]["configured_vault_matches"] == json!(true),
+        "the live peer's vault fingerprint is not the pinned one: {report}"
+    );
     Ok(())
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-17T22:20:51Z:2ecd5d4afb255d32eacfdd7fc58d9b1aa5fe45f09450c5af512972bebbeb5b7c:F9fIAHtlTDCc9OCEIfqKqX8U1aeacEEf1C+Fk5yxUDlW8YARtHp7bOnyJwuGqs7R8Hg6yPjoidUe7BxWX5qbAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T02:47:10Z:6d6b89621227ff05600dbd02465833fab953c0e00ba4593a3cf445e5b8b2883e:C32iKfss5bidwR1l0w1yat/A6VE4mYnOiVbL3lHri7sgN+r1xsqTk3GPsNQUYXyo2OwxfW4Sedm2HiXIu0uBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
@@ -46,13 +46,7 @@ EXECUTIONS = {
     "bounded-turn-recovery": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-recovery.yaml",
     "bounded-turn-continue": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-continue.yaml",
 }
-COMMANDS = {
-    "create": (BUNDLE / ".ai/node/commands/claude-code-profile-create.yaml", KEY_NAMES),
-    "create-subscription": (
-        BUNDLE / ".ai/node/commands/claude-code-subscription-profile-create.yaml",
-        SUBSCRIPTION_NAMES,
-    ),
-}
+ACTIVATION_DOC = BUNDLE / ".ai/knowledge/claude-code/hosted-activation.md"
 
 TOP_LEVEL_KEYS = {
     "schema_version", "external_candidate", "transport", "http_sse",
@@ -359,18 +353,19 @@ class ClaudeCodeContractTests(unittest.TestCase):
             schema = json.loads((SOURCE / route["request_schema"]).read_text())
             self.assertTrue(set(pins[route_id]) <= set(schema["properties"]), name)
 
-    def test_profile_commands_activate_from_their_environments_names(self) -> None:
-        for verb, (path, names) in COMMANDS.items():
-            command = load_yaml(path)
-            self.assertEqual(command["tokens"], ["claude-code", "profile", verb])
-            self.assertEqual(
-                command["defaults"]["activation"],
+    def test_activation_doc_names_each_environments_delivered_secrets(self) -> None:
+        # The per-tool profile commands are gone: a profile is made with the
+        # generic `credential-profile create`, and the secrets it activates from
+        # are the ones the environment delivers. This tool's runbook is where the
+        # exact command for each environment lives, so it must match.
+        text = ACTIVATION_DOC.read_text(encoding="utf-8")
+        for names in (KEY_NAMES, SUBSCRIPTION_NAMES):
+            activation = json.dumps(
                 {"kind": "delivered_secret", "names": sorted(names)},
-                verb,
+                separators=(",", ":"),
             )
-            self.assertEqual(
-                command["dispatch"]["execute"], "service:credential-profiles/create", verb
-            )
+            self.assertIn(f"--activation '{activation}'", text, names)
+        self.assertNotIn("ryeos claude-code profile", text)
 
     def test_adapter_is_not_a_scripted_workload_and_ships_in_no_profile_source(self) -> None:
         for path in SOURCE.rglob("*"):

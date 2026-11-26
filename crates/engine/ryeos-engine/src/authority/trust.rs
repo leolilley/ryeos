@@ -31,10 +31,12 @@ use lillux::crypto::{Signature, Verifier, VerifyingKey};
 mod endorsement;
 mod key_link;
 mod ownership;
+mod publication;
 mod registry;
 pub use endorsement::*;
 pub use key_link::*;
 pub use ownership::*;
+pub use publication::*;
 pub use registry::*;
 
 use crate::contracts::{

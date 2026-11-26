@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T07:17:57Z:f5d04cbe81cb9dd89bff8e1a70b4b188b7353084357644f942c7573825a4ce34:+UZR3YRUS27N+AG1XCdo/ikzCQKwU1uP+iQh9gGrnJnhHjNfzzS9jNKivuIOcFuI/u26ieSvuijoKn6BKHkxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:47:10Z:65efc43aa2d8e861dec134cce5f7b734c305393908c8f63506566985a050838e:FnzgWm/7r1I6gXCGXY/qN0XYmuPPqloj1dBaRCDxXRsID6q5XIr3Fm01pFDgFHXW7M/MGX+2yCWp4eBnjaGaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Claude Code
 
 Provider data for hosting Claude Code through RyeOS's generic
@@ -24,8 +24,6 @@ runbook).
 | `.ai/workers/claude-code/lib/hosted/settings.baseline.json` | the baseline written to `$CLAUDE_CONFIG_DIR/settings.json` |
 | `.ai/worker-executions/claude-code/` | `bounded-turn` (read-write), `bounded-turn-read-only`, `bounded-turn-recovery`, `bounded-turn-continue` (resumes a completed predecessor named by `continue_from`) |
 | `.ai/config/claude-code/environments/` | `ryeos.worker_environment.v7` for each worker and auth path: a model key and gateway address, or a Claude subscription token, delivered as secrets |
-| `.ai/node/commands/claude-code-profile-create.yaml` | `ryeos claude-code profile create <id>` |
-| `.ai/node/commands/claude-code-subscription-profile-create.yaml` | `ryeos claude-code profile create-subscription <id>` |
 | `.ai/knowledge/claude-code/hosted-activation.md` | operator runbook |
 | `test_contract.py` | authored-contract checks |
 

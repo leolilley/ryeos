@@ -240,10 +240,10 @@ async fn service_threads_get_returns_recorded_service_row() {
     );
 }
 
-// ── 3.7 threads/get — missing thread returns null ───────────────────────
+// ── 3.7 threads/get — a missing thread answers NotFound ─────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_threads_get_missing_returns_null() {
+async fn service_threads_get_missing_answers_not_found() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h,
@@ -251,10 +251,10 @@ async fn service_threads_get_missing_returns_null() {
         json!({"thread_id": "T-does-not-exist-xxxxxx"}),
     )
     .await;
-    let result = unwrap_result(status, &body, "threads.get missing");
-    assert!(
-        result.is_null(),
-        "missing thread should return null result, got {result}"
+    assert_eq!(
+        status,
+        reqwest::StatusCode::NOT_FOUND,
+        "a missing thread answers NotFound, as another key's thread does: {body}"
     );
 }
 

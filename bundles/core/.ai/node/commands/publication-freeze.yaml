@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-25T03:41:20Z:5c9f7b13efea0b10495ba77cd4fd261087cc8ec120a4cf7880b25c6661a2bb28:SEIU/kitiy60iVnpOCdUklNpzwL39Zw9X1PIfi7qOpSbMXVz5Q4vfCzw2K6jE2aWrBSKm4hZcvBuJ2d+JDIgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- publication
+- freeze
+description: Freeze an installed bundle into an export manifest without publishing it
+help:
+  usage: "ryeos publication freeze --bundle-name <bundle>"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:publication/freeze

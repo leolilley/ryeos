@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-22T07:03:43Z:fac296a7dbd82c21cdbeb43b1b62abbc4b6b26a80e348afe045afd277ea8fb50:c3k5sRvSQQwavHV01zykNCIFl8pe0rM8ccoG/tdUohMWxELgGIcytM5C2TExD2nJdhVaELO42xK8WmQiao9NAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T02:47:10Z:5410a5a2c256e062dbb36e65e13697f544460317318ff0fcf21ef14aa6070a59:9ptPMPlaUOawNpGZ46UwJkMUSrtA5q9bcMXIoBOAFFHCRdxp2bbNlJu3AzWKlY1o7LUk0BDcbFC1BKEJQ/a/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -645,9 +645,9 @@ class CodexContractTests(unittest.TestCase):
                 self.assertEqual(policy["filters"][name], "exclude")
 
     def test_profile_discovery_uses_owner_scoped_generic_service(self) -> None:
-        command = yaml.safe_load((BUNDLE / ".ai/node/commands/profile-list.yaml").read_text())
+        command = yaml.safe_load((BUNDLE.parent / "core/.ai/node/commands/credential-profile-list.yaml").read_text())
         service = yaml.safe_load((BUNDLE.parent / "core/.ai/services/credential-profiles/list.yaml").read_text())
-        self.assertEqual(command["tokens"], ["codex", "profile", "list"])
+        self.assertEqual(command["tokens"], ["credential-profile", "list"])
         self.assertEqual(command["dispatch"]["execute"], "service:credential-profiles/list")
         self.assertEqual(command["dispatch"]["availability"], "daemon")
         self.assertEqual(service["endpoint"], "credential-profiles.list")

@@ -41,7 +41,7 @@ pub fn response_from_config(mut value: Value) -> Result<Value, String> {
     };
     if let Some(unknown) = body
         .keys()
-        .find(|key| !matches!(key.as_str(), "fallback" | "states" | "reasons"))
+        .find(|key| !matches!(key.as_str(), "fallback" | "states" | "reasons" | "limits"))
     {
         return Err(format!("coverage wording has an unknown field {unknown}"));
     }
@@ -102,6 +102,12 @@ mod tests {
                 .label,
             "The page does not prove exhaustive membership."
         );
+        assert_eq!(wording.limits.source_rows, Some(500));
+        assert!(
+            wording.reasons["source_row_limit"]
+                .label
+                .contains("{total}")
+        );
         for slot in ["empty", "empty_project"] {
             assert!(wording.reasons.contains_key(slot), "{slot}");
         }
@@ -136,6 +142,12 @@ mod tests {
         let mut stray = shipped();
         stray["extra"] = json!(true);
         assert!(response_from_config(stray).is_err());
+        let mut zero = shipped();
+        zero["limits"]["source_rows"] = json!(0);
+        assert!(response_from_config(zero).is_err());
+        let mut unknown_limit = shipped();
+        unknown_limit["limits"]["other"] = json!(1);
+        assert!(response_from_config(unknown_limit).is_err());
         assert!(response_from_config(json!([])).is_err());
     }
 }
