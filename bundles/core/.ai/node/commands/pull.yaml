@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-26T00:59:30Z:44a36c451734c3bb47b0379c42a721d2c521afed50e0df0e6dfd0c33353c3d44:/vNWj1Me7MLGyZ8SMTh1C0m3V7iNpTv2Oukh9jCqzjW65GxkfrOopV4+Vp99hsZpWV7/znu0pU/VNTh2iV6VDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:09:56Z:99268d89791aba0ef23cfa3d58ff3d46702ba3024b10efae673c0565a4cbbc05:BqExBKLoF8sCXO3qNXehHl53kVwh8IjCfWzLpbnUof+Y6Tjz8c2c3oyHYRjgN+wYggBgcPd4ZqizLvqWwWgHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - pull
-description: Install a published bundle from a link, checking the node key and record hash you were given
+description: Install a published bundle from a link, checking the node key and record hash you were given. A host that is, or resolves to, a loopback, private, link-local or metadata address is refused, and so is a host an egress proxy would carry (its address cannot be checked from here; list it in NO_PROXY). --allow-internal true accepts both, for a node pulling from inside its own network
 help:
   usage: "ryeos pull <https://host/published/id> --node fp:<node key fingerprint> --expect <record hash> [--allow-internal true]"
   examples:

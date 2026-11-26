@@ -83,6 +83,13 @@ pub enum PullRefusal {
          its own network, repeat the pull with allow_internal=true"
     )]
     HostInternal { host: String, address: IpAddr },
+    #[error(
+        "publication_proxy_unchecked: the request to {host} would go through the proxy \
+         {proxy}, which resolves and dials the name itself, so the address it reaches cannot be \
+         checked from this node. Nothing was sent. List the host in NO_PROXY to pull directly, \
+         or repeat the pull with allow_internal=true to accept an unchecked network position"
+    )]
+    ProxyUnchecked { host: String, proxy: String },
     #[error("publication_node_mismatch: {0}")]
     NodeMismatch(String),
     #[error(
@@ -121,6 +128,7 @@ impl PullRefusal {
             Self::InsecureUrl(_) => "publication_insecure_url",
             Self::FetchFailed(_) => "publication_fetch_failed",
             Self::HostInternal { .. } => "publication_host_internal",
+            Self::ProxyUnchecked { .. } => "publication_proxy_unchecked",
             Self::NodeMismatch(_) => "publication_node_mismatch",
             Self::VersionMismatch { .. } => "publication_version_mismatch",
             Self::HashMismatch(_) => "publication_hash_mismatch",
@@ -589,15 +597,33 @@ fn fetch_refusal(url: &str, error: &reqwest::Error) -> PullRefusal {
 /// never followed or resolved.
 pub(crate) struct PublicHttp {
     client: reqwest::Client,
+    allow_internal: bool,
+    /// Reads the environment variables that choose a proxy.
+    env: EnvLookup,
 }
+
+/// Reads one environment variable.
+pub(crate) type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 impl PublicHttp {
     pub(crate) fn new(allow_internal: bool) -> Result<Self, PullRefusal> {
-        Self::with_lookup(allow_internal, system_lookup())
+        Self::with_env(
+            allow_internal,
+            system_lookup(),
+            Arc::new(|name: &str| std::env::var(name).ok()),
+        )
     }
 
     pub(crate) fn with_lookup(allow_internal: bool, lookup: Lookup) -> Result<Self, PullRefusal> {
-        let client = ryeos_http_egress::client_builder()
+        Self::with_env(allow_internal, lookup, Arc::new(|_: &str| None))
+    }
+
+    pub(crate) fn with_env(
+        allow_internal: bool,
+        lookup: Lookup,
+        env: EnvLookup,
+    ) -> Result<Self, PullRefusal> {
+        let client = ryeos_http_egress::client_builder_from(&*env)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
@@ -607,10 +633,38 @@ impl PublicHttp {
             }))
             .build()
             .map_err(|error| PullRefusal::FetchFailed(format!("build the HTTP client: {error}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            allow_internal,
+            env,
+        })
+    }
+
+    /// A hostname that a proxy would carry cannot be checked: the proxy
+    /// resolves and dials it. Refused unless the operator allowed internal
+    /// hosts, which is the existing way to accept an unchecked position. An IP
+    /// literal was already checked from its text.
+    fn check_not_proxied(&self, url: &str) -> Result<(), PullRefusal> {
+        if self.allow_internal {
+            return Ok(());
+        }
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Ok(());
+        };
+        let Some(url::Host::Domain(host)) = parsed.host() else {
+            return Ok(());
+        };
+        match ryeos_http_egress::proxy_for(&parsed, &*self.env) {
+            Some(proxy) => Err(PullRefusal::ProxyUnchecked {
+                host: host.to_owned(),
+                proxy,
+            }),
+            None => Ok(()),
+        }
     }
 
     async fn send(&self, url: &str) -> Result<reqwest::Response, PullRefusal> {
+        self.check_not_proxied(url)?;
         let response = self
             .client
             .get(url)

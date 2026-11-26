@@ -665,3 +665,79 @@ async fn the_connect_uses_the_address_that_was_checked() {
         .unwrap_err();
     assert_eq!(refusal.code(), "publication_host_internal", "{refusal}");
 }
+
+fn env_of(pairs: &'static [(&'static str, &'static str)]) -> EnvLookup {
+    Arc::new(move |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    })
+}
+
+#[tokio::test]
+async fn a_host_a_proxy_would_carry_is_refused_as_unchecked() {
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("93.184.216.34", 443)]]);
+    let http = PublicHttp::with_env(
+        false,
+        lookup,
+        env_of(&[("HTTPS_PROXY", "http://proxy.corp:3128")]),
+    )
+    .unwrap();
+    let refusal = http
+        .get_bounded("https://pull.example/public-key", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_proxy_unchecked");
+    let text = refusal.to_string();
+    assert!(
+        text.contains("proxy.corp:3128") && text.contains("pull.example"),
+        "{text}"
+    );
+    assert!(
+        text.contains("allow_internal=true") && text.contains("NO_PROXY"),
+        "{text}"
+    );
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "nothing was resolved or sent"
+    );
+}
+
+#[tokio::test]
+async fn a_host_in_no_proxy_goes_direct_and_the_resolver_check_applies() {
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("10.0.0.5", 443)]]);
+    let http = PublicHttp::with_env(
+        false,
+        lookup,
+        env_of(&[
+            ("HTTPS_PROXY", "http://proxy.corp:3128"),
+            ("NO_PROXY", "pull.example"),
+        ]),
+    )
+    .unwrap();
+    let refusal = http
+        .get_bounded("https://pull.example/public-key", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_host_internal", "{refusal}");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["pull.example"]);
+}
+
+#[tokio::test]
+async fn allow_internal_accepts_a_proxied_position() {
+    let (lookup, _) = scripted_lookup(vec![vec![sock("93.184.216.34", 443)]]);
+    let http = PublicHttp::with_env(
+        true,
+        lookup,
+        env_of(&[("HTTP_PROXY", "http://127.0.0.1:1")]),
+    )
+    .unwrap();
+    // The request is attempted through the proxy (which refuses the connect):
+    // the proxy check itself no longer stops it.
+    let refusal = http
+        .get_bounded("http://pull.example/x", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_fetch_failed", "{refusal}");
+}
