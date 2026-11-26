@@ -981,6 +981,42 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_resolver_refuses_a_command_that_declares_item_kinds() {
+        let build = |item_kinds: Option<Vec<String>>| {
+            let mut record = command("demo", &["demo"]);
+            record.dispatch = CommandDispatch::DirectExecuteItemRef {
+                item_ref_arg: "item_ref".into(),
+                item_kinds,
+                validate_only: false,
+                availability: CommandAvailability::Both,
+            };
+            record
+                .provenance
+                .command_registration_caps
+                .push("ryeos.register.command.*".into());
+            CommandRegistry::from_records(&[record], &policy()).unwrap()
+        };
+        let tokens = vec!["demo".to_owned()];
+
+        let declared = build(Some(vec!["worker_execution".into()]));
+        let any = build(None);
+        // With no declared kinds the resolver is not the thing that refuses (it
+        // fails later only because this fixture names no item ref).
+        assert!(!matches!(
+            crate::resolver::resolve_command(&tokens, &any),
+            Err(crate::resolver::ResolveError::ItemKindsNotEnforced { .. })
+        ));
+        let error = crate::resolver::resolve_command(&tokens, &declared).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::resolver::ResolveError::ItemKindsNotEnforced { ref command } if command == "demo"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn derive_registration_claims_includes_primary_alias_and_dispatch() {
         let mut record = command("demo", &["demo"]);
         record.aliases.push(CommandAliasDef {
