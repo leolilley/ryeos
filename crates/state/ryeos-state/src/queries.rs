@@ -4108,6 +4108,67 @@ mod tests {
         assert_eq!(by_id["T-sub"].depth, 2);
     }
 
+    /// A same-chain child holds one edge derived from its `upstream_thread_id`
+    /// (no source event) and, once the daemon writes its lineage event, a second
+    /// edge derived from that event. The tree walks pairs, so the child is one
+    /// row, and only the event-derived edge counts as the lineage event.
+    #[test]
+    fn execution_tree_collapses_the_derived_and_event_edges_of_one_pair() {
+        let db = test_db();
+        insert_thread(&db, "T-root", "T-root", ThreadStatus::Running);
+        insert_thread_with_upstream(
+            &db,
+            "T-child",
+            "T-root",
+            ThreadStatus::Running,
+            Some("T-root"),
+        );
+        let pair_rows = |db: &ProjectionDb| {
+            list_thread_edges(db, "T-root")
+                .unwrap()
+                .into_iter()
+                .filter(|edge| {
+                    edge.parent_thread_id == "T-root" && edge.child_thread_id == "T-child"
+                })
+                .count()
+        };
+        if pair_rows(&db) == 0 {
+            project_thread_edge(&db, "T-root", "T-root", "T-child", None, Some("spawned")).unwrap();
+        }
+        assert_eq!(
+            pair_rows(&db),
+            1,
+            "one edge derived from upstream_thread_id"
+        );
+        assert!(
+            !thread_spawn_event_edge_exists(&db, "T-root", "T-child").unwrap(),
+            "the derived edge is not the lineage event"
+        );
+
+        db.with_sql(|connection| {
+            Ok(connection.execute(
+                "INSERT INTO thread_edges (
+                    chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
+                    spawn_reason, source_event_hash, created_at
+                ) VALUES ('T-root', 'T-root', 'T-child', NULL, 'dispatch', ?, '2026-06-01T00:00:03Z')",
+                [&"e".repeat(64)],
+            )?)
+        })
+        .unwrap();
+        assert_eq!(pair_rows(&db), 2, "both rows for the one pair");
+        assert!(thread_spawn_event_edge_exists(&db, "T-root", "T-child").unwrap());
+
+        let rows = execution_tree(&db, "T-child", 16, 20).unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.thread.thread_id == "T-child")
+                .count(),
+            1,
+            "the pair is one tree row"
+        );
+        assert_eq!(rows.len(), 2, "the root and the child, nothing doubled");
+    }
+
     #[test]
     fn replay_events_filters_by_thread_and_seq() {
         let db = test_db();
