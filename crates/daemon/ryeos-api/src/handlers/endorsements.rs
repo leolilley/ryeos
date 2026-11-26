@@ -313,10 +313,10 @@ pub async fn list(
         .filter(|digest| !inert.contains_key(*digest))
         .collect();
     let owned = owner_visible(&ledger.endorsements, operator, |stored| {
-        ryeos_app::project_owner::speaks_for(
+        ryeos_app::project_owner::key_owns_project(
             &state,
             &ctx.fingerprint,
-            stored.endorsement.body.project.owner(),
+            &stored.endorsement.body.project,
         )
     });
     let entries: Vec<Value> = owned
