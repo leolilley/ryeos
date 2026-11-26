@@ -656,6 +656,14 @@ fn load_node_config_two_phase_with_socket(
             isolation: isolation.inspection(),
             host_runtime_provider: host_runtime.map(|runtime| runtime.provider),
             provider_environment: provider_environment.environment().as_ref(),
+            publications: ryeos_node::capability_report::PublicationsReport::observe(
+                app_root,
+                &node_identity.signing_key().verifying_key(),
+                node_policy
+                    .require::<ryeos_node_runtime::node_policy::sections::publication::PublicationPolicy>()?
+                    .daily_bytes,
+                lillux::time::unix_secs_now(),
+            ),
         },
     )
     .context("Phase 1: assemble node capability report")?;

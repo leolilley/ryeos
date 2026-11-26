@@ -219,6 +219,28 @@ impl ThreadUsage {
         // `spend_usd` is `UsdNanos`: finite and non-negative by construction.
         Ok(())
     }
+
+    /// Name the first cumulative figure that is lower than in `previous`, or
+    /// `None` when this settlement carries every figure forward or higher.
+    /// A thread's settlements are cumulative, so a lower figure is a
+    /// regression and not a later reading.
+    pub fn cumulative_regression_from(&self, previous: &ThreadUsage) -> Option<&'static str> {
+        if self.completed_turns < previous.completed_turns {
+            Some("completed_turns")
+        } else if self.input_tokens < previous.input_tokens {
+            Some("input_tokens")
+        } else if self.output_tokens < previous.output_tokens {
+            Some("output_tokens")
+        } else if self.spend_usd < previous.spend_usd {
+            Some("spend_usd")
+        } else if self.spawns_used < previous.spawns_used {
+            Some("spawns_used")
+        } else if self.last_settled_turn_seq < previous.last_settled_turn_seq {
+            Some("last_settled_turn_seq")
+        } else {
+            None
+        }
+    }
 }
 
 /// Parse the one canonical timestamp spelling accepted by authoritative state:
