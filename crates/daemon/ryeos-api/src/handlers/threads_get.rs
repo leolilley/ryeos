@@ -1,7 +1,8 @@
 //! `threads.get` — fetch one thread row plus result, artifacts, and facets.
 //!
 //! Ownership check: callers can only access their own threads.
-//! Returns 404 (not 403) to avoid leaking existence.
+//! Returns 404 (not 403) for a thread that is not the caller's and for one
+//! that does not exist alike, so existence does not leak.
 
 use std::sync::Arc;
 
@@ -68,7 +69,10 @@ pub async fn handle(
             }))
             .map_err(|e| HandlerError::Internal(e.to_string()))
         }
-        None => Ok(serde_json::Value::Null),
+        // A thread that does not exist and one that is not the caller's are
+        // one answer, so a thread id's existence is not readable by a key that
+        // does not own it.
+        None => Err(HandlerError::NotFound),
     }
 }
 
