@@ -11,6 +11,7 @@ use ryeos_engine::trust::{
 
 use super::*;
 use crate::handlers::remote_bundle_install::fetch_and_materialize_files;
+use std::net::SocketAddr;
 
 const NOW: u64 = 1_800_000_000;
 const ID: &str = "11111111111111111111111111111111";
@@ -244,11 +245,12 @@ fn an_https_ip_literal_in_an_internal_range_is_refused() {
         "[::]",
         "[::ffff:10.0.0.1]",
     ] {
-        let refused = parse_target(&format!("https://{host}{path}")).unwrap_err();
+        let refused = parse_target(&format!("https://{host}{path}"), false).unwrap_err();
         assert_eq!(refused.code(), "publication_malformed", "{host}");
-        assert!(refused.to_string().contains("not checked yet"), "{host}");
+        assert!(refused.to_string().contains("allow_internal"), "{host}");
+        parse_target(&format!("https://{host}{path}"), true).unwrap();
     }
-    parse_target(&format!("https://93.184.216.34{path}")).unwrap();
+    parse_target(&format!("https://93.184.216.34{path}"), false).unwrap();
 }
 
 #[test]
@@ -269,7 +271,7 @@ fn only_https_or_a_loopback_address_is_pulled_from() {
         format!("ftp://example.com{path}"),
     ] {
         assert_eq!(
-            parse_target(&url).unwrap_err().code(),
+            parse_target(&url, false).unwrap_err().code(),
             "publication_insecure_url",
             "{url}"
         );
@@ -280,13 +282,16 @@ fn only_https_or_a_loopback_address_is_pulled_from() {
         format!("http://localhost{path}/"),
         format!("http://[::1]:9000{path}"),
     ] {
-        let target = parse_target(&url).unwrap_or_else(|error| panic!("{url}: {error}"));
+        let target = parse_target(&url, false).unwrap_or_else(|error| panic!("{url}: {error}"));
         assert_eq!(target.id, ID);
     }
     assert_eq!(
-        parse_target("https://example.com:8443/published/11111111111111111111111111111111")
-            .unwrap()
-            .origin,
+        parse_target(
+            "https://example.com:8443/published/11111111111111111111111111111111",
+            false
+        )
+        .unwrap()
+        .origin,
         "https://example.com:8443"
     );
     for url in [
@@ -296,7 +301,7 @@ fn only_https_or_a_loopback_address_is_pulled_from() {
         "https://example.com/other".to_owned(),
     ] {
         assert_eq!(
-            parse_target(&url).unwrap_err().code(),
+            parse_target(&url, false).unwrap_err().code(),
             "publication_malformed",
             "{url}"
         );
@@ -409,7 +414,7 @@ fn serve_once(response: &'static str) -> (String, Arc<Mutex<String>>) {
 async fn the_public_fetch_sends_no_identity() {
     let (url, seen) =
         serve_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
-    let body = PublicHttp::new()
+    let body = PublicHttp::new(false)
         .unwrap()
         .get_bounded(&format!("{url}/public-key"), 1024)
         .await
@@ -450,7 +455,7 @@ async fn a_redirect_is_not_followed() {
     let (url, seen) = serve_once(
         "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     );
-    let refusal = PublicHttp::new()
+    let refusal = PublicHttp::new(false)
         .unwrap()
         .get_bounded(&format!("{url}/published/{ID}"), 1024)
         .await
@@ -464,7 +469,7 @@ async fn a_redirect_is_not_followed() {
 async fn a_response_longer_than_its_bound_is_cut_off() {
     let (url, _) =
         serve_once("HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world");
-    let body = PublicHttp::new()
+    let body = PublicHttp::new(false)
         .unwrap()
         .get_bounded(&format!("{url}/x"), 5)
         .await
@@ -477,7 +482,7 @@ async fn a_refusal_surfaces_the_nodes_typed_code() {
     let (url, _) = serve_once(
         "HTTP/1.1 410 Gone\r\nContent-Type: application/json\r\nContent-Length: 46\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"publication_expired\",\"x\":1}}",
     );
-    let refusal = PublicHttp::new()
+    let refusal = PublicHttp::new(false)
         .unwrap()
         .get_bounded(&format!("{url}/x"), 1024)
         .await
@@ -487,4 +492,255 @@ async fn a_refusal_surfaces_the_nodes_typed_code() {
         refusal.to_string().contains("publication_expired"),
         "{refusal}"
     );
+}
+
+// ── Hostnames that resolve to internal addresses ────────────────────
+
+type LookupFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>;
+
+/// A resolver that answers from a script, one entry per lookup (the last
+/// repeats), and records every name it was asked.
+fn scripted_lookup(script: Vec<Vec<SocketAddr>>) -> (Lookup, Arc<Mutex<Vec<String>>>) {
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = asked.clone();
+    let lookup: Lookup = Arc::new(move |host: String| -> LookupFuture {
+        let index = {
+            let mut asked = log.lock().unwrap();
+            asked.push(host);
+            asked.len() - 1
+        };
+        let answer = script[index.min(script.len() - 1)].clone();
+        Box::pin(async move { Ok::<_, std::io::Error>(answer) })
+    });
+    (lookup, asked)
+}
+
+fn sock(ip: &str, port: u16) -> SocketAddr {
+    SocketAddr::new(ip.parse().unwrap(), port)
+}
+
+fn listener_port(url: &str) -> u16 {
+    url.rsplit(':').next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn the_addresses_a_name_may_not_resolve_to() {
+    for ip in [
+        "127.0.0.1",
+        "0.1.2.3",
+        "10.0.0.5",
+        "172.16.0.9",
+        "192.168.1.1",
+        "169.254.169.254",
+        "100.100.100.200",
+        "100.64.0.1",
+        "::1",
+        "fd00::1",
+        "fe80::1",
+        "::",
+        "::ffff:10.0.0.1",
+        "::ffff:127.0.0.1",
+    ] {
+        assert!(is_internal_ip(ip.parse().unwrap()), "{ip}");
+    }
+    for ip in [
+        "93.184.216.34",
+        "8.8.8.8",
+        "2606:2800:220:1:248:1893:25c8:1946",
+    ] {
+        assert!(!is_internal_ip(ip.parse().unwrap()), "{ip}");
+    }
+}
+
+#[tokio::test]
+async fn a_name_resolving_to_a_private_address_is_refused_before_any_connect() {
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("10.0.0.5", 80)]]);
+    let refusal = PublicHttp::with_lookup(false, lookup)
+        .unwrap()
+        .get_bounded("http://pull.example/public-key", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_host_internal");
+    let text = refusal.to_string();
+    assert!(
+        text.contains("pull.example") && text.contains("10.0.0.5"),
+        "{text}"
+    );
+    assert!(text.contains("Nothing was sent"), "{text}");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["pull.example"]);
+}
+
+#[tokio::test]
+async fn a_name_with_one_internal_address_among_several_is_refused_whole() {
+    for answer in [
+        vec![sock("93.184.216.34", 80), sock("169.254.169.254", 80)],
+        vec![sock("169.254.169.254", 80), sock("93.184.216.34", 80)],
+        vec![sock("93.184.216.34", 80), sock("::1", 80)],
+    ] {
+        let (lookup, _) = scripted_lookup(vec![answer]);
+        let refusal = PublicHttp::with_lookup(false, lookup)
+            .unwrap()
+            .get_bounded("http://mixed.example/x", 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal.code(), "publication_host_internal", "{refusal}");
+    }
+}
+
+#[tokio::test]
+async fn an_operator_who_allowed_internal_hosts_reaches_one() {
+    let (url, seen) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    let (lookup, _) = scripted_lookup(vec![vec![sock("127.0.0.1", listener_port(&url))]]);
+    let body = PublicHttp::with_lookup(true, lookup)
+        .unwrap()
+        .get_bounded(
+            &format!("http://inside.example:{}/x", listener_port(&url)),
+            1024,
+        )
+        .await
+        .unwrap();
+    assert_eq!(body.as_deref(), Some(&b"ok"[..]));
+    assert!(seen.lock().unwrap().contains("inside.example"));
+}
+
+#[tokio::test]
+async fn a_name_that_resolves_to_nothing_is_a_fetch_failure() {
+    let (lookup, _) = scripted_lookup(vec![vec![]]);
+    let refusal = PublicHttp::with_lookup(false, lookup)
+        .unwrap()
+        .get_bounded("http://nowhere.example/x", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_fetch_failed");
+}
+
+#[tokio::test]
+async fn a_redirect_to_a_private_name_is_never_followed_or_resolved() {
+    let (url, _) = serve_once(
+        "HTTP/1.1 302 Found\r\nLocation: http://metadata.internal.example/latest\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    let port = listener_port(&url);
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("127.0.0.1", port)]]);
+    let refusal = PublicHttp::with_lookup(true, lookup)
+        .unwrap()
+        .get_bounded(&format!("http://first.example:{port}/published/{ID}"), 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_fetch_failed");
+    assert!(refusal.to_string().contains("302"), "{refusal}");
+    assert_eq!(
+        asked.lock().unwrap().as_slice(),
+        ["first.example"],
+        "the redirect target was resolved"
+    );
+}
+
+#[tokio::test]
+async fn the_connect_uses_the_address_that_was_checked() {
+    // The name answers once with the listener's loopback address (allowed for
+    // `localhost` only) and from then on with a metadata address. The first
+    // request must connect to what was checked, with no second lookup; the
+    // next connection resolves again and is checked afresh.
+    let (url, seen) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    let port = listener_port(&url);
+    let (lookup, asked) = scripted_lookup(vec![
+        vec![sock("127.0.0.1", port)],
+        vec![sock("169.254.169.254", port)],
+    ]);
+    let http = PublicHttp::with_lookup(false, lookup).unwrap();
+    let body = http
+        .get_bounded(&format!("http://localhost:{port}/x"), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_deref(), Some(&b"ok"[..]));
+    assert!(!seen.lock().unwrap().is_empty());
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "a second lookup raced the connect"
+    );
+    let refusal = http
+        .get_bounded(&format!("http://localhost:{port}/x"), 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_host_internal", "{refusal}");
+}
+
+fn env_of(pairs: &'static [(&'static str, &'static str)]) -> EnvLookup {
+    Arc::new(move |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    })
+}
+
+#[tokio::test]
+async fn a_host_a_proxy_would_carry_is_refused_as_unchecked() {
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("93.184.216.34", 443)]]);
+    let http = PublicHttp::with_env(
+        false,
+        lookup,
+        env_of(&[("HTTPS_PROXY", "http://proxy.corp:3128")]),
+    )
+    .unwrap();
+    let refusal = http
+        .get_bounded("https://pull.example/public-key", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_proxy_unchecked");
+    let text = refusal.to_string();
+    assert!(
+        text.contains("proxy.corp:3128") && text.contains("pull.example"),
+        "{text}"
+    );
+    assert!(
+        text.contains("allow_internal=true") && text.contains("NO_PROXY"),
+        "{text}"
+    );
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "nothing was resolved or sent"
+    );
+}
+
+#[tokio::test]
+async fn a_host_in_no_proxy_goes_direct_and_the_resolver_check_applies() {
+    let (lookup, asked) = scripted_lookup(vec![vec![sock("10.0.0.5", 443)]]);
+    let http = PublicHttp::with_env(
+        false,
+        lookup,
+        env_of(&[
+            ("HTTPS_PROXY", "http://proxy.corp:3128"),
+            ("NO_PROXY", "pull.example"),
+        ]),
+    )
+    .unwrap();
+    let refusal = http
+        .get_bounded("https://pull.example/public-key", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_host_internal", "{refusal}");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["pull.example"]);
+}
+
+#[tokio::test]
+async fn allow_internal_accepts_a_proxied_position() {
+    let (lookup, _) = scripted_lookup(vec![vec![sock("93.184.216.34", 443)]]);
+    let http = PublicHttp::with_env(
+        true,
+        lookup,
+        env_of(&[("HTTP_PROXY", "http://127.0.0.1:1")]),
+    )
+    .unwrap();
+    // The request is attempted through the proxy (which refuses the connect):
+    // the proxy check itself no longer stops it.
+    let refusal = http
+        .get_bounded("http://pull.example/x", 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "publication_fetch_failed", "{refusal}");
 }
