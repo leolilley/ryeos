@@ -1156,6 +1156,9 @@ fn command_compilation_error(
     match error {
         CommandProjectPolicyError::Invalid(detail) => CliError::ProjectResolution(detail),
         CommandProjectPolicyError::ProjectRequired(detail) => CliError::ProjectRequired(detail),
+        refusal @ CommandProjectPolicyError::ItemKindMismatch { .. } => CliError::Local {
+            detail: refusal.to_string(),
+        },
     }
 }
 
@@ -1288,13 +1291,20 @@ pub(crate) fn apply_project_policy(
     let cwd =
         std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
     ryeos_app::command_invocation::apply_project_policy(command, parameters, default_project, &cwd)
-        .map_err(|error| match error {
+        .map_err(|error| {
+            match error {
             ryeos_app::command_invocation::CommandProjectPolicyError::Invalid(detail) => {
                 CliError::ProjectResolution(detail)
             }
             ryeos_app::command_invocation::CommandProjectPolicyError::ProjectRequired(detail) => {
                 CliError::ProjectRequired(detail)
             }
+            refusal @ ryeos_app::command_invocation::CommandProjectPolicyError::ItemKindMismatch {
+                ..
+            } => CliError::Local {
+                detail: refusal.to_string(),
+            },
+        }
         })
 }
 
@@ -2549,6 +2559,7 @@ mod tests {
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                 item_ref_arg: "item_ref".into(),
+                item_kinds: None,
                 validate_only: false,
                 availability: ryeos_runtime::CommandAvailability::Both,
             },

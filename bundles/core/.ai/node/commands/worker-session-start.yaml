@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T02:47:10Z:8f4a55b3c389db2c56799e6b5afe27a24ee32104da82023ce56d3d884fbdda0c:tOyISrg4pbs6sirulRdP0y/kPMpnB9LIZ342M8Op+WV0OmDoaUL2K2cw2epOvMbEmWT4nPHXZtiMKLCKk7a3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T12:42:31Z:55bec8e9e947f031f03ce6ceaf57905175ee2d0c81e859dfded8afa25d42656c:mNrtrQEWAz2nuJHEn/Kyyn5HJ5kXSfPk92o+HTEGD/qu5IFM9uXEhVbLh4/0ZtHpZkM6jvcy5zpDYUNKBe0bBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [worker, session, start]
 description: "Start a hosted worker session from the principal's pushed project HEAD and a signed portable environment: name the worker execution item, the credential profile and the environment; --current-head is required and --async is recommended"
 help:
@@ -31,5 +31,6 @@ control_flags:
 dispatch:
   kind: direct_execute_item_ref
   item_ref_arg: item_ref
+  item_kinds: [worker_execution]
   validate_only: false
   availability: daemon

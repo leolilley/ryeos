@@ -456,6 +456,11 @@ pub enum CommandDispatch {
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
+        /// The item kinds this command accepts. Absent means any kind; a
+        /// present list is never empty. A ref of another kind is refused
+        /// before dispatch.
+        #[serde(default)]
+        item_kinds: Option<Vec<String>>,
         /// Dispatches through the existing pre-spawn validation boundary when
         /// true. This is command intent, never an item input named `validate`.
         validate_only: bool,
@@ -946,6 +951,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: false,
             availability: CommandAvailability::Both,
         };
@@ -962,6 +968,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: false,
             availability: CommandAvailability::Both,
         };
@@ -985,6 +992,7 @@ mod tests {
         });
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: false,
             availability: CommandAvailability::Both,
         };
@@ -1014,6 +1022,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: true,
             availability: CommandAvailability::Both,
         };

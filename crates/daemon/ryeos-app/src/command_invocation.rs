@@ -62,6 +62,14 @@ pub enum CommandProjectPolicyError {
     Invalid(String),
     #[error("{0}")]
     ProjectRequired(String),
+    #[error(
+        "command_item_kind_mismatch: command '{command}' accepts only {expected:?} items, not '{given}'"
+    )]
+    ItemKindMismatch {
+        command: String,
+        expected: Vec<String>,
+        given: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -144,6 +152,7 @@ pub fn compile_command_invocation(
         CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
         CommandDispatch::DirectExecuteItemRef {
             item_ref_arg,
+            item_kinds,
             validate_only,
             ..
         } => {
@@ -173,8 +182,17 @@ pub fn compile_command_invocation(
                         ))
                     })?
             };
-            ryeos_engine::canonical_ref::CanonicalRef::parse(&target)
+            let parsed = ryeos_engine::canonical_ref::CanonicalRef::parse(&target)
                 .map_err(|e| Invalid(format!("invalid item ref: {e}")))?;
+            if let Some(kinds) = item_kinds
+                && !kinds.contains(&parsed.kind)
+            {
+                return Err(CommandProjectPolicyError::ItemKindMismatch {
+                    command: command.name.clone(),
+                    expected: kinds.clone(),
+                    given: parsed.kind,
+                });
+            }
             (target, *validate_only)
         }
         _ => {
@@ -1010,6 +1028,7 @@ mod tests {
         let mut definition = command();
         definition.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: true,
             availability: Default::default(),
         };
@@ -1148,6 +1167,7 @@ mod tests {
         let mut command = command();
         command.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            item_kinds: None,
             validate_only: false,
             availability: Default::default(),
         };
@@ -1166,6 +1186,57 @@ mod tests {
         .unwrap();
         assert_eq!(compiled.parameters, input);
         assert!(compiled.project_path.is_none());
+    }
+
+    #[test]
+    fn a_command_that_names_item_kinds_refuses_any_other_kind_before_dispatch() {
+        let mut command = command();
+        command.name = "worker-session-start".into();
+        command.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            item_kinds: Some(vec!["worker_execution".into()]),
+            validate_only: false,
+            availability: Default::default(),
+        };
+        command.project.as_mut().unwrap().bind_parameter = None;
+        command.project.as_mut().unwrap().request_project_path = true;
+        let compile = |reference: &str| {
+            compile_command_invocation(
+                &command,
+                &[reference.into(), "--no-project".into()],
+                &serde_json::json!({}),
+                None,
+                None,
+                |_| panic!("no file input"),
+            )
+        };
+
+        for (reference, given) in [
+            ("tool:some/tool", "tool"),
+            ("directive:some/plan", "directive"),
+        ] {
+            match compile(reference) {
+                Err(CommandProjectPolicyError::ItemKindMismatch {
+                    expected,
+                    given: refused,
+                    ..
+                }) => {
+                    assert_eq!(expected, vec!["worker_execution".to_owned()]);
+                    assert_eq!(refused, given);
+                }
+                other => panic!("expected a kind refusal for {reference}, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            compile("worker_execution:codex/session").unwrap().item_ref,
+            "worker_execution:codex/session"
+        );
+
+        // No declared kinds: any kind compiles, as `execute` always did.
+        if let CommandDispatch::DirectExecuteItemRef { item_kinds, .. } = &mut command.dispatch {
+            *item_kinds = None;
+        }
+        assert!(compile("tool:some/tool").is_ok());
     }
 
     #[test]
