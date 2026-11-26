@@ -12,6 +12,15 @@
 //! Scenarios that drive HOSTED directly forge requests the way a compromised or
 //! mistaken origin could, signing with ORIGIN's node key, and prove HOSTED
 //! refuses wrong-audience, expired, tampered and transitive delegations.
+//!
+//! Run it under nextest (one process per test), or with `-- --test-threads 1`.
+//! The tests start two daemons each and set up their node policy in the test
+//! process, where the native SQLite host's process-wide guard
+//! (`ryeos_native_process_matches`) refuses a check made while another thread
+//! installs or closes the native region. Plain `cargo test` runs the tests as
+//! threads of one process and can hit "inherited native process authority
+//! refused" during setup; that is the suite sharing the guard, not a fault in
+//! the code under test.
 
 use ryeosd::test_support as common;
 
