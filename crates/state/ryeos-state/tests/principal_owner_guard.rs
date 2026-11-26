@@ -36,6 +36,10 @@ const SPEAKS_FOR_CALLERS: &[&str] = &[
     "crates/engine/ryeos-executor/src/execution/runner.rs",
     "crates/daemon/ryeos-app/src/worker_handoff.rs",
     "crates/daemon/ryeos-app/src/seat_authority.rs",
+    // A `remote_principal` is an admitted operator only if its key speaks for
+    // the node operator's owner (Review's ruling 2026-11-26): the one place
+    // ownership decides an operator-class answer.
+    "crates/daemon/ryeos-app/src/operator_authority.rs",
 ];
 
 /// The thread read rule asks speaks_for in exactly these arms of

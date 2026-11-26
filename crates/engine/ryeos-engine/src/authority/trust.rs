@@ -692,6 +692,16 @@ impl TrustStore {
         graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
     }
 
+    /// [`Self::owner_for`] judging key links at `now_secs`, for a writer that
+    /// has the node's clock.
+    pub fn owner_for_at(&self, key: &str, now_secs: u64) -> Result<ResolvedOwner, OwnerRefusal> {
+        let graph = self
+            .succession
+            .as_deref()
+            .ok_or(OwnerRefusal::Unavailable)?;
+        graph.ownership_of_at(key.strip_prefix("fp:").unwrap_or(key), now_secs)
+    }
+
     /// The principal a signature by `key` speaks for when verified: its
     /// chain root's solo principal for an active or retired key; `None` for
     /// a revoked key, a key with no record, a corrupt chain, or a store with
