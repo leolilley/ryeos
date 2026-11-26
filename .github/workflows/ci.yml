@@ -1923,8 +1923,16 @@ jobs:
         run: |
           set -euo pipefail
           for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
-            exe="$(cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json \
-              | jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable')"
+            build_json="$RUNNER_TEMP/build-$suite.jsonl"
+            if ! cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json > "$build_json"; then
+              # The JSON stream holds the compiler's own error text, which
+              # cargo's stderr does not repeat: print it so a failed build
+              # says what failed.
+              echo "::error::building $suite failed; the compiler's messages follow" >&2
+              jq -r 'select(.reason == "compiler-message" and (.message.level == "error" or .message.level == "error: internal compiler error")) | .message.rendered' "$build_json" >&2 || true
+              exit 1
+            fi
+            exe="$(jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable' "$build_json")"
             [[ "$(printf '%s\n' "$exe" | wc -l)" == 1 && -x "$exe" ]] || { echo "FAIL: expected exactly one $suite executable, got: $exe" >&2; exit 1; }
             echo "$suite=$exe" >> "$RUNNER_TEMP/e2e-executables"
           done
