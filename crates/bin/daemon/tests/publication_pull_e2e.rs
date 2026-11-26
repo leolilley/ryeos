@@ -563,7 +563,7 @@ async fn a_bundle_that_carries_more_than_invoked_items_is_refused_with_its_typed
         )
         .await;
         assert_eq!(status, 422, "{bundle}: {refused:#}");
-        assert_eq!(refused["error"]["code"], *code, "{bundle}: {refused:#}");
+        assert_eq!(refused["code"], *code, "{bundle}: {refused:#}");
         assert!(
             !b.state_path.join(".ai/bundles").join(bundle).exists(),
             "{bundle}: a refused pull left a bundle behind"
@@ -665,7 +665,7 @@ async fn a_named_bundle_installs_what_the_policy_lifts_and_its_unnamed_twin_is_r
     .await;
     assert_eq!(status, 422, "{refused:#}");
     assert_eq!(
-        refused["error"]["code"], "publication_lane_facet_not_admitted",
+        refused["code"], "publication_lane_facet_not_admitted",
         "{refused:#}"
     );
     assert!(!b.state_path.join(".ai/bundles").join(TWIN_BUNDLE).exists());
