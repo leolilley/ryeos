@@ -115,8 +115,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let project_directory = lillux::PinnedDirectory::open(&canonical)?
         .ok_or_else(|| anyhow!("registered checkout directory disappeared"))?;
     project_directory.ensure_path_binding()?;
-    let _project_mutation_guard =
-        crate::project_namespace::acquire_project_mutation_lock(&project_directory).await?;
+    // The apply takes the project mutation lock itself; holding it here would
+    // make the apply wait on this handler.
 
     let authority = state
         .state_store

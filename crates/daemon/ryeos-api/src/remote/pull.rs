@@ -881,7 +881,11 @@ fn workspace_matches_result_tree(
         if base_tree.files.get(path) == result_tree.files.get(path) {
             continue;
         }
-        let live = open_relative_regular(project_root, path)?;
+        // A path that cannot be opened as a regular file is not "already
+        // applied"; the drift check names it.
+        let Ok(live) = open_relative_regular(project_root, path) else {
+            return Ok(false);
+        };
         let Some(result_hash) = result_tree.files.get(path) else {
             if live.is_some() {
                 return Ok(false);
