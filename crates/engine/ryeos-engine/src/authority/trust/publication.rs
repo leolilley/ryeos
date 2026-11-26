@@ -200,7 +200,8 @@ pub struct PublicationRecord {
     pub bundle_name: String,
     /// The bundle's own version, read from its signed manifest at freeze and
     /// never typed: publish refuses a record whose version is not the frozen
-    /// manifest's.
+    /// manifest's. A label only: nothing orders bundles by it or calls one
+    /// newer or fresher.
     pub version: String,
     /// RFC 3339 UTC instant after which the node stops serving.
     pub not_after: String,
@@ -209,9 +210,15 @@ pub struct PublicationRecord {
     pub statement: String,
 }
 
-/// A bundle version: 1 to 64 printable ASCII bytes, no whitespace.
+/// A bundle version: 1 to 64 bytes of the semver set `[0-9A-Za-z.+_-]`. The
+/// record and the manifest both check it with this one function. The value
+/// reaches public listings, so it is an identifier, never free text. It is a
+/// label: nothing orders two bundles by it or calls one newer or fresher.
 fn is_bundle_version(version: &str) -> bool {
-    (1..=64).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_graphic())
+    (1..=64).contains(&version.len())
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_' | b'-'))
 }
 
 impl PublicationRecord {
@@ -272,7 +279,7 @@ impl PublicationRecord {
             return malformed("bundle_name must be 1 to 128 bytes without `/`");
         }
         if !is_bundle_version(&self.version) {
-            return malformed("version must be 1 to 64 printable bytes");
+            return malformed("version must be 1 to 64 bytes of [0-9A-Za-z.+_-]");
         }
         if lillux::time::unix_secs_from_iso8601(&self.not_after).is_none()
             || lillux::time::unix_secs_from_iso8601(&self.created_at).is_none()
@@ -450,7 +457,8 @@ pub struct PublicationManifest {
     pub kind: String,
     pub schema: String,
     pub bundle_name: String,
-    /// The version in the bundle's signed manifest.
+    /// The version in the bundle's signed manifest. A label only: nothing
+    /// orders bundles by it or calls one newer or fresher.
     pub bundle_version: String,
     pub bundle_manifest_digest: String,
     pub publisher_fingerprint: String,
@@ -503,7 +511,7 @@ impl PublicationManifest {
             return malformed("manifest has an unknown kind or schema");
         }
         if !is_bundle_version(&self.bundle_version) {
-            return malformed("bundle_version must be 1 to 64 printable bytes");
+            return malformed("bundle_version must be 1 to 64 bytes of [0-9A-Za-z.+_-]");
         }
         if self.entries.len() > MAX_PUBLICATION_MANIFEST_ENTRIES
             || self.file_count != self.entries.len() as u64
