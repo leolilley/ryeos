@@ -1179,6 +1179,8 @@ enum PreflightCommandDispatch {
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
+        #[serde(default)]
+        item_kinds: Option<Vec<String>>,
         #[serde(rename = "validate_only")]
         _validate_only: bool,
         #[serde(default)]
@@ -1532,6 +1534,15 @@ fn validate_preflight_command_dispatch(
             if item_ref_arg.is_empty() =>
         {
             bail!("command '{}' has empty item_ref_arg", name);
+        }
+        PreflightCommandDispatch::DirectExecuteItemRef {
+            item_kinds: Some(kinds),
+            ..
+        } if kinds.is_empty() || kinds.iter().any(|kind| kind.trim().is_empty()) => {
+            bail!(
+                "command '{}' declares item_kinds that is empty or names an empty kind; omit the field to accept any kind",
+                name
+            );
         }
         PreflightCommandDispatch::DirectExecuteItemRef { .. } => {}
         PreflightCommandDispatch::ExecuteRef { execute, .. } => {
@@ -2359,6 +2370,36 @@ aliases:
                 panic!("current availability `{availability}` must pass preflight: {error}")
             });
         }
+    }
+
+    #[test]
+    fn command_preflight_refuses_an_empty_item_kinds_list() {
+        let dispatch = |kinds: serde_json::Value| -> PreflightCommandDispatch {
+            serde_json::from_value(serde_json::json!({
+                "kind": "direct_execute_item_ref",
+                "item_ref_arg": "item_ref",
+                "validate_only": false,
+                "item_kinds": kinds,
+            }))
+            .unwrap()
+        };
+        for refused in [
+            serde_json::json!([]),
+            serde_json::json!(["worker_execution", " "]),
+        ] {
+            let error =
+                validate_preflight_command_dispatch("demo", &dispatch(refused)).unwrap_err();
+            assert!(format!("{error:#}").contains("item_kinds"), "{error:#}");
+        }
+        validate_preflight_command_dispatch("demo", &dispatch(serde_json::json!(["tool"])))
+            .unwrap();
+        let absent: PreflightCommandDispatch = serde_json::from_value(serde_json::json!({
+            "kind": "direct_execute_item_ref",
+            "item_ref_arg": "item_ref",
+            "validate_only": false,
+        }))
+        .unwrap();
+        validate_preflight_command_dispatch("demo", &absent).unwrap();
     }
 
     #[test]

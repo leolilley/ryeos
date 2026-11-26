@@ -81,7 +81,26 @@ pub async fn handle(
             }
             serde_json::from_str(source).map_err(|e| format!("invalid input JSON: {e}"))
         },
-    ).map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    ).map_err(|e| match e {
+        ryeos_app::command_invocation::CommandProjectPolicyError::ItemKindMismatch {
+            command,
+            expected,
+            given,
+        } => HandlerError::Structured {
+            code: "command_item_kind_mismatch".to_string(),
+            status: 400,
+            body: json!({
+                "code": "command_item_kind_mismatch",
+                "error": format!(
+                    "command_item_kind_mismatch: command '{command}' accepts only {expected:?} items, not '{given}'"
+                ),
+                "command": command,
+                "expected_kinds": expected,
+                "given_kind": given,
+            }),
+        },
+        other => HandlerError::BadRequest(other.to_string()),
+    })?;
     if compiled.controls.stream == Some(true) {
         return Err(HandlerError::BadRequest(
             "streaming requires the streaming transport; use buffered or accepted execution".into(),
