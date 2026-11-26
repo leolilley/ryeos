@@ -624,6 +624,12 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "publish_bundle" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "publish.yaml")?;
+            crate::client_handlers::publish_bundle(app_root, console, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
@@ -2586,6 +2592,25 @@ mod tests {
             authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_shipped_publication_commands_dispatch_to_the_handler_and_service_the_arms_name() {
+        let commands = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/node/commands");
+        let load = |file: &str| -> serde_yaml::Value {
+            let text = std::fs::read_to_string(commands.join(file)).unwrap();
+            serde_yaml::from_str(&text).unwrap()
+        };
+        // The `publish_bundle` arm authorizes exactly `publish.yaml`; that
+        // file must name the same handler.
+        let publish = load("publish.yaml");
+        assert_eq!(publish["dispatch"]["kind"], "local_handler");
+        assert_eq!(publish["dispatch"]["handler"], "publish_bundle");
+        // The pull is a service call, not a local handler.
+        let pull = load("pull.yaml");
+        assert_eq!(pull["dispatch"]["kind"], "execute_ref");
+        assert_eq!(pull["dispatch"]["execute"], "service:bundle/pull");
     }
 
     #[test]

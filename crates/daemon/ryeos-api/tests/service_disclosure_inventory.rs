@@ -115,6 +115,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/manifest-sign",
     "bundle/profile-sign",
     "bundle/publish",
+    "bundle/pull",
     "bundle/remove",
     "bundle/sign",
     "bundle/smoke",
@@ -174,6 +175,10 @@ const OPERATOR_ONLY: &[&str] = &[
     "project/snapshot-status",
     "projection/rebuild",
     "projection/verify",
+    "publication/freeze",
+    "publication/list",
+    "publication/publish",
+    "publication/retire",
     "remote-worker-workflows/query",
     "remote-worker-workflows/resume",
     "remote-worker-workflows/start",
@@ -856,5 +861,65 @@ fn services_that_list_attachment_leaves_include_the_seat_project() {
                 "{name} lists `{posture}` but not `{expected}`"
             );
         }
+    }
+}
+
+/// The publication services are operator acts and operator bookkeeping. An
+/// empty `disclosure: {}` is not a grant: a principal or an unauthenticated
+/// caller is shaped to an empty answer and never sees the result. Their
+/// capability requirement is separate and unchanged.
+#[test]
+fn the_publication_services_disclose_nothing_to_a_non_operator() {
+    use ryeos_node_runtime::disclosure::{DisclosureClass, shape_result};
+    let all = services();
+    for name in [
+        "bundle/pull",
+        "publication/freeze",
+        "publication/list",
+        "publication/publish",
+        "publication/retire",
+    ] {
+        let body = all
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == name)
+            .unwrap_or_else(|| panic!("{name}: no such service item"))
+            .1
+            .clone();
+        let block = body
+            .get("disclosure")
+            .unwrap_or_else(|| panic!("{name}: no disclosure block"));
+        let declared = ServiceDisclosure::parse(block).unwrap();
+        let result = serde_json::json!({
+            "record_hash": "a".repeat(64),
+            "publications": [{ "id": "b".repeat(32), "bundle_name": "demo" }],
+        });
+        for class in [DisclosureClass::Principal, DisclosureClass::Public] {
+            let shaped = shape_result(class, Some(&declared), result.clone(), declared.bounds())
+                .unwrap_or_else(|refusal| panic!("{name}: {refusal}"));
+            assert_eq!(
+                shaped,
+                Value::Null,
+                "{name} disclosed something to {class:?}"
+            );
+        }
+        let operator = shape_result(
+            DisclosureClass::Operator,
+            Some(&declared),
+            result.clone(),
+            declared.bounds(),
+        )
+        .unwrap();
+        assert_eq!(
+            operator, result,
+            "{name}: the operator must get the full answer"
+        );
+        assert!(
+            body.get("required_caps")
+                .and_then(Value::as_array)
+                .is_some_and(|caps| caps
+                    .iter()
+                    .any(|cap| cap == &Value::from(format!("ryeos.execute.service.{name}")))),
+            "{name}: the capability requirement must stay"
+        );
     }
 }

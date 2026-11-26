@@ -2190,12 +2190,7 @@ fn recover_thread_usage(
                 .validate()
                 .context("resume: invalid thread_usage event")?;
             if let Some(previous) = latest.as_ref()
-                && (usage.completed_turns < previous.completed_turns
-                    || usage.input_tokens < previous.input_tokens
-                    || usage.output_tokens < previous.output_tokens
-                    || usage.spend_usd < previous.spend_usd
-                    || usage.spawns_used < previous.spawns_used
-                    || usage.last_settled_turn_seq < previous.last_settled_turn_seq)
+                && usage.cumulative_regression_from(previous).is_some()
             {
                 anyhow::bail!("resume: thread_usage cumulative authority regressed");
             }

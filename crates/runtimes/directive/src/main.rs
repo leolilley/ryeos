@@ -29,7 +29,6 @@ mod tool_images;
 
 use ryeos_directive_definition::{PROVIDER_SNAPSHOT_KEY, ResolvedProviderSnapshot};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
-use ryeos_runtime::events::RuntimeEventType;
 
 /// Compile the directive-owned stimulus field and derive its exact input-key
 /// references from the AST. Inventory tests call this same boundary without
@@ -622,9 +621,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     };
 
     let mut runner_inst = if let Some(mut resume_state) = resume_state {
-        let resume_id = resume_id
-            .as_deref()
-            .expect("a resume has a thread to resume");
         // The edge into this thread: a machine continuation extends the
         // chain's machine depth, an operator follow-up starts it again.
         if !same_thread_resume {
@@ -651,21 +647,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         {
             return refusal;
         }
-        if !same_thread_resume
-            && let Err(e) = callback
-                .append_runtime_event(
-                    RuntimeEventType::ThreadContinued,
-                    json!({"previous_thread_id": resume_id}),
-                )
-                .await
-        {
-            tracing::warn!(
-                thread_id = %envelope.thread_id,
-                error = %e,
-                "callback append_event(thread_continued) failed"
-            );
-        }
-
         // The frame in force: the one the chain recorded, unless this launch
         // gives the model something different, which is recorded as the next
         // frame. A change a provider entry refuses was ruled out above.
@@ -932,5 +913,64 @@ mod tests {
         .expect("render scheduled execution context");
 
         assert_eq!(rendered, "Fire campaign.nightly@1700000000000");
+    }
+
+    /// A runtime never appends an event type the daemon authors: the daemon
+    /// writes lineage, continuation and terminal events itself, and refuses a
+    /// runtime append of one. This scans this crate's sources for any runtime
+    /// event variant of that set.
+    const DAEMON_AUTHORED_VARIANTS: &[&str] = &[
+        "ThreadCompleted",
+        "ThreadFailed",
+        "ThreadKilled",
+        "ThreadCancelled",
+        "ThreadTimedOut",
+        "ThreadContinued",
+        "ChildThreadSpawned",
+        "ChildThreadSettled",
+        "WorkerContinuationAdmitted",
+        "EdgeRecorded",
+        "AsLaunchedResolution",
+        "AsLaunchedRefBindings",
+        "RuntimeLaunchFacts",
+        "LaunchAugmentationCacheHit",
+        "ProcessInputRootSelected",
+        "ContinuationRequested",
+        "ContinuationAccepted",
+        "CommandSubmitted",
+        "CommandClaimed",
+        "CommandCompleted",
+    ];
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("source dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_source_names_a_daemon_authored_event_variant() {
+        let mut sources = Vec::new();
+        rust_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sources,
+        );
+        assert!(!sources.is_empty());
+        for path in sources {
+            let body = std::fs::read_to_string(&path).expect("read source");
+            for variant in DAEMON_AUTHORED_VARIANTS {
+                let needle = format!("RuntimeEventType::{variant}");
+                assert!(
+                    !body.contains(&needle),
+                    "{} names `{needle}`, an event type the daemon authors",
+                    path.display()
+                );
+            }
+        }
     }
 }

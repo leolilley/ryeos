@@ -25,6 +25,7 @@ pub mod bundle_catalog_publish;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
+pub mod bundle_pull;
 pub mod bundle_release;
 pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
@@ -94,6 +95,7 @@ pub mod project_apply_snapshot;
 pub mod project_owner;
 pub mod project_snapshot_status;
 pub mod project_status;
+pub mod publication;
 pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
@@ -305,6 +307,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     worker_placements::ADOPT_DESCRIPTOR,
     worker_placements::ABORT_DESCRIPTOR,
     bundle_install::DESCRIPTOR,
+    bundle_pull::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     trust_list::LIST_DESCRIPTOR,
@@ -360,6 +363,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     endorsements::RECORD,
     endorsements::REVOKE,
     endorsements::LIST,
+    publication::FREEZE,
+    publication::PUBLISH,
+    publication::RETIRE,
+    publication::LIST,
     items_revised::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,

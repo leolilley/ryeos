@@ -16,6 +16,7 @@ pub mod native_capacity;
 pub mod object_closure;
 pub mod persistent_sessions;
 pub mod provider_environment;
+pub mod publication;
 pub mod recipients;
 pub mod sealed_vault_names;
 pub mod thread_attachments;
