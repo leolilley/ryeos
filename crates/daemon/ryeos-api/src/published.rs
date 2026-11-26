@@ -26,8 +26,9 @@ use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ryeos_app::state::AppState;
 use ryeos_engine::trust::{
-    Closure, MAX_PUBLICATION_MANIFEST_BYTES, PublicationLedger, PublicationManifest,
-    PublicationRefusal, PublicationStatus, StoredPublication, is_publication_hash,
+    Closure, INDEX_VALIDITY_SECS, IndexEntry, IndexLane, MAX_PUBLICATION_MANIFEST_BYTES,
+    PUBLICATION_INDEX_SCHEMA, PublicationIndexBody, PublicationLedger, PublicationManifest,
+    PublicationRefusal, PublicationStatus, ServedIndex, StoredPublication, is_publication_hash,
     is_publication_id, load_publication, served_ledger_path,
 };
 use ryeos_node_runtime::node_policy::sections::publication::PublicationPolicy;
@@ -55,6 +56,7 @@ pub fn is_published_path(path: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishedRoute {
     List,
+    Index,
     Describe,
     Blob,
 }
@@ -62,6 +64,8 @@ pub enum PublishedRoute {
 /// Every route this table serves, all GET. A `{name}` segment captures.
 pub const PUBLISHED_ROUTES: &[(PublishedRoute, &str)] = &[
     (PublishedRoute::List, "/published"),
+    // The literal route is matched before the capturing one.
+    (PublishedRoute::Index, "/published/index"),
     (PublishedRoute::Describe, "/published/{id}"),
     (PublishedRoute::Blob, "/published/{id}/blob/{hash}"),
 ];
@@ -451,6 +455,121 @@ fn list(app: &AppState) -> Result<Served, Refused> {
     Ok(served)
 }
 
+/// The `<major>.<minor>` of a build version, or `None` when it has none.
+fn major_minor(version: &str) -> Option<String> {
+    let mut parts = version.trim().trim_start_matches('v').split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    (digits(major) && digits(minor)).then(|| format!("{major}.{minor}"))
+}
+
+/// What the index remembers between requests: the sequence it last served and
+/// the digest of the entries that sequence named. The sequence moves up only
+/// when the entries change, so it is stable across requests and restarts.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct IndexState {
+    sequence: u64,
+    entries_digest: String,
+}
+
+fn index_state_path(app_root: &Path) -> PathBuf {
+    ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+        .state()
+        .join("publication-index.state")
+}
+
+/// The sequence for `entries_digest`: the stored one if the entries are
+/// unchanged, else the next, written durably before it is served. Serialized
+/// per app root.
+fn index_sequence(app_root: &Path, entries_digest: &str) -> Result<u64, String> {
+    static GUARDS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let guard = GUARDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(app_root.to_path_buf())
+        .or_default()
+        .clone();
+    let _held = guard.lock().unwrap_or_else(|p| p.into_inner());
+    let path = index_state_path(app_root);
+    let current: IndexState = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if current.sequence > 0 && current.entries_digest == entries_digest {
+        return Ok(current.sequence);
+    }
+    let next = IndexState {
+        sequence: current.sequence.saturating_add(1),
+        entries_digest: entries_digest.to_owned(),
+    };
+    let text = serde_json::to_string(&next).map_err(|e| format!("encode the index state: {e}"))?;
+    lillux::atomic_fs::atomic_write(&path, text.as_bytes())
+        .map_err(|e| format!("write the index state: {e}"))?;
+    Ok(next.sequence)
+}
+
+/// The node-signed index of the live publications, by name and version. It is
+/// derived here from the same checks `list` applies, and each entry's
+/// publisher is read from the frozen manifest the record binds.
+fn index(app: &AppState) -> Result<Served, Refused> {
+    let node_key = app.identity.signing_key().verifying_key();
+    let ledger =
+        PublicationLedger::load(&app.config.app_root, &node_key).map_err(Refused::from_refusal)?;
+    let now = lillux::time::unix_secs_now();
+    let series = major_minor(app.daemon_build.version)
+        .ok_or_else(|| Refused::unavailable("the node build has no major.minor version"))?;
+    let mut entries: Vec<IndexEntry> = Vec::new();
+    for stored in &ledger.publications {
+        let state = ledger.state_of(&stored.record.id);
+        if !matches!(state.status(now), PublicationStatus::Live(_))
+            || stored.check_operator(&app.engine.trust_store).is_err()
+        {
+            continue;
+        }
+        let loaded = match load_manifest(app, &stored.record.root.manifest_hash) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                tracing::warn!(id = %stored.record.id, error = %error, "a publication is left out of the index: its manifest is unreadable");
+                continue;
+            }
+        };
+        let record_hash = stored.record.body_hash().map_err(Refused::from_refusal)?;
+        entries.push(IndexEntry {
+            lane: IndexLane::Publication,
+            id: stored.record.id.clone(),
+            record_hash,
+            name: stored.record.bundle_name.clone(),
+            version: stored.record.version.clone(),
+            publisher: loaded.manifest.publisher_fingerprint.clone(),
+            requires: Vec::new(),
+            node_major_minor: series.clone(),
+            not_after: stored.record.not_after.clone(),
+        });
+    }
+    entries.sort();
+    // Two live publications of one `(name, version)` cannot both be listed; the
+    // older id wins and the other is left out until the first is retired.
+    entries
+        .dedup_by(|later, earlier| later.name == earlier.name && later.version == earlier.version);
+    let mut body = PublicationIndexBody {
+        schema: PUBLICATION_INDEX_SCHEMA.to_owned(),
+        node_fingerprint: lillux::signature::compute_fingerprint(&node_key),
+        sequence: 0,
+        generated_at: lillux::time::iso8601_from_unix_secs(now),
+        valid_until: lillux::time::iso8601_from_unix_secs(now + INDEX_VALIDITY_SECS),
+        entries,
+    };
+    let digest = body.entries_digest().map_err(Refused::unavailable)?;
+    body.sequence = index_sequence(&app.config.app_root, &digest).map_err(Refused::unavailable)?;
+    let signed =
+        ServedIndex::sign(body, app.identity.signing_key()).map_err(Refused::unavailable)?;
+    let served = Served::json(&serde_json::to_value(&signed).map_err(Refused::unavailable)?)?;
+    reserve(app, served.bytes.len() as u64)?;
+    Ok(served)
+}
+
 fn describe(app: &AppState, id: &str) -> Result<Served, Refused> {
     let stored = load_live(app, id)?;
     let loaded =
@@ -506,11 +625,12 @@ fn handle(
     captures: &BTreeMap<&'static str, String>,
 ) -> Result<Served, Refused> {
     let id = captures.get("id").map(String::as_str).unwrap_or_default();
-    if route != PublishedRoute::List && !is_publication_id(id) {
+    if !matches!(route, PublishedRoute::List | PublishedRoute::Index) && !is_publication_id(id) {
         return Err(Refused::new(StatusCode::NOT_FOUND, "publication_not_found"));
     }
     match route {
         PublishedRoute::List => list(app),
+        PublishedRoute::Index => index(app),
         PublishedRoute::Describe => describe(app, id),
         PublishedRoute::Blob => blob(
             app,

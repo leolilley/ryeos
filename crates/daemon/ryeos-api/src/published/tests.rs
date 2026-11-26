@@ -1,13 +1,17 @@
 use super::*;
 
 #[test]
-fn the_table_matches_only_its_three_routes() {
+fn the_table_matches_only_its_four_routes() {
     let hash = "a".repeat(64);
     let id = "1".repeat(32);
     let (route, captures) = match_route("/published").unwrap();
     assert_eq!(route, PublishedRoute::List);
     assert!(captures.is_empty());
     assert_eq!(match_route("/published/").unwrap().0, PublishedRoute::List);
+    // The literal index route is matched before the capturing describe route.
+    let (route, captures) = match_route("/published/index").unwrap();
+    assert_eq!(route, PublishedRoute::Index);
+    assert!(captures.is_empty());
     let (route, captures) = match_route(&format!("/published/{id}")).unwrap();
     assert_eq!(route, PublishedRoute::Describe);
     assert_eq!(captures["id"], id);
@@ -111,4 +115,31 @@ fn a_full_limiter_answers_publication_busy_and_frees_with_the_slot() {
     assert!(busy.retry_after);
     drop(first);
     assert!(take_slot(&limiter).is_ok());
+}
+
+#[test]
+fn a_bundle_version_has_a_major_and_minor_or_none() {
+    assert_eq!(major_minor("0.5.102").as_deref(), Some("0.5"));
+    assert_eq!(major_minor("v1.2.3-ple.4").as_deref(), Some("1.2"));
+    assert_eq!(major_minor("0.6.0-ple.1").as_deref(), Some("0.6"));
+    assert_eq!(major_minor("7"), None);
+    assert_eq!(major_minor("a.b.c"), None);
+    assert_eq!(major_minor(""), None);
+}
+
+#[test]
+fn the_index_sequence_moves_only_when_the_entries_change_and_survives_a_restart() {
+    let app_root = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(
+        ryeos_engine::roots::RuntimeRoot::new(app_root.path().to_path_buf()).state(),
+    )
+    .unwrap();
+    let first = index_sequence(app_root.path(), "aa").unwrap();
+    assert_eq!(first, 1);
+    assert_eq!(index_sequence(app_root.path(), "aa").unwrap(), 1);
+    assert_eq!(index_sequence(app_root.path(), "bb").unwrap(), 2);
+    assert_eq!(index_sequence(app_root.path(), "bb").unwrap(), 2);
+    // Back to an earlier set of entries is still a change: the sequence only
+    // goes up.
+    assert_eq!(index_sequence(app_root.path(), "aa").unwrap(), 3);
 }
