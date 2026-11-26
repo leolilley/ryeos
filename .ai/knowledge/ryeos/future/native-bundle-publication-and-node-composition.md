@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T03:57:35Z:941cf19e4f061763aec22c5475644f57aa664fbc72ab9a74c0e6d1255a7947b8:Gr0+/2fGcY/AN7swP9BgfbT3faMNTSCKDyRPNeamfwu6N2uvSotXIUaLUbvHW2OotVauRkib5T2HRvm+ECKoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T03:58:19Z:85a24e6c9973aa22a930c34cd295d6ce3c93768cca84b7c41f2dd3260ab623af:ACJb50Yp3RTWo13O7Om54sNq1AJwhQiAdlQ1ddcIiKwDIfZ/yYF/0U4x5LOLkUi3kQu7DbFGHPVTq32XY9kLAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
@@ -819,9 +819,11 @@ of a tool's own source directory.
 **Default limits on the node that pulled it.** No command registration, no
 runtime authority from manifest capabilities, no kinds, and no native
 executables or handler binaries. Any limit is lifted only by the operator's
-signed node policy naming that bundle, never by a flag on the pull. So the lane
-today carries libraries and knowledge. An application that needs a view, a
-configuration, state or a schedule waits for the operator's named-bundle lift.
+signed node policy naming that bundle, never by a flag on the pull. That policy
+section does not exist yet: until it ships, every limit above is absolute and
+nothing lifts it. So the lane today carries tools, directives, graphs and
+knowledge. An application that needs a view, a configuration, state or a
+schedule waits for the operator's named-bundle lift.
 
 **The lane marker.** The install records its lane, publisher, record hash, node
 key and index sequence in the node-signed bundle registration, so it cannot be
@@ -837,7 +839,7 @@ kind, executable or runtime authority unless this node's policy names it. The
 publisher signed these bytes; nothing authorizes an exact set. Its tools and
 directives run under the caller's own grants."
 
-**How a puller finds one.** A node that serves publications also serves a
+**How a puller finds one (planned).** A node that serves publications also serves a
 node-signed, short-lived index of its live publications by name and version
 (`/published/index`), with a monotonic sequence and a validity bound, so a
 replayed old index is refused. Every entry carries its lane. The index lists
