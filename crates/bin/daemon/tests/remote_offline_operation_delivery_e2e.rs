@@ -455,10 +455,12 @@ async fn an_origin_operator_delivers_an_offline_operation_through_its_node() -> 
 }
 
 /// An origin operator whose key HOSTED's operator never linked is a principal
-/// on HOSTED, not an operator: asking
-/// HOSTED to stop for it is refused.
+/// on HOSTED, not an operator. Delivery itself is gated by the key's own
+/// offline-operation grant, which it holds, so what the missing link changes
+/// is disclosure: HOSTED's refusal of a bad request keeps its code but
+/// withholds the reason that an operator is told.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_origin_operator_that_hosted_never_linked_is_refused_on_hosted() -> Result<()> {
+async fn an_origin_operator_that_hosted_never_linked_is_refused_without_the_reason() -> Result<()> {
     let pair = start_pair(false).await?;
     pair.delegate(&[SUBMIT_CAP, FACTS_CAP, STATUS_CAP]).await?;
     let (status, facts) = pair
@@ -472,12 +474,15 @@ async fn an_origin_operator_that_hosted_never_linked_is_refused_on_hosted() -> R
         "facts through origin: {status} {facts}"
     );
     let delivery = pair.sign(&facts["result"])?;
-    let (status, body) = pair.submit(HOSTED_REMOTE, &delivery, true).await?;
+    let mut forged = delivery.clone();
+    forged.request.body.arguments = json!({ "tampered": true });
+    let (status, body) = pair.submit(HOSTED_REMOTE, &forged, false).await?;
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("remote_offline_operation_refused"), "{text}");
     assert!(
-        body.to_string()
-            .contains("remote_offline_operation_refused"),
-        "{body}"
+        !text.contains("bad_signature"),
+        "a non-operator is not told why: {text}"
     );
     Ok(())
 }
