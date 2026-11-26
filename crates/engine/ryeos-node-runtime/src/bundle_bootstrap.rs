@@ -60,7 +60,6 @@ impl<'a> BundleBootstrapLoader<'a> {
     ///
     /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
-
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         let mut records: Vec<BundleRecord> = Vec::new();
 
