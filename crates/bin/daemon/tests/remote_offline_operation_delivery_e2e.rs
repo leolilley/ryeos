@@ -454,8 +454,9 @@ async fn an_origin_operator_delivers_an_offline_operation_through_its_node() -> 
     Ok(())
 }
 
-/// The same delivery from an origin operator whose key HOSTED's operator never
-/// linked is refused: on HOSTED that key is a principal, not an operator.
+/// An origin operator whose key HOSTED's operator never linked is a principal
+/// on HOSTED, not an operator: asking
+/// HOSTED to stop for it is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_origin_operator_that_hosted_never_linked_is_refused_on_hosted() -> Result<()> {
     let pair = start_pair(false).await?;
@@ -471,7 +472,7 @@ async fn an_origin_operator_that_hosted_never_linked_is_refused_on_hosted() -> R
         "facts through origin: {status} {facts}"
     );
     let delivery = pair.sign(&facts["result"])?;
-    let (status, body) = pair.submit(HOSTED_REMOTE, &delivery, false).await?;
+    let (status, body) = pair.submit(HOSTED_REMOTE, &delivery, true).await?;
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body}");
     assert!(
         body.to_string()
