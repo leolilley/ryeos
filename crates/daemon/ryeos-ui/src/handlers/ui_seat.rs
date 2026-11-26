@@ -1061,7 +1061,12 @@ fn validate_prepared_operation(
         )
         .into());
     }
-    super::ui_invocations_dispatch::validate_prepared_operation_binding(&attachment, operation)
+    super::ui_invocations_dispatch::validate_prepared_operation_binding(
+        state,
+        &session.granted_caps,
+        &attachment,
+        operation,
+    )
 }
 
 fn validate_completed_operation(

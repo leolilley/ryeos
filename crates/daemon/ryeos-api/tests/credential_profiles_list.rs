@@ -14,7 +14,7 @@ const LIST_CAP: &str = "ryeos.execute.service.credential-profiles/list";
 #[test]
 fn cli_descriptor_binds_pagination_flags_through_service_schema() {
     let command: ryeos_runtime::CommandDef = serde_yaml::from_str(include_str!(
-        "../../../../bundles/codex/.ai/node/commands/profile-list.yaml"
+        "../../../../bundles/core/.ai/node/commands/credential-profile-list.yaml"
     ))
     .unwrap();
     let service: Value = serde_yaml::from_str(include_str!(

@@ -59,6 +59,7 @@ impl Node {
             &fp(&self.node),
             &"a".repeat(64),
             "fixture",
+            "1.2.3",
             &lillux::time::iso8601_from_unix_secs(not_after_secs),
             &lillux::time::iso8601_from_unix_secs(NOW),
             1 << 20,
@@ -297,6 +298,7 @@ fn manifest_bytes(entries: &[(&str, &[u8])]) -> (String, Vec<u8>) {
         kind: PUBLICATION_MANIFEST_KIND.to_owned(),
         schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         bundle_name: "fixture".to_owned(),
+        bundle_version: "1.2.3".to_owned(),
         bundle_manifest_digest: "b".repeat(64),
         publisher_fingerprint: "c".repeat(64),
         file_count: entries.len() as u64,
@@ -322,6 +324,42 @@ fn the_closure_is_the_manifest_hash_plus_every_entry_hash_and_nothing_else() {
     assert!(!closure.contains(&lillux::sha256_hex(b"gamma")));
     assert!(!closure.contains("not a hash"));
     assert!(!closure.contains(""));
+}
+
+#[test]
+fn a_record_and_a_manifest_need_an_identifier_version() {
+    let node = Node::new();
+    let mut record = node.record('1', NOW + 3600);
+    record.validate_shape().unwrap();
+    for good in ["1.2.3", "1.0.0-rc.1+build.5", "v_2", &"v".repeat(64)] {
+        record.version = good.to_owned();
+        record
+            .validate_shape()
+            .unwrap_or_else(|_| panic!("{good:?}"));
+    }
+    for bad in [
+        "",
+        "has space",
+        "line\nbreak",
+        "<b>",
+        "a\"b",
+        "a'b",
+        "a/b",
+        "é",
+        &"v".repeat(65),
+    ] {
+        record.version = bad.to_owned();
+        assert!(record.validate_shape().is_err(), "{bad:?}");
+    }
+    let (_, bytes) = manifest_bytes(&[("a.txt", b"alpha")]);
+    let mut manifest: PublicationManifest = serde_json::from_slice(&bytes).unwrap();
+    manifest.validate_shape().unwrap();
+    for bad in ["", "<b>", "a b"] {
+        manifest.bundle_version = bad.to_owned();
+        assert!(manifest.validate_shape().is_err(), "{bad:?}");
+    }
+    manifest.bundle_version = "1.0.0-rc.1+build.5".to_owned();
+    manifest.validate_shape().unwrap();
 }
 
 #[test]

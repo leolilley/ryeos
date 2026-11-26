@@ -440,6 +440,7 @@ fn list(app: &AppState) -> Result<Served, Refused> {
             live.push(json!({
                 "id": stored.record.id,
                 "bundle_name": stored.record.bundle_name,
+                "version": stored.record.version,
                 "not_after": stored.record.not_after,
             }));
         }
