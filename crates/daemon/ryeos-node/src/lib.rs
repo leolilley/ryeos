@@ -6,6 +6,7 @@ pub(crate) const NODE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::n
 pub mod apply_authority;
 pub mod bundle_set_apply;
 pub mod bundle_set_update;
+pub mod bundle_staging;
 pub mod capability_report;
 mod control;
 pub mod host_runtime;
