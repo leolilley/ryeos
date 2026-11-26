@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T00:58:24Z:a3fe1a7656c573c33e36a2753eff3d4e52fdb62dc5f1fb3a933bbd05985a6bef:w7YIi3qa0nzXgKuU3lAA5lE0SXNJe4vx5QpYyLPEt8/dUjLVf+Fw/ZIdUHn7ChWveYHv1iM/Rqv2yD984vzpDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:30:21Z:04c232467ae28375d91833eb88312bdbf7fd3bd814c226a6484cea86aa3dbae4:+mg37DPQV/oWgCC4c/z7ZuPL3KmZ5uyq29j7+xdBA/NVRzuUf0+PskIdYNF+BpVhs+YJl3iZWHpzG50oyfErAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -56,6 +56,9 @@ reasons:
   source_row_limit:
     label: Showing the first {limit} of {total} rows.
     tone: warn
+  contract_mismatch:
+    label: This source answered in a form this page was not written for, so nothing from it is shown.
+    tone: danger
   coverage_not_reported:
     label: This source did not say what it covers.
     tone: warn

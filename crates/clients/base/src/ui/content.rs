@@ -645,6 +645,41 @@ pub struct SourceBinding {
     pub activation: SourceActivation,
     #[serde(default)]
     pub requires_project: bool,
+    /// The result contract the view was written for, `ryeos.read.<name>/v<N>`.
+    /// A response from another contract is refused whole: it reads as a failed
+    /// source, never as rows the view was not written for.
+    #[serde(default, deserialize_with = "deserialize_contract")]
+    pub contract: Option<String>,
+}
+
+/// A source's declared result contract: the schema id a shared read envelope
+/// names, `ryeos.read.<dotted name>/v<N>`.
+fn deserialize_contract<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(contract) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let valid = contract.strip_prefix("ryeos.read.").is_some_and(|rest| {
+        rest.split_once("/v").is_some_and(|(name, version)| {
+            !name.is_empty()
+                && name.split('.').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                })
+                && !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit())
+        })
+    });
+    if !valid {
+        return Err(serde::de::Error::custom(
+            "contract must be a read schema id, `ryeos.read.<name>/v<N>`",
+        ));
+    }
+    Ok(Some(contract))
 }
 
 /// Where a source's records are. A plain string is a path into the response:
@@ -2707,6 +2742,38 @@ mod tests {
         assert_eq!(
             collection_state(collection, &response).map(SourceRowState::code),
             Some("not_reported")
+        );
+    }
+
+    #[test]
+    fn a_source_contract_is_a_read_schema_id() {
+        let source = |contract: serde_json::Value| {
+            serde_json::from_value::<SourceBinding>(
+                json!({"ref": "service:test/rows", "contract": contract}),
+            )
+        };
+        assert_eq!(
+            source(json!("ryeos.read.node.journal/v1"))
+                .unwrap()
+                .contract
+                .as_deref(),
+            Some("ryeos.read.node.journal/v1")
+        );
+        for bad in [
+            "node.journal/v1",
+            "ryeos.read./v1",
+            "ryeos.read.node.journal",
+            "ryeos.read.node.journal/v",
+            "ryeos.read.Node/v1",
+            "ryeos.read.node..journal/v1",
+        ] {
+            assert!(source(json!(bad)).is_err(), "{bad} is refused");
+        }
+        assert!(
+            serde_json::from_value::<SourceBinding>(json!({"ref": "service:test/rows"}))
+                .unwrap()
+                .contract
+                .is_none()
         );
     }
 

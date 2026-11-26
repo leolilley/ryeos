@@ -138,6 +138,27 @@ impl<'a> ReadEnvelope<'a> {
     }
 }
 
+/// The answer a source reads as when its response is not the contract the
+/// view was written for: a failed envelope with the reason `contract_mismatch`
+/// and no rows. `None` when the response is that contract.
+pub fn contract_mismatch_answer(contract: &str, response: &Value) -> Option<Value> {
+    if response.get("schema").and_then(Value::as_str) == Some(contract) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "schema": CONTRACT_MISMATCH_SCHEMA,
+        "revision": "",
+        "coverage": { "state": "failed", "reason": CONTRACT_MISMATCH_REASON },
+        "rows": [],
+    }))
+}
+
+/// The schema of the answer a contract mismatch is read as.
+const CONTRACT_MISMATCH_SCHEMA: &str = "ryeos.read.contract_mismatch/v1";
+
+/// The coverage reason, and the key of its signed sentence.
+pub const CONTRACT_MISMATCH_REASON: &str = "contract_mismatch";
+
 /// Whether a response is a `not_modified` reply: the server's statement that
 /// the revision the client sent is still current.
 pub fn is_not_modified(response: &Value) -> bool {
@@ -221,5 +242,20 @@ mod tests {
         assert!(!is_not_modified(&json!({"not_modified": false})));
         assert_eq!(stored_revision(&envelope("complete")), Some("rev1:a"));
         assert_eq!(stored_revision(&json!({"x": 1})), None);
+    }
+
+    #[test]
+    fn a_response_of_another_contract_reads_as_a_failed_answer_with_no_rows() {
+        let held = envelope("complete");
+        let schema = held["schema"].as_str().unwrap().to_owned();
+        assert!(contract_mismatch_answer(&schema, &held).is_none());
+        let answer = contract_mismatch_answer("ryeos.read.other.rows/v1", &held)
+            .expect("a different schema is a mismatch");
+        let read = read_envelope(&answer).expect("the answer is an envelope");
+        assert_eq!(read.state, EnvelopeCoverageState::Failed);
+        assert_eq!(read.reason, Some(CONTRACT_MISMATCH_REASON));
+        assert!(read.records().is_empty());
+        // A bare, non-envelope response is a mismatch too.
+        assert!(contract_mismatch_answer(&schema, &json!({"rows": [1]})).is_some());
     }
 }

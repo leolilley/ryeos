@@ -750,6 +750,13 @@ impl RyeOsCore {
                             );
                         }
                     } else if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                        // A response of another contract than the source
+                        // declares reads as a failed answer with no rows.
+                        if let Some(answer) = self.source_contract(request).and_then(|contract| {
+                            crate::ui::read_envelope::contract_mismatch_answer(contract, &data)
+                        }) {
+                            data = answer;
+                        }
                         // A timeline response of another contract version is
                         // refused whole; there is no reader for it.
                         if let Some(message) = self.timeline_refusal(tile_id, &data) {
@@ -808,6 +815,23 @@ impl RyeOsCore {
 
         self.bump_generation();
         raw_followup
+    }
+
+    /// The result contract the request's signed source declares, if any.
+    fn source_contract(&self, request: &crate::ui::binding::UiBindingRequest) -> Option<&str> {
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let context = self
+            .binding_attachments
+            .get(&request.binding_attachment_id)?;
+        (context.descriptor.root_ref == *view_ref)
+            .then(|| context.surface_sources.get(channel))
+            .flatten()
+            .or_else(|| context.views.get(view_ref)?.sources.get(channel))
+            .and_then(|source| source.contract.as_deref())
     }
 
     /// Why a response to a signed `attention` source is not one this client can
@@ -1657,6 +1681,94 @@ mod tests {
                 "{label}: the refusal is a failed source"
             );
         }
+    }
+
+    #[test]
+    fn a_source_reads_only_the_contract_it_declares() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "rows": {
+                "ref": "service:test/rows",
+                "contract": "ryeos.read.test.rows/v2"
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find_map(|effect| match &effect.kind {
+                    RyeOsEffectKind::FetchSource { request, .. }
+                        if matches!(
+                            &request.coordinate,
+                            crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                if channel == "rows"
+                        ) =>
+                    {
+                        Some(effect.id)
+                    }
+                    _ => None,
+                })
+                .expect("surface source fetch")
+        };
+        let envelope = |schema: &str| {
+            serde_json::json!({
+                "schema": schema, "as_of": "t", "revision": "rev1:a",
+                "coverage": {"state": "complete"},
+                "rows": [{"id": "one"}],
+            })
+        };
+        let store = |core: &mut RyeOsCore, data: serde_json::Value| {
+            let id = fetch(&core.initial_effects());
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+        };
+        let stored = |core: &RyeOsCore| {
+            core.data
+                .sources
+                .values()
+                .find_map(|response| crate::ui::read_envelope::read_envelope(response))
+                .map(|read| {
+                    (
+                        read.state,
+                        read.reason.map(str::to_owned),
+                        read.records().len(),
+                    )
+                })
+        };
+
+        // Another version of the read: no rows, a failed source with its reason.
+        store(&mut core, envelope("ryeos.read.test.rows/v1"));
+        assert_eq!(
+            stored(&core),
+            Some((
+                crate::ui::read_envelope::EnvelopeCoverageState::Failed,
+                Some("contract_mismatch".to_owned()),
+                0
+            ))
+        );
+        // The declared contract is read as itself.
+        store(&mut core, envelope("ryeos.read.test.rows/v2"));
+        assert_eq!(
+            stored(&core),
+            Some((
+                crate::ui::read_envelope::EnvelopeCoverageState::Complete,
+                None,
+                1
+            ))
+        );
     }
 
     #[test]
