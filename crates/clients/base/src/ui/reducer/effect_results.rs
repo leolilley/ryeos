@@ -1895,7 +1895,6 @@ mod tests {
             }),
         );
         assert!(!refused(&core));
-        eprintln!("DEBUG stored_params={:?} sources={:?}", core.data.source_stored_params, core.data.sources);
         let (id, sent) = fetch(&mut core);
         assert_eq!(sent.as_deref(), Some("rev1:a"));
         answer(&mut core, id, not_modified.clone());
