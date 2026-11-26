@@ -108,11 +108,16 @@ fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+const TEST_MODULE_MARKER: &str = "\n#[cfg(test)]\nmod ";
+
 /// The part of a source file before its test module. A `#[cfg(test)]` on a
 /// single item or import earlier in the file is not the end of production
-/// code, so the cut is the top-level test module only.
+/// code, so the cut is the top-level test module only. A file with no test
+/// module is production in full; the sweep asserts that many files do have
+/// one, so a marker that stops matching fails the guard instead of passing
+/// silently.
 fn non_test_text(text: &str) -> &str {
-    text.find("\n#[cfg(test)]\nmod ")
+    text.find(TEST_MODULE_MARKER)
         .map_or(text, |end| &text[..end])
 }
 
@@ -129,8 +134,10 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
 
     let mut unexpected = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut with_test_module = 0_usize;
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
+        with_test_module += usize::from(text.contains(TEST_MODULE_MARKER));
         let body = non_test_text(&text);
         if !LIVE_MARKERS.iter().any(|marker| body.contains(marker)) {
             continue;
@@ -149,6 +156,10 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
             )),
         }
     }
+    assert!(
+        with_test_module > 800,
+        "only {with_test_module} files have a top-level test module: the cut marker no longer matches"
+    );
     for name in MUST_ADMIT
         .iter()
         .copied()
@@ -217,9 +228,9 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
     let text =
         std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
             .unwrap();
-    let production = text
-        .find("#[cfg(test)]\nmod tests")
-        .map_or(text.as_str(), |end| &text[..end]);
+    let production = &text[..text
+        .find(TEST_MODULE_MARKER)
+        .expect("loader.rs has a top-level test module")];
     assert!(production.contains("fn system_scan_root"));
     assert!(production.contains("fn bundle_scan_root"));
     for forbidden in [
