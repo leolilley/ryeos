@@ -61,11 +61,34 @@ pub(crate) struct BundleExportEntry {
     pub(crate) mode: u32,
 }
 
+/// A live install never changes the node's bundle registrations: they are
+/// pinned by the signed init completion record, and the running node holds
+/// that record open. Until live installs are staged and activated by a signed
+/// offline operation, they are refused before anything is fetched or written.
+pub(crate) const LIVE_INSTALLS_ARE_STAGED: bool = false;
+
+pub(crate) const LIVE_INSTALL_REFUSED_CODE: &str = "live_install_staged_unavailable";
+
+pub(crate) fn live_install_refused() -> crate::handler_error::HandlerError {
+    let message = "live installs are staged; staging is not available yet";
+    crate::handler_error::HandlerError::Structured {
+        code: LIVE_INSTALL_REFUSED_CODE.to_owned(),
+        status: 501,
+        body: serde_json::json!({
+            "code": LIVE_INSTALL_REFUSED_CODE,
+            "error": format!("{LIVE_INSTALL_REFUSED_CODE}: {message}"),
+        }),
+    }
+}
+
 pub async fn handle(
     req: Request,
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    if !LIVE_INSTALLS_ARE_STAGED {
+        return Err(anyhow::Error::new(live_install_refused()));
+    }
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
