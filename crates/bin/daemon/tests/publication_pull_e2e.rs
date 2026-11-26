@@ -485,7 +485,10 @@ const LANE_REFUSALS: &[(&str, &[&str], LaneFiles, &str)] = &[
     (
         "lane-service",
         &["service"],
-        &[(".ai/knowledge/x/note.md", b"x")],
+        &[(
+            ".ai/services/lane/demo.yaml",
+            b"kind: service\nendpoint: lane.demo\navailability: local\nlocal_execute: tool:lane/demo\nrequired_caps: []\ndescription: \"a service item\"\ndisclosure: {}\n",
+        )],
         "publication_lane_kind_refused",
     ),
     (
@@ -522,6 +525,20 @@ async fn start_publisher_with_lane_refusals() -> (DaemonHarness, FastFixture) {
                     for (path, bytes) in *files {
                         let file = root.join(path);
                         std::fs::create_dir_all(file.parent().expect("a parent directory"))?;
+                        // Service items are signed by the fixture publisher so
+                        // the publishing node verifies them like any other.
+                        let bytes = if path.starts_with(".ai/services/") {
+                            lillux::signature::sign_content_at(
+                                std::str::from_utf8(bytes).expect("utf-8 service item"),
+                                &fixture.publisher,
+                                "#",
+                                None,
+                                FAST_FIXTURE_TIME,
+                            )
+                            .into_bytes()
+                        } else {
+                            bytes.to_vec()
+                        };
                         std::fs::write(file, bytes)?;
                     }
                     Ok(())
