@@ -1,11 +1,11 @@
-# ryeos:signed:2026-11-26T17:03:36Z:a7802693a30049c6917747d00269e0f3b53709c21e008138bd0f58e27bafcfd5:u99gXoub1ZNYK0AcZmaZxJX8T0hzGk+XzbqH6tcNPgkk4avsfD5u4SHItPftXUPQdq1I79dwkzy+vIEvOm/PDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T23:13:46Z:593dfd88a1f9c42fd6ea7f0eaf1f825bb8ead9c150bce391e67448a2691c96fd:xunjE2M6dqdfkigMd03Z0JQASSOEZoSJFswbSLKYQr8WTAozd2MFReA3V0gUfM5qtHOYm4koqiP9vakdtBPYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: []
-description: "List installed bundles, and bundles staged for a later start (status staged; operators see the stage detail, principals see the status only)"
+description: "List installed bundles, and bundles staged for a later start (status staged; operators see the stage detail, and apply_refused with the closed refusal code once a signed apply of the stage was refused; principals see the name and plain staged only)"
 disclosure:
   principal:
     - "/bundles/*/name"

@@ -281,6 +281,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "bundle-staging", "apply"],
+        summary: "Queue the signed request that activates a staged bundle at the node's next start",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["trust", "pin"],
         summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
         category: "maintenance",
@@ -548,6 +553,11 @@ pub async fn try_dispatch(
             ) =>
         {
             crate::lifecycle_bundle_state::run(argv[2].as_str(), &argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("bundle-staging")) if argv.get(2).map(String::as_str) == Some("apply") => {
+            crate::lifecycle_bundle_staging::run_apply(&argv[3..], console)
                 .map_err(map_local_err)?;
             Ok(true)
         }

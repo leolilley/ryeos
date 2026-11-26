@@ -1,8 +1,8 @@
-# ryeos:signed:2026-11-26T17:01:26Z:a04ccd19975b8a0df4979179e494e84ce0a0746ab05d9e7e75f5067b14bbc383:R/L8168ioZwkjvzBV/YzQKeP45lCEbfBUxY2ogOrfAlri3e52n1pi5Bt4+ARa4t2MpU9sRyvzSWkOPiKv2m7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T23:13:38Z:79c222980696038d4e44f4db611676ec2c27672795f13af0c65cb39a4d1cb927:52sE3t6eMS0WtlkXZMkU5jzq2kta94pFL2+BJKPVQW/PMmgWV/Hq4JEH9flpDt4hgacprephxT8noiAB0SiyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - list
-description: List installed bundles, and bundles staged for a later start (status staged)
+description: List installed bundles, and bundles staged for a later start (status staged; an operator also sees apply_refused with the closed refusal code once a signed apply of the stage was refused)
 dispatch:
   kind: execute_ref
   execute: service:bundle/list

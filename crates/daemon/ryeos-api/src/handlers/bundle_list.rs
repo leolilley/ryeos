@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use ryeos_node::bundle_staging::apply::STATUS_APPLY_REFUSED;
 use ryeos_node::bundle_staging::{STATUS_STAGED, StagedBundle, StagingArea};
 use serde_json::Value;
 
@@ -30,6 +31,16 @@ fn staged_entry(stage: &StagedBundle, operator: bool) -> Value {
         "status": STATUS_STAGED,
     });
     if operator && let Some(object) = entry.as_object_mut() {
+        if let Some(refusal) = &stage.refusal {
+            object.insert("status".into(), serde_json::json!(STATUS_APPLY_REFUSED));
+            object.insert(
+                "apply_refusal".into(),
+                serde_json::json!({
+                    "code": refusal.code.as_str(),
+                    "request_digest": refusal.request_digest,
+                }),
+            );
+        }
         object.insert(
             "tree_digest".into(),
             serde_json::json!(stage.record.tree_digest),
@@ -97,3 +108,68 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_node::bundle_staging::apply::{ApplyRefusalCode, ApplyRefusalMarker, REFUSAL_SCHEMA};
+    use ryeos_node::bundle_staging::{DeclaredFacets, STAGING_SCHEMA, StagedSource, StagingRecord};
+
+    fn stage(refusal: Option<ApplyRefusalMarker>) -> StagedBundle {
+        StagedBundle {
+            record: StagingRecord {
+                schema: STAGING_SCHEMA.to_owned(),
+                bundle_name: "demo".to_owned(),
+                tree_digest: "a".repeat(64),
+                source: StagedSource {
+                    kind: "remote".to_owned(),
+                    origin: "remote:test".to_owned(),
+                    publication_record_hash: None,
+                    pinned_node: None,
+                    manifest_hash: None,
+                },
+                requested_by: "bb".to_owned(),
+                policy_generation: "c".repeat(64),
+                declared: DeclaredFacets::default(),
+                file_count: 1,
+                total_bytes: 1,
+                evidence: Default::default(),
+                staged_at: "2026-11-27T00:00:00Z".to_owned(),
+            },
+            dir: std::path::PathBuf::from("/nonexistent"),
+            refusal,
+        }
+    }
+
+    fn marker() -> ApplyRefusalMarker {
+        ApplyRefusalMarker {
+            schema: REFUSAL_SCHEMA.to_owned(),
+            tree_digest: "a".repeat(64),
+            request_digest: "d".repeat(64),
+            code: ApplyRefusalCode::TreeDigestMismatch,
+            signer_fingerprint: "ee".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_operator_sees_the_refusal_code_and_everyone_else_sees_staged() {
+        let refused = stage(Some(marker()));
+        let operator = staged_entry(&refused, true);
+        assert_eq!(operator["status"], "apply_refused");
+        assert_eq!(operator["apply_refusal"]["code"], "tree_digest_mismatch");
+        assert_eq!(operator["apply_refusal"]["request_digest"], "d".repeat(64));
+
+        let principal = staged_entry(&refused, false);
+        assert_eq!(
+            principal,
+            serde_json::json!({ "name": "demo", "status": "staged" })
+        );
+    }
+
+    #[test]
+    fn a_stage_with_no_marker_is_staged_for_an_operator_too() {
+        let entry = staged_entry(&stage(None), true);
+        assert_eq!(entry["status"], "staged");
+        assert!(entry.get("apply_refusal").is_none());
+    }
+}
