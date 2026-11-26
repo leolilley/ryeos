@@ -1954,6 +1954,12 @@ fn cleanup_recovery_directory(
     Ok(())
 }
 
+fn in_quarantine(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.starts_with(".ryeos-quarantine.")))
+    })
+}
+
 fn surface_quarantined_files(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<Vec<String>, PullResultsError> {
@@ -1963,11 +1969,11 @@ fn surface_quarantined_files(
             ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
             ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
         ),
-        |_relative, _directory| Ok(false),
+        // Only quarantine files matter. Every other file is skipped without
+        // being opened, so a symlink elsewhere in a checkout is not refused.
+        |relative, is_directory| Ok(!is_directory && !in_quarantine(relative)),
         |relative, _file| {
-            if relative.components().any(|component| {
-                matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.starts_with(".ryeos-quarantine.")))
-            }) {
+            if in_quarantine(relative) {
                 quarantines.borrow_mut().push(relative.to_path_buf());
             }
             Ok(())
