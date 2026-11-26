@@ -366,6 +366,19 @@ fn owner_visible<T>(rows: &[T], operator: bool, owns: impl Fn(&T) -> bool) -> Ve
     rows.iter().filter(|row| operator || owns(row)).collect()
 }
 
+pub const LIST: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:endorsements/list",
+    endpoint: "endorsements.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.endorsements/list"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: ListRequest = crate::handler_error::parse_request(params)?;
+            list(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
 #[cfg(test)]
 mod owner_filter_tests {
     use super::owner_visible;
@@ -399,16 +412,3 @@ mod owner_filter_tests {
         assert_ne!(answer("pid:a/one"), answer("pid:nobody/nothing"));
     }
 }
-
-pub const LIST: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:endorsements/list",
-    endpoint: "endorsements.list",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.endorsements/list"],
-    handler: |params, ctx, state| {
-        Box::pin(async move {
-            let req: ListRequest = crate::handler_error::parse_request(params)?;
-            list(req, ctx, state).await.map_err(Into::into)
-        })
-    },
-};
