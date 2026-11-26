@@ -4290,11 +4290,37 @@ async fn start_real_portable_handoff_with(
         lillux::signature::compute_fingerprint(&source_operator_key.verifying_key())
     );
     let target_profile_owner = source_operator_principal.clone();
+    let link_source_operator_key = source_operator_key.clone();
     let (mut target, target_fixture) = DaemonHarness::start_fast_with_node_and_user_keys(
         target_node_signing_key(),
         target_operator_signing_key(),
         move |state_path, _user_space, fixture| {
-            plant_portable_worker_for_owner(state_path, fixture, &target_profile_owner)
+            plant_portable_worker_for_owner(state_path, fixture, &target_profile_owner)?;
+            // The source operator reaches the target as a remote principal, so
+            // it is an operator there only by speaking for the owner the
+            // target's own operator acts for. Pin that link before the target
+            // daemon loads its registry.
+            let target_operator = target_operator_signing_key();
+            let target_trust = ryeos_engine::trust::TrustStore::load_node_registry(state_path)?;
+            let target_operator_key = format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&target_operator.verifying_key())
+            );
+            let target_operator_owner = target_trust
+                .owner_for(&target_operator_key)
+                .map_err(|error| anyhow::anyhow!("target operator owner: {error}"))?
+                .principal
+                .to_string();
+            ryeos_engine::trust::pin_link_for_tests(
+                state_path,
+                &fixture.node,
+                &target_operator,
+                &link_source_operator_key,
+                &target_operator_owner,
+                3600,
+            )
+            .map_err(|error| anyhow::anyhow!("pin the source operator link: {error}"))?;
+            Ok(())
         },
         |command| {
             command.env("HOSTNAME", "handoff-target");
