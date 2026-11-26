@@ -450,16 +450,21 @@ async fn a_delegated_call_is_recorded_on_hosted_as_the_principal_and_revocation_
     let probe = lillux::sha256_hex(b"recorded-as-the-principal");
     let (status, text) = pair.hosted_as_node(&delegation, &probe).await?;
     ensure!(status.is_success(), "forwarded request: {status} {text}");
-    let recorded: Value = serde_json::from_str(&text)?;
-    let result = recorded.get("result").unwrap_or(&recorded);
-    assert_eq!(
-        result["revoked_by"],
-        u1_principal.as_str(),
-        "forwarded response: {text}"
+    // The forwarded principal is not the hosted node's operator, so the
+    // response discloses only the digest and time; the ledger holds who revoked
+    // and through which site.
+    let ledger = std::fs::read_to_string(pair.tombstone_path(&probe))
+        .context("hosted holds no tombstone for the forwarded request")?;
+    assert!(
+        ledger.contains(&format!("revoked_by = \"{u1_principal}\"")),
+        "{ledger}"
     );
-    assert_eq!(
-        result["delegated_via"],
-        pair.origin_fixture.site_id().as_str()
+    assert!(
+        ledger.contains(&format!(
+            "delegated_via = \"{}\"",
+            pair.origin_fixture.site_id()
+        )),
+        "{ledger}"
     );
 
     // Revoking from ORIGIN tombstones the digest on HOSTED and drops the local
