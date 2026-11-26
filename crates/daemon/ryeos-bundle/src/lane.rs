@@ -695,12 +695,12 @@ mod tests {
     #[test]
     fn runtime_authority_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = manifest();
-        manifest.runtime_authority.bundle_events = vec![BundleEventDecl {
+        let mut first = manifest();
+        first.runtime_authority.bundle_events = vec![BundleEventDecl {
             event_kind: "pulled.event".to_string(),
             operations: vec![BundleEventOperation::Append],
         }];
-        let error = refusal(tmp.path(), &manifest);
+        let error = refusal(tmp.path(), &first);
         assert_message(&error, "bundle_lane_runtime_authority");
         assert!(error.to_string().contains("bundle_events"));
 
