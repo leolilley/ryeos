@@ -31,6 +31,22 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
     let project_root = project_root
         .canonicalize()
         .expect("canonical fixture project");
+    // The fixture key registered this checkout: the thread states its project.
+    let identity = test_state::fixture_project_identity(&project_root);
+    create_project_thread_stating(state, thread_id, &project_root, identity);
+}
+
+/// A thread of `project_root` that states `identity` as its project, launched
+/// by the fixture key.
+fn create_project_thread_stating(
+    state: &AppState,
+    thread_id: &str,
+    project_root: &std::path::Path,
+    identity: ryeos_state::project_identity::ProjectIdentity,
+) {
+    let project_root = project_root
+        .canonicalize()
+        .expect("canonical fixture project");
     let mut project_authority = ExecutionProjectAuthority::live(
         project_root.clone(),
         format!("local:{}", project_root.display()),
@@ -40,11 +56,8 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
         Vec::new(),
     )
     .expect("live fixture project authority");
-    // The fixture key registered this checkout: the thread states its project.
     if let ExecutionProjectAuthority::LiveProject { signer_project, .. } = &mut project_authority {
-        *signer_project = ryeos_state::project_identity::LogicalProject::Stated(
-            test_state::fixture_project_identity(&project_root),
-        );
+        *signer_project = ryeos_state::project_identity::LogicalProject::Stated(identity);
     }
     state
         .state_store
@@ -647,8 +660,15 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     std::fs::create_dir(&first).expect("create first project");
     std::fs::create_dir(&second).expect("create second project");
     std::os::unix::fs::symlink(&first, &first_alias).expect("create equivalent project path");
-    create_project_thread(&state, "T-first", &first);
-    create_project_thread(&state, "T-second", &second);
+    // Each seat is the node operator's, on a checkout the operator's owner
+    // registered under its own name, so the seat states that project. The
+    // threads were launched by another key: a seat reads them because they
+    // belong to its stated project, and never the other project's.
+    let first_identity = test_state::register_operator_checkout(&state, &first, "first");
+    let second_identity = test_state::register_operator_checkout(&state, &second, "second");
+    assert_ne!(first_identity, second_identity);
+    create_project_thread_stating(&state, "T-first", &first, first_identity);
+    create_project_thread_stating(&state, "T-second", &second, second_identity);
 
     // Compile and activate real browser sessions. The first enters through an
     // equivalent symlink path, proving the session retains the canonical

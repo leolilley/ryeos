@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T04:58:17Z:6fb7e2d89f6b1a0eaaa8c1be76ea8ad2456cecdf12f8a5b76f3e2e42a10f47a0:BZpt5a2KV6iF+Qv568f+QJbm3Uv7t4jsMpwWQdM4FSly0IIP3uavyzctORQCYR28H0t7ly/h5iYxLTnCHMDuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T23:30:06Z:7020c287dbaea4c086db6b7a5f4ba2c740068be10045eca166b2457d0e46a44b:oDTBcZCvXcWTOsL9GZzCDKHcbKDN5tKjpseSMLq6OuXK7k1+T03qzHkKGgBi3MSO+0KPeftaAt0a3a01evXpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -333,22 +333,19 @@ startup never rewrites it.
 
 `operational.sqlite3` owns stable credential-profile ownership, lifecycle,
 confirmed account evidence, generation, and tombstones in addition to its
-other non-reconstructable records. Its explicit atomic v4-to-v5 forward
-migration creates that authority table; a monotonic profile revision repairs a
-crash gap against RuntimeDb's live session/lease projection. The store must
-never be silently reset or archived. Schema v6 retains each remote sync job's
-immutable typed operation. Its v5-to-v6 migration proves the exact predecessor
-table, gives legacy jobs an explicit non-authoritative recovery envelope, and
-atomically rebuilds the table into the same column order and SQL as a fresh v6
-store. The exact appended-column intermediate produced by the original v6
-migrator is also recognized and repaired; no unknown layout is modified.
+other non-reconstructable records. Its schema is exact: startup accepts only
+the current version (7) and refuses any other with a typed error that says this
+binary has no migration. The error names the sidecar files an operator removes,
+with the node stopped and the old file preserved, to start a fresh store; the
+store is never silently reset or archived. A monotonic profile revision repairs
+a crash gap against RuntimeDb's live session/lease projection. Each remote sync
+job retains its immutable typed operation in the same current schema.
 
 Replay indexes inside that stable database have their own clean-cut epoch,
-currently epoch 10. Epoch 10 binds dispatch-effect replay to admitted launch
-capsule schema 25, including retained receiving-kind content ceilings and
-explicit fixed-parent live filesystem authority.
-An epoch-9 record cannot prove that authority and
-is therefore retired rather than reinterpreted.
+currently epoch 20. Epoch 20 binds dispatch-effect replay to admitted launch
+capsule schema 41, which carries the thread workload ceiling, the detached
+workspace input and the evaluator origin chain. An epoch-19 record cannot prove
+that authority and is therefore retired rather than reinterpreted.
 They are not authority-compatible merely because the surrounding SQLite schema
 is current: a dispatch-effect record retains its complete admitted execution
 closure, including the exact admitted-launch-capsule schema. When that closure
@@ -385,18 +382,17 @@ Both CLI reset reports expose the actual source/target epoch and whether no
 rows, dispatch-effect rows, or all replay rows were selected for retirement.
 
 `accounting.sqlite3` is the durable financial source of truth paired with its
-node-local external financial anchor. Accounting schema v2 extends the exact v1
-ledger with launch-gate directive bindings and operation-keyed cross-site
-allowance export/import tables. Its sole automatic migration accepts only the
-fully validated exact v1 application ID and complete v1 table/index SQL, then
-applies the additive v2 contract in one immediate transaction. Every retained
-v1 gate is materialized with an explicit null directive binding because v1
-committed execution-budget authority only; the migration never infers broader
-launch authority from per-attempt directive rows. It then validates the
-complete resulting schema before commit. This is a forward migration of
-financial authority, not an execution-format compatibility reader.
+node-local external financial anchor. Its schema is exact: startup accepts only
+the current version (8) and refuses every earlier version (1 through 7) with a
+typed error that names the file. There is no migration and no compatibility
+reader; hard admission stays fail-closed until the old ledger is removed and
+the node starts with a fresh one. The ledger is not covered by
+`reset execution-history`, so removing it is a separate operator step. The
+current contract carries launch-gate directive bindings (a gate with no
+directive binding is an explicit null, never inferred from per-attempt rows) and
+the operation-keyed cross-site allowance export/import tables described below.
 
-The v2 export transition atomically records the externally anchored financial
+The export transition atomically records the externally anchored financial
 sequence, immutable transfer receipt, and per-account debit rows. Target import
 creates zero-use `prepared` accounts, then records the exact rooted source
 transfer and activates them atomically during remote adoption. An exported
