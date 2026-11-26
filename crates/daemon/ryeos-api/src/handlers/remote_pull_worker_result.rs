@@ -813,6 +813,7 @@ fn classify_pull_error(error: crate::remote::pull::PullResultsError) -> AttemptF
         | PullResultsError::UnrelatedSnapshot { .. }
         | PullResultsError::MissingSnapshotHash) => AttemptFailure::permanent(failure),
         failure @ (PullResultsError::LocalConflict(_)
+        | PullResultsError::LocalConflicts { .. }
         | PullResultsError::RecoveryRequired(_)
         | PullResultsError::Other(_)) => AttemptFailure::retryable(failure),
     }

@@ -825,6 +825,14 @@ pub async fn execute_unary_forward(
     .map_err(|e| {
         let err = match e {
             PullResultsError::LocalConflict(path) => RemoteForwardError::PullLocalConflict { path },
+            PullResultsError::LocalConflicts { conflicts, .. } => {
+                RemoteForwardError::PullLocalConflict {
+                    path: conflicts
+                        .first()
+                        .map(|conflict| conflict.path.clone())
+                        .unwrap_or_default(),
+                }
+            }
             PullResultsError::MissingSnapshotHash => RemoteForwardError::PullMissingSnapshotHash,
             PullResultsError::InvalidRemoteSnapshot(message) => {
                 RemoteForwardError::PullInvalidRemoteSnapshot { message }
