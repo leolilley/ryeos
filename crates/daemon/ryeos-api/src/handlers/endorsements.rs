@@ -123,15 +123,21 @@ pub async fn record(
     let now = lillux::time::unix_secs_now();
     let Some(signed) = req.endorsement else {
         let ledger = load_ledger(&state)?;
-        return Ok(json!({
-            "ledger_head": ledger.head(&node_verifying_key(&state)),
+        let operator =
+            ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok();
+        let mut facts = json!({
             "now": lillux::time::iso8601_from_unix_secs(now),
             "max_clock_skew_secs": MAX_ENDORSEMENT_CLOCK_SKEW_SECS,
             // What a standing endorsement may name and how long it may last, so
             // the CLI can refuse before the operator signs anything.
             "standing_kinds": state.engine.trust_store.standing_gate().kinds(),
             "max_standing_lifetime_secs": MAX_STANDING_LIFETIME_SECS,
-        }));
+        });
+        if operator {
+            // The head moves when anyone endorses, so it is the operator's alone.
+            facts["ledger_head"] = json!(ledger.head(&node_verifying_key(&state)));
+        }
+        return Ok(facts);
     };
 
     // The journal must verify before anything is written, so an endorsement is
@@ -287,6 +293,12 @@ pub async fn list(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     caller_fingerprint(&ctx)?;
+    // The ledger is the node's. The admitted operator reads all of it; any
+    // other key reads only the endorsements whose project it speaks for, judged
+    // live in the engine from the project identity in the endorsement's own
+    // body. That filter runs before the `project` parameter, so a project the
+    // caller does not own answers exactly as a project that does not exist.
+    let operator = ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok();
     let ledger = load_ledger(&state)?;
     let index: Arc<EndorsementIndex> = state.engine.trust_store.endorsement_index();
     let inert: std::collections::BTreeMap<String, &'static str> = state
@@ -300,9 +312,15 @@ pub async fn list(
         .digests()
         .filter(|digest| !inert.contains_key(*digest))
         .collect();
-    let entries: Vec<Value> = ledger
-        .endorsements
-        .iter()
+    let owned = owner_visible(&ledger.endorsements, operator, |stored| {
+        ryeos_app::project_owner::speaks_for(
+            &state,
+            &ctx.fingerprint,
+            stored.endorsement.body.project.owner(),
+        )
+    });
+    let entries: Vec<Value> = owned
+        .into_iter()
         .filter(|stored| {
             req.project
                 .as_deref()
@@ -333,10 +351,53 @@ pub async fn list(
             })
         })
         .collect();
-    Ok(json!({
-        "ledger_head": ledger.head(&node_verifying_key(&state)),
-        "endorsements": entries,
-    }))
+    let mut answer = json!({ "endorsements": entries });
+    if operator {
+        // The head moves when anyone endorses, so it is the operator's alone.
+        answer["ledger_head"] = json!(ledger.head(&node_verifying_key(&state)));
+    }
+    Ok(answer)
+}
+
+/// The rows of `rows` the caller may see: all of them for the operator,
+/// otherwise those `owns` accepts. A pure filter, so it is tested without a
+/// ledger.
+fn owner_visible<T>(rows: &[T], operator: bool, owns: impl Fn(&T) -> bool) -> Vec<&T> {
+    rows.iter().filter(|row| operator || owns(row)).collect()
+}
+
+#[cfg(test)]
+mod owner_filter_tests {
+    use super::owner_visible;
+
+    #[test]
+    fn two_owners_each_see_only_their_own_rows_and_the_operator_sees_all() {
+        let rows = [("alpha", 1), ("beta", 2), ("alpha", 3)];
+        let as_alpha = owner_visible(&rows, false, |row| row.0 == "alpha");
+        assert_eq!(as_alpha.iter().map(|r| r.1).collect::<Vec<_>>(), [1, 3]);
+        let as_beta = owner_visible(&rows, false, |row| row.0 == "beta");
+        assert_eq!(as_beta.iter().map(|r| r.1).collect::<Vec<_>>(), [2]);
+        let as_operator = owner_visible(&rows, true, |_| false);
+        assert_eq!(as_operator.len(), 3);
+    }
+
+    #[test]
+    fn a_project_the_caller_does_not_own_answers_like_one_that_does_not_exist() {
+        // The owner filter runs first, then the project parameter.
+        let rows = [("alpha", "pid:a/one"), ("beta", "pid:b/two")];
+        let answer = |project: &str| {
+            let owned = owner_visible(&rows, false, |row| row.0 == "alpha");
+            serde_json::to_vec(
+                &owned
+                    .into_iter()
+                    .filter(|row| row.1 == project)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        assert_eq!(answer("pid:b/two"), answer("pid:nobody/nothing"));
+        assert_ne!(answer("pid:a/one"), answer("pid:nobody/nothing"));
+    }
 }
 
 pub const LIST: ServiceDescriptor = ServiceDescriptor {
