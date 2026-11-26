@@ -121,39 +121,48 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
-    let _cas_read_guard = authority.acquire_shared_guard()?;
-    let cas = authority.cas_store()?;
+    // Every read of the store happens under the shared guard in this block,
+    // which holds no await; the guard is released before the apply runs. The
+    // snapshots read are reachable from the published head, so they stay
+    // rooted while the apply reads their blobs.
+    let (base_tree, result_tree) = {
+        let _cas_read_guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
 
-    // The result is the caller's published head or an ancestor of it, and the
-    // base is an ancestor of the result: the apply follows what publication
-    // already proved.
-    let head_key =
-        ryeos_state::project_identity::ProjectHeadKey::owned_by(&caller_owner, &req.project_name);
-    let head = state
-        .state_store
-        .with_state_db(|db| db.read_project_head(&head_key))?;
-    let published = match head.as_deref() {
-        Some(head) => snapshot_reaches(&cas, head, &req.result_snapshot_hash)?,
-        None => false,
+        // The result is the caller's published head or an ancestor of it, and the
+        // base is an ancestor of the result: the apply follows what publication
+        // already proved.
+        let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+            &caller_owner,
+            &req.project_name,
+        );
+        let head = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(&head_key))?;
+        let published = match head.as_deref() {
+            Some(head) => snapshot_reaches(&cas, head, &req.result_snapshot_hash)?,
+            None => false,
+        };
+        if !published {
+            return Err(typed_refusal(
+                "project_apply_not_published",
+                409,
+                "the result snapshot is not this project's published head or one of its ancestors",
+            )
+            .into());
+        }
+        if !snapshot_reaches(&cas, &req.result_snapshot_hash, &req.base_snapshot_hash)? {
+            return Err(typed_refusal(
+                "project_apply_base_not_ancestor",
+                409,
+                "the base snapshot is not an ancestor of the result snapshot",
+            )
+            .into());
+        }
+        let base_tree = load_tree(&cas, &req.base_snapshot_hash)?;
+        let result_tree = load_tree(&cas, &req.result_snapshot_hash)?;
+        (base_tree, result_tree)
     };
-    if !published {
-        return Err(typed_refusal(
-            "project_apply_not_published",
-            409,
-            "the result snapshot is not this project's published head or one of its ancestors",
-        )
-        .into());
-    }
-    if !snapshot_reaches(&cas, &req.result_snapshot_hash, &req.base_snapshot_hash)? {
-        return Err(typed_refusal(
-            "project_apply_base_not_ancestor",
-            409,
-            "the base snapshot is not an ancestor of the result snapshot",
-        )
-        .into());
-    }
-    let base_tree = load_tree(&cas, &req.base_snapshot_hash)?;
-    let result_tree = load_tree(&cas, &req.result_snapshot_hash)?;
 
     match pull::apply_published_result(&authority, &canonical, &base_tree, &result_tree).await {
         Ok((files_updated, files_deleted)) => Ok(answer(
