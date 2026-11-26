@@ -658,8 +658,7 @@ async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
     )
     .await;
     assert_eq!(status, 200, "{recorded:#}");
-    // The project string is withheld from a non-operator's rows, so B's row
-    // is recognised by its digest.
+    // B's row is recognised by its digest; its project is the canonical form.
     let b_digest = recorded["result"]["endorsement_digest"]
         .as_str()
         .expect("recorded digest")
@@ -694,7 +693,23 @@ async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
     let rows = own["result"]["endorsements"].as_array().expect("rows");
     assert_eq!(rows.len(), 1, "{own:#}");
     assert_eq!(rows[0]["endorsement_digest"], json!(b_digest), "{own:#}");
-    assert!(rows[0].get("project").is_none(), "{own:#}");
+    let project = rows[0]["project"].as_str().expect("the project leaf");
+    assert_eq!(project, b_project.to_string(), "{own:#}");
+    assert!(
+        !own.to_string().contains(&operator_project.to_string()),
+        "another owner's project reached B: {own:#}"
+    );
+    let (owner, name) = project.split_once('/').expect("owner/name");
+    assert_eq!(name, "b-project", "{own:#}");
+    assert!(
+        owner
+            .strip_prefix("pid:v1:")
+            .is_some_and(|hex| hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "not the canonical owner form: {own:#}"
+    );
     assert!(own["result"].get("ledger_head").is_none(), "{own:#}");
 
     // A project B does not own answers exactly as one that exists nowhere.
