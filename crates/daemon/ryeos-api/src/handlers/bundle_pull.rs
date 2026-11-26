@@ -111,6 +111,12 @@ pub enum PullRefusal {
     Expired,
     #[error("publication_manifest_mismatch: {0}")]
     ManifestMismatch(String),
+    #[error(
+        "publication_format_unsupported: the export is format {found}; this node reads only \
+         {supported}. Older formats recorded the host's raw file modes and are not read; \
+         publish again from a node on this release"
+    )]
+    FormatUnsupported { found: String, supported: String },
     #[error("publication_blob_mismatch: {0}")]
     BlobMismatch(String),
     #[error(
@@ -137,6 +143,7 @@ impl PullRefusal {
             Self::SignatureInvalid => "publication_signature_invalid",
             Self::Expired => "publication_expired",
             Self::ManifestMismatch(_) => "publication_manifest_mismatch",
+            Self::FormatUnsupported { .. } => "publication_format_unsupported",
             Self::BlobMismatch(_) => "publication_blob_mismatch",
             Self::PublisherUnpinned { .. } => "publication_publisher_unpinned",
         }
@@ -450,6 +457,12 @@ pub(crate) fn verify_publication(
             "the manifest does not hash to the record's manifest_hash".into(),
         ));
     }
+    if manifest.schema != ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA {
+        return Err(PullRefusal::FormatUnsupported {
+            found: manifest.schema.clone(),
+            supported: ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA.to_owned(),
+        });
+    }
     manifest
         .validate_shape()
         .map_err(|error| PullRefusal::ManifestMismatch(error.to_string()))?;
@@ -492,6 +505,7 @@ pub(crate) fn check_publisher_pinned(
 /// helpers take.
 pub(crate) fn export_response(manifest: &PublicationManifest) -> BundleExportResponse {
     BundleExportResponse {
+        format: super::bundle_export::BUNDLE_EXPORT_FORMAT.to_owned(),
         bundle_name: manifest.bundle_name.clone(),
         file_count: manifest.entries.len(),
         total_bytes: manifest.total_bytes,

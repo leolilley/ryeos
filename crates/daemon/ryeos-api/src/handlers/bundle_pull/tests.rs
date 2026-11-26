@@ -789,3 +789,24 @@ fn a_refused_stage_keeps_its_typed_code_through_classify() {
     assert_eq!(code, "bundle_stage_node_count_cap");
     assert_eq!(status, 507);
 }
+
+#[test]
+fn a_manifest_in_the_old_format_is_refused_with_a_typed_code() {
+    let mut manifest = manifest_for("demo", BODY);
+    manifest.schema = ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED.to_owned();
+    let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+    let refused = verify(&published, NOW).unwrap_err();
+    assert_eq!(refused.code(), "publication_format_unsupported");
+    assert!(refused.to_string().contains("not read"));
+}
+
+#[test]
+fn a_manifest_entry_with_another_mode_is_refused() {
+    for mode in [0o600, 0o664, 0o4755] {
+        let mut manifest = manifest_for("demo", BODY);
+        manifest.entries[0].mode = mode;
+        let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+        let refused = verify(&published, NOW).unwrap_err();
+        assert_eq!(refused.code(), "publication_manifest_mismatch", "{mode:#o}");
+    }
+}

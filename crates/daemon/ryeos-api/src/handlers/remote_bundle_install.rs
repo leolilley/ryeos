@@ -48,6 +48,9 @@ pub struct Request {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BundleExportResponse {
+    /// The export format; an answer without the current one is refused.
+    #[serde(default)]
+    pub(crate) format: String,
     pub(crate) bundle_name: String,
     pub(crate) file_count: usize,
     pub(crate) total_bytes: u64,
@@ -775,6 +778,17 @@ pub(crate) fn validate_export_response(
     response: &BundleExportResponse,
     expected_bundle_name: &str,
 ) -> Result<()> {
+    if response.format != super::bundle_export::BUNDLE_EXPORT_FORMAT {
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_export_format_unsupported",
+            422,
+            format!(
+                "the export is format '{}'; this node reads only '{}'",
+                response.format,
+                super::bundle_export::BUNDLE_EXPORT_FORMAT
+            ),
+        )));
+    }
     if response.bundle_name != expected_bundle_name {
         bail!(
             "remote exported bundle '{}' when '{}' was requested",
@@ -923,15 +937,9 @@ pub(crate) fn validate_export_response(
 }
 
 fn validate_unix_file_mode(mode: u32, path: &str) -> Result<()> {
-    if mode & !0o777 != 0 {
+    if !ryeos_engine::trust::is_normalised_file_mode(mode) {
         bail!(
-            "remote bundle export entry '{}' has invalid Unix file mode {mode:#o}: special permission bits are forbidden",
-            path
-        );
-    }
-    if mode & 0o022 != 0 {
-        bail!(
-            "remote bundle export entry '{}' has Unix file mode {mode:#o}: group- or other-write is forbidden",
+            "remote bundle export entry '{}' has file mode {mode:#o}: an export records exactly 0o644 or 0o755",
             path
         );
     }
@@ -1040,14 +1048,38 @@ mod tests {
     }
 
     #[test]
-    fn staged_file_modes_refuse_special_bits_and_group_or_other_write() {
-        for mode in [0o644, 0o755, 0o600, 0o500] {
+    fn an_export_records_exactly_the_two_normalised_modes() {
+        for mode in [0o644, 0o755] {
             validate_unix_file_mode(mode, "f").unwrap();
         }
         for mode in [
-            0o4755, 0o2755, 0o1755, 0o664, 0o646, 0o666, 0o775, 0o020, 0o002,
+            0o600, 0o500, 0o4755, 0o2755, 0o1755, 0o664, 0o646, 0o666, 0o775, 0o020, 0o002, 0o000,
         ] {
             assert!(validate_unix_file_mode(mode, "f").is_err(), "{mode:#o}");
+        }
+    }
+
+    #[test]
+    fn an_export_in_another_format_is_refused_with_a_typed_code() {
+        let mut old = response(vec![entry("a", 1, 1)]);
+        old.format = "ryeos.bundle-export/v1".to_owned();
+        let error = validate_export_response(&old, "demo").unwrap_err();
+        assert!(format!("{error:#}").contains("bundle_export_format_unsupported"));
+        old.format = String::new();
+        assert!(validate_export_response(&old, "demo").is_err());
+        validate_export_response(&response(vec![entry("a", 1, 1)]), "demo").unwrap();
+    }
+
+    #[test]
+    fn an_export_entry_with_another_mode_is_malformed() {
+        for mode in [0o600, 0o664, 0o4755] {
+            let mut bad = entry("a", 1, 1);
+            bad.mode = mode;
+            let error = validate_export_response(&response(vec![bad]), "demo").unwrap_err();
+            assert!(
+                format!("{error:#}").contains("exactly 0o644 or 0o755"),
+                "{mode:#o}"
+            );
         }
     }
 
@@ -1213,6 +1245,7 @@ mod tests {
 
     fn response(entries: Vec<BundleExportEntry>) -> BundleExportResponse {
         BundleExportResponse {
+            format: super::super::bundle_export::BUNDLE_EXPORT_FORMAT.to_owned(),
             bundle_name: "demo".to_string(),
             file_count: entries.len(),
             total_bytes: entries.iter().map(|entry| entry.size).sum(),
