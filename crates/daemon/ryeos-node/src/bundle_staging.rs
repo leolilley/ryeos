@@ -402,6 +402,20 @@ impl StagingArea {
         Ok(Self { root, directory })
     }
 
+    /// Open the area only if it already exists. A read must not create state:
+    /// a node that has never staged anything has no area, and `None` says so.
+    pub fn open_if_present(app_root: &Path) -> Result<Option<Self>, StagingRefusal> {
+        let root = Self::root_for(app_root);
+        match std::fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(StagingRefusal::store(error)),
+        }
+        let directory =
+            lillux::PinnedDirectory::open_or_create(&root).map_err(StagingRefusal::store)?;
+        Ok(Some(Self { root, directory }))
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -946,5 +960,14 @@ mod tests {
         let one = tree_digest("demo", &[a.clone(), b.clone()]).unwrap();
         assert_eq!(one, tree_digest("demo", &[b.clone(), a.clone()]).unwrap());
         assert_ne!(one, tree_digest("other", &[a, b]).unwrap());
+    }
+
+    #[test]
+    fn a_read_does_not_create_the_staging_area() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(StagingArea::open_if_present(dir.path()).unwrap().is_none());
+        assert!(!StagingArea::root_for(dir.path()).exists());
+        StagingArea::open(dir.path()).unwrap();
+        assert!(StagingArea::open_if_present(dir.path()).unwrap().is_some());
     }
 }

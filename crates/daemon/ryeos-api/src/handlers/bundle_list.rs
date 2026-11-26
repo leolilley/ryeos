@@ -87,12 +87,16 @@ pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) ->
         }));
     }
     let node_key = state.identity.signing_key().verifying_key();
-    let staged: Vec<Value> = StagingArea::open(&state.config.app_root)
-        .and_then(|area| area.list(&node_key))
-        .map_err(anyhow::Error::new)?
-        .iter()
-        .map(|stage| staged_entry(stage, operator))
-        .collect();
+    let staged: Vec<Value> =
+        match StagingArea::open_if_present(&state.config.app_root).map_err(anyhow::Error::new)? {
+            Some(area) => area
+                .list(&node_key)
+                .map_err(anyhow::Error::new)?
+                .iter()
+                .map(|stage| staged_entry(stage, operator))
+                .collect(),
+            None => Vec::new(),
+        };
     Ok(serde_json::json!({ "bundles": bundles, "staged": staged }))
 }
 
