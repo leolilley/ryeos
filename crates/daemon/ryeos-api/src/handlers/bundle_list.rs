@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use ryeos_engine::trust::{SignerRole, SignerStatus};
 use ryeos_node::bundle_staging::{STATUS_STAGED, StagedBundle, StagingArea};
 use serde_json::Value;
 
@@ -23,25 +22,6 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {}
-
-/// Whether the caller is the node's own active operator, not a forwarded
-/// request. Read only: a caller that is not one is simply not shown detail.
-fn caller_is_operator(ctx: &HandlerContext, state: &AppState) -> bool {
-    if ctx.authenticated_origin_site_id.is_some() || ctx.delegated_via.is_some() {
-        return false;
-    }
-    let fingerprint = ctx
-        .fingerprint
-        .strip_prefix("fp:")
-        .unwrap_or(&ctx.fingerprint);
-    state
-        .engine
-        .trust_store
-        .signer(fingerprint)
-        .is_some_and(|record| {
-            record.role == SignerRole::Operator && record.status == SignerStatus::Active
-        })
-}
 
 /// One stage as the caller may see it.
 fn staged_entry(stage: &StagedBundle, operator: bool) -> Value {
@@ -77,7 +57,8 @@ fn staged_entry(stage: &StagedBundle, operator: bool) -> Value {
 }
 
 pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let operator = caller_is_operator(&ctx, &state);
+    let operator = ryeos_app::operator_authority::disclosure_class_for(&state, &ctx)
+        == ryeos_node_runtime::disclosure::DisclosureClass::Operator;
     let mut bundles = Vec::new();
     for record in &state.node_config.bundles {
         bundles.push(serde_json::json!({
