@@ -170,7 +170,7 @@ impl std::fmt::Display for StagingRefusal {
             } => write!(
                 f,
                 "the node holds {held} staged bytes and this stage adds {requested}; the node cap \
-                 is {limit}. Nothing was staged; an operator can clear stale stages"
+                 is {limit}. Nothing was staged"
             ),
             Self::NodeCount { limit } => write!(
                 f,
