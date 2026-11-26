@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T06:28:53Z:95c87c651a43f251e520d985008e860fb2f75c5fab2065ee21eb629512d15823:u92A3rIEIYrbqCMtYV34ZDvFRvIjW8CJMwZ5VwbTemFAiC7LES9/VEDLR9Saq47THsYVbviqnUFCoMED80ErAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T03:57:35Z:941cf19e4f061763aec22c5475644f57aa664fbc72ab9a74c0e6d1255a7947b8:Gr0+/2fGcY/AN7swP9BgfbT3faMNTSCKDyRPNeamfwu6N2uvSotXIUaLUbvHW2OotVauRkib5T2HRvm+ECKoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
@@ -271,7 +271,9 @@ paths, normalized executable modes, internal links, byte counts, and blob
 edges unless implementation proves it cannot faithfully represent a bundle.
 The current live-directory `bundle/export` response is outside this protocol.
 Native publication never converts or admits it as a generation, and no
-compatibility adapter is part of this design.
+compatibility adapter is part of this design. A frozen export may be offered
+through the separate [publication lane](#publication-lane), which is additive to
+this protocol and never converts into it.
 
 Bundle contracts have three layers. The wire decoder validates only local
 syntax, ordering, vocabularies, and bounds. A meaning-blind closure contract
@@ -296,9 +298,11 @@ to be the same exact publisher fingerprint. Separate signers require a later
 explicit two-key policy contract.
 
 Every generation requires the accepted product, selected witness, and
-publisher-materialization result above. There is no alternate archive/import
-lineage, compatibility schema, or evidence-light publication path. Unknown or
-older generation schemas fail closed.
+publisher-materialization result above. Within this protocol there is no
+alternate archive/import lineage, compatibility schema, or evidence-light
+publication path. The [publication lane](#publication-lane) is not such a path:
+it is a separate, plainly lower-assurance distribution that never produces or
+feeds a generation. Unknown or older generation schemas fail closed.
 
 V1 release attestations are non-expiring and remain subject to current local
 publisher policy and revocation. Their signed `issued_at` is an issuer claim,
@@ -768,6 +772,77 @@ The first production cut is complete only when:
   refused until a typed state-effect/rollback-safety contract exists; and
 - the same release operations can be invoked by a RyeOS Graph without relying
   on hidden GitHub workflow behavior.
+
+## Publication lane
+
+The native protocol above is how RyeOS releases its own bundles: through a
+release node's evidence chain, a curated set, and activation on a stopped or
+drained node. Someone without a release node (a person on a hosted node, a
+third-party builder) needs a way to offer a bundle to others. The publication
+lane is that way. It is a second, plainly lower-assurance lane that sits
+beside the native one.
+
+**What it is.** A node's operator signs a publication record that binds one
+frozen export of an installed bundle, the bundle's name and version (read from
+its signed manifest at freeze), an expiry and a per-read byte bound; the node
+countersigns it and serves it with no caller identity under a node-wide byte
+cap. A puller pins the node's key and the record's hash, verifies everything
+before fetching any blob, and installs through the ordinary admission. The
+puller's trust is the publisher key it pinned in its own trust store plus the
+node key it pinned. There is no release evidence chain.
+
+**What it never does.**
+- It never produces a generation, a set or a catalog entry, and never feeds
+  `bundle-set update`. The native protocol's identities and evidence are
+  unchanged by it.
+- The same bundle name is never held in both lanes. A publication-lane bundle
+  may require an installed native bundle, never the reverse. Core is never
+  pulled in either lane. An install plan that mixes lanes is refused.
+- The pull is an operator act, resolved to an exact version. There is no
+  floating "latest".
+
+**What a publication-lane bundle may carry.** An allow-list of four item kinds:
+tool, directive, graph and knowledge. They run only when someone invokes them,
+under that caller's own grants, so the operator's pin of the publisher is the
+whole trust decision. Every other kind is refused before any file is written
+with a typed code naming the kind and the path. Not allowed: service items (the
+read-disclosure layer takes a service's tier and required capabilities from the
+item itself), routes, node configuration and policy, model-provider
+configuration, other configuration items for now, UI surfaces and views,
+schedules, hooks, watchers, events and anything else the node loads into
+itself. The tree is also refused if it carries `bin/`, isolation backends,
+external providers or lifecycle adapters, `provides_kinds`, anything under
+`.ai/handlers`, `.ai/parsers`, `.ai/runtimes` or `.ai/protocols`, a file whose
+bytes carry executable magic, or a file outside an item path that is not part
+of a tool's own source directory.
+
+**Default limits on the node that pulled it.** No command registration, no
+runtime authority from manifest capabilities, no kinds, and no native
+executables or handler binaries. Any limit is lifted only by the operator's
+signed node policy naming that bundle, never by a flag on the pull. So the lane
+today carries libraries and knowledge. An application that needs a view, a
+configuration, state or a schedule waits for the operator's named-bundle lift.
+
+**The lane marker.** The install records its lane, publisher, record hash, node
+key and index sequence in the node-signed bundle registration, so it cannot be
+dropped by deleting an unsigned file. It is shown by `ryeos node doctor` and the
+bundle listing, and survives updates. A native set update refuses a name whose
+registration carries a lane.
+
+**The receipt says so.** "Installed from a publication, not a release.
+Publisher fp:<publisher> signed these bytes and this node pinned that key; node
+fp:<node> served them. No release evidence chain exists for this bundle: it was
+not built, qualified or attested by a release node. It carries no command,
+kind, executable or runtime authority unless this node's policy names it. The
+publisher signed these bytes; nothing authorizes an exact set. Its tools and
+directives run under the caller's own grants."
+
+**How a puller finds one.** A node that serves publications also serves a
+node-signed, short-lived index of its live publications by name and version
+(`/published/index`), with a monotonic sequence and a validity bound, so a
+replayed old index is refused. Every entry carries its lane. The index lists
+what the node serves and grants nothing: the puller still checks the publisher
+against its own trust store and verifies the record the entry names.
 
 ## Non-goals
 
