@@ -695,11 +695,16 @@ pub async fn handle(
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
                 .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+            let admitted_project = ryeos_app::live_project_path::admit_handler_live_path(
+                &state,
+                &ctx,
+                project_path.as_path(),
+            )?;
             let mut project_ctx =
                 ryeos_executor::execution::project_source::resolve_project_context(
                     &state,
                     &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
-                    project_path.as_path(),
+                    &admitted_project.canonical,
                     &ctx.fingerprint,
                     &format!("thread-input-{thread_id}"),
                     None,

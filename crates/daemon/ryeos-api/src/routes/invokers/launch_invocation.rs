@@ -115,10 +115,15 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
             .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
+        let admitted_project_path = crate::routes::live_path::admit_route_live_path(
+            &ctx.state,
+            ctx.principal.as_ref(),
+            project_path.as_path(),
+        )?;
         let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
             &ctx.state,
             &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
-            project_path.as_path(),
+            &admitted_project_path,
             &principal_id,
             &format!("route-{thread_id}"),
             None,

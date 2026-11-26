@@ -149,3 +149,30 @@ fn registered_to_key(state: &AppState, key: &str, canonical: &Path) -> bool {
         }
     }
 }
+
+impl LiveProjectPathRefusal {
+    /// The handler answer for this refusal: 403 for a key that is not the
+    /// operator and for a node-internal root, 400 for the operator's own bad
+    /// path.
+    pub fn into_handler_error(self) -> crate::handler_error::HandlerError {
+        use crate::handler_error::HandlerError;
+        match self {
+            Self::NotRegisteredToCaller | Self::NodeInternal(_) => {
+                HandlerError::Forbidden(self.to_string())
+            }
+            Self::BadPath(_) => HandlerError::BadRequest(self.to_string()),
+        }
+    }
+}
+
+/// [`admit_live_project_path`] for a handler: the key and whether it is the
+/// admitted operator come from the request context.
+pub fn admit_handler_live_path(
+    state: &AppState,
+    ctx: &crate::handler_context::HandlerContext,
+    requested: &Path,
+) -> Result<AdmittedLiveProject, crate::handler_error::HandlerError> {
+    let operator = crate::operator_authority::require_admitted_operator(state, ctx).is_ok();
+    admit_live_project_path(state, &ctx.fingerprint, operator, requested)
+        .map_err(LiveProjectPathRefusal::into_handler_error)
+}
