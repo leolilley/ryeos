@@ -2491,6 +2491,44 @@ async fn handle_execute(
             );
         }
     }
+    // The daemon owns the parent's `child_thread_spawned` lineage event: a
+    // runtime may not append one. Launch sites record it as the child is
+    // linked; this is the one place that holds the retained action intent for
+    // every inline child, so a child born by a path with no launch-site record
+    // (a method or in-process service child) still gets its edge. The append
+    // is idempotent and never fails the caller's result. A failed write is
+    // only a warning here: a reader that needs the edge (qualification,
+    // collecting a child's result) must fail closed when the edge is missing
+    // and must never rebuild it from what a runtime claims about its own
+    // children.
+    if let Some(child_thread_id) = retained_runtime_action_child_id.as_deref()
+        && state.threads.get_thread(child_thread_id)?.is_some()
+    {
+        match state.threads.record_dispatch_child_lineage(child_thread_id) {
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+            )) => tracing::warn!(
+                child_thread_id,
+                "parent settled before the dispatched child's lineage event was recorded"
+            ),
+            // Written now, or already written by a launch site: nothing owed.
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::Appended
+                | ryeos_app::state_store::ChildLineageAppendOutcome::AlreadyPresent,
+            )) => {}
+            // This child holds a retained action intent, so an event is owed;
+            // `NotOwed` here means the intent row went missing.
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::NotOwed) => tracing::warn!(
+                child_thread_id,
+                "the dispatched child has no retained action intent, so no lineage event was written"
+            ),
+            Err(error) => tracing::warn!(
+                child_thread_id,
+                error = %error,
+                "failed to record the dispatched child's lineage event"
+            ),
+        }
+    }
     match hook_ledger {
         None => result.map_err(anyhow::Error::new),
         Some((dispatch_key, request_hash, identity)) => {

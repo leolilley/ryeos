@@ -1956,6 +1956,8 @@ mod tests {
                 },
             });
         };
+        // The unit-test default wording is cleared: this test starts unloaded.
+        core.data.coverage_wording = None;
         let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
         assert!(core.data.coverage_wording.is_none());
         send(

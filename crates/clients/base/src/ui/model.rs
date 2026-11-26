@@ -1385,9 +1385,18 @@ impl RyeOsCore {
                         && (!source.requires_project
                             || attachment.descriptor.project_path.is_some())
                 })
-                .map(|(channel, source)| (channel.clone(), source.params.clone()))
+                .map(|(channel, source)| (channel.clone(), source.clone()))
                 .collect::<Vec<_>>();
-            for (channel, params) in sources {
+            for (channel, source) in sources {
+                let tile_id = super::source_key::RyeOsSurfaceSourceKey {
+                    presentation_id: presentation_id.clone(),
+                    surface_instance_id: surface_id.clone(),
+                    channel: channel.clone(),
+                }
+                .encode();
+                // A surface source that declares `if_revision` as dynamic asks
+                // with the held answer's revision, like a view source does.
+                let params = self.with_if_revision(&tile_id, &source, source.params.clone());
                 if let Some((request, request_bounds)) = self
                     .compiled_binding_operation_for_attachment(
                         &coordinate.binding_attachment_id,
@@ -1398,18 +1407,11 @@ impl RyeOsCore {
                         super::binding::UiBindingPayload::SourceParameters { params },
                     )
                 {
-                    effects.push(
-                        self.emit(RyeOsEffectKind::FetchSource {
-                            tile_id: super::source_key::RyeOsSurfaceSourceKey {
-                                presentation_id: presentation_id.clone(),
-                                surface_instance_id: surface_id.clone(),
-                                channel,
-                            }
-                            .encode(),
-                            request,
-                            request_bounds,
-                        }),
-                    );
+                    effects.push(self.emit(RyeOsEffectKind::FetchSource {
+                        tile_id,
+                        request,
+                        request_bounds,
+                    }));
                 }
             }
         }

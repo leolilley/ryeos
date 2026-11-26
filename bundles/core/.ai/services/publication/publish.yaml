@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-25T22:07:10Z:976f6a615298297d7ac278305407237f23c411b0e0dc4d1636641337e72910f8:ZUs492274P68+jonakxpywOEjjbKd0sHNCvp8cHGYPVxlrDzQc9U0JAC2sbv+sakmCBF4usObb4Nqa/xARkZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: publication.publish
+required_caps: ["ryeos.execute.service.publication/publish"]
+schema:
+  record: object
+  signature: string
+description: "Record a publication the operator signed with their own key: the node checks the signer is its active operator and the manifest is frozen, then countersigns and stores it. Anything published can be copied and cannot be recalled."
+disclosure: {}

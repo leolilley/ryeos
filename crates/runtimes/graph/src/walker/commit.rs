@@ -152,22 +152,6 @@ impl Walker {
                 .await
                 .context("publish authoritative state anchor")?;
         }
-        if let Some(child_thread_id) = &observation.child_thread_id {
-            let result = self
-                .client
-                .append_runtime_event(
-                    RuntimeEventType::ChildThreadSpawned,
-                    json!({
-                        "child_thread_id": child_thread_id,
-                        "node": node,
-                        "step": step,
-                        "item_id": &observation.item_id,
-                        "spawn_reason": "dispatch",
-                    }),
-                )
-                .await;
-            self.record_callback_warning("child_thread_spawned", result);
-        }
         for entry in &observation.milestones {
             let Some(kind) = entry.get("kind").and_then(Value::as_str) else {
                 continue;
@@ -427,5 +411,67 @@ impl Walker {
         }
 
         CommitResult::Terminate(Box::new(graph_result))
+    }
+}
+
+/// A runtime never appends an event type the daemon authors: the daemon writes
+/// lineage, continuation and terminal events itself, and refuses a runtime
+/// append of one. This scans this crate's sources for any runtime event
+/// variant of that set.
+#[cfg(test)]
+mod daemon_authored_event_scan {
+    const DAEMON_AUTHORED_VARIANTS: &[&str] = &[
+        "ThreadCompleted",
+        "ThreadFailed",
+        "ThreadKilled",
+        "ThreadCancelled",
+        "ThreadTimedOut",
+        "ThreadContinued",
+        "ChildThreadSpawned",
+        "ChildThreadSettled",
+        "WorkerContinuationAdmitted",
+        "EdgeRecorded",
+        "AsLaunchedResolution",
+        "AsLaunchedRefBindings",
+        "RuntimeLaunchFacts",
+        "LaunchAugmentationCacheHit",
+        "ProcessInputRootSelected",
+        "ContinuationRequested",
+        "ContinuationAccepted",
+        "CommandSubmitted",
+        "CommandClaimed",
+        "CommandCompleted",
+    ];
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("source dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_source_names_a_daemon_authored_event_variant() {
+        let mut sources = Vec::new();
+        rust_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sources,
+        );
+        assert!(!sources.is_empty());
+        for path in sources {
+            let body = std::fs::read_to_string(&path).expect("read source");
+            for variant in DAEMON_AUTHORED_VARIANTS {
+                let needle = format!("RuntimeEventType::{variant}");
+                assert!(
+                    !body.contains(&needle),
+                    "{} names `{needle}`, an event type the daemon authors",
+                    path.display()
+                );
+            }
+        }
     }
 }
