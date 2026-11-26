@@ -126,6 +126,11 @@ pub enum LaneRefusal {
     )]
     ExecutableImage { path: String },
     #[error(
+        "publication_lane_executor_declared: {detail}; a publication-lane bundle may declare no executor or executable item source. {}",
+        LANE_LIMIT_NOT_LIFTABLE
+    )]
+    ExecutorDeclared { detail: String },
+    #[error(
         "bundle_lane_unreadable: the bundle tree at {path} could not be inspected ({detail}); a publication-lane bundle is refused when it cannot be checked. {}",
         LANE_LIMIT_NOT_LIFTABLE
     )]
@@ -143,6 +148,7 @@ impl LaneRefusal {
             Self::KindRefused { .. } => "publication_lane_kind_refused",
             Self::StrayFile { .. } => "publication_lane_stray_file",
             Self::ExecutableImage { .. } => "publication_lane_executable_image",
+            Self::ExecutorDeclared { .. } => "publication_lane_executor_declared",
             Self::Unreadable { .. } => "bundle_lane_unreadable",
         }
     }
@@ -174,11 +180,71 @@ pub fn refuse_lane_authority(
         });
     }
 
-    for rel in tree_files(bundle_root)? {
-        refuse_lane_path(&rel)?;
-        refuse_executable_image(bundle_root, &rel)?;
+    let files = tree_files(bundle_root)?;
+    for rel in &files {
+        refuse_lane_path(rel)?;
+        refuse_executable_image(bundle_root, rel)?;
     }
-    Ok(())
+    refuse_executor_payload(bundle_root, &files)
+}
+
+/// The signed ref that names the bundle's executor manifest.
+const EXECUTOR_MANIFEST_REF: &str = ".ai/refs/bundles/manifest";
+
+/// The executor manifest is the only object a lane bundle may carry, and it
+/// must declare no item source. The binary resolver loads executors and their
+/// payloads from `.ai/objects` through that ref, so an object a lane bundle
+/// ships beyond the empty manifest, whatever its bytes, could be an executor.
+fn refuse_executor_payload(root: &Path, files: &[String]) -> Result<(), LaneRefusal> {
+    let objects: Vec<&String> = files
+        .iter()
+        .filter(|rel| under(rel, ".ai/objects"))
+        .collect();
+    let has_ref = files.iter().any(|rel| rel == EXECUTOR_MANIFEST_REF);
+    if objects.is_empty() && !has_ref {
+        return Ok(());
+    }
+    let stray = |path: &str| LaneRefusal::StrayFile {
+        path: path.to_string(),
+    };
+    if !has_ref {
+        return Err(stray(objects[0]));
+    }
+    let ref_path = root.join(EXECUTOR_MANIFEST_REF);
+    let text = fs::read_to_string(&ref_path).map_err(|error| unreadable(&ref_path, &error))?;
+    let hash = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .nth(1)
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| stray(EXECUTOR_MANIFEST_REF))?;
+    let manifest_rel = format!(
+        ".ai/objects/objects/{}/{}/{hash}.json",
+        &hash[..2],
+        &hash[2..4]
+    );
+    if !objects.iter().any(|rel| **rel == manifest_rel) {
+        return Err(stray(EXECUTOR_MANIFEST_REF));
+    }
+    if let Some(extra) = objects.iter().find(|rel| ***rel != manifest_rel) {
+        return Err(stray(extra));
+    }
+    let manifest_path = root.join(&manifest_rel);
+    let bytes = fs::read(&manifest_path).map_err(|error| unreadable(&manifest_path, &error))?;
+    let declared = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("item_source_hashes").cloned())
+        .and_then(|sources| sources.as_object().map(|sources| sources.len()));
+    match declared {
+        Some(0) => Ok(()),
+        Some(count) => Err(LaneRefusal::ExecutorDeclared {
+            detail: format!("the executor manifest {manifest_rel} declares {count} item source(s)"),
+        }),
+        None => Err(LaneRefusal::ExecutorDeclared {
+            detail: format!("the executor manifest {manifest_rel} could not be read as a manifest"),
+        }),
+    }
 }
 
 /// Check an installed laned bundle's whole tree and manifest again, as the
@@ -403,6 +469,64 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    const MANIFEST_HASH: &str = "44a561f2da1b69e9223d9c1baeac7fb0e0567dad1bdeba1d9eb24f9f0768e174";
+
+    fn write_executor_manifest(root: &Path, object: &str) {
+        write_bytes(
+            root,
+            ".ai/refs/bundles/manifest",
+            format!("# ryeos:signed:x\nryeos:bundle-executor-manifest\n{MANIFEST_HASH}\n")
+                .as_bytes(),
+        );
+        write_bytes(
+            root,
+            &format!(".ai/objects/objects/44/a5/{MANIFEST_HASH}.json"),
+            object.as_bytes(),
+        );
+    }
+
+    #[test]
+    fn an_executor_with_a_script_payload_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let object = "{\"item_source_hashes\":{\"bin:x\":\"aaaa\"},\"kind\":\"source_manifest\"}";
+        write_executor_manifest(tmp.path(), object);
+        write_bytes(
+            tmp.path(),
+            ".ai/objects/blobs/aa/aa/aaaa",
+            b"#!/bin/sh\necho pwned\n",
+        );
+        // The extra blob is refused as a stray object before the declaration
+        // is read; either way the bundle is refused.
+        assert_message(
+            &refusal(tmp.path(), &manifest()),
+            "publication_lane_stray_file",
+        );
+
+        let declared = tempfile::tempdir().unwrap();
+        write_executor_manifest(declared.path(), object);
+        assert_message(
+            &refusal(declared.path(), &manifest()),
+            "publication_lane_executor_declared",
+        );
+    }
+
+    #[test]
+    fn objects_without_the_manifest_ref_or_an_unreadable_manifest_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), ".ai/objects/objects/44/a5/x.json");
+        assert_message(
+            &refusal(tmp.path(), &manifest()),
+            "publication_lane_stray_file",
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_executor_manifest(tmp.path(), "not json");
+        assert_message(
+            &refusal(tmp.path(), &manifest()),
+            "publication_lane_executor_declared",
+        );
+    }
+
     #[test]
     fn a_bundle_of_only_the_four_kinds_and_control_data_passes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -414,12 +538,14 @@ mod tests {
             ".ai/knowledge/pulled/note.md",
             ".ai/manifest.yaml",
             ".ai/manifest.source.yaml",
-            ".ai/objects/objects/44/a5/blob.json",
-            ".ai/refs/bundles/manifest",
             "PUBLISHER_TRUST.toml",
         ] {
             write(tmp.path(), rel);
         }
+        write_executor_manifest(
+            tmp.path(),
+            "{\"item_source_hashes\":{},\"kind\":\"source_manifest\"}",
+        );
         for rel in [
             ".ai/directives/pulled/plan.md",
             ".ai/graphs/pulled/flow.yaml",

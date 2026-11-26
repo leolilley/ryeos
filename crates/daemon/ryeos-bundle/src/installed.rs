@@ -540,6 +540,23 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_laned_bundle_leaves_the_others_loading() {
+        let layout = Layout::new();
+        let core = layout.write_bundle("core");
+        layout.write_registration("core", &core);
+        let pulled = layout.write_bundle("pulled");
+        write_laned_registration(&layout, "pulled", &pulled, &lane_yaml(&"b".repeat(64)));
+        fs::create_dir_all(pulled.join("bin")).unwrap();
+        fs::write(pulled.join("bin/tool"), b"x").unwrap();
+
+        let records =
+            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+                .unwrap();
+        let names: Vec<&str> = records.iter().map(|record| record.name.as_str()).collect();
+        assert_eq!(names, ["core"]);
+    }
+
+    #[test]
     fn native_registration_may_ship_a_native_executable() {
         let layout = Layout::new();
         let bundle = layout.write_bundle("core");
