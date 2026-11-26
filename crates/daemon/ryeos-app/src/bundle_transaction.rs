@@ -23,6 +23,10 @@ pub enum BundleOperation {
 pub enum BundlePhase {
     Prepared,
     Activated,
+    /// The install was refused after its tree was moved into place and is
+    /// being undone. Reconciliation finishes the undo and never completes the
+    /// install, whatever the namespace holds.
+    Abandoning,
 }
 
 /// Build the exact node-owned registration bytes used by init and ordinary
@@ -207,15 +211,27 @@ impl BundleTransaction {
         Ok(self.registration_path())
     }
 
-    /// Abandon a present transaction that was begun and never activated in the
-    /// journal, after the caller has put the namespace back as it was before
-    /// `begin_present`. Nothing was registered, so no registration is touched.
-    /// Refused unless the journal is a present transaction still in its
-    /// prepared phase.
-    pub fn abandon_prepared(&self) -> Result<()> {
-        let journal = self.read_validated_journal()?;
+    /// Record, durably, that a prepared install or replace is being undone.
+    /// The caller does this BEFORE it moves the tree back, so a crash or a
+    /// failed move leaves a journal that reconciliation turns into the undo,
+    /// never into the install. Refused unless the journal is a present
+    /// transaction still in its prepared phase.
+    pub fn mark_abandoning(&self) -> Result<()> {
+        let mut journal = self.read_validated_journal()?;
         if journal.operation == BundleOperation::Remove || journal.phase != BundlePhase::Prepared {
             anyhow::bail!("only a prepared install or replace transaction can be abandoned");
+        }
+        journal.phase = BundlePhase::Abandoning;
+        self.write_journal(&journal)
+    }
+
+    /// Remove the journal of an abandoning transaction once the caller has put
+    /// the namespace back as it was before `begin_present`. Nothing was
+    /// registered, so no registration is touched.
+    pub fn finish_abandoned(&self) -> Result<()> {
+        let journal = self.read_validated_journal()?;
+        if journal.phase != BundlePhase::Abandoning {
+            anyhow::bail!("only an abandoning transaction can be finished as abandoned");
         }
         self.finish()
     }
@@ -235,6 +251,11 @@ impl BundleTransaction {
             return Ok(None);
         }
         let journal = self.read_validated_journal()?;
+        if journal.phase == BundlePhase::Abandoning {
+            self.complete_abandon(&journal)?;
+            self.finish()?;
+            return Ok(Some(journal.operation));
+        }
         match journal.operation {
             BundleOperation::Remove => {
                 self.remove_registration()?;
@@ -264,6 +285,35 @@ impl BundleTransaction {
         }
         self.finish()?;
         Ok(Some(journal.operation))
+    }
+
+    /// Finish an undo that was recorded and not completed. The tree that was
+    /// refused is removed or swapped out; no registration is written and the
+    /// install is never completed.
+    fn complete_abandon(&self, journal: &Journal) -> Result<()> {
+        let staging = journal
+            .staging_path
+            .as_deref()
+            .context("abandoning transaction has no staging path")?;
+        let expected = journal
+            .generation_digest
+            .as_deref()
+            .context("present transaction missing generation digest")?;
+        match journal.operation {
+            BundleOperation::Replace => {
+                // The refused generation is still in the target when its
+                // digest is the journal's; the previous one then waits at the
+                // staging path and is swapped back. Otherwise the swap was
+                // already made and only the refused tree remains to remove.
+                if self.target.is_dir() && tree_digest(&self.target)? == expected {
+                    lillux::atomic_exchange_paths(&self.target, staging)
+                        .context("swap the previous generation back into place")?;
+                }
+            }
+            _ => lillux::remove_dir_all_durable(&self.target)?,
+        }
+        lillux::remove_dir_all_durable(staging)?;
+        Ok(())
     }
 
     fn complete_present(&self, journal: &Journal, signing_key: &SigningKey) -> Result<()> {

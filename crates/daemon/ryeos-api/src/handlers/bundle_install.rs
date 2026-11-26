@@ -174,7 +174,8 @@ pub struct InstallChecks<'a> {
     /// it was and a registered bundle is never removed.
     pub activated: &'a dyn Fn(&Path) -> Result<()>,
     /// On the installed tree when a rerun finds an interrupted install that
-    /// reconciliation completed, before the registration set is sealed.
+    /// reconciliation completed. The registration set is already sealed; a
+    /// refusal here leaves the completed install in place and sealed.
     pub converged: &'a dyn Fn(&Path) -> Result<()>,
     /// Maps a failure of node admission of the staging copy to the error this
     /// install reports.
@@ -308,12 +309,6 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
     ) && transaction.target().is_dir()
         && !req.replace
     {
-        // Reconciliation completed an install that died after activation. The
-        // registration set it changed is pinned by the signed init
-        // completion, so it is resealed here: a crash between the
-        // registration commit and the reseal must not leave a node that
-        // cannot boot. The reseal rewrites the record from current state, so
-        // doing it again is harmless.
         (checks.converged)(transaction.target())?;
         (env.seal)()?;
         return Ok(serde_json::json!({
@@ -464,8 +459,9 @@ pub fn install_staged(
         verify_copy(target, ApplyRefusalCode::TreeChangedDuringInstall)
     };
     let converged_check = |target: &Path| -> Result<()> {
-        // A rerun may seal only what is the stage's own bytes; any other tree
-        // under this name is an install somebody else made.
+        // A rerun refuses a tree that is not the stage's own bytes: any
+        // other tree under this name is an install somebody else made. The
+        // registration it completed has already been sealed.
         verify_tree_digest(
             name,
             target,
@@ -1082,10 +1078,30 @@ where
     })()
 }
 
-/// Undo an install whose moved tree failed its post-move check: move the tree
-/// back to its staging path, remove it, and abandon the journal. Nothing was
-/// registered, so no registration is touched; a failure here leaves the
-/// journal for the next reconciliation and says so.
+/// Test-only fault: make the step that moves a refused tree back fail, as a
+/// disk fault would.
+#[cfg(test)]
+thread_local! {
+    static UNDO_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn undo_fault() -> Result<()> {
+    #[cfg(test)]
+    {
+        if UNDO_FAULT.with(std::cell::Cell::get) {
+            anyhow::bail!("injected undo fault");
+        }
+    }
+    Ok(())
+}
+
+/// Undo an install whose moved tree failed its post-move check. The journal is
+/// first recorded as abandoning, so that whatever happens next the node can
+/// only finish the undo, never the install; then the tree is moved back to its
+/// staging path and removed, and the journal is removed. Nothing was
+/// registered, so no registration is touched. A failure after the first step
+/// leaves the abandoning journal, which the next reconciliation completes by
+/// removing the refused tree: the node boots without the bundle.
 fn undo_install_activation(
     staging: &Path,
     target: &Path,
@@ -1093,6 +1109,8 @@ fn undo_install_activation(
     refusal: anyhow::Error,
 ) -> anyhow::Error {
     let undone = (|| -> Result<()> {
+        transaction.mark_abandoning()?;
+        undo_fault()?;
         match lillux::rename_path_durable(target, staging) {
             Ok(()) => {}
             Err(error) if error.namespace_committed() => {
@@ -1107,12 +1125,12 @@ fn undo_install_activation(
         }
         lillux::remove_dir_all_durable(staging)
             .with_context(|| format!("remove the refused tree {}", staging.display()))?;
-        transaction.abandon_prepared()
+        transaction.finish_abandoned()
     })();
     match undone {
         Ok(()) => refusal,
         Err(error) => refusal.context(format!(
-            "the refused install could not be undone, and its journal is left for reconciliation: {error:#}"
+            "the refused install could not be fully undone; its journal records the undo and reconciliation finishes it without installing: {error:#}"
         )),
     }
 }
@@ -1262,6 +1280,8 @@ fn undo_replace_activation(
     refusal: anyhow::Error,
 ) -> anyhow::Error {
     let undone = (|| -> Result<()> {
+        transaction.mark_abandoning()?;
+        undo_fault()?;
         match lillux::atomic_exchange_paths(target, staging) {
             Ok(()) => {}
             Err(error) if error.namespace_committed() => {
@@ -1274,12 +1294,12 @@ fn undo_replace_activation(
         }
         lillux::remove_dir_all_durable(staging)
             .with_context(|| format!("remove the refused tree {}", staging.display()))?;
-        transaction.abandon_prepared()
+        transaction.finish_abandoned()
     })();
     match undone {
         Ok(()) => refusal,
         Err(error) => refusal.context(format!(
-            "the refused replacement could not be undone, and its journal is left for reconciliation: {error:#}"
+            "the refused replacement could not be fully undone; its journal records the undo and reconciliation finishes it without installing: {error:#}"
         )),
     }
 }
@@ -1858,6 +1878,93 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_undo_leaves_a_journal_that_reconciles_to_the_undo_not_the_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, bundles, target, key) = atomic_fixture(tmp.path());
+        let expected = digest_tree(&src);
+        let registry_lock =
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = acquire(tmp.path(), &registry_lock);
+
+        UNDO_FAULT.with(|fault| fault.set(true));
+        let error = install_dir_atomic(
+            &src,
+            &target,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |staging| {
+                // Changed after the audit, before the journal digest is taken:
+                // the journal's digest is the changed tree's, so only the
+                // abandoning record stops reconciliation completing it.
+                fs::write(staging.join("a.txt"), b"evil!")?;
+                Ok(())
+            },
+            |moved| {
+                verify_tree_digest(
+                    "demo",
+                    moved,
+                    &expected,
+                    &test_limits(),
+                    ApplyRefusalCode::TreeChangedDuringInstall,
+                )
+            },
+        )
+        .expect_err("the moved tree is refused");
+        UNDO_FAULT.with(|fault| fault.set(false));
+        assert_eq!(
+            refusal_code(&error),
+            Some(ApplyRefusalCode::TreeChangedDuringInstall)
+        );
+        // The undo failed: the unverified tree still stands in the target.
+        assert!(target.is_dir());
+
+        // Reconciliation finishes the undo and never completes the install.
+        let recovered = transaction.reconcile(&key).unwrap();
+        assert_eq!(
+            recovered,
+            Some(ryeos_app::bundle_transaction::BundleOperation::Install)
+        );
+        assert!(!target.exists());
+        assert!(!bundles.join(".demo.staging").exists());
+        assert!(!tmp.path().join(".ai/node/bundles/demo.yaml").exists());
+        assert_eq!(transaction.reconcile(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_undo_of_a_replacement_reconciles_back_to_the_previous_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _bundles, target, key) = atomic_fixture(tmp.path());
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("new.txt"), b"new").unwrap();
+        let registry_lock =
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = acquire(tmp.path(), &registry_lock);
+
+        UNDO_FAULT.with(|fault| fault.set(true));
+        let _ = replace_dir_atomic(
+            &src,
+            &target,
+            false,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |_| Ok(()),
+            |_| anyhow::bail!("refused"),
+        )
+        .expect_err("refused");
+        UNDO_FAULT.with(|fault| fault.set(false));
+        // Not swapped back yet: the refused generation is in the target.
+        assert!(target.join("new.txt").is_file());
+
+        transaction.reconcile(&key).unwrap();
+        assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
+        assert!(!target.join("new.txt").exists());
+        assert!(!tmp.path().join(".ai/node/bundles/demo.yaml").exists());
+        assert_eq!(transaction.reconcile(&key).unwrap(), None);
+    }
+
+    #[test]
     fn a_post_move_refusal_puts_the_previous_generation_back_on_replace() {
         let tmp = tempfile::tempdir().unwrap();
         let (src, bundles, target, key) = atomic_fixture(tmp.path());
@@ -2025,7 +2132,7 @@ mod tests {
                 .digest;
 
         let (outcome, seals) = staged_rerun(tmp.path(), &src, &key, &stage_digest);
-        let error = outcome.expect_err("an installed tree that is not the stage is not sealed");
+        let error = outcome.expect_err("an installed tree that is not the stage is refused");
         assert_eq!(
             refusal_code(&error),
             Some(ApplyRefusalCode::BundleAlreadyInstalled)
