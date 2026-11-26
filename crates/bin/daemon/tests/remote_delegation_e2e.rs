@@ -452,7 +452,11 @@ async fn a_delegated_call_is_recorded_on_hosted_as_the_principal_and_revocation_
     ensure!(status.is_success(), "forwarded request: {status} {text}");
     let recorded: Value = serde_json::from_str(&text)?;
     let result = recorded.get("result").unwrap_or(&recorded);
-    assert_eq!(result["revoked_by"], u1_principal.as_str());
+    assert_eq!(
+        result["revoked_by"],
+        u1_principal.as_str(),
+        "forwarded response: {text}"
+    );
     assert_eq!(
         result["delegated_via"],
         pair.origin_fixture.site_id().as_str()
