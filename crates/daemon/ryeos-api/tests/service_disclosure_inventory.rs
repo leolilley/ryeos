@@ -863,23 +863,22 @@ fn services_that_list_attachment_leaves_include_the_seat_project() {
 /// not the operator, so its answer is shaped by the service item's tier. The
 /// source reads the target's stage timings from `qualification_measurements`
 /// (test builds only). A leaf in no tier is cut, and the qualification then
-/// reports an executed stage as unobserved, so both tiers name them.
+/// reports an executed stage as unobserved, so both tiers name exactly these
+/// leaves, the same in every build.
 #[test]
-fn the_handoff_targets_tiers_carry_the_stage_timings_the_source_reads_back() {
+fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_back() {
     let wanted: &[(&str, &[&str])] = &[
         (
             "worker-placements/prepare",
-            &[
-                "/qualification_measurements/schema",
-                "/qualification_measurements/project_materialization_ms",
-            ],
+            &["schema", "project_materialization_ms"],
         ),
         (
             "worker-placements/adopt",
             &[
-                "/qualification_measurements/schema",
-                "/qualification_measurements/event_replay_ms",
-                "/qualification_measurements/worker_attach_recovery_ms",
+                "schema",
+                "event_replay_ms",
+                "worker_attach_recovery_ms",
+                "adoption_path",
             ],
         ),
     ];
@@ -890,14 +889,44 @@ fn the_handoff_targets_tiers_carry_the_stage_timings_the_source_reads_back() {
             .find(|(name, _)| name == service)
             .unwrap_or_else(|| panic!("{service} is not a service"))
             .1;
-        let tier: Vec<&str> = body["disclosure"]["principal"]
+        let mut named: Vec<String> = body["disclosure"]["principal"]
             .as_array()
             .unwrap_or_else(|| panic!("{service} has no principal tier"))
             .iter()
             .filter_map(Value::as_str)
+            .filter_map(|leaf| leaf.strip_prefix("/qualification_measurements/"))
+            .map(str::to_owned)
             .collect();
-        for leaf in *leaves {
-            assert!(tier.contains(leaf), "{service} tier does not list {leaf}");
+        named.sort();
+        let mut expected: Vec<String> = leaves.iter().map(|leaf| (*leaf).to_owned()).collect();
+        expected.sort();
+        assert_eq!(named, expected, "{service}");
+    }
+}
+
+/// The measurements key reaches a response only in a build with
+/// `handoff-test-support` (or a test build): every place that writes it sits
+/// under that cfg gate, so a shipped build emits no such key.
+#[test]
+fn the_measurements_key_is_written_only_under_the_test_support_gate() {
+    let handlers = repo().join("crates/daemon/ryeos-api/src/handlers");
+    for file in ["worker_placements.rs", "dedicated_sessions.rs"] {
+        let text = std::fs::read_to_string(handlers.join(file)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("[\"qualification_measurements\"] =") {
+                continue;
+            }
+            let gated = lines[..index]
+                .iter()
+                .rev()
+                .take(12)
+                .any(|above| above.contains("feature = \"handoff-test-support\""));
+            assert!(
+                gated,
+                "{file}:{} writes qualification_measurements outside the test-support gate",
+                index + 1
+            );
         }
     }
 }

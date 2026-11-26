@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T00:41:39Z:32d52abb5ca53a42be78951d3c6ef56f22307493a241b19fd30621ef5f0f02e4:/mTiUOe0cRq1KLVHqFsJJbGhpvTTQ8XWMCCIg2VkFAOYEDDO/znxoSOwMxJz5tZr0jwfJ9R0gT2g7uAmDjsSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:42:38Z:9f6f2a143ee01fc675b4b67e3d8f44231210955aa405089e74f0dd7379050229:NLd3jaVdE9TdYMCHlhAlvYhbxHr7o69aT1QDUlHwZVnl5Wzh5Jm7TbRvx7axWzPzasD8qemy9hjJYMk2WuF5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.adopt
 required_caps: ["ryeos.execute.service.worker-placements/adopt"]
@@ -34,3 +34,4 @@ disclosure:
     - "/qualification_measurements/schema"
     - "/qualification_measurements/event_replay_ms"
     - "/qualification_measurements/worker_attach_recovery_ms"
+    - "/qualification_measurements/adoption_path"
