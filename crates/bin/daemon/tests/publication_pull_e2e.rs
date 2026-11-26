@@ -616,7 +616,7 @@ async fn start_publisher_with_named_and_twin() -> (DaemonHarness, FastFixture) {
                     std::fs::write(
                         item,
                         lillux::signature::sign_content_at(
-                            "schema: 1\nnote: an inert config item\n",
+                            &format!("schema: 1\ncategory: lane-demo-{bundle}\nnote: an inert config item\n"),
                             &fixture.publisher,
                             "#",
                             None,
