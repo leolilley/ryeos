@@ -48,18 +48,27 @@ fn the_operator_decision_functions_have_exactly_the_callers_the_impact_table_lis
     sources(&root, &root.join("crates"), &mut files);
     assert!(files.len() > 500, "the sweep found {} files", files.len());
     let mut counts = vec![0_usize; EXPECTED.len()];
+    // A file with no top-level test module is production in full. An
+    // item-level `#[cfg(test)]` is legal anywhere, so only the module ends
+    // production text; the floor fails the guard if the marker's spelling
+    // stops matching and the cut silently stops applying.
+    let mut with_test_module = 0_usize;
     for file in &files {
         if file.to_string_lossy() == "crates/daemon/ryeos-app/src/operator_authority.rs" {
             continue;
         }
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let body = text
-            .find("\n#[cfg(test)]\nmod ")
-            .map_or(text.as_str(), |end| &text[..end]);
+        let end = text.find("\n#[cfg(test)]\nmod ");
+        with_test_module += usize::from(end.is_some());
+        let body = end.map_or(text.as_str(), |end| &text[..end]);
         for (index, (name, _)) in EXPECTED.iter().enumerate() {
             counts[index] += body.matches(name).count();
         }
     }
+    assert!(
+        with_test_module > 800,
+        "only {with_test_module} files have a top-level test module: the cut marker no longer matches"
+    );
     let mismatches: Vec<String> = EXPECTED
         .iter()
         .zip(&counts)
