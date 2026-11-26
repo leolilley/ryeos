@@ -100,7 +100,7 @@ async fn the_capability_report_is_listed_read_and_summarised() -> Result<()> {
     )
     .await;
     assert_eq!(got["schema"], "ryeos.read.records.get/v1", "{got}");
-    assert_eq!(got["coverage"]["state"], "observed", "{got}");
+    assert_eq!(got["coverage"]["state"], "complete", "{got}");
     assert_eq!(got["record"]["verify"]["status"], "verified", "{got}");
     assert_eq!(got["record"]["verify"]["scheme"], "node_signed_json_digest");
     let signer = got["record"]["verify"]["signer"]
@@ -165,7 +165,7 @@ async fn the_capability_report_is_listed_read_and_summarised() -> Result<()> {
     )
     .await;
     assert_eq!(listed["schema"], "ryeos.read.records.list/v1", "{listed}");
-    assert_eq!(listed["coverage"]["state"], "observed", "{listed}");
+    assert_eq!(listed["coverage"]["state"], "complete", "{listed}");
     assert!(listed["page"]["next_cursor"].is_null(), "{listed}");
     assert_eq!(listed["page"]["total"], 1, "{listed}");
     let records = listed["rows"].as_array().expect("rows");

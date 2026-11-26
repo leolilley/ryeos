@@ -139,7 +139,7 @@ fn record_envelope(record: Value, state: &str, reason: Value) -> Value {
 /// must not see: free-text reasons, paths, addresses, a failure detail and a
 /// field a later release might add.
 fn answer() -> Value {
-    record_envelope(record(), "observed", Value::Null)
+    record_envelope(record(), "complete", Value::Null)
 }
 
 /// The record inside that answer.
@@ -262,7 +262,7 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
     let shown = shown();
     let text = serde_json::to_string(&shown).unwrap();
     assert_eq!(shown["schema"], "ryeos.read.records.get/v1");
-    assert_eq!(shown["coverage"]["state"], "observed");
+    assert_eq!(shown["coverage"]["state"], "complete");
     // What is kept, including a report from an earlier policy generation
     // arriving marked not fresh.
     assert_eq!(shown["record"]["record_kind"], "capability_report");

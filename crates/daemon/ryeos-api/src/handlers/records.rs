@@ -717,6 +717,20 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| HandlerError::Internal(format!("records read task failed: {error}")))?
 }
 
+/// How much of a single record the answer holds. A verified record read in
+/// full is `complete`; one whose body was cut is `partial`, since a reader
+/// must not take the body for the whole; a record that failed verification is
+/// `partial` with its own reason.
+fn record_coverage(verified: bool, answer: &Value) -> Coverage {
+    match verified {
+        true if answer["truncated"] == json!(true) => {
+            Coverage::with_reason(CoverageState::Partial, "body_truncated")
+        }
+        true => Coverage::complete(),
+        false => Coverage::with_reason(CoverageState::Partial, "record_unverified"),
+    }
+}
+
 /// The signers side table for the signers an answer names. A value that is
 /// not a key fingerprint is left out: the table refuses such values, and the
 /// answer's own `verify.signer` still states it.
@@ -815,17 +829,11 @@ pub async fn get(
         let unverified = (req.include_unverified && matches!(found, Found::Failed { .. }))
             .then(|| unverified_body(kind, &state.config.app_root))
             .flatten();
-        let coverage = match found {
-            Found::Verified { .. } => Coverage::observed(),
-            _ => Coverage::with_reason(CoverageState::Partial, "record_unverified"),
-        };
+        let answer = record_answer(kind, &found, unverified);
+        let coverage = record_coverage(matches!(found, Found::Verified { .. }), &answer);
         let signers = signers_for(&signer_of(&found).into_iter().collect::<Vec<_>>(), &state)?;
         envelope_json(ReadEnvelope::record(
-            GET_SCHEMA,
-            revision,
-            coverage,
-            record_answer(kind, &found, unverified),
-            signers,
+            GET_SCHEMA, revision, coverage, answer, signers,
         ))
     })
     .await
@@ -922,7 +930,7 @@ pub async fn list(
         envelope_json(ReadEnvelope::rows(
             LIST_SCHEMA,
             revision,
-            Coverage::observed(),
+            Coverage::complete(),
             page,
             Page {
                 next_cursor: (next < total).then(|| next.to_string()),
@@ -1349,5 +1357,38 @@ mod tests {
         );
         assert_eq!(answer["verify"]["status"], "unverified_kind");
         assert!(answer.get("body").is_none());
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn shown(verified: bool, truncated: bool) -> Value {
+        let coverage = record_coverage(verified, &json!({ "truncated": truncated }));
+        serde_json::to_value(&coverage).unwrap()
+    }
+
+    #[test]
+    fn a_verified_record_read_in_full_is_complete() {
+        let value = shown(true, false);
+        assert_eq!(value["state"], "complete");
+        assert_eq!(value["reason"], Value::Null);
+    }
+
+    #[test]
+    fn a_verified_record_with_a_cut_body_is_partial() {
+        let value = shown(true, true);
+        assert_eq!(value["state"], "partial");
+        assert_eq!(value["reason"], "body_truncated");
+    }
+
+    #[test]
+    fn a_record_that_failed_verification_is_partial_whatever_its_body() {
+        for truncated in [false, true] {
+            let value = shown(false, truncated);
+            assert_eq!(value["state"], "partial");
+            assert_eq!(value["reason"], "record_unverified");
+        }
     }
 }
