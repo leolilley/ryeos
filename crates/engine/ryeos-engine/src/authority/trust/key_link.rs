@@ -225,6 +225,13 @@ fn check_signature(
     key.verify(bytes, &signature).map_err(|_| bad())
 }
 
+/// One side's signature over a body, base64: what `ryeos key link-sign`
+/// prints. The linking key and the added key each sign the same body id.
+pub fn sign_link_side(body: &KeyLinkBody, key: &SigningKey) -> Result<String, KeyLinkRefusal> {
+    let signature = key.sign(&body.signing_bytes()?);
+    Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()))
+}
+
 impl SignedKeyLink {
     /// Sign `body` with the linking key (`linked_by`) and the added key.
     pub fn sign(
