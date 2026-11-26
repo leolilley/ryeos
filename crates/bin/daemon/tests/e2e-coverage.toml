@@ -293,6 +293,10 @@ paths = ["crates/state/ryeos-state/src/large_object_store.rs", "crates/state/rye
 covers = ["ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/state/ryeos-state/src/project_discovery.rs", "crates/state/ryeos-state/src/project_identity.rs"]
 
+[tests.project_apply_published_e2e]
+covers = ["ryeos-api"]
+paths = ["crates/daemon/ryeos-api/src/handlers/project_apply_published.rs", "crates/daemon/ryeos-api/src/remote/pull.rs"]
+
 [tests.project_schedule_deploy_e2e]
 covers = ["ryeos-api", "ryeos-expression", "ryeos-project-capture", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
 paths = ["crates/daemon/ryeos-api/src/project_deploy/**"]

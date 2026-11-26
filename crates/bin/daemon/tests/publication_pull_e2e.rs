@@ -87,6 +87,7 @@ async fn publish_bundle_on(a: &DaemonHarness, fixture: &FastFixture, bundle: &st
         &node_fingerprint,
         result["manifest_hash"].as_str().unwrap(),
         bundle,
+        result["bundle_version"].as_str().unwrap(),
         &lillux::time::iso8601_from_unix_secs(now + 3600),
         &lillux::time::iso8601_from_unix_secs(now),
         read_bound,

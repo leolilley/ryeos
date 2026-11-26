@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T07:17:57Z:661ecf011be7ca3caba0eeecde31d06daad436d41594e53b3d2701afee711a80:7U8QKu6F3rDamlAMYBMur7hSbuUunnoPS2i4wp7xXwf3dw1VQFph7aaQYeLdxWxNG94YJ9HL3IihZzkoZMPgAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:47:10Z:fe64bad6b304636ba713f8677cf6d298fe7757ed970628ad486a373b5a373c4d:cGh7HzfHlFu4b4hi5b/srv91wd+JQVeNwMoEgs+bsdlvRAvOO00sGuei7qlL+P8/hYFirc/THsqjOpota1QeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
@@ -42,7 +42,8 @@ yet, so set `CLAUDE_CODE_EXECUTABLE` before launching.
 2. Create the credential profile. It activates from the two delivered names
    and needs no login ceremony:
 
-       ryeos claude-code profile create <profile-id>
+       ryeos credential-profile create <profile-id> \
+         --activation '{"kind":"delivered_secret","names":["ANTHROPIC_API_KEY","ANTHROPIC_BASE_URL"]}'
 
 3. Launch a bounded turn with the `environment` binding set to
    `config:claude-code/environments/default` (or `trusted-lane` on a trusted
@@ -56,7 +57,8 @@ yet, so set `CLAUDE_CODE_EXECUTABLE` before launching.
    under the same exact recipient rule as the model key.
 3. Create the credential profile from it:
 
-       ryeos claude-code profile create-subscription <profile-id>
+       ryeos credential-profile create <profile-id> \
+         --activation '{"kind":"delivered_secret","names":["CLAUDE_CODE_OAUTH_TOKEN"]}'
 
 4. Launch with the `environment` binding set to
    `config:claude-code/environments/subscription` (or

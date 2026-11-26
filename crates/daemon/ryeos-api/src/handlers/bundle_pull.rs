@@ -451,6 +451,11 @@ pub(crate) fn verify_publication(
             "the manifest is for another bundle than the record names".into(),
         ));
     }
+    if manifest.bundle_version != record.version {
+        return Err(PullRefusal::ManifestMismatch(
+            "the manifest is for another bundle version than the record names".into(),
+        ));
+    }
     Ok(VerifiedPublication { served, manifest })
 }
 

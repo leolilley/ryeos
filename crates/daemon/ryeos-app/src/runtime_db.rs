@@ -37001,11 +37001,9 @@ mod tests {
                 .unwrap_err(),
         );
         assert_eq!(refusal.code(), "credential_confirm_expired");
-        assert!(
-            refusal
-                .to_string()
-                .contains(&format!("ryeos codex profile abandon-login P-late {epoch}"))
-        );
+        assert!(refusal.to_string().contains(&format!(
+            "ryeos credential-profile abandon-login P-late {epoch}"
+        )));
 
         let wrong_epoch = ceremony_refusal(
             db.confirm_credential_enrollment("P-late", "fp:operator", epoch + 1, &digest)

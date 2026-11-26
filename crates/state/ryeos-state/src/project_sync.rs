@@ -643,6 +643,21 @@ pub fn is_live_execution_denied_only_path(rel_path: &str) -> bool {
     matched_prefix(rel_path, LIVE_EXECUTION_DENIED_ONLY).is_some()
 }
 
+/// True when `rel_path` is inside a secret, node-owned or live-execution-denied
+/// control root, or is one of the pull transaction's own scratch directories:
+/// the paths no result may write into a live checkout.
+pub fn is_live_execution_denied_path(rel_path: &str) -> bool {
+    matched_prefix(rel_path, NEVER_DEPLOY_SECRETS).is_some()
+        || matched_prefix(rel_path, NODE_OWNED).is_some()
+        || matched_prefix(rel_path, LIVE_EXECUTION_DENIED_ONLY).is_some()
+        || rel_path.split('/').any(|component| {
+            component.starts_with(".ryeos-pull-staging-")
+                || component.starts_with(".ryeos-pull-backup-")
+                || component.starts_with(".ryeos-quarantine.")
+                || component == ".ryeos-pull.lock"
+        })
+}
+
 /// Central, non-bypassable live-execution control-plane floor. The same
 /// classification owns snapshot/deploy safety; live execution serializes this
 /// exact policy into its authority rather than duplicating path literals in an

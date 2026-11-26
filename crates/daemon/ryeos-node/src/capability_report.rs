@@ -162,6 +162,7 @@ impl DurableIdentityFacts {
 pub struct LivePublicationFacts {
     pub id: String,
     pub bundle_name: String,
+    pub version: String,
     pub manifest_hash: String,
     pub not_after: String,
 }
@@ -275,6 +276,7 @@ impl PublicationsReport {
                 None => report.live.push(LivePublicationFacts {
                     id: record.id.clone(),
                     bundle_name: record.bundle_name.clone(),
+                    version: record.version.clone(),
                     manifest_hash: record.root.manifest_hash.clone(),
                     not_after: record.not_after.clone(),
                 }),

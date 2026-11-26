@@ -166,11 +166,17 @@ pub(crate) async fn device_login<N: NodeCommands, O: Operator>(
 ) -> Result<Value, CliError> {
     let profile_id = plan.profile_id.as_str();
     if plan.create {
-        node.call(argv(&["codex", "profile", "create", profile_id]))
-            .await?;
+        node.call(argv(&[
+            "credential-profile",
+            "create",
+            profile_id,
+            "--activation",
+            r#"{"kind":"ceremony"}"#,
+        ]))
+        .await?;
     }
     let profile = node
-        .call(argv(&["codex", "profile", "get", profile_id]))
+        .call(argv(&["credential-profile", "get", profile_id]))
         .await?;
     require_ready_for_login(&profile, profile_id)?;
 
@@ -190,7 +196,7 @@ pub(crate) async fn device_login<N: NodeCommands, O: Operator>(
         return Err(local(match ended {
             Ok(_) => format!("{error}; login session {session} was ended"),
             Err(end_error) => format!(
-                "{error}; ending login session {session} also failed ({end_error}); run `ryeos codex session terminate {session} cancelled`"
+                "{error}; ending login session {session} also failed ({end_error}); run `ryeos worker session terminate {session} cancelled`"
             ),
         }));
     }
@@ -207,7 +213,7 @@ pub(crate) async fn device_login<N: NodeCommands, O: Operator>(
         .ok_or_else(|| local("the profile has no login epoch"))?;
     if state != "confirming" {
         return Err(local(format!(
-            "credential profile '{profile_id}' is {state} after the login, not confirming; read it with `ryeos codex profile get {profile_id}`"
+            "credential profile '{profile_id}' is {state} after the login, not confirming; read it with `ryeos credential-profile get {profile_id}`"
         )));
     }
     let account = profile
@@ -220,14 +226,13 @@ pub(crate) async fn device_login<N: NodeCommands, O: Operator>(
         .ok_or_else(|| local("the profile has no observed account digest"))?;
     if !operator.approve_account(account, digest)? {
         return Err(local(format!(
-            "account not confirmed. Credential profile '{profile_id}' stays confirming; confirm it with `ryeos codex profile confirm {profile_id} {login_epoch} {digest}` before the window closes, or after it closes run `ryeos codex profile abandon-login {profile_id} {login_epoch}`"
+            "account not confirmed. Credential profile '{profile_id}' stays confirming; confirm it with `ryeos credential-profile confirm {profile_id} {login_epoch} {digest}` before the window closes, or after it closes run `ryeos credential-profile abandon-login {profile_id} {login_epoch}`"
         )));
     }
     let login_epoch_text = login_epoch.to_string();
     let confirmed = node
         .call(argv(&[
-            "codex",
-            "profile",
+            "credential-profile",
             "confirm",
             profile_id,
             login_epoch_text.as_str(),
@@ -261,7 +266,7 @@ fn require_ready_for_login(profile: &Value, profile_id: &str) -> Result<(), CliE
     match state {
         "unauthenticated" => Ok(()),
         "enrolling" | "confirming" => Err(local(format!(
-            "credential profile '{profile_id}' already has login epoch {epoch} {state}; finish it, or once its window closes run `ryeos codex profile abandon-login {profile_id} {epoch}`"
+            "credential profile '{profile_id}' already has login epoch {epoch} {state}; finish it, or once its window closes run `ryeos credential-profile abandon-login {profile_id} {epoch}`"
         ))),
         "active" => Err(local(format!(
             "credential profile '{profile_id}' is already active; revoke it before logging in again"
@@ -299,7 +304,7 @@ async fn observe_account<N: NodeCommands, O: Operator>(
     // The node enforces the real window at confirmation; this bound only
     // stops polling once no observation can still count.
     let profile = node
-        .call(argv(&["codex", "profile", "get", profile_id]))
+        .call(argv(&["credential-profile", "get", profile_id]))
         .await?;
     let window_closes_at_ms = profile
         .get("login_expires_at_ms")
@@ -340,7 +345,7 @@ async fn wait_for_ready_session<N: NodeCommands>(
     let mut last: String;
     loop {
         match node
-            .call(argv(&["codex", "session", "status", session]))
+            .call(argv(&["worker", "session", "status", session]))
             .await
         {
             Ok(status) => {
@@ -381,7 +386,7 @@ async fn wait_for_released_profile<N: NodeCommands>(
         .saturating_add(duration_ms(timing.lock_release_timeout));
     loop {
         let profile = node
-            .call(argv(&["codex", "profile", "get", profile_id]))
+            .call(argv(&["credential-profile", "get", profile_id]))
             .await?;
         let holder = profile
             .get("lock_owner")
@@ -392,7 +397,7 @@ async fn wait_for_released_profile<N: NodeCommands>(
         };
         if node.now_ms() >= deadline {
             return Err(local(format!(
-                "credential profile '{profile_id}' is still held by {holder} after the login session ended; confirm with `ryeos codex profile confirm` once it is released"
+                "credential profile '{profile_id}' is still held by {holder} after the login session ended; confirm with `ryeos credential-profile confirm` once it is released"
             )));
         }
         node.pause(timing.poll).await;
@@ -405,7 +410,7 @@ fn argv(tokens: &[&str]) -> Vec<String> {
 
 fn session_command_argv(session: &str, idempotency_key: &str, route_id: &str) -> Vec<String> {
     argv(&[
-        "codex",
+        "worker",
         "session",
         "command",
         session,
@@ -417,7 +422,7 @@ fn session_command_argv(session: &str, idempotency_key: &str, route_id: &str) ->
 }
 
 fn terminate_argv(session: &str) -> Vec<String> {
-    argv(&["codex", "session", "terminate", session, "cancelled"])
+    argv(&["worker", "session", "terminate", session, "cancelled"])
 }
 
 fn duration_ms(duration: Duration) -> i64 {
@@ -522,6 +527,17 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    /// The command a call names: the leading tokens up to the first argument
+    /// (`credential-profile get` is two tokens, `worker session status` three).
+    fn verb_of(argv: &[String]) -> String {
+        let tokens = if argv[0] == "credential-profile" {
+            2
+        } else {
+            3
+        };
+        argv[..tokens].join(" ")
+    }
+
     struct FakeNode {
         calls: Vec<Vec<String>>,
         replies: VecDeque<(&'static str, Result<Value, CliError>)>,
@@ -541,9 +557,9 @@ mod tests {
             self.calls
                 .iter()
                 .map(|call| {
-                    let verb = call[..3].join(" ");
+                    let verb = verb_of(call);
                     match call.get(5) {
-                        Some(route) if verb == "codex session command" => {
+                        Some(route) if verb == "worker session command" => {
                             format!("{verb} {route}")
                         }
                         _ => verb,
@@ -559,7 +575,7 @@ mod tests {
                 .replies
                 .pop_front()
                 .unwrap_or_else(|| panic!("unexpected call {argv:?}"));
-            let verb = argv[..3].join(" ");
+            let verb = verb_of(&argv);
             assert_eq!(verb, expected, "call {argv:?}");
             self.calls.push(argv);
             reply
@@ -641,13 +657,13 @@ mod tests {
         let mut replies = Vec::new();
         if create {
             replies.push((
-                "codex profile create",
+                "credential-profile create",
                 Ok(json!({"state": "unauthenticated"})),
             ));
         }
         replies.extend([
             (
-                "codex profile get",
+                "credential-profile get",
                 Ok(json!({"state": "unauthenticated", "login_epoch": 0, "lock_owner": null})),
             ),
             (
@@ -655,16 +671,16 @@ mod tests {
                 Ok(json!({"status": "accepted", "thread_id": "T-login"})),
             ),
             (
-                "codex session status",
+                "worker session status",
                 Err(local("HTTP 404 before the session row exists")),
             ),
             (
-                "codex session status",
+                "worker session status",
                 Ok(json!({"state": "idle", "worker_instance_id": "W-1"})),
             ),
-            ("codex session command", Ok(device_code())),
+            ("worker session command", Ok(device_code())),
             (
-                "codex profile get",
+                "credential-profile get",
                 Ok(json!({"state": "enrolling", "login_epoch": 1, "login_expires_at_ms": 60_000})),
             ),
         ]);
@@ -675,15 +691,15 @@ mod tests {
     async fn device_login_sequence_order() {
         let mut replies = opening(true);
         replies.extend([
-            ("codex session command", Ok(account_read(false))),
-            ("codex session command", Ok(account_read(true))),
-            ("codex session terminate", Ok(json!({"state": "terminal"}))),
+            ("worker session command", Ok(account_read(false))),
+            ("worker session command", Ok(account_read(true))),
+            ("worker session terminate", Ok(json!({"state": "terminal"}))),
             (
-                "codex profile get",
+                "credential-profile get",
                 Ok(json!({"state": "confirming", "lock_owner": "W-1", "login_epoch": 1})),
             ),
             (
-                "codex profile get",
+                "credential-profile get",
                 Ok(json!({
                     "state": "confirming",
                     "lock_owner": null,
@@ -693,7 +709,7 @@ mod tests {
                 })),
             ),
             (
-                "codex profile confirm",
+                "credential-profile confirm",
                 Ok(json!({"state": "active", "credential_generation": 2})),
             ),
         ]);
@@ -708,19 +724,19 @@ mod tests {
         assert_eq!(
             node.verbs(),
             [
-                "codex profile create",
-                "codex profile get",
+                "credential-profile create",
+                "credential-profile get",
                 "codex login open-trusted",
-                "codex session status",
-                "codex session status",
-                "codex session command credential.login.start",
-                "codex profile get",
-                "codex session command credential.account.read",
-                "codex session command credential.account.read",
-                "codex session terminate",
-                "codex profile get",
-                "codex profile get",
-                "codex profile confirm",
+                "worker session status",
+                "worker session status",
+                "worker session command credential.login.start",
+                "credential-profile get",
+                "worker session command credential.account.read",
+                "worker session command credential.account.read",
+                "worker session terminate",
+                "credential-profile get",
+                "credential-profile get",
+                "credential-profile confirm",
             ]
         );
         assert_eq!(
@@ -729,12 +745,12 @@ mod tests {
         );
         assert_eq!(
             node.calls[9],
-            argv(&["codex", "session", "terminate", "T-login", "cancelled"])
+            argv(&["worker", "session", "terminate", "T-login", "cancelled"])
         );
         let digest = "d".repeat(64);
         assert_eq!(
             node.calls[12],
-            argv(&["codex", "profile", "confirm", "personal", "1", &digest])
+            argv(&["credential-profile", "confirm", "personal", "1", &digest])
         );
         assert_eq!(
             operator.shown,
@@ -752,9 +768,9 @@ mod tests {
         // 1_000 ms start, 5 s per poll, window closes at 60_000 ms: twelve
         // empty reads, then the session is ended and nothing is confirmed.
         for _ in 0..12 {
-            replies.push(("codex session command", Ok(account_read(false))));
+            replies.push(("worker session command", Ok(account_read(false))));
         }
-        replies.push(("codex session terminate", Ok(json!({"state": "terminal"}))));
+        replies.push(("worker session terminate", Ok(json!({"state": "terminal"}))));
         let mut node = FakeNode::new(replies);
         let mut operator = FakeOperator::default();
         let error = device_login(&mut node, &mut operator, &plan(false), &timing())
@@ -768,7 +784,7 @@ mod tests {
             !node
                 .verbs()
                 .iter()
-                .any(|verb| verb == "codex profile confirm"),
+                .any(|verb| verb == "credential-profile confirm"),
             "an expired window must never confirm"
         );
         assert_eq!(operator.approved, None);
@@ -777,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn device_login_refuses_a_profile_left_mid_login() {
         let mut node = FakeNode::new(vec![(
-            "codex profile get",
+            "credential-profile get",
             Ok(json!({"state": "confirming", "login_epoch": 4, "lock_owner": null})),
         )]);
         let error = device_login(
@@ -789,7 +805,7 @@ mod tests {
         .await
         .unwrap_err()
         .to_string();
-        assert!(error.contains("ryeos codex profile abandon-login personal 4"));
+        assert!(error.contains("ryeos credential-profile abandon-login personal 4"));
         assert_eq!(node.calls.len(), 1, "nothing is opened for a stuck profile");
     }
 
@@ -807,10 +823,10 @@ mod tests {
     async fn declined_account_is_not_confirmed() {
         let mut replies = opening(false);
         replies.extend([
-            ("codex session command", Ok(account_read(true))),
-            ("codex session terminate", Ok(json!({"state": "terminal"}))),
+            ("worker session command", Ok(account_read(true))),
+            ("worker session terminate", Ok(json!({"state": "terminal"}))),
             (
-                "codex profile get",
+                "credential-profile get",
                 Ok(json!({
                     "state": "confirming",
                     "lock_owner": null,
