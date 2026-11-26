@@ -890,6 +890,12 @@ fn validate_unix_file_mode(mode: u32, path: &str) -> Result<()> {
             path
         );
     }
+    if mode & 0o022 != 0 {
+        bail!(
+            "remote bundle export entry '{}' has Unix file mode {mode:#o}: group- or other-write is forbidden",
+            path
+        );
+    }
     Ok(())
 }
 
@@ -992,6 +998,18 @@ mod tests {
                 .unwrap()
                 .contains("Nothing was staged")
         );
+    }
+
+    #[test]
+    fn staged_file_modes_refuse_special_bits_and_group_or_other_write() {
+        for mode in [0o644, 0o755, 0o600, 0o500] {
+            validate_unix_file_mode(mode, "f").unwrap();
+        }
+        for mode in [
+            0o4755, 0o2755, 0o1755, 0o664, 0o646, 0o666, 0o775, 0o020, 0o002,
+        ] {
+            assert!(validate_unix_file_mode(mode, "f").is_err(), "{mode:#o}");
+        }
     }
 
     fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
