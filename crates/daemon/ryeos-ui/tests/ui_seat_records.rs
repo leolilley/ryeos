@@ -292,7 +292,9 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
         "daemon_digest",
         "credential_home",
         "in_place_roots",
-        "enclosure_memory_max_bytes",
+        // The capacity name is shown on purpose (as a collection name below);
+        // the number it carries is not.
+        "4096",
         "node_pid",
         "uid_map",
         "fp:node",

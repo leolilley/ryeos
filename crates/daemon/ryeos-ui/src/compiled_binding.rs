@@ -1466,7 +1466,13 @@ mod tests {
                     "keep": ["/value"],
                     "max_result_bytes": 1024,
                     "max_items": 10
-                }]
+                },
+                // The UI plane has no exemption: a field service a seat reads
+                // is admitted by an entry like any other.
+                {"target": "service:ui/ryeos-ui/field/project"},
+                {"target": "service:ui/ryeos-ui/field/runs"},
+                {"target": "service:ui/ryeos-ui/field/execution"},
+                {"target": "service:ui/ryeos-ui/field/definition"}]
             }))
             .expect("test seat reads")
         });
