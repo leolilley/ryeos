@@ -629,14 +629,14 @@ fn test_node_policy(
         )
 }
 
-/// The `ui_seat_reads` policy exactly as the shipped standard profile carries
+/// The `read_disclosure` policy exactly as the shipped standard profile carries
 /// it, so tests that mint and dispatch against the shipped Surfaces run under
 /// the policy the node ships.
 pub fn shipped_seat_reads_record() -> Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy> {
     use ryeos_node_runtime::node_policy::NodePolicyContext;
     use ryeos_node_runtime::node_policy::NodePolicySection as _;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-        SECTION_NAME, UiSeatReadsPolicySection,
+    use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+        ReadDisclosurePolicySection, SECTION_NAME,
     };
 
     let path = ryeos_engine::test_support::workspace_root()
@@ -645,7 +645,7 @@ pub fn shipped_seat_reads_record() -> Arc<dyn ryeos_node_runtime::node_policy::E
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let profile: serde_json::Value = serde_yaml::from_str(&text).expect("parse standard profile");
     let body = profile["policies"][SECTION_NAME].clone();
-    UiSeatReadsPolicySection
+    ReadDisclosurePolicySection
         .parse(
             &NodePolicyContext {
                 section: SECTION_NAME.to_owned(),
@@ -654,29 +654,29 @@ pub fn shipped_seat_reads_record() -> Arc<dyn ryeos_node_runtime::node_policy::E
             },
             &body,
         )
-        .expect("shipped ui_seat_reads policy parses")
+        .expect("shipped read_disclosure policy parses")
 }
 
-/// Replace the state's `ui_seat_reads` policy with `body`, parsed and
+/// Replace the state's `read_disclosure` policy with `body`, parsed and
 /// validated as the node loads it. Call before minting: a binding records
 /// what the policy then admitted.
 pub fn set_seat_reads(state: &mut AppState, body: &serde_json::Value) {
     use ryeos_node_runtime::node_policy::NodePolicyContext;
     use ryeos_node_runtime::node_policy::NodePolicySection as _;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-        SECTION_NAME, UiSeatReadsPolicySection,
+    use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+        ReadDisclosurePolicySection, SECTION_NAME,
     };
 
-    let record = UiSeatReadsPolicySection
+    let record = ReadDisclosurePolicySection
         .parse(
             &NodePolicyContext {
                 section: SECTION_NAME.to_owned(),
-                source_file: "/test/ui_seat_reads.yaml".into(),
+                source_file: "/test/read_disclosure.yaml".into(),
                 signer_fingerprint: "test".to_owned(),
             },
             body,
         )
-        .expect("test ui_seat_reads policy parses");
+        .expect("test read_disclosure policy parses");
     state.node_policy = test_node_policy(None, record);
 }
 

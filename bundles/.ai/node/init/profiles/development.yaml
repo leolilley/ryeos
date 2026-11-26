@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:33:53Z:726a03a9a18152383c4aef3b4bdf3f6b01e93b33fed99803903f7d39ee3a58ff:s+cWJmh3wPH5Y83kXKDoemqUVdA5oXCWMzaauxsep9UFyN5y0L22Vl7g637GHWJYIsJnp6QpReC83R2qHQPhAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T09:35:52Z:8f9925d8d22d005abaa34cf22923959bffa98eb66cd9387a1b7407868b23ce1f:LqcIfoMmInPvtYiijNWpMk551dM55VohHKEC/mJmSrNJNsiyFTTXm3pfBcUNWqx5sVf3p9m9V34ncQVn7UmEAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -588,6 +588,8 @@ policies:
       - ryeos.execute.service.worker-executions/approvals
       - ryeos.execute.service.revisions/list
       - ryeos.execute.service.revisions/get
+      - ryeos.execute.service.records/get
+      - ryeos.execute.service.records/kinds
       - ryeos.execute.service.worker-executions/resolve-approval
       - ryeos.execute.directive.*
       - ryeos.execute.graph.*
@@ -623,316 +625,100 @@ policies:
     max_facet_pages_per_thread: 8
     max_facet_pages_total: 64
   # What a UI seat may read through a bound source. A service with no entry is
-  # not readable by a seat. A service under ui/ryeos-ui/ scopes its own result
-  # and is outside this list. Each keep list is an allowlist of result fields.
-  # Filesystem paths and operator-only fields are left out, and so is any field
-  # a later release adds until an entry names it.
-  ui_seat_reads:
+  # not readable by a seat, and that includes the services under ui/ryeos-ui/.
+  # What of a result a seat may see is declared by the service item's own
+  # disclosure block; an entry here only admits the read, forces or denies
+  # parameters, and may narrow the item's fields and bounds further. An event
+  # stream route has no item, so its entry keeps the fields it discloses.
+  read_disclosure:
     schema: 1
     reads:
       - target: service:node/status
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /node_id
-          - /version
-          - /revision
-          - /build_date
-          - /started_at
-          - /uptime_seconds
-          - /bind
-          - /active_threads
-          - /isolation/mode
-          - /isolation/filesystem_mode
-          - /isolation/network_mode
-          - /isolation/version
-          - /isolation/policy_digest
-          - /isolation/backend
-          - /isolation/process_scopes
-          - /thread_projection
-          - /pending_head_transitions
-          - /accounting
-        max_result_bytes: 65536
-        max_items: 64
       - target: service:bundle/list
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /bundles/*/name
-        max_result_bytes: 65536
-        max_items: 512
       - target: service:projects/list
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /version
-          - /projects/*/local_id
-          - /projects/*/name
-          - /projects/*/root
-          - /projects/*/added_at
-          - /projects/*/tags
-          - /projects/*/exists
-          - /projects/*/current
-          - /projects/*/registered
-        max_result_bytes: 1048576
-        max_items: 1024
       - target: service:commands/list
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /commands/*/name
-          - /commands/*/tokens
-          - /commands/*/description
-          - /commands/*/arguments
-          - /commands/*/forms
-          - /commands/*/defaults
-          - /commands/*/parameter_binding
-          - /commands/*/control_flags
-          - /commands/*/project
-          - /commands/*/invocable
-        max_result_bytes: 4194304
-        max_items: 4096
       - target: service:threads/list
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /next_cursor
-          - /threads/*/thread_id
-          - /threads/*/chain_root_id
-          - /threads/*/kind
-          - /threads/*/status
-          - /threads/*/item_ref
-          - /threads/*/launch_mode
-          - /threads/*/current_site_id
-          - /threads/*/origin_site_id
-          - /threads/*/upstream_thread_id
-          - /threads/*/successor_thread_id
-          - /threads/*/created_at
-          - /threads/*/updated_at
-          - /threads/*/execution
-          - /threads/*/follow
-          - /threads/*/pending
-          - /threads/*/facets
-          - /threads/*/current_node
-          - /threads/*/error
-        max_result_bytes: 4194304
-        max_items: 2048
       - target: service:scheduler/list
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /identity_filtered
-          - /node_owned_included
-          - /anonymous
-          - /note
-          - /schedules/*/schedule_id
-          - /schedules/*/item_ref
-          - /schedules/*/schedule_type
-          - /schedules/*/expression
-          - /schedules/*/timezone
-          - /schedules/*/enabled
-          - /schedules/*/registered_at
-          - /schedules/*/misfire_policy
-          - /schedules/*/overlap_policy
-          - /schedules/*/lateness_grace_secs
-          - /schedules/*/last_scheduled_at
-          - /schedules/*/last_reserved_at
-          - /schedules/*/last_dispatched_at
-          - /schedules/*/last_fire_status
-          - /schedules/*/last_fire_reason
-          - /schedules/*/last_fire_outcome
-          - /schedules/*/current_due_at
-          - /schedules/*/current_due_within_grace
-          - /schedules/*/misfire_horizon_exclusive
-          - /schedules/*/next_fire_at
-          - /schedules/*/cursor_last_scheduled_at
-          - /schedules/*/cursor_next_fire_at
-          - /schedules/*/cursor_updated_at
-          - /schedules/*/cursor_fresh
-          - /schedules/*/decision
-          - /schedules/*/decision_reason
-          - /schedules/*/lifetime_exhausted
-          - /schedules/*/total_fires
-        max_result_bytes: 1048576
-        max_items: 2048
       - target: service:items/effective
-        classes: [local_operator, hosted_principal]
-        # A seat resolves bundle items only; it does not choose a project path.
-        deny_params: [project_path]
-        keep:
-          - /requested_ref
-          - /canonical_ref
-          - /kind
-          - /trusted
-          - /trust_class
-          - /root_trust_class
-          - /shadows_bundle_item
-          - /policy_facts
-          - /diagnostics
-          - /provenance/root/requested_id
-          - /provenance/root/resolved_ref
-          - /provenance/root/source_space
-          - /provenance/root/trust_class
-          - /provenance/root/signer_fingerprint
-          - /provenance/root/raw_content_digest
-          - /provenance/ancestors/*/requested_id
-          - /provenance/ancestors/*/resolved_ref
-          - /provenance/ancestors/*/source_space
-          - /provenance/ancestors/*/trust_class
-          - /provenance/ancestors/*/signer_fingerprint
-          - /provenance/ancestors/*/raw_content_digest
-          - /authorship
-          - /as_launched
-        max_result_bytes: 1048576
-        max_items: 2048
+        deny_params:
+        - project_path
       - target: service:node/locality/groups
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /schema
-          - /as_of
-          - /groups
-          - /invalid_declarations/*/label
-          - /invalid_declarations/*/code
-        max_result_bytes: 1048576
-        max_items: 1024
-      # The event streams a seat opens are named by their route. A frame is the
-      # event name beside the event record, and an entry keeps only the
-      # identifiers and live text a client reads. Ledger hashes, sequence
-      # numbers, stored payloads and error text are left out, and so is any
-      # field a later release adds until an entry names it.
       - target: route:ui/events/chain
-        classes: [local_operator, hosted_principal]
         keep:
-          - /event_type
-          - /payload/chain_root_id
-          - /payload/thread_id
-          - /payload/event_type
-          - /payload/payload/delta
-          - /payload/payload/tool_use_partial/delta
-          - /payload/code
+        - /event_type
+        - /payload/chain_root_id
+        - /payload/thread_id
+        - /payload/event_type
+        - /payload/payload/delta
+        - /payload/payload/tool_use_partial/delta
+        - /payload/code
         max_result_bytes: 65536
         max_items: 16
-      # The session stream carries thread hints and item hints. Thread
-      # lifecycle hints keep the thread, its event name, status and time.
-      # Activity hints keep only their kind, so no thread list rides on them.
-      # An item hint keeps the item ref, digest, revision and change set id;
-      # the daemon sends it only to a session whose own bindings name that
-      # item, and it carries no item content.
       - target: route:ui/events/session
-        classes: [local_operator, hosted_principal]
         keep:
-          - /event_type
-          - /payload/kind
-          - /payload/thread_id
-          - /payload/event_type
-          - /payload/status
-          - /payload/updated_at
-          - /payload/item_ref
-          - /payload/digest
-          - /payload/revision
-          - /payload/change_set
+        - /event_type
+        - /payload/kind
+        - /payload/thread_id
+        - /payload/event_type
+        - /payload/status
+        - /payload/updated_at
+        - /payload/item_ref
+        - /payload/digest
+        - /payload/revision
+        - /payload/change_set
         max_result_bytes: 4096
         max_items: 4
-      # The pending approvals of a hosted work chain, as the Approvals view
-      # reads them. The service already answers only for a chain the caller
-      # owns. Each approval keeps its identifiers, digest, state, times and the
-      # public part of its requested authority.
       - target: service:worker-executions/approvals
-        classes: [local_operator, hosted_principal]
-        keep:
-          - /approvals/*/chain_root_id
-          - /approvals/*/placement_thread_id
-          - /approvals/*/approval_id
-          - /approvals/*/worker_boot_epoch
-          - /approvals/*/request_digest
-          - /approvals/*/operation_class
-          - /approvals/*/requested_authority/accept_allowed
-          - /approvals/*/requested_authority/display
-          - /approvals/*/state
-          - /approvals/*/expires_at_ms
-          - /approvals/*/created_at_ms
-        max_result_bytes: 262144
-        max_items: 256
-      # The signed revision history of one item of the seat's own project. The
-      # project is pinned to the session's bound project, so a seat never names
-      # a path of its own, and a session with no project reads nothing. A record
-      # keeps its identifiers, digests, time, signer, verification status and
-      # the provenance keys that name no filesystem path. Failure detail text,
-      # the head failure reason and the provenance path are left out, and so is
-      # any field a later release adds until an entry names it. The list carries
-      # no item bytes. The record read keeps the signed item bytes inline for
-      # diff and revert preview; authored UI items are far below the bound, and a
-      # record that exceeds it is refused whole, never cut. Unverified records
-      # stay withheld: a seat may not ask for them.
       - target: service:revisions/list
-        classes: [local_operator, hosted_principal]
         pin:
-          project_path: "@session:project_root"
-        keep:
-          - /item_ref
-          - /total
-          - /sound
-          - /file
-          - /head/status
-          - /head/seq
-          - /head/head_seq
-          - /head/tip_seq
-          - /next_cursor
-          - /records/*/seq
-          - /records/*/hash
-          - /records/*/verify/status
-          - /records/*/verify/scheme
-          - /records/*/verify/signer
-          - /records/*/verify/reason
-          - /records/*/unrecorded_change_before
-          - /records/*/tombstone
-          - /records/*/recorded_at
-          - /records/*/actor/fingerprint
-          - /records/*/actor/role
-          - /records/*/before_digest
-          - /records/*/after_digest
-          - /records/*/file_ext
-          - /records/*/provenance/authored_by
-          - /records/*/provenance/action
-          - /records/*/provenance/thread_id
-          - /records/*/provenance/invocation_id
-          - /records/*/provenance/parent_item_ref
-          - /records/*/provenance/authoring_capability
-          - /records/*/provenance/target_ref
-          - /records/*/provenance/content_digest
-        max_result_bytes: 524288
-        max_items: 200
+          project_path: '@session:project_root'
       - target: service:revisions/get
-        classes: [local_operator, hosted_principal]
         pin:
-          project_path: "@session:project_root"
-        deny_params: [include_unverified]
-        keep:
-          - /item_ref
-          - /total
-          - /sound
-          - /file
-          - /head/status
-          - /head/seq
-          - /head/head_seq
-          - /head/tip_seq
-          - /record/seq
-          - /record/hash
-          - /record/verify/status
-          - /record/verify/scheme
-          - /record/verify/signer
-          - /record/verify/reason
-          - /record/unrecorded_change_before
-          - /record/tombstone
-          - /record/recorded_at
-          - /record/actor/fingerprint
-          - /record/actor/role
-          - /record/before_digest
-          - /record/after_digest
-          - /record/file_ext
-          - /record/provenance/authored_by
-          - /record/provenance/action
-          - /record/provenance/thread_id
-          - /record/provenance/invocation_id
-          - /record/provenance/parent_item_ref
-          - /record/provenance/authoring_capability
-          - /record/provenance/target_ref
-          - /record/provenance/content_digest
-          - /record/body/previous
-          - /record/body/content
-        max_result_bytes: 1048576
-        max_items: 16
+          project_path: '@session:project_root'
+        deny_params:
+        - include_unverified
+      - target: service:records/get
+        when:
+          record_kind:
+          - capability_report
+        deny_params:
+        - include_unverified
+        - holder
+        - key
+        - hash
+      - target: service:records/kinds
+        max_result_bytes: 16384
+        max_items: 64
+      - target: service:ui/ryeos-ui/config/get
+      - target: service:ui/ryeos-ui/coverage/wording
+      - target: service:ui/ryeos-ui/dimension/get
+      - target: service:ui/ryeos-ui/execution/occurrence
+      - target: service:ui/ryeos-ui/field/comparison
+      - target: service:ui/ryeos-ui/field/definition
+      - target: service:ui/ryeos-ui/field/execution
+      - target: service:ui/ryeos-ui/field/project
+      - target: service:ui/ryeos-ui/field/runs
+      - target: service:ui/ryeos-ui/files/list
+      - target: service:ui/ryeos-ui/files/read
+      - target: service:ui/ryeos-ui/files/tree
+      - target: service:ui/ryeos-ui/gc/status
+      - target: service:ui/ryeos-ui/item/inspect
+      - target: service:ui/ryeos-ui/items/list
+      - target: service:ui/ryeos-ui/node/activity
+      - target: service:ui/ryeos-ui/node/capabilities/wording
+      - target: service:ui/ryeos-ui/node/machines
+      - target: service:ui/ryeos-ui/node/usage
+      - target: service:ui/ryeos-ui/projects/list
+      - target: service:ui/ryeos-ui/projects/resolve
+      - target: service:ui/ryeos-ui/recent/list
+      - target: service:ui/ryeos-ui/remotes/list
+      - target: service:ui/ryeos-ui/schedules/list
+      - target: service:ui/ryeos-ui/thread/inspect
+      - target: service:ui/ryeos-ui/thread/tree
+      - target: service:ui/ryeos-ui/threads/list
+      - target: service:ui/ryeos-ui/timeline/raw
+      - target: service:ui/ryeos-ui/timeline/thread
+      - target: service:ui/ryeos-ui/work/approval-history
+      - target: service:ui/ryeos-ui/work/attention
+      - target: service:ui/ryeos-ui/work/candidate
+      - target: service:ui/ryeos-ui/work/list

@@ -35,6 +35,10 @@ pub enum ResolveError {
     NotExecutable { command: String },
     #[error("command '{command}' requires argument '{argument}'")]
     MissingItemRefArgument { command: String, argument: String },
+    #[error(
+        "command '{command}' declares item_kinds, which this resolver does not enforce; use compile_command_invocation"
+    )]
+    ItemKindsNotEnforced { command: String },
     #[error("failed to bind arguments for command {tokens:?}: {detail}")]
     Bind { tokens: Vec<String>, detail: String },
 }
@@ -49,6 +53,20 @@ pub fn resolve_command(
         .map_err(|_| ResolveError::NoMatch {
             tokens: tokens.to_vec(),
         })?;
+
+    // This binder never parses the ref, so it cannot enforce declared item
+    // kinds; refuse rather than skip the declaration.
+    if matches!(
+        &matched.command.dispatch,
+        crate::CommandDispatch::DirectExecuteItemRef {
+            item_kinds: Some(_),
+            ..
+        }
+    ) {
+        return Err(ResolveError::ItemKindsNotEnforced {
+            command: matched.command.name.clone(),
+        });
+    }
 
     let mut parameters =
         crate::arg_binder::bind_argv_with_command(&matched.tail, Some(&matched.command)).map_err(

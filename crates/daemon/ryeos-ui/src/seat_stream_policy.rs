@@ -13,8 +13,8 @@ use std::pin::Pin;
 use ryeos_api::route_error::RouteDispatchError;
 use ryeos_app::state::AppState;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-    SeatClass, TARGET_KIND_ROUTE, UiSeatReadsPolicy,
+use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+    ReadDisclosurePolicy, TARGET_KIND_ROUTE,
 };
 use serde_json::{Value, json};
 use tokio_stream::{Stream, StreamExt};
@@ -62,12 +62,11 @@ pub(crate) fn admit_open(
 ) -> Result<AdmittedStream, RouteDispatchError> {
     let policy = state
         .node_policy
-        .require::<UiSeatReadsPolicy>()
+        .require::<ReadDisclosurePolicy>()
         .map_err(|error| RouteDispatchError::Internal(format!("{error:#}")))?;
     let target = stream_target(route_id);
     let admitted = decide(
         policy,
-        SeatClass::of_session(session.user_principal_id.as_deref()),
         &target,
         parameter_schema,
         Some(RequestFacts {
@@ -171,23 +170,21 @@ fn refusal_envelope(refusal: &SeatReadRefusal, mode: FrameMode) -> RouteStreamEn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatReadEntry;
+    use ryeos_node_runtime::node_policy::sections::read_disclosure::ReadEntry;
 
     fn shaping(keep: Value, max_bytes: u64) -> DetachedShaping {
-        let entry: SeatReadEntry = serde_json::from_value(json!({
+        let entry: ReadEntry = serde_json::from_value(json!({
             "target": "route:test/stream",
-            "classes": ["local_operator"],
             "keep": keep,
             "max_result_bytes": max_bytes,
             "max_items": 4
         }))
         .unwrap();
-        let policy: UiSeatReadsPolicy =
+        let policy: ReadDisclosurePolicy =
             serde_json::from_value(json!({"schema": 1, "reads": [entry]})).unwrap();
         policy.validate().unwrap();
         let admitted = decide(
             &policy,
-            SeatClass::LocalOperator,
             "route:test/stream",
             &BTreeMap::new(),
             Some(RequestFacts {

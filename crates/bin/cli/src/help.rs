@@ -1369,6 +1369,7 @@ mod tests {
                 project: None,
                 dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                     item_ref_arg: "item_ref".into(),
+                    item_kinds: None,
                     validate_only: false,
                     availability: ryeos_runtime::CommandAvailability::Both,
                 },
