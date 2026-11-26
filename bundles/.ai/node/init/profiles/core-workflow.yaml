@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:30:44Z:fbde5075c584a2facc958d1d53ca9d410e91afd1d7cf1e75a9da5389de072749:1ybIv0e3B4i50z5mKH3RnMypeb9nkp1INXWiJlAKVNE5u5gU2AtnGikzxdzuyg0k1QU1eEbLT1O+5zi99gCtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:19:08Z:f1fd8d3c2db55c32b3c106a41355a6619a3f10f1e82fb5f6d9dc68bea83da879:hQrtyhEqG9GrpDfVBv81YfGPPDk9iXLh/d6GuYp7eN58sqwgxO3XWSpWWFqarBBE55VlkMZ/fnaxu8MeNio3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -175,6 +175,15 @@ policies:
     # Most /published requests worked at once, node-wide; one past it is
     # answered publication_busy before any read.
     max_in_flight: 16
+  publication_lane:
+    schema: 1
+    # What a bundle pulled from a publication may carry. admit_activations
+    # accepts only `invoked`: items that act only when a caller invokes them,
+    # under that caller's own grants. named_bundles lifts more for one bundle by
+    # name: `kinds` (exact node-loaded kinds) and `facets` (manifest
+    # declarations a policy can lift). Nothing else can be lifted.
+    admit_activations: [invoked]
+    named_bundles: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

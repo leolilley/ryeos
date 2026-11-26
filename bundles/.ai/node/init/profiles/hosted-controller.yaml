@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T20:30:44Z:7bcaa8cc7e858501383b6348af6a4517b900c54ba03f0ef04261d30d5c0cc04a:9AsZm1MbtIJZ3FVE1Kkpu8rxBBZI8xfHP3vnKRpCqIpf6MsR9/HN0df/GqP0M8xIBamoRAqdWIc8McWvFJkxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:19:08Z:cd270db96026139eadac1cf2bc3ae32fce208d6c0ea9774e78321ab9ef33ed39:aG7mW6KPorDS+Lc69fi1x1lnjeaWd5jxHPtjWHDGcP5EWKJlV9xKpIYcWpYAkcugGF5lUJUjTya8W4J2IH+dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -201,6 +201,15 @@ policies:
     # Most /published requests worked at once, node-wide; one past it is
     # answered publication_busy before any read.
     max_in_flight: 16
+  publication_lane:
+    schema: 1
+    # What a bundle pulled from a publication may carry. admit_activations
+    # accepts only `invoked`: items that act only when a caller invokes them,
+    # under that caller's own grants. named_bundles lifts more for one bundle by
+    # name: `kinds` (exact node-loaded kinds) and `facets` (manifest
+    # declarations a policy can lift). Nothing else can be lifted.
+    admit_activations: [invoked]
+    named_bundles: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
