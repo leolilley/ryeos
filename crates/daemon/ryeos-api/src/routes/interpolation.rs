@@ -53,8 +53,17 @@ pub fn require_literal_project_path(
     route_id: &str,
     mode: &str,
 ) -> Result<(), RouteConfigError> {
-    let Some(path) = config.get("project_path").and_then(Value::as_str) else {
+    let Some(value) = config.get("project_path") else {
         return Ok(());
+    };
+    // Present means a string: any other shape (an object, an array, a null)
+    // is refused here, so the exemption never depends on a later deserializer.
+    let Some(path) = value.as_str() else {
+        return Err(RouteConfigError::InvalidSourceConfig {
+            id: route_id.to_owned(),
+            src: mode.to_owned(),
+            reason: "`source_config.project_path` must be a literal path string".to_owned(),
+        });
     };
     if path.contains("${") {
         return Err(RouteConfigError::InvalidSourceConfig {
@@ -248,6 +257,17 @@ mod tests {
             serde_json::Value::Null,
         ] {
             require_literal_project_path(&config, "route-7", "launch").unwrap();
+        }
+        for shape in [
+            serde_json::json!({ "project_path": null }),
+            serde_json::json!({ "project_path": {"a": "/srv"} }),
+            serde_json::json!({ "project_path": ["/srv"] }),
+            serde_json::json!({ "project_path": 7 }),
+        ] {
+            assert!(
+                require_literal_project_path(&shape, "route-7", "launch").is_err(),
+                "{shape}"
+            );
         }
     }
 

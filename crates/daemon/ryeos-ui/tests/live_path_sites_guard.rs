@@ -231,3 +231,59 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
         );
     }
 }
+
+/// Every response mode that carries a project path calls the literal-path
+/// check, unless it is named here with the reason it needs none. A new mode
+/// cannot reopen the hole by forgetting the call.
+const MODES_NEEDING_NO_LITERAL_CHECK: &[(&str, &str)] = &[
+    (
+        "execute_mode.rs",
+        "the project path is a request-body field of a signed /execute call and goes through admit_live_project_path",
+    ),
+    (
+        "handler_mode.rs",
+        "a fixed-principal handler route runs in a request-owned workspace the daemon creates; its project_path is not a configured path",
+    ),
+];
+
+#[test]
+fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let dir = root.join("crates/daemon/ryeos-api/src/routes/response_modes");
+    let mut seen_exempt = Vec::new();
+    let mut checked = 0;
+    let mut problems = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let body = non_test_text(&text);
+        if !body.contains("project_path") {
+            continue;
+        }
+        let exempt = MODES_NEEDING_NO_LITERAL_CHECK
+            .iter()
+            .any(|(file, _)| *file == name);
+        if exempt {
+            seen_exempt.push(name);
+        } else if body.contains("require_literal_project_path(") {
+            checked += 1;
+        } else {
+            problems.push(format!(
+                "{name}: carries a project_path but does not call require_literal_project_path and is not named in MODES_NEEDING_NO_LITERAL_CHECK"
+            ));
+        }
+    }
+    assert!(checked >= 3, "only {checked} modes call the literal check");
+    for (file, _) in MODES_NEEDING_NO_LITERAL_CHECK {
+        if !seen_exempt.iter().any(|seen| seen == file) {
+            problems.push(format!(
+                "{file}: named as exempt but it no longer mentions project_path; drop it"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
