@@ -520,6 +520,11 @@ fn project_thread_usage_subject(
     })
 }
 
+/// The row a thread's usage settles to is the greatest cumulative reading, not
+/// the one with the highest chain position: settlements are cumulative, so a
+/// later event that carries any figure lower than the held row is not a newer
+/// reading and leaves the row alone. An event that carries every figure at
+/// least as high replaces it, whatever its chain position.
 fn project_thread_usage_latest(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
@@ -553,7 +558,21 @@ fn project_thread_usage_latest(
                     provider_id = excluded.provider_id,
                     model = excluded.model,
                     profile = excluded.profile
-                WHERE excluded.chain_seq > thread_usage_latest.chain_seq",
+                WHERE excluded.completed_turns >= thread_usage_latest.completed_turns
+                  AND excluded.input_tokens >= thread_usage_latest.input_tokens
+                  AND excluded.output_tokens >= thread_usage_latest.output_tokens
+                  AND excluded.spend_usd >= thread_usage_latest.spend_usd
+                  AND excluded.spawns_used >= thread_usage_latest.spawns_used
+                  AND excluded.last_settled_turn_seq >= thread_usage_latest.last_settled_turn_seq
+                  AND (
+                    excluded.chain_seq > thread_usage_latest.chain_seq
+                    OR excluded.completed_turns > thread_usage_latest.completed_turns
+                    OR excluded.input_tokens > thread_usage_latest.input_tokens
+                    OR excluded.output_tokens > thread_usage_latest.output_tokens
+                    OR excluded.spend_usd > thread_usage_latest.spend_usd
+                    OR excluded.spawns_used > thread_usage_latest.spawns_used
+                    OR excluded.last_settled_turn_seq > thread_usage_latest.last_settled_turn_seq
+                  )",
                 rusqlite::params![
                     &event.thread_id,
                     &event.chain_root_id,

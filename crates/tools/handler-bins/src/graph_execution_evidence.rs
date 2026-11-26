@@ -71,9 +71,8 @@ struct ToolCallResult {
 #[serde(deny_unknown_fields)]
 struct ChildSpawned {
     child_thread_id: String,
-    node: String,
-    step: u32,
     item_id: String,
+    operation_id: String,
     spawn_reason: String,
 }
 
@@ -437,8 +436,7 @@ fn project_events(
     {
         bail!("Graph Tool events contradict the described unary call");
     }
-    if child.node != expected.action_node
-        || child.step != expected.action_step
+    if child.operation_id != start.operation_id
         || child.item_id != expected.target_ref
         || child.spawn_reason != "dispatch"
         || child.child_thread_id.is_empty()
@@ -486,7 +484,9 @@ fn project_events(
     if canonical_digest(terminal_result)? != receipt.node_result_hash {
         bail!("Graph terminal result differs from the committed Tool receipt");
     }
-    if !(*start_seq < *result_seq && *result_seq < *child_seq && *child_seq < *receipt_seq) {
+    // The daemon records the child's lineage as it creates the child, before
+    // the walker commits the call's start and result.
+    if !(*child_seq < *start_seq && *start_seq < *result_seq && *result_seq < *receipt_seq) {
         bail!("Graph occurrence events are not in commit order");
     }
     Ok(ExecutionEvidenceCandidateCallWire {
@@ -646,9 +646,19 @@ mod tests {
         };
         let events = vec![
             event(1, ryeos_state::event_types::GRAPH_STARTED, json!({})),
-            event(2, ryeos_state::event_types::GRAPH_STEP_STARTED, json!({})),
             event(
-                3,
+                2,
+                ryeos_state::event_types::CHILD_THREAD_SPAWNED,
+                json!({
+                    "child_thread_id": "child",
+                    "item_id": expected.target_ref,
+                    "operation_id": operation_id,
+                    "spawn_reason": "dispatch",
+                }),
+            ),
+            event(3, ryeos_state::event_types::GRAPH_STEP_STARTED, json!({})),
+            event(
+                4,
                 ryeos_state::event_types::TOOL_CALL_START,
                 json!({
                     "operation_id": operation_id,
@@ -664,7 +674,7 @@ mod tests {
                 }),
             ),
             event(
-                4,
+                5,
                 ryeos_state::event_types::TOOL_CALL_RESULT,
                 json!({
                     "operation_id": operation_id,
@@ -678,17 +688,6 @@ mod tests {
                     "step": expected.action_step,
                     "item_id": expected.target_ref,
                     "status": "ok",
-                }),
-            ),
-            event(
-                5,
-                ryeos_state::event_types::CHILD_THREAD_SPAWNED,
-                json!({
-                    "child_thread_id": "child",
-                    "node": expected.action_node,
-                    "step": expected.action_step,
-                    "item_id": expected.target_ref,
-                    "spawn_reason": "dispatch",
                 }),
             ),
             event(

@@ -52,6 +52,16 @@ fn spawned_events(state: &crate::state::AppState, parent: &str) -> Vec<Value> {
 /// A running parent, a fresh-root child linked to it, and the retained action
 /// intent that a callback dispatch reserves before creating the child.
 fn dispatched_child(state: &crate::state::AppState, parent: &str, child: &str, operation: &str) {
+    dispatched_child_in_mode(state, parent, child, operation, RuntimeActionMode::Detached);
+}
+
+fn dispatched_child_in_mode(
+    state: &crate::state::AppState,
+    parent: &str,
+    child: &str,
+    operation: &str,
+    mode: RuntimeActionMode,
+) {
     let store = &state.state_store;
     store
         .create_thread_for_test(&thread_record(parent))
@@ -60,14 +70,7 @@ fn dispatched_child(state: &crate::state::AppState, parent: &str, child: &str, o
         .mark_thread_running(parent, None)
         .expect("start parent");
     store
-        .reserve_runtime_action_intent(
-            operation,
-            parent,
-            RuntimeActionMode::Detached,
-            &"b".repeat(64),
-            child,
-            None,
-        )
+        .reserve_runtime_action_intent(operation, parent, mode, &"b".repeat(64), child, None)
         .expect("reserve action intent");
     store
         .create_thread_for_test(&thread_record(child))
@@ -186,4 +189,151 @@ fn parent_settling_before_the_append_writes_nothing_and_requires_fails_closed() 
         "a live dispatch site must refuse a child whose parent cannot author its lineage"
     );
     assert!(spawned_events(&state, "T-parent").is_empty());
+}
+
+fn append_batch(
+    state: &crate::state::AppState,
+    thread_id: &str,
+    events: Vec<(&str, Value)>,
+) -> anyhow::Result<crate::event_store_service::EventAppendBatchResult> {
+    state.events.append_batch(
+        &crate::event_store_service::EventAppendBatchParams {
+            thread_id: thread_id.to_string(),
+            events: events
+                .into_iter()
+                .map(
+                    |(event_type, payload)| crate::event_store_service::EventAppendItem {
+                        event_type: event_type.to_string(),
+                        payload,
+                    },
+                )
+                .collect(),
+            attachments: Vec::new(),
+            idempotency_key: None,
+        },
+        &ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy::as_shipped(),
+        &ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy::as_shipped(),
+    )
+}
+
+#[test]
+fn an_inline_dispatched_child_gets_its_lineage_from_the_daemon_and_a_runtime_cannot_write_it() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_owner, state) = crate::state::test_support::build(root.path()).expect("compose");
+    let operation = "e".repeat(64);
+    dispatched_child_in_mode(
+        &state,
+        "T-parent",
+        "T-child",
+        &operation,
+        RuntimeActionMode::Inline,
+    );
+
+    // The parent's own runtime append of the lineage event is refused, whole
+    // batch included, and writes nothing.
+    let forged = json!({
+        "child_thread_id": "T-child",
+        "node": "n",
+        "step": 0,
+        "item_id": "directive:test/T-child",
+        "spawn_reason": "dispatch",
+    });
+    let error = append_batch(
+        &state,
+        "T-parent",
+        vec![("observation", json!({})), ("child_thread_spawned", forged)],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("daemon-authored"), "{error:#}");
+    assert!(spawned_events(&state, "T-parent").is_empty());
+
+    // The daemon writes it from the retained action intent: the parent is the
+    // intent's first caller, and the payload names the occurrence.
+    assert_eq!(
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
+        DispatchChildLineage::Recorded(ChildLineageAppendOutcome::Appended)
+    );
+    assert_eq!(
+        spawned_events(&state, "T-parent"),
+        vec![json!({
+            "child_thread_id": "T-child",
+            "item_id": "directive:test/T-child",
+            "operation_id": operation,
+            "spawn_reason": "dispatch",
+        })]
+    );
+}
+
+fn usage_payload(completed_turns: u32, input_tokens: u64, spend_nanos: i64) -> Value {
+    json!({
+        "completed_turns": completed_turns,
+        "input_tokens": input_tokens,
+        "output_tokens": 1,
+        "spend_usd": ryeos_accounting::UsdNanos::from_nanos(spend_nanos).unwrap(),
+        "spawns_used": 0,
+        "started_at": "2026-06-01T00:00:00Z",
+        "settled_at": "2026-06-01T00:05:00Z",
+        "last_settled_turn_seq": completed_turns,
+        "elapsed_ms": 100,
+    })
+}
+
+#[test]
+fn a_running_thread_cannot_regress_its_usage_and_a_resent_settlement_is_accepted() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_owner, state) = crate::state::test_support::build(root.path()).expect("compose");
+    state
+        .state_store
+        .create_thread_for_test(&thread_record("T-usage"))
+        .unwrap();
+    state
+        .state_store
+        .mark_thread_running("T-usage", None)
+        .unwrap();
+
+    append_batch(
+        &state,
+        "T-usage",
+        vec![("thread_usage", usage_payload(2, 200, 5_000))],
+    )
+    .expect("first settlement");
+    // The same payload again, as a runner resends after a lost acknowledgement.
+    append_batch(
+        &state,
+        "T-usage",
+        vec![("thread_usage", usage_payload(2, 200, 5_000))],
+    )
+    .expect("identical resend");
+    append_batch(
+        &state,
+        "T-usage",
+        vec![("thread_usage", usage_payload(3, 300, 9_000))],
+    )
+    .expect("cumulative step");
+
+    for lower in [usage_payload(2, 300, 9_000), usage_payload(3, 299, 9_000)] {
+        let error = append_batch(&state, "T-usage", vec![("thread_usage", lower)]).unwrap_err();
+        assert!(error.to_string().contains("not cumulative"), "{error:#}");
+    }
+    // Daemon-authored types stay refused alongside the legitimate append, and
+    // the refused batch wrote nothing.
+    let error = append_batch(
+        &state,
+        "T-usage",
+        vec![
+            ("thread_usage", usage_payload(4, 400, 9_500)),
+            ("thread_continued", json!({"previous_thread_id": "T-x"})),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("daemon-authored"), "{error:#}");
+    let held = state
+        .state_store
+        .latest_thread_event_by_type("T-usage", "thread_usage")
+        .unwrap()
+        .expect("held settlement");
+    assert_eq!(held.payload["completed_turns"], json!(3));
 }
