@@ -722,6 +722,13 @@ where
             "key_as must be a non-empty field name without dots",
         ));
     }
+    // A scalar entry is stored as `{ value, <key_as>: key }`: naming the key
+    // `value` would overwrite the entry's own value with its key.
+    if name == "value" {
+        return Err(serde::de::Error::custom(
+            "key_as may not be `value`: a scalar entry is stored under that name",
+        ));
+    }
     Ok(name)
 }
 
@@ -1415,7 +1422,11 @@ pub fn source_collection<'a>(
     // and a failed answer draws none.
     if let Some(envelope) = super::read_envelope::read_envelope(response)
         && (source.is_none_or(|source| source.collection.is_none())
-            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed)
+            || matches!(
+                envelope.state,
+                super::read_envelope::EnvelopeCoverageState::Failed
+                    | super::read_envelope::EnvelopeCoverageState::Unavailable
+            ))
     {
         return Cow::Borrowed(envelope.records());
     }
@@ -1589,7 +1600,11 @@ pub fn source_collection_for_section<'a>(
     use std::borrow::Cow;
     if let Some(envelope) = super::read_envelope::read_envelope(response)
         && (section.collection.is_none()
-            || envelope.state == super::read_envelope::EnvelopeCoverageState::Failed)
+            || matches!(
+                envelope.state,
+                super::read_envelope::EnvelopeCoverageState::Failed
+                    | super::read_envelope::EnvelopeCoverageState::Unavailable
+            ))
     {
         return envelope.records().iter().map(Cow::Borrowed).collect();
     }
@@ -2743,6 +2758,17 @@ mod tests {
             collection_state(collection, &response).map(SourceRowState::code),
             Some("not_reported")
         );
+    }
+
+    #[test]
+    fn a_map_key_may_not_be_named_value() {
+        let binding = |key_as: &str| {
+            serde_json::from_value::<CollectionBinding>(
+                json!({"path": "items", "entries": "map", "key_as": key_as}),
+            )
+        };
+        assert!(binding("name").is_ok());
+        assert!(binding("value").is_err());
     }
 
     #[test]

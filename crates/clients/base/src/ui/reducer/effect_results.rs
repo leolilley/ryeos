@@ -727,14 +727,45 @@ impl RyeOsCore {
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     let mut data = data;
+                    let request_params = match &request.payload {
+                        crate::ui::binding::UiBindingPayload::SourceParameters { params } => {
+                            Some(params)
+                        }
+                        _ => None,
+                    };
                     if result_id >= floor
                         && stored.is_none_or(|s| result_id >= s)
                         && crate::ui::read_envelope::is_not_modified(&data)
                     {
                         // The server says the revision this client sent is
-                        // still current: the stored answer stays, and it
-                        // counts as freshly read.
-                        if self.data.sources.contains_key(tile_id) {
+                        // still current. That keeps the stored answer only
+                        // for the request that asked: one that sent the held
+                        // answer's revision, with the parameters the answer
+                        // was fetched with. Any other `not_modified` is
+                        // unexpected, and the rows held are left as they are,
+                        // not refreshed.
+                        let asked_for_it = request_params.is_some_and(|params| {
+                            let sent = params.get("if_revision").and_then(|v| v.as_str());
+                            let held = self
+                                .data
+                                .sources
+                                .get(tile_id)
+                                .and_then(crate::ui::read_envelope::stored_revision);
+                            sent.is_some()
+                                && sent == held
+                                && self.data.source_stored_params.get(tile_id)
+                                    == Some(&crate::ui::model::without_if_revision(params))
+                        });
+                        if !asked_for_it {
+                            self.data.source_errors.insert(
+                                tile_id.clone(),
+                                crate::ui::effect::RyeOsUiError::definite(
+                                    "unexpected_not_modified",
+                                    "The source reported no change to a request that did not ask for it"
+                                        .to_owned(),
+                                ),
+                            );
+                        } else if self.data.sources.contains_key(tile_id) {
                             self.data.source_errors.remove(tile_id);
                             self.data
                                 .source_stored_epoch
@@ -788,6 +819,17 @@ impl RyeOsCore {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        match request_params {
+                            Some(params) => {
+                                self.data.source_stored_params.insert(
+                                    tile_id.clone(),
+                                    crate::ui::model::without_if_revision(params),
+                                );
+                            }
+                            None => {
+                                self.data.source_stored_params.remove(tile_id);
+                            }
+                        }
                         self.rebuild_field_source_cache(tile_id);
                         self.data.source_errors.remove(tile_id);
                         self.data
@@ -1769,6 +1811,106 @@ mod tests {
                 1
             ))
         );
+    }
+
+    #[test]
+    fn a_not_modified_reply_keeps_rows_only_for_the_request_that_asked() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "rows": {
+                "ref": "service:test/rows",
+                "params": {"page": "one", "if_revision": ""},
+                "dynamic_parameters": ["if_revision"]
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let fetch = |core: &mut RyeOsCore| {
+            core.initial_effects()
+                .into_iter()
+                .find_map(|effect| match &effect.kind {
+                    RyeOsEffectKind::FetchSource { request, .. }
+                        if matches!(
+                            &request.coordinate,
+                            crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                if channel == "rows"
+                        ) =>
+                    {
+                        let sent = match &request.payload {
+                            crate::ui::binding::UiBindingPayload::SourceParameters { params } => {
+                                params
+                                    .get("if_revision")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            }
+                            _ => None,
+                        };
+                        Some((effect.id, sent))
+                    }
+                    _ => None,
+                })
+                .expect("surface source fetch")
+        };
+        let answer = |core: &mut RyeOsCore, id: u64, data: serde_json::Value| {
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+        };
+        let not_modified = serde_json::json!({"not_modified": true, "revision": "rev1:a"});
+        let refused = |core: &RyeOsCore| {
+            core.data
+                .source_errors
+                .values()
+                .any(|error| error.code == "unexpected_not_modified")
+        };
+
+        // Nothing held: the first fetch asks for no revision, and a
+        // not_modified to it is refused.
+        let (id, sent) = fetch(&mut core);
+        assert!(sent.is_none() || sent.as_deref() == Some(""));
+        answer(&mut core, id, not_modified.clone());
+        assert!(refused(&core));
+        assert!(core.data.sources.is_empty());
+
+        // A full answer is held; the next fetch asks with its revision, and a
+        // not_modified to that request keeps the rows and is not an error.
+        let (id, _) = fetch(&mut core);
+        answer(
+            &mut core,
+            id,
+            serde_json::json!({
+                "schema": "ryeos.read.test.rows/v1", "as_of": "t", "revision": "rev1:a",
+                "coverage": {"state": "complete"}, "rows": [{"id": "one"}],
+            }),
+        );
+        assert!(!refused(&core));
+        let (id, sent) = fetch(&mut core);
+        assert_eq!(sent.as_deref(), Some("rev1:a"));
+        answer(&mut core, id, not_modified.clone());
+        assert!(!refused(&core));
+        assert_eq!(core.data.sources.len(), 1);
+
+        // The held answer is of other parameters: no revision is sent, and a
+        // not_modified is refused with the rows left as held.
+        for params in core.data.source_stored_params.values_mut() {
+            *params = serde_json::json!({"page": "two"});
+        }
+        let (id, sent) = fetch(&mut core);
+        assert!(sent.is_none() || sent.as_deref() == Some(""));
+        answer(&mut core, id, not_modified);
+        assert!(refused(&core));
+        assert_eq!(core.data.sources.len(), 1);
     }
 
     #[test]

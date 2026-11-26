@@ -528,6 +528,11 @@ pub struct RyeOsDataState {
     /// older response never overwrites a newer one.
     #[serde(default)]
     pub source_stored_epoch: HashMap<String, u64>,
+    /// The parameters (without `if_revision`) each source key's stored answer
+    /// was fetched with. A `not_modified` reply keeps the stored rows only
+    /// for the same request, and `if_revision` is sent only for it.
+    #[serde(default)]
+    pub source_stored_params: HashMap<String, serde_json::Value>,
     /// Minimum acceptable result id per source key, raised when the key's
     /// SUBJECT changes (lens swap, drill return, selection facet write):
     /// a straggler for the previous subject must never land under the new
@@ -566,12 +571,26 @@ pub(crate) struct RyeOsTimelineSourceCache {
 // of the thread-execution-stream concern in `super::timeline`.
 pub use super::timeline::RyeOsLiveDelta;
 
+/// `params` without the `if_revision` the client adds to them.
+pub(crate) fn without_if_revision(params: &serde_json::Value) -> serde_json::Value {
+    let mut params = params.clone();
+    if let Some(fields) = params.as_object_mut() {
+        fields.remove("if_revision");
+    }
+    params
+}
+
 impl RyeOsDataState {
     /// The signed bound on rows one source shows, if the wording carries one.
+    ///
+    /// Until the wording has loaded the bound is not known, and a source draws
+    /// no rows: a bound that waits for a file does not bound what is drawn.
+    /// Loaded wording that states no `source_rows` is an unbounded source.
     pub fn source_row_limit(&self) -> Option<usize> {
-        self.coverage_wording
-            .as_ref()
-            .and_then(|wording| wording.limits.source_rows)
+        match self.coverage_wording.as_ref() {
+            None => Some(0),
+            Some(wording) => wording.limits.source_rows,
+        }
     }
 }
 
@@ -1111,6 +1130,11 @@ impl RyeOsCore {
         now_ms: u64,
     ) -> Self {
         let mut core = Self::default();
+        #[cfg(test)]
+        {
+            core.data.coverage_wording =
+                Some(super::dto::RyeOsCoverageWordingDto::unit_test_default());
+        }
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
         core.runtime.last_tick_ms = now_ms;
@@ -2040,10 +2064,18 @@ impl RyeOsCore {
         {
             return params;
         }
+        // The held answer is of one request; another request (a page turned, a
+        // filter changed) holds none, so it asks for a full answer.
+        let same_request = self
+            .data
+            .source_stored_params
+            .get(source_key)
+            .is_some_and(|held| *held == without_if_revision(&params));
         let revision = self
             .data
             .sources
             .get(source_key)
+            .filter(|_| same_request)
             .and_then(super::read_envelope::stored_revision);
         if let (Some(revision), Some(fields)) = (revision, params.as_object_mut()) {
             fields.insert(IF_REVISION.to_string(), revision.into());
@@ -3657,6 +3689,21 @@ fn resolve_field_params(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_wait_for_the_signed_bound_and_a_stated_absence_of_one_is_no_bound() {
+        use super::*;
+        let mut data = RyeOsDataState::default();
+        // Nothing loaded: the bound is not known, so no row is drawn.
+        assert_eq!(data.source_row_limit(), Some(0));
+        let mut wording = crate::ui::dto::RyeOsCoverageWordingDto::unit_test_default();
+        data.coverage_wording = Some(wording.clone());
+        assert_eq!(data.source_row_limit(), Some(500));
+        // Loaded wording that states no bound is a source with no bound.
+        wording.limits.source_rows = None;
+        data.coverage_wording = Some(wording);
+        assert_eq!(data.source_row_limit(), None);
+    }
+
     #[test]
     fn shared_widget_local_state_comes_from_exact_authored_binding_and_is_not_reset() {
         use super::*;

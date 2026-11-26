@@ -298,6 +298,24 @@ pub struct RyeOsCoverageLimitsDto {
 }
 
 impl RyeOsCoverageWordingDto {
+    /// The wording unit tests of this crate start from: the fixed "not known"
+    /// sentence for every state, the signed 500-row bound, and nothing else.
+    /// A test of the unloaded state clears the field.
+    #[cfg(test)]
+    pub(crate) fn unit_test_default() -> Self {
+        Self {
+            fallback: RyeOsWordingEntry {
+                label: "This page's coverage is not known.".into(),
+                tone: "none".into(),
+            },
+            states: Default::default(),
+            reasons: Default::default(),
+            limits: RyeOsCoverageLimitsDto {
+                source_rows: Some(500),
+            },
+        }
+    }
+
     /// Read a response of the contract this client speaks. Any other version,
     /// an empty sentence or a tone outside the closed list is refused.
     pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {

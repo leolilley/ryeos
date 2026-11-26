@@ -127,7 +127,10 @@ impl<'a> ReadEnvelope<'a> {
     /// The records the answer carries: its rows, or its one record. A failed
     /// answer carries no authoritative rows, so it yields none.
     pub fn records(&self) -> &'a [Value] {
-        if self.state == EnvelopeCoverageState::Failed {
+        if matches!(
+            self.state,
+            EnvelopeCoverageState::Failed | EnvelopeCoverageState::Unavailable
+        ) {
             return &[];
         }
         match (self.rows, self.record) {
@@ -257,5 +260,22 @@ mod tests {
         assert!(read.records().is_empty());
         // A bare, non-envelope response is a mismatch too.
         assert!(contract_mismatch_answer(&schema, &json!({"rows": [1]})).is_some());
+    }
+
+    #[test]
+    fn an_unavailable_answer_draws_no_rows_as_a_failed_one_does() {
+        for state in ["failed", "unavailable"] {
+            let held = envelope(state);
+            assert!(
+                read_envelope(&held).expect("envelope").records().is_empty(),
+                "{state} draws no rows"
+            );
+        }
+        assert!(
+            !read_envelope(&envelope("partial"))
+                .expect("envelope")
+                .records()
+                .is_empty()
+        );
     }
 }

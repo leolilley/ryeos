@@ -708,7 +708,15 @@ fn row_cut_status(
     cut: Option<super::content::RowCut>,
 ) -> Option<RyeOsSourceStatusVm> {
     let cut = cut?;
-    let wording = core.data.coverage_wording.as_ref()?;
+    // Rows wait for the signed bound, so a source with rows and no wording yet
+    // reads as loading, never as empty.
+    let Some(wording) = core.data.coverage_wording.as_ref() else {
+        return Some(RyeOsSourceStatusVm {
+            state: "loading".into(),
+            message: "Waiting for source".into(),
+            stale: false,
+        });
+    };
     let message = wording
         .resolve("partial", ROW_CUT_REASON)
         .label
