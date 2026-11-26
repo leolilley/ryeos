@@ -1,0 +1,18 @@
+# ryeos:signed:2026-11-26T01:09:56Z:99268d89791aba0ef23cfa3d58ff3d46702ba3024b10efae673c0565a4cbbc05:BqExBKLoF8sCXO3qNXehHl53kVwh8IjCfWzLpbnUof+Y6Tjz8c2c3oyHYRjgN+wYggBgcPd4ZqizLvqWwWgHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- pull
+description: Install a published bundle from a link, checking the node key and record hash you were given. A host that is, or resolves to, a loopback, private, link-local or metadata address is refused, and so is a host an egress proxy would carry (its address cannot be checked from here; list it in NO_PROXY). --allow-internal true accepts both, for a node pulling from inside its own network
+help:
+  usage: "ryeos pull <https://host/published/id> --node fp:<node key fingerprint> --expect <record hash> [--allow-internal true]"
+  examples:
+    - "ryeos pull https://example.com/published/0123456789abcdef0123456789abcdef --node fp:<node key fingerprint> --expect <record hash> [--allow-internal true]"
+forms:
+- slots:
+  - field: url
+    matcher: string
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/pull

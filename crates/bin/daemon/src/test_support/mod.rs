@@ -808,6 +808,7 @@ pub struct DaemonHarness {
 enum FastBundleSelection {
     CoreOnly,
     CoreScheduling,
+    CoreKnowledge,
     Standard,
     StandardCentralAuth,
     Development,
@@ -1181,6 +1182,24 @@ impl DaemonHarness {
         .await
     }
 
+    /// A node initialized with the shipped Core-knowledge profile and its own node
+    /// and operator keys: the smallest shipped selection that provides the
+    /// `knowledge` kind, for a test that needs a second node that does not
+    /// already hold the bundle it pulls.
+    pub async fn start_fast_core_knowledge_with_node_and_user_keys(
+        node_key: SigningKey,
+        user_key: SigningKey,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::CoreKnowledge,
+            |_state_path, _user_space, _fixture| Ok(()),
+            |_| {},
+        )
+        .await
+    }
+
     /// Cross-site fixture with distinct node and operator identities. This is
     /// the faithful shape for forwarding tests: the source operator must be an
     /// origin-bound remote authority on the target, never its local operator.
@@ -1224,6 +1243,9 @@ impl DaemonHarness {
             FastBundleSelection::CoreScheduling => {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
+            FastBundleSelection::CoreKnowledge => {
+                copy_core_to_temp_prepared(&["core", "knowledge"])?
+            }
             FastBundleSelection::Standard => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Standard
                     .exact_bundles()
@@ -1246,6 +1268,7 @@ impl DaemonHarness {
         let selected_profile = match bundle_selection {
             FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
             FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
+            FastBundleSelection::CoreKnowledge => fast_fixture::FastFixtureProfile::CoreKnowledge,
             FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
             FastBundleSelection::StandardCentralAuth => {
                 fast_fixture::FastFixtureProfile::StandardCentralAuth
@@ -1287,6 +1310,9 @@ impl DaemonHarness {
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         match bundle_selection {
+            FastBundleSelection::CoreKnowledge => {
+                fast_fixture::register_core_knowledge_composition(&state_path, &fixture)?
+            }
             FastBundleSelection::Standard => {
                 fast_fixture::register_standard_composition(&state_path, &fixture)?
             }
@@ -1565,6 +1591,11 @@ impl DaemonHarness {
                 serde_json::json!({ "thread_id": thread_id }),
             )
             .await?;
+        // A thread the daemon does not know answers NotFound, as one that is
+        // not the caller's does.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         anyhow::ensure!(status.is_success(), "threads/get failed: {status} {body}");
         Ok(body.get("result").filter(|value| !value.is_null()).cloned())
     }
@@ -1744,6 +1775,25 @@ impl DaemonHarness {
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
         Ok((status, value))
+    }
+
+    /// Send one request with no signature, cookie or credential of any kind,
+    /// as a stranger would. Returns (status, response headers, body bytes).
+    pub async fn raw_request(
+        &self,
+        method: reqwest::Method,
+        route_path: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>)> {
+        let resp = ryeos_http_egress::client_builder()
+            .build()
+            .expect("the HTTP client builds")
+            .request(method, format!("http://{}{}", self.bind, route_path))
+            .send()
+            .await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.bytes().await?.to_vec();
+        Ok((status, headers, body))
     }
 
     /// Path the daemon writes standalone-mode audit records to.

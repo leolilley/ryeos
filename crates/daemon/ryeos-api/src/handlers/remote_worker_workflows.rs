@@ -1740,11 +1740,31 @@ async fn observe_exact_graph_terminal(
         )? {
             return Ok(None);
         }
-        let value = response
-            .pointer("/result/result")
+        // The thread read names the body by digest; the body comes from
+        // `threads/result`, which only the thread's owner may read. Both are
+        // shaped for the key that asks, so neither depends on that key being
+        // the target's operator.
+        let named = response
+            .pointer("/result_digest")
+            .and_then(Value::as_str)
+            .context("completed target Graph named no result digest")?
+            .to_owned();
+        let fetched = client.threads_result(&current).await?;
+        if fetched.pointer("/thread_id").and_then(Value::as_str) != Some(current.as_str()) {
+            bail!("target Graph result answered for another thread");
+        }
+        let value = fetched
+            .pointer("/result")
             .cloned()
+            .filter(|value| !value.is_null())
             .context("completed target Graph omitted its result")?;
         let digest = ryeos_state::objects::canonical_value_digest(&value)?;
+        if digest != named {
+            return Err(TargetWorkflowTerminalInvalid(
+                "target Graph result differs from its named digest".to_owned(),
+            )
+            .into());
+        }
         let result: ryeos_runtime::graph_result::GraphResult = serde_json::from_value(value)
             .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
         if !result.success

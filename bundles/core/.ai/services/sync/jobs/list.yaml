@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:91ace3e3c6b3f91b6f766f004277284e54b9ec6fc2f44f9d813d60938d3289d3:ApBh8ngWA/F4XCwnODLZ7wyz8TaAh7ZSTW39naZJOQJfrZor1BLF1eMzmFJyjHTnZtwXLguD0EOU1U58SEcBBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T03:37:55Z:6ad4423e48891536abc7837edd647bbaad134eae86181d774bc6b9b8aeefed7d:R/C1LwXb+pDUJ2maT8tgRhS/NZVIAakbeIHJly9i2Mry/TxUJh3LKH4OaCpS9bu1Gwty2gWuUvz+cdwpkMacBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sync.jobs.list
 required_caps: ["ryeos.execute.service.sync/jobs/list"]
@@ -6,23 +6,5 @@ schema:
   state: string?
   limit: number?
 description: "List durable distributed sync jobs with optional state filtering"
-# uploaded_hashes and fetched_hashes are left unlisted: operator-only, they can be very long lists.
-disclosure:
-  principal:
-    - "/jobs/*/job_id"
-    - "/jobs/*/operation_type"
-    - "/jobs/*/state"
-    - "/jobs/*/phase"
-    - "/jobs/*/attempt_count"
-    - "/jobs/*/max_attempts"
-    - "/jobs/*/created_at"
-    - "/jobs/*/updated_at"
-    - "/jobs/*/finished_at"
-  free_text:
-    - "/jobs/*/peer"
-    - "/jobs/*/last_error"
-    - "/jobs/*/result"
-    - "/jobs/*/roots"
-    - "/jobs/*/heads"
-  max_items: 4096
-  max_result_bytes: 1048576
+# Sync jobs are node-global with no owner: the handler admits only the node operator, and nothing a peer node calls reads them.
+disclosure: {}

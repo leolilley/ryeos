@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:f4959a03c908d2b308fb2d6103acc1b27099db102950ced22cef0a61c9f8ab20:op9WvxycpkjoLoUm/DXyla23S3kRWp+1lN/SFnwtJMQK7FNz91YAnwzfjdWoQCBMmPDI6zu+ZO31z5mEtqL9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:50:54Z:bd2389165f03dab22f446fc2b6592d80ed90a22ca6d330ba67431aa6f4028825:YXhPNWiIUYSUXDoqG53XDnuW8Chr8ph9W0yy+D2mc/d++XK+/zXyNyADv7C82oml6pEHxyj+x+njSz9/0DitAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: vault.set
 required_caps: ["ryeos.execute.service.vault/set"]
@@ -6,7 +6,8 @@ schema:
   name: string
   value: string
 description: "Set a secret in the node vault"
-# The value is never echoed; vault_fingerprint is key material and stays operator-only.
+# The value is never echoed. This service returns no key digest; the vault public key's
+# digest is published by identity/public_key.
 disclosure:
   principal:
     - "/name"

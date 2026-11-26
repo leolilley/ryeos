@@ -46,6 +46,10 @@ struct PreparedTargetPlacement {
 struct TargetAdoptionQualificationMeasurements {
     event_replay_ms: Option<u64>,
     worker_attach_recovery_ms: Option<u64>,
+    /// Which return path of the adoption handler produced the measurements,
+    /// so a stage observation that is absent can be tied to the path that
+    /// skips the stage (a re-driven adoption never replays events again).
+    adoption_path: Option<&'static str>,
 }
 
 #[cfg(any(test, feature = "handoff-test-support"))]
@@ -57,6 +61,7 @@ fn attach_target_adoption_qualification_measurements(
         "schema":"ryeos.worker_handoff_target_adoption_measurements.v1",
         "event_replay_ms":measurements.event_replay_ms,
         "worker_attach_recovery_ms":measurements.worker_attach_recovery_ms,
+        "adoption_path":measurements.adoption_path,
     });
     response
 }
@@ -1684,6 +1689,7 @@ async fn adopt_authorized(
         {
             qualification_measurements.worker_attach_recovery_ms =
                 Some(worker_attach_started.elapsed_millis());
+            qualification_measurements.adoption_path = Some("projected_attachment_receipt");
         }
         let result = WorkerPlacementAdoptResult::Attached {
             response,
@@ -1888,6 +1894,7 @@ async fn adopt_authorized(
         {
             qualification_measurements.worker_attach_recovery_ms =
                 Some(worker_attach_started.elapsed_millis());
+            qualification_measurements.adoption_path = Some("attached_before_import");
         }
         return Ok(response);
     }
@@ -1933,6 +1940,7 @@ async fn adopt_authorized(
             {
                 qualification_measurements.worker_attach_recovery_ms =
                     Some(worker_attach_started.elapsed_millis());
+                qualification_measurements.adoption_path = Some("attached_after_launch_claim_wait");
             }
             return Ok(response);
         }
@@ -2035,6 +2043,7 @@ async fn adopt_authorized(
         {
             qualification_measurements.worker_attach_recovery_ms =
                 Some(worker_attach_started.elapsed_millis());
+            qualification_measurements.adoption_path = Some("attached_after_import_profile_lock");
         }
         return Ok(response);
     }
@@ -2167,6 +2176,7 @@ async fn adopt_authorized(
         {
             qualification_measurements.worker_attach_recovery_ms =
                 Some(worker_attach_started.elapsed_millis());
+            qualification_measurements.adoption_path = Some("attached_after_import_launch");
         }
         return Ok(response);
     }

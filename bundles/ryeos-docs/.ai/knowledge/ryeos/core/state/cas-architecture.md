@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:05:09Z:f7a155df353769d6cc536ffaa2aa667bf127c5d89642f52649c2d020cad7378f:mgxE+wOeXpsR6sH/h/QDvPawVDn78rCpedmSET6d1H4qg3yE4eSu2VVtYrR+whdnm5SvlwRb2z8caIWEYva7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T01:04:20Z:6636bebf55625e5b62ebdc328d55c945777ccad1818f3a79ea674fc8c7f2a064:M0LD2+k6pVIAAPrO67TD9cGpkpLSFlGaYzpBqlAnGjnoJ/mTuSbC+4IIpNenQLX+CZwmlA16LD7GyGdSNNuqDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -145,11 +145,18 @@ database class determines recovery:
 
 - `runtime.sqlite3` is exact-current execution history. A predecessor table or
   embedded authority contract fails before row interpretation and requires the
-  operator-confirmed thread-history/project-head reset; normal open never
+  operator-confirmed `ryeos node reset execution-history` (which also retires
+  project heads only when the release's cut says so); normal open never
   migrates or reinterprets it;
-- `operational.sqlite3` is retained source-of-truth state. Deployed predecessor
-  schemas advance only through explicit atomic forward migrations; it is never
-  reset to activate a new schema;
+- `operational.sqlite3` is retained source-of-truth state, and it is exact too:
+  the binary opens only its current schema version and refuses any other with
+  a typed error that says there is no migration. It is never silently reset,
+  archived or rewritten. To start a fresh store the operator, with the node
+  stopped and the old file preserved, removes `operational.sqlite3`, its
+  `-wal` and `-shm` sidecars and its initialized marker, and loses what the
+  store held (sync jobs, CAS-entry attribution, admission-attestation lookup
+  rows and credential-profile ownership). Only its replay-index rows have a
+  narrower reset, `ryeos node reset replay-indexes`;
 - rebuildable stores (`projection.<instance-id>.sqlite3` and
   `scheduler.sqlite3`) evolve through their explicit reset-and-rebuild paths
   from durable source material.

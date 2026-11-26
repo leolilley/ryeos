@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T03:32:39Z:f1dd436d645c62f4aaaf76104173b642072233201bba5e3d604d685e6ef932de:aHD86pRq4eNCvDzGQAQf8xiJZ+L5P5OhTEMOFLyk1TTnjlzjR84gtAgIFzouv52pg517cOMb0lgyQYjnLvTeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T20:30:44Z:7bcaa8cc7e858501383b6348af6a4517b900c54ba03f0ef04261d30d5c0cc04a:9AsZm1MbtIJZ3FVE1Kkpu8rxBBZI8xfHP3vnKRpCqIpf6MsR9/HN0df/GqP0M8xIBamoRAqdWIc8McWvFJkxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -189,6 +189,18 @@ policies:
     # `refuse` is final. A class not listed is refused, so no class is accepted
     # until it is listed `allow` here.
     classes: {}
+  publication:
+    schema: 1
+    # What this node publishes to strangers. daily_bytes caps the bytes the
+    # /published routes serve over a rolling 24 hours, across every publication
+    # and reader: it bounds the bill, not availability, since a stranger can use
+    # up the day's cap. max_lifetime_days bounds how far ahead a publication's
+    # not_after may be; code adds a hard maximum node data cannot raise.
+    daily_bytes: 1073741824
+    max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
