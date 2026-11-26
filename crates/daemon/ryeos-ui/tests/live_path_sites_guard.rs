@@ -61,6 +61,26 @@ const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
         "a session's project is the directory pinned at launch; the key names no path",
     ),
     (
+        "crates/engine/ryeos-executor/src/execution/launch.rs",
+        "builds a resolution-cache key's root identity: records the root's live path only when the already-chosen subject authority is live",
+    ),
+    (
+        "crates/engine/ryeos-executor/src/execution/effective_program_projection.rs",
+        "checks that a plan context's already-chosen authority is live or projectless before projecting the effective program",
+    ),
+    (
+        "crates/engine/ryeos-executor/src/dispatch.rs",
+        "one arm of a match on the admission's subject authority: a live authority is not a pinned or projectless resolution",
+    ),
+    (
+        "crates/daemon/ryeos-app/src/execution_provenance.rs",
+        "maps an already-built root or child live provenance to the live authority and defines root_live_fs, whose callers are pinned below",
+    ),
+    (
+        "crates/daemon/ryeos-app/src/resolution_cache.rs",
+        "validates that a resolution binding and its cache key agree with the admitted subject authority and live project root; it chooses no path",
+    ),
+    (
         "crates/engine/ryeos-engine/src/contracts/execution_plan.rs",
         "engine type definitions and matching",
     ),
@@ -90,6 +110,115 @@ const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
     ),
 ];
 
+/// The exact marker lines of the five matcher files. A second, different
+/// live-path line in one of them is a new site and trips the guard, which a
+/// file-level exemption alone would hide.
+const PINNED_MARKER_LINES: &[(&str, &[&str])] = &[
+    (
+        "crates/engine/ryeos-executor/src/execution/launch.rs",
+        &["ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs"],
+    ),
+    (
+        "crates/engine/ryeos-executor/src/execution/effective_program_projection.rs",
+        &["SubjectResolutionAuthority::LiveFs | SubjectResolutionAuthority::Projectless"],
+    ),
+    (
+        "crates/engine/ryeos-executor/src/dispatch.rs",
+        &["SubjectResolutionAuthority::LiveFs => false,"],
+    ),
+    (
+        "crates/daemon/ryeos-app/src/execution_provenance.rs",
+        &["ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs"],
+    ),
+    (
+        "crates/daemon/ryeos-app/src/resolution_cache.rs",
+        &[
+            "SubjectResolutionAuthority::LiveFs => {",
+            "matches!(self.subject_authority, SubjectResolutionAuthority::LiveFs)",
+            "SubjectResolutionAuthority::LiveFs",
+            "live_project_root: matches!(subject_authority, SubjectResolutionAuthority::LiveFs)",
+            "SubjectResolutionAuthority::LiveFs => {",
+            "SubjectResolutionAuthority::Projectless | SubjectResolutionAuthority::LiveFs",
+            "live_project_root: matches!(self.subject_authority, SubjectResolutionAuthority::LiveFs)",
+            "if matches!(self.subject_authority, SubjectResolutionAuthority::LiveFs) {",
+        ],
+    ),
+];
+
+/// Production files that call `root_live_fs(`, which is where a live path
+/// becomes a provenance. Each is a must-admit site, a route-authored site
+/// (literal path checked when the route loads), the session-pinned UI
+/// dispatch, or the definition itself. A new caller trips the guard.
+const ROOT_LIVE_FS_CALLERS: &[&str] = &[
+    "crates/bin/daemon/src/scheduler_impl.rs",
+    "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
+    "crates/daemon/ryeos-api/src/handlers/bundle_smoke.rs",
+    "crates/daemon/ryeos-api/src/handlers/threads_input.rs",
+    "crates/daemon/ryeos-api/src/routes/response_modes/execute_mode.rs",
+    "crates/daemon/ryeos-api/src/routes/invokers/dispatch_invocation.rs",
+    "crates/daemon/ryeos-api/src/routes/invokers/launch_invocation.rs",
+    "crates/daemon/ryeos-ui/src/handlers/ui_invocations_dispatch.rs",
+    "crates/daemon/ryeos-app/src/execution_provenance.rs",
+];
+
+/// Production files that name a child live provenance: its definition and
+/// derivation from a parent, and the readers that match on it. A child
+/// inherits its parent's admitted root, so a new file here is a new way to
+/// make one.
+const CHILD_LIVE_PROJECT_FILES: &[&str] = &[
+    "crates/daemon/ryeos-app/src/execution_provenance.rs",
+    "crates/daemon/ryeos-app/src/launch_metadata.rs",
+    "crates/daemon/ryeos-app/src/thread_lifecycle/sealed_request.rs",
+    "crates/engine/ryeos-executor/src/execution/runner.rs",
+];
+
+#[test]
+fn live_provenance_has_only_the_listed_constructors_and_matchers() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let mut files = Vec::new();
+    workspace_files(&root, &root.join("crates"), &mut files);
+    let mut roots = std::collections::BTreeSet::new();
+    let mut children = std::collections::BTreeSet::new();
+    for file in &files {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        let body = non_test_text(&text);
+        let name = file.to_string_lossy().replace('\\', "/");
+        if body.contains("root_live_fs(") {
+            roots.insert(name.clone());
+        }
+        if body.contains("ChildLiveProject {") {
+            children.insert(name);
+        }
+    }
+    let expect = |list: &[&str]| -> std::collections::BTreeSet<String> {
+        list.iter().map(|path| (*path).to_owned()).collect()
+    };
+    assert_eq!(
+        roots,
+        expect(ROOT_LIVE_FS_CALLERS),
+        "the production callers of root_live_fs changed"
+    );
+    assert_eq!(
+        children,
+        expect(CHILD_LIVE_PROJECT_FILES),
+        "the production files naming ChildLiveProject changed"
+    );
+}
+
+#[test]
+fn the_matcher_files_have_exactly_their_pinned_live_path_lines() {
+    let root = ryeos_engine::test_support::workspace_root();
+    for (path, pinned) in PINNED_MARKER_LINES {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        let found: Vec<&str> = non_test_text(&text)
+            .lines()
+            .map(str::trim)
+            .filter(|line| LIVE_MARKERS.iter().any(|marker| line.contains(marker)))
+            .collect();
+        assert_eq!(&found, pinned, "{path}: its live-path lines changed");
+    }
+}
+
 fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -108,17 +237,31 @@ fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const TEST_MODULE_MARKER: &str = "\n#[cfg(test)]\nmod ";
+/// Where a source file's test module starts: a `#[cfg(test)]` line directly
+/// followed by `mod`, `pub mod` or `pub(crate) mod`. An item-level
+/// `#[cfg(test)]` is legal anywhere and is not the end of production code.
+fn test_module_start(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find("\n#[cfg(test)]\n") {
+        let start = from + at;
+        let next = text[start + "\n#[cfg(test)]\n".len()..].trim_start();
+        if next.starts_with("mod ")
+            || next.starts_with("pub mod ")
+            || next.starts_with("pub(crate) mod ")
+            || next.starts_with("pub(super) mod ")
+        {
+            return Some(start);
+        }
+        from = start + 1;
+    }
+    None
+}
 
-/// The part of a source file before its test module. A `#[cfg(test)]` on a
-/// single item or import earlier in the file is not the end of production
-/// code, so the cut is the top-level test module only. A file with no test
-/// module is production in full; the sweep asserts that many files do have
-/// one, so a marker that stops matching fails the guard instead of passing
-/// silently.
+/// The production text of a source file. A file with no test module is
+/// production in full; the sweep asserts that many files do have one, so a
+/// cut that stops matching fails the guard instead of passing silently.
 fn non_test_text(text: &str) -> &str {
-    text.find(TEST_MODULE_MARKER)
-        .map_or(text, |end| &text[..end])
+    test_module_start(text).map_or(text, |end| &text[..end])
 }
 
 #[test]
@@ -126,7 +269,7 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     // A new site or a moved exemption changes these counts and so fails here:
     // add the file to the right list, with a reason if it is exempt.
     assert_eq!(MUST_ADMIT.len(), 7, "the must-admit list changed");
-    assert_eq!(NEEDS_NO_ADMISSION.len(), 14, "the exemption list changed");
+    assert_eq!(NEEDS_NO_ADMISSION.len(), 19, "the exemption list changed");
     let root = ryeos_engine::test_support::workspace_root();
     let mut files = Vec::new();
     workspace_files(&root, &root.join("crates"), &mut files);
@@ -137,7 +280,7 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     let mut with_test_module = 0_usize;
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        with_test_module += usize::from(text.contains(TEST_MODULE_MARKER));
+        with_test_module += usize::from(test_module_start(&text).is_some());
         let body = non_test_text(&text);
         if !LIVE_MARKERS.iter().any(|marker| body.contains(marker)) {
             continue;
@@ -228,9 +371,7 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
     let text =
         std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
             .unwrap();
-    let production = &text[..text
-        .find(TEST_MODULE_MARKER)
-        .expect("loader.rs has a top-level test module")];
+    let production = &text[..test_module_start(&text).expect("loader.rs has a test module")];
     assert!(production.contains("fn system_scan_root"));
     assert!(production.contains("fn bundle_scan_root"));
     for forbidden in [
