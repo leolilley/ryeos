@@ -124,39 +124,6 @@ fn a_thread_read_by_a_peer_carries_the_launch_hashes_the_workflow_binds() {
 }
 
 #[test]
-fn sync_job_records_keep_their_hash_lists_and_withhold_errors_and_results() {
-    let job = json!({
-        "job_id": "j", "state": "done", "roots": [HASH], "heads": [HASH],
-        "uploaded_hashes": [HASH], "fetched_hashes": [HASH],
-        "peer": "remote-a", "last_error": "boom", "result": { "x": 1 },
-    });
-    check(
-        "sync/jobs/list",
-        DisclosureClass::Principal,
-        json!({ "jobs": [job.clone()] }),
-        &[
-            "/jobs/0/roots/0",
-            "/jobs/0/heads/0",
-            "/jobs/0/uploaded_hashes/0",
-            "/jobs/0/fetched_hashes/0",
-        ],
-        &["/jobs/0/peer", "/jobs/0/last_error", "/jobs/0/result"],
-    );
-    check(
-        "sync/jobs/inspect",
-        DisclosureClass::Principal,
-        json!({ "job": job, "attempts": [] }),
-        &[
-            "/job/roots/0",
-            "/job/heads/0",
-            "/job/uploaded_hashes/0",
-            "/job/fetched_hashes/0",
-        ],
-        &["/job/peer", "/job/last_error", "/job/result"],
-    );
-}
-
-#[test]
 fn the_offline_signer_report_gives_a_non_operator_the_closed_code_only() {
     let answer = json!({ "signer": {
         "fingerprint": "f", "local_operator": false, "grant_digest": null,

@@ -302,6 +302,11 @@ pub fn facts_report(app_root: &Path, node: &NodeIdentity, signer: Option<&str>) 
     Ok(report)
 }
 
+/// The closed codes of `signer.grant_error_code`: lowercase letters, digits
+/// and `_` only, never message text, since a non-operator reads them.
+pub const GRANT_ERROR_CODE_OPERATOR_IDENTITY_UNREADABLE: &str = "operator_identity_unreadable";
+pub const GRANT_ERROR_CODE_GRANT_UNVERIFIABLE: &str = "grant_unverifiable";
+
 /// Under what authority the key `fingerprint` signs a request for this node,
 /// as the startup applier will judge it: the local operator, whose authority
 /// is the key on the volume and who names no grant, or a grant, whose current
@@ -328,7 +333,7 @@ pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) ->
         Ok(_) => {}
         Err(error) => {
             return ungranted(
-                Some("operator_identity_unreadable"),
+                Some(GRANT_ERROR_CODE_OPERATOR_IDENTITY_UNREADABLE),
                 Some(format!(
                     "the local operator identity cannot be read: {error:#}"
                 )),
@@ -346,7 +351,10 @@ pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) ->
             "origin_site_id": grant.configured_origin_site_id,
         }),
         Ok(None) => ungranted(None, None),
-        Err(error) => ungranted(Some("grant_unverifiable"), Some(format!("{error:#}"))),
+        Err(error) => ungranted(
+            Some(GRANT_ERROR_CODE_GRANT_UNVERIFIABLE),
+            Some(format!("{error:#}")),
+        ),
     }
 }
 
@@ -832,5 +840,21 @@ mod tests {
         let ungranted = signer_report(fx.path(), &fx.node, &stranger);
         assert_eq!(ungranted["fingerprint"], stranger.as_str());
         assert!(ungranted["grant_digest"].is_null());
+    }
+
+    #[test]
+    fn the_grant_error_codes_are_closed_identifiers() {
+        for code in [
+            GRANT_ERROR_CODE_OPERATOR_IDENTITY_UNREADABLE,
+            GRANT_ERROR_CODE_GRANT_UNVERIFIABLE,
+        ] {
+            assert!(
+                !code.is_empty()
+                    && code.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{code}"
+            );
+        }
     }
 }

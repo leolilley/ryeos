@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T00:50:54Z:2e296f40bde6fccbaf2bee0d709b756c71bcae09be0d5918780d4d7b767d721d:Y0Hgb6Ue0CQPKSCzOZ3ydsrHx43Wjr4zj3xZg1yF4SyP1AItzYbJU1T81Il1XlcPyTacj/kLGg8APXw95CYvAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:91ace3e3c6b3f91b6f766f004277284e54b9ec6fc2f44f9d813d60938d3289d3:ApBh8ngWA/F4XCwnODLZ7wyz8TaAh7ZSTW39naZJOQJfrZor1BLF1eMzmFJyjHTnZtwXLguD0EOU1U58SEcBBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sync.jobs.list
 required_caps: ["ryeos.execute.service.sync/jobs/list"]
@@ -18,13 +18,11 @@ disclosure:
     - "/jobs/*/created_at"
     - "/jobs/*/updated_at"
     - "/jobs/*/finished_at"
-    - "/jobs/*/roots"
-    - "/jobs/*/heads"
-    - "/jobs/*/uploaded_hashes"
-    - "/jobs/*/fetched_hashes"
   free_text:
     - "/jobs/*/peer"
     - "/jobs/*/last_error"
     - "/jobs/*/result"
+    - "/jobs/*/roots"
+    - "/jobs/*/heads"
   max_items: 4096
   max_result_bytes: 1048576
