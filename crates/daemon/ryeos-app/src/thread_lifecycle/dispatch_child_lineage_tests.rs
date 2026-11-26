@@ -337,3 +337,108 @@ fn a_running_thread_cannot_regress_its_usage_and_a_resent_settlement_is_accepted
         .expect("held settlement");
     assert_eq!(held.payload["completed_turns"], json!(3));
 }
+
+/// Two callers racing to record the same parent→child lineage event: the write
+/// permit and store lock cover the once-only check and the append, so exactly
+/// one appends and the other finds the event already written.
+#[test]
+fn racing_lineage_appends_leave_exactly_one_event() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_owner, state) = crate::state::test_support::build(root.path()).expect("compose");
+    let operation = "f".repeat(64);
+    dispatched_child(&state, "T-parent", "T-child", &operation);
+    let payload = json!({
+        "child_thread_id": "T-child",
+        "item_id": "directive:test/T-child",
+        "operation_id": operation,
+        "spawn_reason": "dispatch",
+    });
+
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let racers = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    state
+                        .threads
+                        .append_child_thread_spawned_once(
+                            "T-parent",
+                            "T-parent",
+                            "T-child",
+                            payload.clone(),
+                        )
+                        .expect("append once")
+                })
+            })
+            .collect::<Vec<_>>();
+        racers
+            .into_iter()
+            .map(|racer| racer.join().expect("racer"))
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == ChildLineageAppendOutcome::Appended)
+            .count(),
+        1,
+        "exactly one racer appends: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == ChildLineageAppendOutcome::AlreadyPresent)
+            .count(),
+        1,
+        "the other finds the event written: {outcomes:?}"
+    );
+    assert_eq!(spawned_events(&state, "T-parent"), vec![payload]);
+}
+
+/// A same-chain child (its `upstream_thread_id` is the parent) already has an
+/// edge derived from that field, and still owes the daemon-written event.
+#[test]
+fn same_chain_child_with_a_derived_edge_still_gets_its_lineage_event() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_owner, state) = crate::state::test_support::build(root.path()).expect("compose");
+    let operation = "9".repeat(64);
+    let store = &state.state_store;
+    store
+        .create_thread_for_test(&thread_record("T-parent"))
+        .expect("parent thread");
+    store
+        .mark_thread_running("T-parent", None)
+        .expect("start parent");
+    store
+        .reserve_runtime_action_intent(
+            &operation,
+            "T-parent",
+            RuntimeActionMode::Inline,
+            &"b".repeat(64),
+            "T-child",
+            None,
+        )
+        .expect("reserve action intent");
+    let mut child = thread_record("T-child");
+    child.chain_root_id = "T-parent".to_string();
+    child.upstream_thread_id = Some("T-parent".to_string());
+    // A non-root thread carries no captured history policy of its own.
+    child.captured_history_policy = None;
+    store
+        .create_thread_for_test(&child)
+        .expect("same-chain child");
+    store
+        .record_child_link("T-parent", "T-child", "dispatch")
+        .expect("link child");
+
+    assert_eq!(
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
+        DispatchChildLineage::Recorded(ChildLineageAppendOutcome::Appended)
+    );
+    assert_eq!(spawned_events(&state, "T-parent").len(), 1);
+}
