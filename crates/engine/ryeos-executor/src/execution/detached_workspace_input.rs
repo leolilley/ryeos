@@ -10,7 +10,10 @@
 //! an immutable workspace operation is reserved, the exact current generation
 //! is captured while the parent's borrowers are briefly quiesced, and the
 //! generation is bound to that intent, which owns it from then on. The parent
-//! is resumed and the operation released before the child exists. Nothing
+//! is resumed and the operation released before the child exists. The
+//! released intent keeps the captured generation reachable for garbage
+//! collection until the child's thread row exists; from then on the child's own
+//! sealed resume authority roots it for the child's lifetime. Nothing
 //! here freezes the parent's workspace or waits on the parent's root gate: the
 //! caller already holds one child-operation lease for the whole call, so a
 //! terminalizing wait from here would wait on itself, and a frozen workspace
@@ -28,6 +31,7 @@ use anyhow::{Context, Result};
 use ryeos_app::callback_token::CallbackCapability;
 use ryeos_app::runtime_db::{NewRuntimeWorkspaceOperation, RuntimeWorkspaceOperationPhase};
 use ryeos_app::state::AppState;
+use ryeos_state::objects::WorkspaceGenerationPair;
 
 /// How a detached child receives its parent's workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +78,9 @@ pub(crate) struct DetachedWorkloadAdmission<'a> {
 /// captured and released finds it `Released` with the input bound and
 /// captures nothing again. Any other phase belongs to a drive that has not
 /// settled and is refused.
+///
+/// Returns the exact generation pair the child receives as data: the one just
+/// captured, or on a retry the one the intent already bound.
 pub(crate) async fn capture_detached_workspace_input(
     state: &AppState,
     parent_thread_id: &str,
@@ -81,21 +88,28 @@ pub(crate) async fn capture_detached_workspace_input(
     parent_project_path: &Path,
     admission: &DetachedWorkloadAdmission<'_>,
     retained_phase: RuntimeWorkspaceOperationPhase,
-) -> Result<()> {
+) -> Result<WorkspaceGenerationPair> {
     match retained_phase {
         RuntimeWorkspaceOperationPhase::Released => {
-            let bound = state
+            let operation = state
                 .state_store
                 .get_runtime_action_intent(operation_id)?
-                .and_then(|intent| intent.workspace_operation)
-                .and_then(|operation| operation.input_snapshot_hash)
-                .is_some();
-            if !bound {
+                .and_then(|intent| intent.workspace_operation);
+            let Some(snapshot_hash) = operation
+                .as_ref()
+                .and_then(|operation| operation.input_snapshot_hash.clone())
+            else {
                 anyhow::bail!(
                     "detach: workspace operation {operation_id} was released without a bound input generation"
                 );
-            }
-            return Ok(());
+            };
+            let pair = WorkspaceGenerationPair {
+                snapshot_hash,
+                output_capture_hash: operation
+                    .and_then(|operation| operation.input_output_capture_hash),
+            };
+            pair.validate()?;
+            return Ok(pair);
         }
         RuntimeWorkspaceOperationPhase::Reserved => {}
         other => anyhow::bail!(
@@ -118,7 +132,7 @@ pub(crate) async fn capture_detached_workspace_input(
         )
     })
     .await?;
-    let (_input_generation, publication, quiesced) =
+    let (input_generation, publication, quiesced) =
         pending.into_unpublished_generation_and_quiesced()?;
     if let Some(publication) = publication
         && let Err(error) = publication.publish()
@@ -147,7 +161,7 @@ pub(crate) async fn capture_detached_workspace_input(
         &[RuntimeWorkspaceOperationPhase::Quiesced],
         RuntimeWorkspaceOperationPhase::Released,
     )?;
-    Ok(())
+    Ok(input_generation)
 }
 
 #[cfg(test)]

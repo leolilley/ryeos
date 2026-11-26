@@ -345,6 +345,25 @@ impl EventStoreService {
             );
         }
 
+        if params
+            .events
+            .iter()
+            .any(|event| event.event_type == ryeos_state::event_types::THREAD_USAGE)
+        {
+            let held = self
+                .state_store
+                .latest_thread_event_by_type(
+                    &thread.thread_id,
+                    ryeos_state::event_types::THREAD_USAGE,
+                )?
+                .map(|record| {
+                    serde_json::from_value::<ryeos_state::ThreadUsage>(record.payload)
+                        .context("thread's held thread_usage settlement is invalid")
+                })
+                .transpose()?;
+            validate_thread_usage_steps(&params.events, held)?;
+        }
+
         let events = params
             .events
             .iter()
@@ -552,6 +571,7 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
     let mut batch_bytes = 0usize;
     let mut cognition_in_chunks = CognitionInAssembler::default();
     for event in events {
+        refuse_daemon_authored(&event.event_type)?;
         if event.event_type == ryeos_state::event_types::MILESTONE
             && event.payload.get("kind").and_then(Value::as_str) == Some("state_anchor")
         {
@@ -611,6 +631,66 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
     Ok(())
 }
 
+/// The event types a runtime may not append: each has a daemon writer, and
+/// another party reads it as the daemon's testimony. The terminal lifecycle
+/// types reach the log only through thread finalization; the rest are written
+/// by the daemon's own lifecycle, launch and lineage paths, which append
+/// through the state store and never through this runtime-facing service.
+/// Types with no writer at all (the continuation and command vocabulary) are
+/// listed so a runtime cannot be the first to write one.
+///
+/// `artifact_published` and `thread_facet_set` stay appendable: a runtime
+/// copy of either is display or cohort data that readers re-derive.
+pub const DAEMON_AUTHORED_EVENT_TYPES: &[&str] = &[
+    // Written by the daemon's evidence, observation and accounting paths.
+    ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
+    ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
+    ryeos_state::event_types::HOOK_FAILED,
+    ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+    ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
+    ryeos_state::event_types::ATTENTION_ACKNOWLEDGED,
+    ryeos_state::event_types::LAUNCH_BINDING_REBOUND,
+    // Birth and start: written by the daemon when it creates and starts a
+    // thread. A runtime-written one would let a thread restate the chain's
+    // usage subject.
+    ryeos_state::event_types::THREAD_CREATED,
+    ryeos_state::event_types::THREAD_STARTED,
+    // Terminal lifecycle: written only when the daemon finalizes a thread.
+    ryeos_state::event_types::THREAD_COMPLETED,
+    ryeos_state::event_types::THREAD_FAILED,
+    ryeos_state::event_types::THREAD_KILLED,
+    ryeos_state::event_types::THREAD_CANCELLED,
+    ryeos_state::event_types::THREAD_TIMED_OUT,
+    // Lineage and continuation edges the daemon authors.
+    ryeos_state::event_types::THREAD_CONTINUED,
+    ryeos_state::event_types::CHILD_THREAD_SPAWNED,
+    ryeos_state::event_types::CHILD_THREAD_SETTLED,
+    ryeos_state::event_types::WORKER_CONTINUATION_ADMITTED,
+    ryeos_state::event_types::EDGE_RECORDED,
+    // Launch facts the daemon records for the explain view.
+    ryeos_state::event_types::AS_LAUNCHED_RESOLUTION,
+    ryeos_state::event_types::AS_LAUNCHED_REF_BINDINGS,
+    ryeos_state::event_types::RUNTIME_LAUNCH_FACTS,
+    ryeos_state::event_types::LAUNCH_AUGMENTATION_CACHE_HIT,
+    ryeos_state::event_types::PROCESS_INPUT_ROOT_SELECTED,
+    // Vocabulary with no writer: reserved, not open to a runtime.
+    ryeos_state::event_types::CONTINUATION_REQUESTED,
+    ryeos_state::event_types::CONTINUATION_ACCEPTED,
+    ryeos_state::event_types::COMMAND_SUBMITTED,
+    ryeos_state::event_types::COMMAND_CLAIMED,
+    ryeos_state::event_types::COMMAND_COMPLETED,
+];
+
+/// Refuse an event type a runtime may not append.
+fn refuse_daemon_authored(event_type: &str) -> Result<()> {
+    if DAEMON_AUTHORED_EVENT_TYPES.contains(&event_type) {
+        bail!(
+            "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
+        );
+    }
+    Ok(())
+}
+
 /// V5.5 D11: delegate to the typed `RuntimeEventType` enum.
 ///
 /// `crates/engine/ryeos-runtime/src/events.rs` is the single source of truth for
@@ -619,26 +699,44 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
 /// the two — the producer and consumer surfaces both fail to compile
 /// (or accept the new variant) atomically.
 fn validate_event_type(event_type: &str) -> Result<()> {
-    // The budget-transition audit event is daemon-authored only: it is
-    // emitted exclusively from committed ledger transitions through the
-    // transactional outbox publisher (which appends via the state store, not
-    // this runtime-facing service). A runtime-authored copy could poison the
-    // outbox exact-once recovery check.
-    if matches!(
-        event_type,
-        ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
-            | ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
-            | ryeos_state::event_types::HOOK_FAILED
-            | ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
-            | ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
-            | ryeos_state::event_types::ATTENTION_ACKNOWLEDGED
-            | ryeos_state::event_types::LAUNCH_BINDING_REBOUND
-    ) {
-        bail!(
-            "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
-        );
-    }
+    // Daemon-authored types are refused before the vocabulary check. The
+    // budget-transition audit event, for one, is emitted exclusively from
+    // committed ledger transitions through the transactional outbox publisher
+    // (which appends via the state store, not this runtime-facing service); a
+    // runtime-authored copy could poison the outbox exact-once recovery check.
+    refuse_daemon_authored(event_type)?;
     ryeos_runtime::RuntimeEventType::parse(event_type).map(|_| ())
+}
+
+/// Hold a batch's `thread_usage` events to the cumulative rule: each carries
+/// every figure at least as high as the thread's previous settlement. The
+/// first settlement of a thread has nothing to be held to. An identical
+/// payload is accepted, so a settlement re-sent after a lost acknowledgement
+/// is not refused.
+fn validate_thread_usage_steps(
+    events: &[EventAppendItem],
+    held: Option<ryeos_state::ThreadUsage>,
+) -> Result<()> {
+    let mut previous = held;
+    for event in events {
+        if event.event_type != ryeos_state::event_types::THREAD_USAGE {
+            continue;
+        }
+        let usage: ryeos_state::ThreadUsage = serde_json::from_value(event.payload.clone())
+            .context("event append refused: invalid thread_usage payload")?;
+        usage
+            .validate()
+            .context("event append refused: invalid thread_usage payload")?;
+        if let Some(previous) = previous.as_ref()
+            && let Some(field) = usage.cumulative_regression_from(previous)
+        {
+            bail!(
+                "event append refused: thread_usage is not cumulative; `{field}` is lower than the thread's previous settlement"
+            );
+        }
+        previous = Some(usage);
+    }
+    Ok(())
 }
 
 /// The class one runtime event is stored under: the node's signed
@@ -919,7 +1017,7 @@ mod tests {
 
     #[test]
     fn floor_events_are_stored_indexed() {
-        assert_eq!(stored("thread_completed", json!({})).unwrap(), "indexed");
+        assert_eq!(stored("artifact_published", json!({})).unwrap(), "indexed");
         assert!(stored("not_an_event", json!({})).is_err());
     }
 
@@ -996,6 +1094,234 @@ mod tests {
                 "daemon evidence remains part of the indexed event vocabulary"
             );
         }
+    }
+
+    /// The types a runtime append refuses because the vocabulary cannot name
+    /// them: the daemon projects these itself and no runtime may emit them.
+    const UNPARSEABLE_BY_RUNTIME: &[&str] = &[
+        "subprocess_output_observed",
+        "resource_budget_transition_v1",
+        "resource_precontact_budget_transition_v1",
+    ];
+
+    /// Every other registered type, which a runtime may append. A new event
+    /// type must be placed in one of these lists or in
+    /// `DAEMON_AUTHORED_EVENT_TYPES`, so a type with a daemon writer is
+    /// classified when it is added.
+    const RUNTIME_APPENDABLE: &[&str] = &[
+        "stream_opened",
+        "token_delta",
+        "stream_snapshot",
+        "stream_closed",
+        "observation",
+        "artifact_published",
+        "thread_facet_set",
+        "cognition_in",
+        "cognition_out",
+        "cognition_reasoning",
+        "cognition_frame",
+        "cognition_compaction",
+        "tool_call_start",
+        "tool_call_result",
+        "graph_started",
+        "graph_completed",
+        "graph_step_started",
+        "graph_step_completed",
+        "graph_branch_taken",
+        "graph_foreach_started",
+        "graph_foreach_iteration",
+        "graph_follow_suspended",
+        "graph_node_retry",
+        "provider_retry",
+        "cost_untracked",
+        "thread_usage",
+        "milestone",
+    ];
+
+    #[test]
+    fn every_registered_event_type_is_classified_exactly_once() {
+        let mut classified = BTreeSet::new();
+        for list in [
+            DAEMON_AUTHORED_EVENT_TYPES,
+            UNPARSEABLE_BY_RUNTIME,
+            RUNTIME_APPENDABLE,
+        ] {
+            for name in list {
+                assert!(classified.insert(*name), "`{name}` is classified twice");
+            }
+        }
+        let registered: BTreeSet<&str> = ryeos_state::event_types::ALL.iter().copied().collect();
+        assert_eq!(
+            classified, registered,
+            "a registered event type is unclassified, or a list names an unregistered type"
+        );
+        for name in ryeos_state::event_types::ALL {
+            let refused = validate_event_type(name).is_err();
+            let expected = !RUNTIME_APPENDABLE.contains(name);
+            assert_eq!(refused, expected, "refusal of `{name}`");
+            assert_eq!(
+                ryeos_runtime::RuntimeEventType::parse(name).is_err(),
+                UNPARSEABLE_BY_RUNTIME.contains(name),
+                "vocabulary status of `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refused_set_is_exactly_the_decided_list() {
+        let decided: BTreeSet<&str> = [
+            "provider_attempt_budget_transition_v1",
+            "hook_observation_recorded",
+            "hook_failed",
+            "project_observation_recorded",
+            "provider_call_observation_recorded",
+            "attention_acknowledged",
+            "launch_binding_rebound",
+            "thread_created",
+            "thread_started",
+            "thread_completed",
+            "thread_failed",
+            "thread_killed",
+            "thread_cancelled",
+            "thread_timed_out",
+            "thread_continued",
+            "child_thread_spawned",
+            "child_thread_settled",
+            "worker_continuation_admitted",
+            "edge_recorded",
+            "as_launched_resolution",
+            "as_launched_ref_bindings",
+            "runtime_launch_facts",
+            "launch_augmentation_cache_hit",
+            "process_input_root_selected",
+            "continuation_requested",
+            "continuation_accepted",
+            "command_submitted",
+            "command_claimed",
+            "command_completed",
+        ]
+        .into_iter()
+        .collect();
+        let actual: BTreeSet<&str> = DAEMON_AUTHORED_EVENT_TYPES.iter().copied().collect();
+        assert_eq!(actual, decided);
+        assert_eq!(actual.len(), DAEMON_AUTHORED_EVENT_TYPES.len());
+    }
+
+    #[test]
+    fn a_runtime_append_of_a_daemon_authored_type_is_refused_typed_and_whole() {
+        for event_type in DAEMON_AUTHORED_EVENT_TYPES {
+            let error = validate_event_type(event_type).unwrap_err();
+            assert!(
+                error.to_string().contains("daemon-authored"),
+                "unexpected refusal for {event_type}: {error:#}"
+            );
+            // One refused event among accepted ones refuses the whole batch.
+            let error = validate_runtime_event_batch(&[
+                EventAppendItem {
+                    event_type: "observation".to_owned(),
+                    payload: json!({}),
+                },
+                EventAppendItem {
+                    event_type: (*event_type).to_owned(),
+                    payload: json!({}),
+                },
+            ])
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("daemon-authored"),
+                "batch carrying {event_type}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_published_and_thread_facet_set_stay_appendable() {
+        for event_type in ["artifact_published", "thread_facet_set"] {
+            validate_event_type(event_type).unwrap();
+            validate_runtime_event_batch(&[EventAppendItem {
+                event_type: event_type.to_owned(),
+                payload: json!({}),
+            }])
+            .unwrap();
+        }
+    }
+
+    fn usage_item(
+        completed_turns: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        spend_nanos: i64,
+    ) -> EventAppendItem {
+        EventAppendItem {
+            event_type: "thread_usage".to_owned(),
+            payload: json!({
+                "completed_turns": completed_turns,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "spend_usd": ryeos_accounting::UsdNanos::from_nanos(spend_nanos).unwrap(),
+                "spawns_used": 0,
+                "started_at": "2026-06-01T00:00:00Z",
+                "settled_at": "2026-06-01T00:05:00Z",
+                "last_settled_turn_seq": completed_turns,
+                "elapsed_ms": 100,
+            }),
+        }
+    }
+
+    fn held_usage(item: &EventAppendItem) -> ryeos_state::ThreadUsage {
+        serde_json::from_value(item.payload.clone()).unwrap()
+    }
+
+    #[test]
+    fn thread_usage_must_be_cumulative_against_the_threads_previous_settlement() {
+        let held = usage_item(2, 200, 20, 5_000);
+
+        // The first settlement of a thread has nothing to be held to.
+        validate_thread_usage_steps(&[usage_item(1, 100, 10, 1_000)], None).unwrap();
+        // The same payload again (a re-send after a lost acknowledgement) and
+        // a higher one are accepted.
+        validate_thread_usage_steps(std::slice::from_ref(&held), Some(held_usage(&held))).unwrap();
+        validate_thread_usage_steps(&[usage_item(3, 300, 30, 9_000)], Some(held_usage(&held)))
+            .unwrap();
+
+        // Any figure that goes down is refused.
+        for lower in [
+            usage_item(1, 200, 20, 5_000),
+            usage_item(2, 199, 20, 5_000),
+            usage_item(2, 200, 19, 5_000),
+            usage_item(2, 200, 20, 4_999),
+        ] {
+            let error = validate_thread_usage_steps(&[lower], Some(held_usage(&held))).unwrap_err();
+            assert!(error.to_string().contains("not cumulative"), "{error:#}");
+        }
+        // A mixed step (some figures up, one down) is not cumulative.
+        assert!(
+            validate_thread_usage_steps(&[usage_item(3, 100, 40, 9_000)], Some(held_usage(&held)))
+                .is_err()
+        );
+
+        // Settlements inside one batch are held to each other.
+        assert!(
+            validate_thread_usage_steps(
+                &[usage_item(3, 300, 30, 9_000), usage_item(2, 200, 20, 5_000)],
+                Some(held_usage(&held))
+            )
+            .is_err()
+        );
+        assert!(
+            validate_thread_usage_steps(
+                &[usage_item(1, 100, 10, 1_000), usage_item(2, 200, 20, 5_000)],
+                None
+            )
+            .is_ok()
+        );
+
+        // A payload that is not a settlement is refused.
+        let malformed = EventAppendItem {
+            event_type: "thread_usage".to_owned(),
+            payload: json!({"completed_turns": 1}),
+        };
+        assert!(validate_thread_usage_steps(&[malformed], None).is_err());
     }
 
     #[test]

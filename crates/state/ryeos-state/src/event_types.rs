@@ -129,7 +129,8 @@ pub fn thread_terminal_outcome(event_type: &str) -> Option<ThreadOutcomeKind> {
 }
 
 /// Whether an `outcome_code` names a failed run. Lives beside the event
-/// vocabulary so outcome words have a single home.
+/// vocabulary so outcome words have a single home. A child stopped because its
+/// session ended (`cancelled_by_parent_end`) is stopped, never failed.
 pub fn outcome_code_is_failure(code: &str) -> bool {
     if let Some(suffix) = code.strip_prefix("exit:") {
         return suffix != "0";
@@ -150,8 +151,15 @@ pub fn outcome_code_is_failure(code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ALL;
+    use super::{ALL, outcome_code_is_failure};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_child_stopped_by_its_session_ending_is_not_a_failure() {
+        assert!(!outcome_code_is_failure("cancelled_by_parent_end"));
+        assert!(outcome_code_is_failure("cancelled"));
+        assert!(outcome_code_is_failure("failed"));
+    }
 
     #[test]
     fn all_has_no_duplicates() {

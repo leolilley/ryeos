@@ -554,7 +554,8 @@ impl StateStore {
         Ok(candidates)
     }
 
-    /// Append the portable parent→child spawn edge exactly once. The write
+    /// Append the portable parent→child spawn event exactly once (an edge derived
+    /// from `upstream_thread_id` alone is not the event and does not count). The write
     /// permit and store lock cover the appendability check, projected-edge
     /// lookup, and signed-chain append, so concurrent RESERVED re-drives cannot
     /// both observe absence. Projection must be current because it is the
@@ -589,8 +590,11 @@ impl StateStore {
         if g.state_db.get_thread(child_thread_id)?.is_none() {
             bail!("child thread not found while recording lineage: {child_thread_id}");
         }
-        if queries::thread_edge_exists(g.state_db.projection(), parent_thread_id, child_thread_id)?
-        {
+        if queries::thread_spawn_event_edge_exists(
+            g.state_db.projection(),
+            parent_thread_id,
+            child_thread_id,
+        )? {
             return Ok(ChildLineageAppend {
                 outcome: ChildLineageAppendOutcome::AlreadyPresent,
                 persisted: Vec::new(),

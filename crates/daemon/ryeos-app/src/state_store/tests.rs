@@ -8,7 +8,9 @@ use tempfile::tempdir;
 mod birth_tests;
 mod core_tests;
 mod launch_tests;
+mod lineage_tests;
 mod workspace_handoff_tests;
+mod workspace_input_roots_tests;
 
 pub(super) fn projected_event_fixture(
     durability: ryeos_state::objects::EventDurability,
@@ -184,6 +186,8 @@ pub(super) fn rooted_bundle_proof_fixture(
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
         thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         runtime_ref: "runtime:fixture".to_owned(),
         executor_ref: "tool:test/executor".to_owned(),
     }
@@ -1168,6 +1172,8 @@ pub(super) fn continuation_resume_context(
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
         thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         executor_ref: Some("native:test".to_string()),
         runtime_ref: None,
     }
