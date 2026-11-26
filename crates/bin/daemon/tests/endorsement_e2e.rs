@@ -658,6 +658,12 @@ async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
     )
     .await;
     assert_eq!(status, 200, "{recorded:#}");
+    // The project string is withheld from a non-operator's rows, so B's row
+    // is recognised by its digest.
+    let b_digest = recorded["result"]["endorsement_digest"]
+        .as_str()
+        .expect("recorded digest")
+        .to_owned();
 
     // The operator sees both rows and the ledger head.
     let (status, all) = service(&h, "service:endorsements/list", json!({})).await;
@@ -687,7 +693,8 @@ async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
     let own = list_as_b(json!({})).await;
     let rows = own["result"]["endorsements"].as_array().expect("rows");
     assert_eq!(rows.len(), 1, "{own:#}");
-    assert_eq!(rows[0]["project"], json!(b_project.to_string()), "{own:#}");
+    assert_eq!(rows[0]["endorsement_digest"], json!(b_digest), "{own:#}");
+    assert!(rows[0].get("project").is_none(), "{own:#}");
     assert!(own["result"].get("ledger_head").is_none(), "{own:#}");
 
     // A project B does not own answers exactly as one that exists nowhere.
@@ -711,5 +718,5 @@ async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
     let mine = list_as_b(json!({ "project": b_project.to_string() })).await;
     let rows = mine["result"]["endorsements"].as_array().expect("rows");
     assert_eq!(rows.len(), 1, "{mine:#}");
-    assert_eq!(rows[0]["project"], json!(b_project.to_string()), "{mine:#}");
+    assert_eq!(rows[0]["endorsement_digest"], json!(b_digest), "{mine:#}");
 }
