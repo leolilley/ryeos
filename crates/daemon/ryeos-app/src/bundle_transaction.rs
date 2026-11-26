@@ -207,6 +207,19 @@ impl BundleTransaction {
         Ok(self.registration_path())
     }
 
+    /// Abandon a present transaction that was begun and never activated in the
+    /// journal, after the caller has put the namespace back as it was before
+    /// `begin_present`. Nothing was registered, so no registration is touched.
+    /// Refused unless the journal is a present transaction still in its
+    /// prepared phase.
+    pub fn abandon_prepared(&self) -> Result<()> {
+        let journal = self.read_validated_journal()?;
+        if journal.operation == BundleOperation::Remove || journal.phase != BundlePhase::Prepared {
+            anyhow::bail!("only a prepared install or replace transaction can be abandoned");
+        }
+        self.finish()
+    }
+
     pub fn commit_absent(&self) -> Result<()> {
         let journal = self.read_validated_journal()?;
         if journal.operation != BundleOperation::Remove {
