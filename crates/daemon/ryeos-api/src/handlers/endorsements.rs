@@ -286,6 +286,20 @@ pub async fn list(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
+    // The ledger is the node's, not a principal's: it names every project's
+    // endorsements, so only the node's operator reads it. A non-operator key
+    // that holds the capability is refused rather than shown a filtered view,
+    // so the answer for another principal's project is not a presence oracle.
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).map_err(|_| {
+        HandlerError::Structured {
+            code: "operator_required".to_owned(),
+            status: 403,
+            body: json!({
+                "code": "operator_required",
+                "error": "the endorsement ledger is read only by the node's operator",
+            }),
+        }
+    })?;
     caller_fingerprint(&ctx)?;
     let ledger = load_ledger(&state)?;
     let index: Arc<EndorsementIndex> = state.engine.trust_store.endorsement_index();

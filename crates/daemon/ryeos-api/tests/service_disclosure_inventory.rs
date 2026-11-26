@@ -122,6 +122,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "credential-profiles/abandon-login",
     "credential-profiles/delete",
     "credential-profiles/get",
+    "endorsements/list",
     "external-content/activate",
     "external-content/bind",
     "external-content/bindings",
