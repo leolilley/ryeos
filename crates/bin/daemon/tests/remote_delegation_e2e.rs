@@ -187,6 +187,8 @@ async fn start_pair() -> Result<Pair> {
                     // The remote bundle-install service also requires the
                     // local bundle-install capability before it goes out.
                     "ryeos.execute.service.bundle/install",
+                    // Reading the staged list is a plain principal's view.
+                    "ryeos.execute.service.bundle/list",
                     THREADS_CAP,
                     "ryeos.execute.service.remote/delegation-revoke",
                 ],
