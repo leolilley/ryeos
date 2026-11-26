@@ -570,6 +570,7 @@ pub(crate) async fn publish_bundle(
             .ok_or_else(|| local(format!("the node's freeze answer omits {name}")))
     };
     let (node_fingerprint, manifest_hash) = (text("node_fingerprint")?, text("manifest_hash")?);
+    let version = text("bundle_version")?;
     let read_bound = number("largest_file_bytes")?
         .max(number("manifest_bytes")?)
         .clamp(
@@ -590,6 +591,7 @@ pub(crate) async fn publish_bundle(
         &node_fingerprint,
         &manifest_hash,
         &bundle_name,
+        &version,
         &not_after,
         &lillux::time::iso8601_now(),
         read_bound,

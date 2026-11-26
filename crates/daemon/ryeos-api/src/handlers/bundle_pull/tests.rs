@@ -30,6 +30,7 @@ fn manifest_for(bundle: &str, body: &[u8]) -> PublicationManifest {
         kind: PUBLICATION_MANIFEST_KIND.to_owned(),
         schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         bundle_name: bundle.to_owned(),
+        bundle_version: "1.2.3".to_owned(),
         bundle_manifest_digest: "b".repeat(64),
         publisher_fingerprint: "c".repeat(64),
         file_count: 1,
@@ -69,12 +70,29 @@ fn published_with(
     not_after: u64,
     countersigner: &SigningKey,
 ) -> Published {
+    published_versioned(
+        record_bundle,
+        &manifest.bundle_version,
+        manifest,
+        not_after,
+        countersigner,
+    )
+}
+
+fn published_versioned(
+    record_bundle: &str,
+    record_version: &str,
+    manifest: &PublicationManifest,
+    not_after: u64,
+    countersigner: &SigningKey,
+) -> Published {
     let record = PublicationRecord::new(
         ID,
         "nonce",
         &node_fp(),
         &manifest_hash(manifest),
         record_bundle,
+        record_version,
         &lillux::time::iso8601_from_unix_secs(not_after),
         &lillux::time::iso8601_from_unix_secs(NOW),
         1 << 20,
@@ -186,6 +204,20 @@ fn a_manifest_for_another_bundle_than_the_record_is_refused() {
         verify(&published, NOW).unwrap_err().code(),
         "publication_manifest_mismatch"
     );
+}
+
+#[test]
+fn a_manifest_for_another_bundle_version_than_the_record_is_refused() {
+    let published = published_versioned(
+        "demo",
+        "9.9.9",
+        &manifest_for("demo", BODY),
+        NOW + 3600,
+        &node_key(),
+    );
+    let refusal = verify(&published, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publication_manifest_mismatch");
+    assert!(refusal.to_string().contains("version"), "{refusal}");
 }
 
 fn key_doc(fingerprint: &str, version: &str) -> PublicKeyDoc {

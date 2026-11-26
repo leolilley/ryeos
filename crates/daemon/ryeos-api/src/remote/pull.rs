@@ -30,6 +30,35 @@ pub struct PullResult {
     pub files_deleted: usize,
 }
 
+/// Most conflicting paths one refusal names.
+pub const MAX_REPORTED_CONFLICTS: usize = 256;
+
+/// Why one path of a result cannot be applied to the live files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyConflictReason {
+    /// The base had the file and the live file differs from it (content or
+    /// mode), and is not the result either.
+    Drifted,
+    /// The base had the file, the result changes it, and the live file is gone.
+    Missing,
+    /// The result adds the file and a different file is already there.
+    BlocksNewFile,
+    /// The live entry at a changed path is not a regular file, or a parent of
+    /// it cannot be walked as a plain directory.
+    NotRegular,
+    /// The path is inside the node-owned or secret control floor that live
+    /// execution may never write.
+    ProtectedPath,
+}
+
+/// One conflicting path and why.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ApplyConflict {
+    pub path: String,
+    pub reason: ApplyConflictReason,
+}
+
 /// Typed errors for the pull/apply pipeline.
 #[derive(thiserror::Error, Debug)]
 pub enum PullResultsError {
@@ -37,6 +66,14 @@ pub enum PullResultsError {
     MissingSnapshotHash,
     #[error("local workspace conflict at {0}")]
     LocalConflict(String),
+    /// Every path of a result that cannot be applied to the live files, named
+    /// at once. Nothing was written. `total` counts all of them; `conflicts`
+    /// holds at most [`MAX_REPORTED_CONFLICTS`] in path order.
+    #[error("local workspace has {total} conflicting path(s)")]
+    LocalConflicts {
+        conflicts: Vec<ApplyConflict>,
+        total: usize,
+    },
     #[error("invalid remote snapshot: {0}")]
     InvalidRemoteSnapshot(String),
     #[error("remote result apply requires recovery: {0}")]
@@ -129,6 +166,34 @@ pub async fn pull_results(
     .await;
 
     finish_pull_staged_roots(authority, &mut staged_roots, operation)
+}
+
+/// Apply the difference between two published project trees to a local
+/// checkout: the tree the result was authored against and the tree it produced,
+/// both already in the local store. No fetch and no lineage check happen here;
+/// the caller has proved the result is the published head and the base its
+/// ancestor. The conflict rules, locking, recovery journal, staging, atomic
+/// swap and rollback are those of [`pull_results`].
+pub async fn apply_published_result(
+    authority: &PinnedStateAuthority,
+    local_project_root: &Path,
+    base_tree: &ProjectTree,
+    result_tree: &ProjectTree,
+) -> Result<(usize, usize), PullResultsError> {
+    let local_cas = authority.cas_store().map_err(PullResultsError::Other)?;
+    let journal_auth_key = authority
+        .require_recovery()
+        .map_err(PullResultsError::Other)?
+        .workspace_journal_auth_key()
+        .map_err(PullResultsError::Other)?;
+    apply_tree_diff(
+        &local_cas,
+        local_project_root,
+        base_tree,
+        result_tree,
+        &journal_auth_key,
+    )
+    .await
 }
 
 // The staged pull transaction keeps its remote, authority, lease, and three
@@ -515,11 +580,12 @@ impl PullRecoveryJournal {
 
 /// Apply the diff between base and remote project trees to the local workspace.
 ///
-/// Uses clean-base policy: if any tracked file has drifted since the push,
-/// the entire apply is aborted with `LocalConflict`.
-///
-/// New files from remote that would overwrite a pre-existing local file are
-/// also treated as conflicts.
+/// Only the paths the result changes are checked: a changed path must still
+/// equal the base (or already equal the result), a new path must not exist
+/// (unless it already equals the result), and a path in a protected control
+/// root is refused. A dirty file the result does not touch stays untouched and
+/// is never a conflict. Every conflict is collected and returned at once as
+/// `LocalConflicts`; nothing is written when there is any. Nothing is merged.
 ///
 /// **Atomicity:** All writes are staged in a temporary directory first
 /// (Phase B). Only after staging succeeds do we backup originals and swap
@@ -555,116 +621,125 @@ async fn apply_tree_diff(
         return Ok((0, 0));
     }
 
-    // Collect all paths from base + remote trees.
-    let mut all_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in base_tree.files.keys() {
-        all_paths.insert(path.clone());
-    }
-    for path in remote_tree.files.keys() {
-        all_paths.insert(path.clone());
+    // Every path the two trees name, in a stable order. A path whose file is
+    // the same in both trees is never read and never a conflict: a dirty file
+    // the result does not touch stays as it is.
+    let mut all_paths: Vec<String> = base_tree
+        .files
+        .keys()
+        .chain(remote_tree.files.keys())
+        .cloned()
+        .collect();
+    all_paths.sort();
+    all_paths.dedup();
+    for path in &all_paths {
+        ryeos_state::project_sync::validate_safe_relative_path(path)
+            .map_err(PullResultsError::Other)?;
     }
 
-    // Phase A: validate — check all tracked paths for drift, and all new
-    // paths for pre-existing files. Also resolve all CAS content.
+    // Phase A: validate every changed path against the live files, collecting
+    // all conflicts, and resolve all CAS content. Nothing is written here.
     let mut planned: Vec<PlannedChange> = Vec::new();
+    let mut conflicts: Vec<ApplyConflict> = Vec::new();
 
     for path in &all_paths {
         let base_hash = base_tree.files.get(path);
         let remote_hash = remote_tree.files.get(path);
-        ryeos_state::project_sync::validate_safe_relative_path(path)
-            .map_err(PullResultsError::Other)?;
-        let local_file = open_relative_regular(&project_root, path)?;
+        if base_hash == remote_hash {
+            continue;
+        }
+        let mut conflict = |reason: ApplyConflictReason| {
+            conflicts.push(ApplyConflict {
+                path: path.clone(),
+                reason,
+            });
+        };
+        if ryeos_state::project_sync::is_live_execution_denied_path(path) {
+            conflict(ApplyConflictReason::ProtectedPath);
+            continue;
+        }
+        let local_file = match open_relative_regular(&project_root, path) {
+            Ok(file) => file,
+            Err(_) => {
+                conflict(ApplyConflictReason::NotRegular);
+                continue;
+            }
+        };
         let base_file = base_hash
             .map(|hash| load_project_file(local_cas, hash))
             .transpose()?;
-
-        // If the path was in the base, verify local hasn't drifted
-        if let Some(base_file) = base_file.as_ref() {
-            let (local_hash, local_mode) = match local_file.as_ref() {
-                Some(file) => (
-                    Some(hash_open_regular(
-                        file.try_clone().map_err(anyhow::Error::from)?,
-                    )?),
-                    Some(normalized_open_mode(file)?),
-                ),
-                None => (None, None),
+        let result_file = remote_hash
+            .map(|hash| load_project_file(local_cas, hash))
+            .transpose()?;
+        let live_matches =
+            |file: &std::fs::File, expected: &ProjectFile| -> Result<bool, PullResultsError> {
+                Ok(
+                    hash_open_regular(file.try_clone().map_err(anyhow::Error::from)?)?
+                        == expected.blob_hash
+                        && normalized_open_mode(file)? == expected.normalized_mode,
+                )
             };
-            if local_hash.as_deref() != Some(base_file.blob_hash.as_str())
-                || local_mode != Some(base_file.normalized_mode)
-            {
-                return Err(PullResultsError::LocalConflict(path.clone()));
-            }
-        }
 
-        // If the path is NEW in remote (not in base), check there's no
-        // pre-existing local file — that would be a conflict too.
-        if base_hash.is_none() && remote_hash.is_some() && local_file.is_some() {
-            return Err(PullResultsError::LocalConflict(format!(
-                "{} (new remote file would overwrite local)",
-                path
-            )));
-        }
-
-        // Plan the change
-        match (base_hash, remote_hash) {
-            // Unchanged — no-op
-            (Some(b), Some(r)) if b == r => {}
-            // File changed — resolve content from CAS (fail hard if missing)
-            (Some(_), Some(r)) => {
-                let file = require_project_file_blob(local_cas, r, path)?;
-                planned.push(PlannedChange::Write {
-                    rel_path: path.clone(),
-                    blob_hash: file.blob_hash,
-                    normalized_mode: file.normalized_mode,
-                    expected_live: local_file,
-                    expected_blob_hash: Some(
-                        base_file
-                            .as_ref()
-                            .expect("changed base file was loaded")
-                            .blob_hash
-                            .clone(),
-                    ),
-                    expected_mode: Some(
-                        base_file
-                            .as_ref()
-                            .expect("changed base file was loaded")
-                            .normalized_mode,
-                    ),
-                });
-            }
-            // File deleted on remote
-            (Some(_), None) => {
-                if let Some(expected_live) = local_file {
-                    planned.push(PlannedChange::Delete {
+        match (base_file.as_ref(), result_file.as_ref()) {
+            // The result changes a file the base had.
+            (Some(base_file), Some(result_file)) => match local_file {
+                None => conflict(ApplyConflictReason::Missing),
+                Some(file) if live_matches(&file, result_file)? => {} // already applied
+                Some(file) if live_matches(&file, base_file)? => {
+                    let file_blob =
+                        require_project_file_blob(local_cas, remote_hash.expect("result"), path)?;
+                    planned.push(PlannedChange::Write {
                         rel_path: path.clone(),
-                        expected_live,
-                        expected_blob_hash: base_file
-                            .as_ref()
-                            .expect("deleted base file was loaded")
-                            .blob_hash
-                            .clone(),
-                        expected_mode: base_file
-                            .as_ref()
-                            .expect("deleted base file was loaded")
-                            .normalized_mode,
+                        blob_hash: file_blob.blob_hash,
+                        normalized_mode: file_blob.normalized_mode,
+                        expected_live: Some(file),
+                        expected_blob_hash: Some(base_file.blob_hash.clone()),
+                        expected_mode: Some(base_file.normalized_mode),
                     });
                 }
+                Some(_) => conflict(ApplyConflictReason::Drifted),
+            },
+            // The result deletes a file the base had.
+            (Some(base_file), None) => {
+                if let Some(file) = local_file {
+                    if live_matches(&file, base_file)? {
+                        planned.push(PlannedChange::Delete {
+                            rel_path: path.clone(),
+                            expected_live: file,
+                            expected_blob_hash: base_file.blob_hash.clone(),
+                            expected_mode: base_file.normalized_mode,
+                        });
+                    } else {
+                        conflict(ApplyConflictReason::Drifted);
+                    }
+                }
+                // Already gone: applied.
             }
-            // New file on remote — resolve content from CAS (fail hard if missing)
-            (None, Some(r)) => {
-                let file = require_project_file_blob(local_cas, r, path)?;
-                planned.push(PlannedChange::Write {
-                    rel_path: path.clone(),
-                    blob_hash: file.blob_hash,
-                    normalized_mode: file.normalized_mode,
-                    expected_live: None,
-                    expected_blob_hash: None,
-                    expected_mode: None,
-                });
-            }
-            // Both None — shouldn't happen but no-op
+            // The result adds a file.
+            (None, Some(result_file)) => match local_file {
+                None => {
+                    let file_blob =
+                        require_project_file_blob(local_cas, remote_hash.expect("result"), path)?;
+                    planned.push(PlannedChange::Write {
+                        rel_path: path.clone(),
+                        blob_hash: file_blob.blob_hash,
+                        normalized_mode: file_blob.normalized_mode,
+                        expected_live: None,
+                        expected_blob_hash: None,
+                        expected_mode: None,
+                    });
+                }
+                Some(file) if live_matches(&file, result_file)? => {} // already applied
+                Some(_) => conflict(ApplyConflictReason::BlocksNewFile),
+            },
             (None, None) => {}
         }
+    }
+
+    if !conflicts.is_empty() {
+        let total = conflicts.len();
+        conflicts.truncate(MAX_REPORTED_CONFLICTS);
+        return Err(PullResultsError::LocalConflicts { conflicts, total });
     }
 
     // Phase B: all content resolved successfully. Stage writes into a
@@ -793,6 +868,9 @@ fn workspace_matches_result_tree(
     base_tree: &ProjectTree,
     result_tree: &ProjectTree,
 ) -> Result<bool, PullResultsError> {
+    // Only the paths the result changes: a dirty file the result does not touch
+    // is not part of "already applied", or a repeat after a crash would fall
+    // through to the drift check and report the applied paths as drifted.
     let mut all_paths = base_tree.files.keys().collect::<Vec<_>>();
     all_paths.extend(result_tree.files.keys());
     all_paths.sort();
@@ -800,7 +878,14 @@ fn workspace_matches_result_tree(
     for path in all_paths {
         ryeos_state::project_sync::validate_safe_relative_path(path)
             .map_err(PullResultsError::Other)?;
-        let live = open_relative_regular(project_root, path)?;
+        if base_tree.files.get(path) == result_tree.files.get(path) {
+            continue;
+        }
+        // A path that cannot be opened as a regular file is not "already
+        // applied"; the drift check names it.
+        let Ok(live) = open_relative_regular(project_root, path) else {
+            return Ok(false);
+        };
         let Some(result_hash) = result_tree.files.get(path) else {
             if live.is_some() {
                 return Ok(false);
@@ -1597,30 +1682,17 @@ impl Drop for PinnedScratchDirectory {
 fn ensure_no_pull_recovery_artifacts(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<(), PullResultsError> {
-    let found = std::cell::RefCell::new(None::<std::path::PathBuf>);
-    project_root.visit_regular_files_bounded(
-        lillux::DirectoryTraversalBudget::new(
-            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
-            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
-        ),
-        |relative, _directory| {
-            if is_pull_transaction_path(relative) {
-                *found.borrow_mut() = Some(relative.to_path_buf());
-                return Ok(true);
-            }
-            Ok(false)
-        },
-        |relative, _file| {
-            if is_pull_transaction_path(relative) {
-                *found.borrow_mut() = Some(relative.to_path_buf());
-            }
-            Ok(())
-        },
-    )?;
-    if let Some(relative) = found.into_inner() {
+    // Transactions are only ever created directly under the project root, so
+    // the root's own entries are the whole question. A walk of the tree would
+    // refuse any checkout that holds a symlink.
+    let found = project_root
+        .entry_names()?
+        .into_iter()
+        .find(|name| name.to_str().is_some_and(is_pull_transaction_artifact_name));
+    if let Some(name) = found {
         return Err(PullResultsError::RecoveryRequired(format!(
             "reserved transaction artifact {} is present; preserve it and recover the interrupted apply before retrying",
-            project_root.path().join(relative).display()
+            project_root.path().join(name).display()
         )));
     }
     Ok(())
@@ -1882,6 +1954,12 @@ fn cleanup_recovery_directory(
     Ok(())
 }
 
+fn in_quarantine(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.starts_with(".ryeos-quarantine.")))
+    })
+}
+
 fn surface_quarantined_files(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<Vec<String>, PullResultsError> {
@@ -1891,11 +1969,11 @@ fn surface_quarantined_files(
             ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
             ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
         ),
-        |_relative, _directory| Ok(false),
+        // Only quarantine files matter. Every other file is skipped without
+        // being opened, so a symlink elsewhere in a checkout is not refused.
+        |relative, is_directory| Ok(!is_directory && !in_quarantine(relative)),
         |relative, _file| {
-            if relative.components().any(|component| {
-                matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.starts_with(".ryeos-quarantine.")))
-            }) {
+            if in_quarantine(relative) {
                 quarantines.borrow_mut().push(relative.to_path_buf());
             }
             Ok(())
@@ -1943,15 +2021,6 @@ fn surface_quarantined_files(
     }
     project_root.ensure_path_binding()?;
     Ok(notices)
-}
-
-fn is_pull_transaction_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        name.to_str().is_some_and(is_pull_transaction_artifact_name)
-    })
 }
 
 /// Roll back applied writes and deletes by restoring from backup.
@@ -2239,10 +2308,17 @@ mod tests {
 
         let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).await;
         match result {
-            Err(PullResultsError::LocalConflict(path)) => {
-                assert_eq!(path, "file.txt");
+            Err(PullResultsError::LocalConflicts { conflicts, total }) => {
+                assert_eq!(total, 1);
+                assert_eq!(
+                    conflicts,
+                    vec![ApplyConflict {
+                        path: "file.txt".to_owned(),
+                        reason: ApplyConflictReason::Drifted,
+                    }]
+                );
             }
-            other => panic!("expected LocalConflict, got {:?}", other),
+            other => panic!("expected LocalConflicts, got {:?}", other),
         }
 
         // Workspace should be untouched
@@ -2268,14 +2344,16 @@ mod tests {
 
         let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).await;
         match result {
-            Err(PullResultsError::LocalConflict(msg)) => {
-                assert!(msg.contains("new.txt"), "got: {msg}");
-                assert!(
-                    msg.contains("new remote file would overwrite local"),
-                    "got: {msg}"
+            Err(PullResultsError::LocalConflicts { conflicts, .. }) => {
+                assert_eq!(
+                    conflicts,
+                    vec![ApplyConflict {
+                        path: "new.txt".to_owned(),
+                        reason: ApplyConflictReason::BlocksNewFile,
+                    }]
                 );
             }
-            other => panic!("expected LocalConflict, got {:?}", other),
+            other => panic!("expected LocalConflicts, got {:?}", other),
         }
     }
 
@@ -2398,6 +2476,243 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replay, (0, 0));
+    }
+
+    // ── local apply: changed-path conflict check ──
+
+    #[tokio::test]
+    async fn a_dirty_file_the_result_does_not_touch_stays_and_the_apply_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("changed.txt"), "old").unwrap();
+        std::fs::write(root.join("dirty.txt"), "edited by the person").unwrap();
+        let cas = CasStore::new(root.join("cas"));
+        let old = store_project_file(&cas, b"old");
+        let new = store_project_file(&cas, b"new");
+        let dirty_base = store_project_file(&cas, b"as published");
+        let base = make_tree(&[("changed.txt", &old), ("dirty.txt", &dirty_base)]);
+        let result = make_tree(&[("changed.txt", &new), ("dirty.txt", &dirty_base)]);
+
+        let applied = apply_tree_diff(&cas, root, &base, &result, &[7_u8; 32])
+            .await
+            .unwrap();
+        assert_eq!(applied, (1, 0));
+        assert_eq!(
+            std::fs::read_to_string(root.join("changed.txt")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("dirty.txt")).unwrap(),
+            "edited by the person"
+        );
+
+        // A repeat after a crash, with the dirty file still dirty, is a no-op
+        // and not a false drift report on the applied path.
+        let replay = apply_tree_diff(&cas, root, &base, &result, &[7_u8; 32])
+            .await
+            .unwrap();
+        assert_eq!(replay, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn every_conflicting_path_is_named_in_one_refusal_and_nothing_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.txt"), "local a").unwrap();
+        std::fs::write(root.join("b.txt"), "base b").unwrap();
+        std::fs::write(root.join("new.txt"), "local new").unwrap();
+        let cas = CasStore::new(root.join("cas"));
+        let a_base = store_project_file(&cas, b"base a");
+        let a_new = store_project_file(&cas, b"new a");
+        let b_base = store_project_file(&cas, b"base b");
+        let b_new = store_project_file(&cas, b"new b");
+        let n_new = store_project_file(&cas, b"result new");
+        let gone_base = store_project_file(&cas, b"gone");
+        let gone_new = store_project_file(&cas, b"gone but changed");
+        let base = make_tree(&[
+            ("a.txt", &a_base),
+            ("b.txt", &b_base),
+            ("gone.txt", &gone_base),
+        ]);
+        let result = make_tree(&[
+            ("a.txt", &a_new),
+            ("b.txt", &b_new),
+            ("gone.txt", &gone_new),
+            ("new.txt", &n_new),
+        ]);
+
+        let error = apply_tree_diff(&cas, root, &base, &result, &[7_u8; 32])
+            .await
+            .unwrap_err();
+        match error {
+            PullResultsError::LocalConflicts { conflicts, total } => {
+                assert_eq!(total, 3);
+                assert_eq!(
+                    conflicts,
+                    vec![
+                        ApplyConflict {
+                            path: "a.txt".to_owned(),
+                            reason: ApplyConflictReason::Drifted,
+                        },
+                        ApplyConflict {
+                            path: "gone.txt".to_owned(),
+                            reason: ApplyConflictReason::Missing,
+                        },
+                        ApplyConflict {
+                            path: "new.txt".to_owned(),
+                            reason: ApplyConflictReason::BlocksNewFile,
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected LocalConflicts, got {other:?}"),
+        }
+        // b.txt was clean and would have applied; with conflicts elsewhere it
+        // is not written either.
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "base b"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "local a"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_path_already_holding_the_result_is_applied_and_a_long_list_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("same.txt"), "result").unwrap();
+        let cas = CasStore::new(root.join("cas"));
+        let result_file = store_project_file(&cas, b"result");
+        let base = make_tree(&[]);
+        let result = make_tree(&[("same.txt", &result_file)]);
+        assert_eq!(
+            apply_tree_diff(&cas, root, &base, &result, &[7_u8; 32])
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+
+        let many = (0..300)
+            .map(|index| format!("file-{index:03}.txt"))
+            .collect::<Vec<_>>();
+        for name in &many {
+            std::fs::write(root.join(name), "local").unwrap();
+        }
+        let theirs = store_project_file(&cas, b"theirs");
+        let items = many
+            .iter()
+            .map(|name| (name.as_str(), theirs.as_str()))
+            .collect::<Vec<_>>();
+        let error = apply_tree_diff(&cas, root, &make_tree(&[]), &make_tree(&items), &[7_u8; 32])
+            .await
+            .unwrap_err();
+        match error {
+            PullResultsError::LocalConflicts { conflicts, total } => {
+                assert_eq!(total, 300);
+                assert_eq!(conflicts.len(), MAX_REPORTED_CONFLICTS);
+                assert_eq!(conflicts[0].path, "file-000.txt");
+            }
+            other => panic!("expected LocalConflicts, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_result_naming_a_control_path_is_refused_whole_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("ok.txt"), "old").unwrap();
+        let cas = CasStore::new(root.join("cas"));
+        let old = store_project_file(&cas, b"old");
+        let new = store_project_file(&cas, b"new");
+        let secret = store_project_file(&cas, b"key");
+        let base = make_tree(&[("ok.txt", &old)]);
+        let result = make_tree(&[("ok.txt", &new), (".ai/node/identity/key", &secret)]);
+
+        let error = apply_tree_diff(&cas, root, &base, &result, &[7_u8; 32])
+            .await
+            .unwrap_err();
+        match error {
+            PullResultsError::LocalConflicts { conflicts, .. } => assert_eq!(
+                conflicts,
+                vec![ApplyConflict {
+                    path: ".ai/node/identity/key".to_owned(),
+                    reason: ApplyConflictReason::ProtectedPath,
+                }]
+            ),
+            other => panic!("expected LocalConflicts, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(root.join("ok.txt")).unwrap(), "old");
+        assert!(!root.join(".ai").exists());
+
+        for bad in ["../escape.txt", "/abs.txt", "a/../b.txt"] {
+            let result = make_tree(&[(bad, &new)]);
+            let error = apply_tree_diff(&cas, root, &make_tree(&[]), &result, &[7_u8; 32])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, PullResultsError::Other(_)),
+                "{bad} must be refused whole, got {error:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_ancestor_of_a_changed_path_refuses_and_writes_nothing_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let cas = CasStore::new(tmp.path().join("cas"));
+        let new = store_project_file(&cas, b"new");
+        let result = make_tree(&[("link/file.txt", &new)]);
+
+        let error = apply_tree_diff(&cas, &root, &make_tree(&[]), &result, &[7_u8; 32])
+            .await
+            .unwrap_err();
+        match error {
+            PullResultsError::LocalConflicts { conflicts, .. } => assert_eq!(
+                conflicts,
+                vec![ApplyConflict {
+                    path: "link/file.txt".to_owned(),
+                    reason: ApplyConflictReason::NotRegular,
+                }]
+            ),
+            other => panic!("expected LocalConflicts, got {other:?}"),
+        }
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing is written through the link"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_nested_quarantine_file_makes_the_apply_refuse_and_write_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        // A replaced file's quarantine sits beside it, not at the project root.
+        std::fs::write(root.join("sub/.ryeos-quarantine.abc"), b"left behind").unwrap();
+        let cas = CasStore::new(tmp.path().join("cas"));
+        let new = store_project_file(&cas, b"new");
+        let result = make_tree(&[("a.txt", &new)]);
+
+        let error = apply_tree_diff(&cas, &root, &make_tree(&[]), &result, &[7_u8; 32])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PullResultsError::RecoveryRequired(_)),
+            "expected RecoveryRequired, got {error:?}"
+        );
+        assert!(
+            !root.join("a.txt").exists(),
+            "nothing of the result is written"
+        );
     }
 
     // ── extract_snapshot_hash coverage ──

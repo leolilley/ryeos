@@ -42,6 +42,8 @@ struct BoundInvocation {
 }
 
 pub(crate) fn validate_prepared_operation_binding(
+    state: &AppState,
+    scopes: &[String],
     attachment: &AdmittedBindingAttachment,
     operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
 ) -> Result<()> {
@@ -51,7 +53,8 @@ pub(crate) fn validate_prepared_operation_binding(
     let marker = crate::seat_auth::attachment_project_query_identity(attachment)
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?
         .map(|path| path.to_string_lossy().into_owned());
-    let bound = resolve_binding_request(attachment, &admission.request, marker.as_deref())?;
+    let markers = SessionMarkers::for_attachment(state, attachment, scopes, marker.as_deref());
+    let bound = resolve_binding_request(attachment, &admission.request, &markers)?;
     use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
     let purpose = match bound.target.result_effect {
         Some(CompiledUiResultEffect::SurfaceOpening) => {
@@ -221,7 +224,13 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     // a request or durable row.
     let project_marker = crate::seat_auth::attachment_project_query_identity(&attachment)?
         .map(|path| path.to_string_lossy().into_owned());
-    let mut bound = resolve_binding_request(&attachment, &req, project_marker.as_deref())?;
+    let markers = SessionMarkers::for_attachment(
+        &state,
+        &attachment,
+        &session.granted_caps,
+        project_marker.as_deref(),
+    );
+    let mut bound = resolve_binding_request(&attachment, &req, &markers)?;
     let item_ref = bound.target.identity.canonical_ref.clone();
     // Every read passes the node's seat read policy: parameters are pinned and
     // checked here, and the returned shaping decides what the result may
@@ -342,7 +351,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             (Some(_), Some(operation_id)) => {
                 let operation =
                     ingress.require_prepared(&state, &session, &producer, operation_id, &req)?;
-                validate_prepared_operation_binding(&attachment, &operation)?;
+                validate_prepared_operation_binding(
+                    &state,
+                    &session.granted_caps,
+                    &attachment,
+                    &operation,
+                )?;
                 if bound
                     .params
                     .get("creation_request_id")
@@ -1133,8 +1147,9 @@ fn enforce_request_bounds(
 fn resolve_binding_request(
     attachment: &AdmittedBindingAttachment,
     req: &UiBindingRequest,
-    project_root: Option<&str>,
+    markers: &SessionMarkers<'_>,
 ) -> Result<BoundInvocation> {
+    let project_root = markers.project_root;
     match (&req.coordinate, &req.payload) {
         (UiBindingCoordinate::SurfaceRoute, UiBindingPayload::Input { value, route }) => {
             let surface_route = attachment
@@ -1147,7 +1162,7 @@ fn resolve_binding_request(
                         "surface route is absent from the compiled binding".into(),
                     )
                 })?;
-            let mut params = resolve_session_markers(&surface_route.parameters, project_root)?;
+            let mut params = resolve_session_markers(&surface_route.parameters, markers)?;
             let params = params.as_object_mut().ok_or_else(|| {
                 HandlerError::Internal("compiled surface route parameters are not an object".into())
             })?;
@@ -1210,7 +1225,7 @@ fn resolve_binding_request(
             Ok(BoundInvocation {
                 project_authored_source: source.project_authored,
                 target: source.target.clone(),
-                params: bind_source_parameters(source, params, project_root)?,
+                params: bind_source_parameters(source, params, markers)?,
             })
         }
         (
@@ -1323,7 +1338,7 @@ fn resolve_binding_request(
                     .into());
                 }
             };
-            let params = resolve_session_markers(&params, project_root)?;
+            let params = resolve_session_markers(&params, markers)?;
             Ok(BoundInvocation {
                 project_authored_source: false,
                 target: target.clone(),
@@ -1369,7 +1384,7 @@ fn validate_route_context(route: &ryeos_client_base::ui::UiBindingRouteContext) 
 fn bind_source_parameters(
     source: &CompiledUiSource,
     supplied: &Value,
-    project_root: Option<&str>,
+    markers: &SessionMarkers<'_>,
 ) -> Result<Value> {
     let supplied = supplied
         .as_object()
@@ -1408,7 +1423,7 @@ fn bind_source_parameters(
         }
     }
     let value = Value::Object(bound);
-    resolve_session_markers(&value, project_root)
+    resolve_session_markers(&value, markers)
 }
 
 fn bind_dynamic_source_parameter(key: &str, value: &Value) -> Result<Value> {
@@ -1497,8 +1512,127 @@ fn bind_authored_parameter(
     }
 }
 
-fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<Value> {
+/// What the session markers of a signed binding entry resolve from, taken from
+/// the admitted attachment at dispatch. The path markers read the retained
+/// checkout; the typed markers read who the seat is and what it stands for,
+/// judged now: `@session:key` is the seat's key (`fp:<hex>`),
+/// `@session:principal` the owner that key acts for (`pid:v1:<hex>`), and
+/// `@session:project` the project the seat states (`pid:v1:<hex>/<name>`).
+/// A typed marker that cannot resolve is a typed refusal, never an empty value.
+pub(crate) struct SessionMarkers<'a> {
+    project_root: Option<&'a str>,
+    typed: Option<TypedSessionFacts<'a>>,
+}
+
+/// What the typed markers are judged from.
+struct TypedSessionFacts<'a> {
+    state: &'a AppState,
+    compiled: &'a crate::compiled_binding::SessionCompiledUiBinding,
+    scopes: &'a [String],
+}
+
+impl<'a> SessionMarkers<'a> {
+    pub(crate) fn for_attachment(
+        state: &'a AppState,
+        attachment: &'a AdmittedBindingAttachment,
+        scopes: &'a [String],
+        project_root: Option<&'a str>,
+    ) -> Self {
+        Self {
+            project_root,
+            typed: Some(TypedSessionFacts {
+                state,
+                compiled: &attachment.compiled_binding,
+                scopes,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn project_root_only(project_root: Option<&'a str>) -> Self {
+        Self {
+            project_root,
+            typed: None,
+        }
+    }
+
+    fn typed(&self, marker: &str) -> Result<&TypedSessionFacts<'a>> {
+        self.typed.as_ref().ok_or_else(|| {
+            HandlerError::Internal(format!("session marker `{marker}` has no session to read"))
+                .into()
+        })
+    }
+
+    fn key(&self) -> Result<String> {
+        Ok(self
+            .typed("@session:key")?
+            .compiled
+            .binding
+            .principal_id
+            .clone())
+    }
+
+    fn principal(&self) -> Result<String> {
+        let facts = self.typed("@session:principal")?;
+        let key = &facts.compiled.binding.principal_id;
+        match facts.state.engine.trust_store.owner_for(key) {
+            Ok(owner) => Ok(owner.principal.to_string()),
+            Err(refusal) => Err(owner_marker_refusal(refusal)),
+        }
+    }
+
+    fn project(&self) -> Result<String> {
+        let facts = self.typed("@session:project")?;
+        match crate::seat_project::resolve_for_binding(facts.state, facts.compiled, facts.scopes)? {
+            ryeos_client_base::ui::UiSeatProject::Stated { project } => Ok(project),
+            ryeos_client_base::ui::UiSeatProject::Absent { absence } => Err(marker_refusal(
+                absence.code(),
+                "this seat's checkout states no project",
+            )),
+            ryeos_client_base::ui::UiSeatProject::Projectless => Err(marker_refusal(
+                "project_required",
+                "this signed binding entry requires a seat that states a project",
+            )),
+        }
+    }
+}
+
+/// What `@session:principal` answers when the node cannot name the owner of
+/// the seat's key: a retired or revoked key is the typed `owner_key_not_active`;
+/// any other refusal is the node's own fault.
+fn owner_marker_refusal(refusal: ryeos_engine::trust::OwnerRefusal) -> anyhow::Error {
+    match refusal {
+        ryeos_engine::trust::OwnerRefusal::KeyNotActive { .. } => marker_refusal(
+            "owner_key_not_active",
+            "this seat's key no longer acts for an owner",
+        ),
+        other => {
+            HandlerError::Internal(format!("resolve the owner of the seat key: {other}")).into()
+        }
+    }
+}
+
+/// A typed refusal of a session marker: the code names why the seat cannot
+/// stand for what the marker asks.
+fn marker_refusal(code: &str, message: &str) -> anyhow::Error {
+    HandlerError::Structured {
+        code: code.to_owned(),
+        status: 409,
+        body: json!({"code": code, "error": message}),
+    }
+    .into()
+}
+
+fn resolve_session_markers(value: &Value, markers: &SessionMarkers<'_>) -> Result<Value> {
+    let project_root = markers.project_root;
     match value {
+        Value::String(marker) if marker == "@session:key" => Ok(Value::String(markers.key()?)),
+        Value::String(marker) if marker == "@session:principal" => {
+            Ok(Value::String(markers.principal()?))
+        }
+        Value::String(marker) if marker == "@session:project" => {
+            Ok(Value::String(markers.project()?))
+        }
         Value::String(marker) if marker == "@session:project_root_or_null" => {
             Ok(project_root.map(Value::from).unwrap_or(Value::Null))
         }
@@ -1517,15 +1651,13 @@ fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<
         Value::Array(values) => Ok(Value::Array(
             values
                 .iter()
-                .map(|value| resolve_session_markers(value, project_root))
+                .map(|value| resolve_session_markers(value, markers))
                 .collect::<Result<_>>()?,
         )),
         Value::Object(values) => Ok(Value::Object(
             values
                 .iter()
-                .map(|(key, value)| {
-                    Ok((key.clone(), resolve_session_markers(value, project_root)?))
-                })
+                .map(|(key, value)| Ok((key.clone(), resolve_session_markers(value, markers)?)))
                 .collect::<Result<_>>()?,
         )),
         value => Ok(value.clone()),
@@ -2839,7 +2971,7 @@ mod tests {
         assert_eq!(
             resolve_session_markers(
                 &json!({"project_path": "@session:project_root_or_null"}),
-                None,
+                &SessionMarkers::project_root_only(None),
             )
             .unwrap(),
             json!({"project_path": null})
@@ -2847,7 +2979,7 @@ mod tests {
         assert_eq!(
             resolve_session_markers(
                 &json!({"project_path": "@session:project_root_or_null"}),
-                Some("/project"),
+                &SessionMarkers::project_root_only(Some("/project")),
             )
             .unwrap(),
             json!({"project_path": "/project"})
@@ -2856,6 +2988,166 @@ mod tests {
 
     #[test]
     fn required_project_marker_still_refuses_projectless_sessions() {
-        assert!(resolve_session_markers(&json!("@session:project_root"), None).is_err());
+        assert!(
+            resolve_session_markers(
+                &json!("@session:project_root"),
+                &SessionMarkers::project_root_only(None)
+            )
+            .is_err()
+        );
+    }
+
+    /// A seat of the fixture key, on a checkout that states no project (the
+    /// fixture registered none) or on no checkout at all.
+    fn marker_session(
+        state: &AppState,
+        checkout: Option<&std::path::Path>,
+    ) -> (Arc<AdmittedBindingAttachment>, Vec<String>) {
+        let launch = crate::test_support::launch_context(
+            "surface:ryeos/ui/base",
+            checkout
+                .map(|path| path.to_string_lossy().into_owned())
+                .as_deref(),
+            crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+            None,
+        );
+        let (session_id, token) = crate::test_support::mint_launch(state, launch);
+        let ui = get_ui_state(state).expect("UI state");
+        assert_eq!(
+            ui.browser_sessions.consume_launch_token(&token),
+            Some(session_id.clone())
+        );
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("session");
+        (
+            session.attachments[&session.root_attachment_id].clone(),
+            session.granted_caps.clone(),
+        )
+    }
+
+    fn refusal_code(error: &anyhow::Error) -> Option<String> {
+        match error.downcast_ref::<HandlerError>() {
+            Some(HandlerError::Structured { code, .. }) => Some(code.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_retired_or_revoked_key_is_the_typed_owner_refusal_and_other_faults_are_not() {
+        use ryeos_engine::trust::{OwnerRefusal, SignerStatus};
+        for status in [SignerStatus::Retired, SignerStatus::Revoked] {
+            let error = owner_marker_refusal(OwnerRefusal::KeyNotActive { status });
+            assert_eq!(
+                refusal_code(&error).as_deref(),
+                Some("owner_key_not_active")
+            );
+        }
+        let error = owner_marker_refusal(OwnerRefusal::Unavailable);
+        assert!(
+            refusal_code(&error).is_none(),
+            "a damaged registry is not a seat refusal"
+        );
+    }
+
+    #[test]
+    fn a_seat_on_a_registered_checkout_states_its_project_and_loses_it_with_the_registration() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        let canonical = checkout.path().canonicalize().expect("canonical checkout");
+        let identity = crate::test_support::register_operator_checkout(&state, &canonical, "demo");
+
+        // A seat of the operator's key on that checkout, sealed with the
+        // project the registration states.
+        let operator = crate::test_support::operator_launch_context(&state);
+        let key = if operator.fingerprint.starts_with("fp:") {
+            operator.fingerprint.clone()
+        } else {
+            format!("fp:{}", operator.fingerprint)
+        };
+        let mut launch = crate::test_support::launch_context(
+            "surface:ryeos/ui/base",
+            Some(canonical.to_string_lossy().as_ref()),
+            crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+            None,
+        );
+        {
+            let binding = &mut Arc::make_mut(&mut launch.compiled_binding).binding;
+            binding.principal_id = key;
+            binding.signer_project =
+                ryeos_state::project_identity::LogicalProject::Stated(identity.clone());
+        }
+        let (session_id, token) = crate::test_support::mint_launch(&state, launch);
+        let ui = get_ui_state(&state).expect("UI state");
+        assert_eq!(
+            ui.browser_sessions.consume_launch_token(&token),
+            Some(session_id.clone())
+        );
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("session");
+        let attachment = session.attachments[&session.root_attachment_id].clone();
+        let scopes = vec!["*".to_owned()];
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+
+        // The registration states the project: the marker is its identity, with the name.
+        let stated = resolve_session_markers(&json!("@session:project"), &markers).unwrap();
+        assert_eq!(stated, json!(identity.to_string()));
+        assert!(stated.as_str().unwrap().ends_with("/demo"));
+
+        // The registration is gone: the same seat answers the typed absence,
+        // so the answer is judged now and not carried from mint.
+        ryeos_node::project_registry::unregister(
+            &ryeos_node::project_registry::RegistrationChange {
+                app_root: &state.config.app_root,
+                node: &state.identity,
+                request_digest: &"0".repeat(64),
+                path: &canonical,
+                identity: &identity,
+            },
+        )
+        .expect("unregister the checkout");
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("unregistered"));
+    }
+
+    #[test]
+    fn the_typed_markers_say_who_the_seat_is_and_what_it_stands_for() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let project = tempfile::TempDir::new().expect("checkout");
+
+        // A seat on no checkout: the key and its owner resolve; a project does not.
+        let (attachment, scopes) = marker_session(&state, None);
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+        assert_eq!(
+            resolve_session_markers(&json!({"k": "@session:key"}), &markers).unwrap(),
+            json!({"k": crate::test_support::FIXTURE_KEY})
+        );
+        let owner = state
+            .engine
+            .trust_store
+            .owner_for(crate::test_support::FIXTURE_KEY)
+            .expect("the fixture key acts for its own owner")
+            .principal
+            .to_string();
+        assert!(owner.starts_with("pid:v1:"));
+        assert_eq!(
+            resolve_session_markers(&json!("@session:principal"), &markers).unwrap(),
+            json!(owner)
+        );
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("project_required"));
+
+        // A seat on a checkout that states no project: the typed absence, never a path.
+        let (attachment, scopes) = marker_session(&state, Some(project.path()));
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("unregistered"));
+
+        // The typed markers need a session to read: without one they are refused.
+        let bare = SessionMarkers::project_root_only(None);
+        assert!(resolve_session_markers(&json!("@session:key"), &bare).is_err());
     }
 }

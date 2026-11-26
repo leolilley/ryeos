@@ -206,3 +206,58 @@ async fn standalone_structured_refusal_prints_its_body() {
         "body printed:\n{stderr}"
     );
 }
+
+// ── 5.3 a stopped-node install or removal leaves a node that boots ──────
+
+/// The signed init completion record pins every bundle registration, so each
+/// stopped-node registration change must reseal it. The node is started again
+/// after each change; a refusal to boot fails the test at the restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_boots_after_a_stopped_node_install_and_after_a_stopped_node_remove() {
+    let mut harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
+        .await
+        .expect("standalone harness init");
+    let src = write_testbundle_source(&harness);
+    let src_path = src.path().to_str().unwrap().to_string();
+
+    let install_out = harness
+        .run_service(
+            "service:bundle/install",
+            Some(&format!(
+                r#"{{"name":"testbundle","source_path":"{src_path}"}}"#
+            )),
+        )
+        .await
+        .expect("install spawn");
+    assert!(
+        install_out.status.success(),
+        "bundle.install failed: {}",
+        String::from_utf8_lossy(&install_out.stderr)
+    );
+    harness
+        .restart_node()
+        .await
+        .expect("the node boots after a stopped-node install");
+    let names = harness.listed_bundle_names().await.expect("list");
+    assert!(names.iter().any(|name| name == "testbundle"), "{names:?}");
+    harness
+        .stop_node()
+        .await
+        .expect("stop the node before the next stopped-node change");
+
+    let remove_out = harness
+        .run_service("service:bundle/remove", Some(r#"{"name":"testbundle"}"#))
+        .await
+        .expect("remove spawn");
+    assert!(
+        remove_out.status.success(),
+        "bundle.remove failed: {}",
+        String::from_utf8_lossy(&remove_out.stderr)
+    );
+    harness
+        .restart_node()
+        .await
+        .expect("the node boots after a stopped-node remove");
+    let names = harness.listed_bundle_names().await.expect("list");
+    assert!(!names.iter().any(|name| name == "testbundle"), "{names:?}");
+}
