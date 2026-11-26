@@ -717,6 +717,21 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| HandlerError::Internal(format!("records read task failed: {error}")))?
 }
 
+/// The state of a record as a revision tip. A verified record is its digest;
+/// a failed one is its failure code, plus the digest of the unverified body
+/// when one is served, so a changed refusal or a changed served body never
+/// shares a revision with an earlier one; an absent record is `absent`.
+fn record_tip(found: &Found, unverified: Option<&Value>) -> HandlerResult<String> {
+    Ok(match found {
+        Found::Verified { .. } => digest_of(found).unwrap_or("absent").to_owned(),
+        Found::Failed { code, .. } => match unverified {
+            Some(body) => format!("failed:{code}:{}", filter_digest(body)?),
+            None => format!("failed:{code}"),
+        },
+        Found::Absent => "absent".to_owned(),
+    })
+}
+
 /// How much of a single record the answer holds. A verified record read in
 /// full is `complete`; one whose body was cut is `partial`, since a reader
 /// must not take the body for the whole; a record that failed verification is
@@ -734,6 +749,10 @@ fn record_coverage(verified: bool, answer: &Value) -> Coverage {
 /// The signers side table for the signers an answer names. A value that is
 /// not a key fingerprint is left out: the table refuses such values, and the
 /// answer's own `verify.signer` still states it.
+// The keys of the signers table are key fingerprints: public identity, shown
+// to a principal on purpose (the old tier withheld `/verify/signer`, the text
+// of the signer; the fingerprint a record names is not secret). A signer's
+// label and role stay free text.
 fn signers_for(signers: &[&str], state: &AppState) -> HandlerResult<BTreeMap<String, SignerEntry>> {
     let valid: Vec<&str> = signers
         .iter()
@@ -817,18 +836,19 @@ pub async fn get(
         {
             return Err(HandlerError::NotFound);
         }
+        let unverified = (req.include_unverified && matches!(found, Found::Failed { .. }))
+            .then(|| unverified_body(kind, &state.config.app_root))
+            .flatten();
+        let tip = record_tip(&found, unverified.as_ref())?;
         let revision = revision_of(
             "records_get",
             &authorization,
-            &[("record", digest_of(&found).unwrap_or("absent"))],
+            &[("record", tip.as_str())],
             &filter,
         );
         if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
             return Ok(value);
         }
-        let unverified = (req.include_unverified && matches!(found, Found::Failed { .. }))
-            .then(|| unverified_body(kind, &state.config.app_root))
-            .flatten();
         let answer = record_answer(kind, &found, unverified);
         let coverage = record_coverage(matches!(found, Found::Verified { .. }), &answer);
         let signers = signers_for(&signer_of(&found).into_iter().collect::<Vec<_>>(), &state)?;
@@ -895,10 +915,11 @@ pub async fn list(
         };
         refuse_unsupported_holder(kind, req.holder.as_deref())?;
         let found = read_record(kind, &state.config.app_root, &policy_generation(&state));
+        let tip = record_tip(&found, None)?;
         let revision = revision_of(
             "records_list",
             &authorization,
-            &[("record", digest_of(&found).unwrap_or("absent"))],
+            &[("record", tip.as_str())],
             &filter,
         );
         if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
@@ -1390,5 +1411,38 @@ mod coverage_tests {
             assert_eq!(value["state"], "partial");
             assert_eq!(value["reason"], "record_unverified");
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    fn failed(code: &'static str) -> Found {
+        Found::Failed {
+            code,
+            message: "m".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_changed_failure_never_shares_a_revision_with_an_earlier_one() {
+        let a = record_tip(&failed("record_oversized"), None).unwrap();
+        let b = record_tip(&failed("record_unreadable"), None).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, record_tip(&Found::Absent, None).unwrap());
+        let one = revision_of("records_get", "auth", &[("record", a.as_str())], "f");
+        let two = revision_of("records_get", "auth", &[("record", b.as_str())], "f");
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn a_served_unverified_body_is_part_of_the_tip() {
+        let found = failed("record_unverified");
+        let first = record_tip(&found, Some(&json!({"a": 1}))).unwrap();
+        let second = record_tip(&found, Some(&json!({"a": 2}))).unwrap();
+        let none = record_tip(&found, None).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, none);
     }
 }
