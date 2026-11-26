@@ -496,19 +496,22 @@ async fn a_refusal_surfaces_the_nodes_typed_code() {
 
 // ── Hostnames that resolve to internal addresses ────────────────────
 
+type LookupFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>;
+
 /// A resolver that answers from a script, one entry per lookup (the last
 /// repeats), and records every name it was asked.
 fn scripted_lookup(script: Vec<Vec<SocketAddr>>) -> (Lookup, Arc<Mutex<Vec<String>>>) {
     let asked = Arc::new(Mutex::new(Vec::<String>::new()));
     let log = asked.clone();
-    let lookup: Lookup = Arc::new(move |host: String| {
+    let lookup: Lookup = Arc::new(move |host: String| -> LookupFuture {
         let index = {
             let mut asked = log.lock().unwrap();
             asked.push(host);
             asked.len() - 1
         };
         let answer = script[index.min(script.len() - 1)].clone();
-        Box::pin(async move { Ok(answer) })
+        Box::pin(async move { Ok::<_, std::io::Error>(answer) })
     });
     (lookup, asked)
 }

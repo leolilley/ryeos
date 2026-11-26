@@ -185,11 +185,6 @@ pub(crate) struct Pins {
     pub node: String,
     /// The publication record body hash.
     pub expect: String,
-    /// Lift the refusal of hosts that are, or resolve to, loopback, private,
-    /// link-local or metadata addresses, for a node pulling from inside its
-    /// own network.
-    #[serde(default)]
-    pub allow_internal: bool,
 }
 
 impl Pins {
@@ -512,9 +507,13 @@ pub(crate) type Lookup = Arc<
 >;
 
 fn system_lookup() -> Lookup {
-    Arc::new(|host: String| {
-        Box::pin(async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) })
-    })
+    Arc::new(
+        |host: String| -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>> {
+            Box::pin(
+                async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) },
+            )
+        },
+    )
 }
 
 /// The error a [`CheckedResolver`] hands the HTTP client, recovered from the
@@ -818,6 +817,11 @@ pub struct Request {
     pub node: String,
     /// The publication record hash to expect.
     pub expect: String,
+    /// Lift the refusal of hosts that are, or resolve to, loopback, private,
+    /// link-local or metadata addresses, for a node pulling from inside its
+    /// own network.
+    #[serde(default)]
+    pub allow_internal: bool,
 }
 
 pub async fn handle(
