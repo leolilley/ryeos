@@ -750,11 +750,6 @@ pub fn register_fixture_bundle(
     register_presigned_fixture_bundle(state_path, bundle_name, &abs, fixture)
 }
 
-/// Bundles that the staging e2es export from a publishing node. They are
-/// copied into the node's own state and given explicit modes; every other
-/// registered workspace bundle is used in place and never modified.
-const COPIED_FIXTURE_BUNDLES: &[&str] = &["ryeos-docs"];
-
 /// Give a fixture bundle explicit modes where the runner's umask left group or
 /// other write: such a directory becomes 0o755, such a file 0o755 when it
 /// carries an execute bit and 0o644 otherwise. A bundle that is exported and
@@ -810,6 +805,7 @@ pub fn register_presigned_fixture_bundle(
         abs.join(AI_DIR).join("manifest.yaml").is_file(),
         "presigned fixture bundle has no manifest"
     );
+    set_fixture_bundle_modes(&abs)?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
@@ -973,17 +969,8 @@ fn register_bundle_record(
     if !bundle.is_dir() {
         anyhow::bail!("prepared bundle does not exist at {}", bundle.display());
     }
-    // A bundle the e2es export and stage is registered from a copy inside the
-    // test's own state, with explicit modes: the checkout is never touched and
-    // the exported modes do not depend on the runner's umask.
-    let abs = if COPIED_FIXTURE_BUNDLES.contains(&bundle_name) {
-        let copy = state_path.join(AI_DIR).join("bundles").join(bundle_name);
-        copy_tree_preserving_mtimes(&bundle, &copy)?;
-        set_fixture_bundle_modes(&copy)?;
-        copy.canonicalize()?
-    } else {
-        bundle.canonicalize()?
-    };
+    let abs = bundle.canonicalize()?;
+    set_fixture_bundle_modes(&abs)?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
