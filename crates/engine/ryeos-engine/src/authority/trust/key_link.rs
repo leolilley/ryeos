@@ -556,6 +556,60 @@ pub fn revoke_key_link(
     write_node_signed(&directory, &format!("{link_id}.json"), &text, node_key)
 }
 
+/// For test fixtures: pin a link that joins `added` to `principal`, vouched
+/// for by `linked_by`, lasting `lifetime_secs` from now, and return its
+/// entry for [`super::TrustStore::with_key_links`]. The link is written as
+/// the node would (node-signed under the links directory), so a store loaded
+/// from `app_root` after this call reads it. `principal` is the `pid:v1:` text
+/// of the owner `linked_by` acts for; take it from `owner_for`, never from a
+/// key.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_link_for_tests(
+    app_root: &Path,
+    node_key: &SigningKey,
+    linked_by: &SigningKey,
+    added: &SigningKey,
+    principal: &str,
+    lifetime_secs: u64,
+) -> Result<KeyLinkEntry, KeyLinkRefusal> {
+    let now = lillux::time::unix_secs_now();
+    let encode = |key: &SigningKey| {
+        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes())
+    };
+    let fingerprint = |key: &SigningKey| {
+        format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        )
+    };
+    let nonce: [u8; 16] = std::array::from_fn(|index| (now as u8).wrapping_add(index as u8));
+    let body = KeyLinkBody {
+        schema: KEY_LINK_SCHEMA.to_owned(),
+        nonce: lillux::sha256_hex(&nonce)[..32].to_owned(),
+        principal: principal.to_owned(),
+        key: fingerprint(added),
+        key_public: encode(added),
+        linked_by: fingerprint(linked_by),
+        linked_by_public: encode(linked_by),
+        created_at: lillux::time::iso8601_from_unix_secs(now),
+        not_after: lillux::time::iso8601_from_unix_secs(now + lifetime_secs),
+        request_digest: lillux::sha256_hex(b"ryeos/key-link-test/v1"),
+    };
+    let link = SignedKeyLink::sign(body, linked_by, added)?;
+    let stored = StoredKeyLink::new(link, lillux::time::iso8601_from_unix_secs(now))?;
+    write_key_link(app_root, node_key, &stored)?;
+    let ledger = KeyLinkLedger {
+        links: vec![stored],
+        tombstones: Vec::new(),
+    };
+    let mut entries = ledger
+        .entries()
+        .map_err(|error| KeyLinkRefusal::Store(error.to_string()))?;
+    entries
+        .pop()
+        .ok_or_else(|| KeyLinkRefusal::Store("the pinned link produced no entry".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
