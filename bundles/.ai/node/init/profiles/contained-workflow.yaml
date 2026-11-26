@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T04:19:08Z:27f20c4d239899289eaa7c9beb29523654c8153d1b20f67e6aef582e01f365cb:ZxfJdBvTXXbzdBs4etko6U3c5NlHdkeO4KkeYcDN743kI/1J/C2pZj4/ewwiL1Jc/Kur4qA3Oy5q3NcUHJ50CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:41:11Z:aadb99002376929b4b15fee12723eb7e72d7b069ad3f3e6f6b9b3ae82060a629:huj0QAL7CwuWbou456NHH4m2YLKOgUJ6PbL9IbtZ5k8uEaxYkYsqypwDKYMukRfQs7nkjR14YLzFvMYpN1jVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -209,6 +209,16 @@ policies:
     # name: `kinds` (exact node-loaded kinds) and `facets` (manifest
     # declarations a policy can lift). Nothing else can be lifted.
     admit_activations: [invoked]
+    # The manifest facets an operator may lift for a named bundle. Only these
+    # five exist to lift; provided kinds, the operator vault, state homes,
+    # route capabilities, isolation backends, external providers and adapters,
+    # bin trees and executors can never be listed.
+    liftable_facets:
+      - bundle_events
+      - item_authoring
+      - owns_namespaces
+      - project_snapshots
+      - runtime_vault
     named_bundles: {}
   thread_attachments:
     schema: 1

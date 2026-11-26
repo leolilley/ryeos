@@ -640,7 +640,7 @@ async fn start_puller_naming_a_bundle() -> (DaemonHarness, FastFixture) {
         SigningKey::from_bytes(&[0x5c; 32]),
         |state_path, _, fixture| {
             let body = format!(
-                "schema: 1\nadmit_activations:\n  - invoked\nnamed_bundles:\n  {NAMED_BUNDLE}:\n    kinds:\n      - config\n    facets:\n      - owns_namespaces\n"
+                "schema: 1\nadmit_activations:\n  - invoked\nliftable_facets:\n  - owns_namespaces\nnamed_bundles:\n  {NAMED_BUNDLE}:\n    kinds:\n      - config\n    facets:\n      - owns_namespaces\n"
             );
             std::fs::write(
                 state_path.join(".ai/node/policies/publication_lane.yaml"),

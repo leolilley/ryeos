@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T04:19:08Z:cd270db96026139eadac1cf2bc3ae32fce208d6c0ea9774e78321ab9ef33ed39:aG7mW6KPorDS+Lc69fi1x1lnjeaWd5jxHPtjWHDGcP5EWKJlV9xKpIYcWpYAkcugGF5lUJUjTya8W4J2IH+dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:41:11Z:b9fe728aee446c27eb00c6dfa4a2f3662b59e1813a20bacb7eee6cf880a2a0f3:mqgR3zk23GkLlg2yKqjLRvZUtMmKqRP8oay5cqXP0gV0pOj7hRMyfl0T/Vp5E59s/OmS5ZjhaweZuFYvwqlNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -209,6 +209,16 @@ policies:
     # name: `kinds` (exact node-loaded kinds) and `facets` (manifest
     # declarations a policy can lift). Nothing else can be lifted.
     admit_activations: [invoked]
+    # The manifest facets an operator may lift for a named bundle. Only these
+    # five exist to lift; provided kinds, the operator vault, state homes,
+    # route capabilities, isolation backends, external providers and adapters,
+    # bin trees and executors can never be listed.
+    liftable_facets:
+      - bundle_events
+      - item_authoring
+      - owns_namespaces
+      - project_snapshots
+      - runtime_vault
     named_bundles: {}
   thread_attachments:
     schema: 1

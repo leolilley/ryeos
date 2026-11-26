@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use ryeos_bundle::lane::{Facet, LaneGrants};
+use ryeos_bundle::lane::{Facet, LaneGrants, NEVER_LIFTABLE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,6 +36,10 @@ const MAX_ENTRIES_PER_BUNDLE: usize = 64;
 pub struct PublicationLanePolicy {
     pub schema: u32,
     pub admit_activations: Vec<String>,
+    /// The manifest facets an operator may lift for a named bundle. Policy
+    /// data, not code; it can only hold facets the manifest format knows and
+    /// can never hold one of the never-liftable floor.
+    pub liftable_facets: Vec<String>,
     pub named_bundles: BTreeMap<String, NamedBundleLane>,
 }
 
@@ -78,6 +82,23 @@ impl PublicationLanePolicy {
         if self.admit_activations.len() > 1 {
             bail!("node publication lane policy admit_activations lists `{INVOKED}` once");
         }
+        if !sorted_unique(&self.liftable_facets) {
+            bail!("node publication lane policy liftable_facets must be sorted and unique");
+        }
+        for facet in &self.liftable_facets {
+            if NEVER_LIFTABLE.contains(&facet.as_str()) {
+                bail!(
+                    "node publication lane policy liftable_facets lists `{facet}`, which no \
+                     policy can lift"
+                );
+            }
+            if Facet::parse(facet).is_none() {
+                bail!(
+                    "node publication lane policy liftable_facets lists `{facet}`, which the \
+                     bundle manifest format does not know"
+                );
+            }
+        }
         if self.named_bundles.len() > MAX_NAMED_BUNDLES {
             bail!("node publication lane policy names more than {MAX_NAMED_BUNDLES} bundles");
         }
@@ -102,10 +123,10 @@ impl PublicationLanePolicy {
                 }
             }
             for facet in &entry.facets {
-                if Facet::parse(facet).is_none() {
+                if !self.liftable_facets.contains(facet) {
                     bail!(
-                        "node publication lane policy facet `{facet}` for `{bundle}` is not one \
-                         a policy can lift"
+                        "node publication lane policy facet `{facet}` for `{bundle}` is not in \
+                         liftable_facets"
                     );
                 }
             }
@@ -138,6 +159,15 @@ impl PublicationLanePolicy {
         Self {
             schema: 1,
             admit_activations: vec![INVOKED.to_string()],
+            liftable_facets: [
+                "bundle_events",
+                "item_authoring",
+                "owns_namespaces",
+                "project_snapshots",
+                "runtime_vault",
+            ]
+            .map(String::from)
+            .to_vec(),
             named_bundles: BTreeMap::new(),
         }
     }
@@ -201,6 +231,33 @@ mod tests {
         policy.admit_activations = Vec::new();
         policy.validate().unwrap();
         assert!(!policy.grants_for("demo").invoked);
+    }
+
+    #[test]
+    fn the_liftable_list_can_never_hold_a_floor_facet_or_an_unknown_name() {
+        for floor in NEVER_LIFTABLE {
+            let mut policy = PublicationLanePolicy::as_shipped();
+            policy.liftable_facets.push(floor.to_string());
+            policy.liftable_facets.sort();
+            assert!(policy.validate().is_err(), "{floor}");
+        }
+        let mut unknown = PublicationLanePolicy::as_shipped();
+        unknown.liftable_facets.push("zzz_not_a_facet".to_string());
+        unknown.liftable_facets.sort();
+        assert!(unknown.validate().is_err());
+        let mut unsorted = PublicationLanePolicy::as_shipped();
+        unsorted.liftable_facets.reverse();
+        assert!(unsorted.validate().is_err());
+    }
+
+    #[test]
+    fn a_named_entry_may_name_only_facets_on_the_liftable_list() {
+        let mut policy = with(named(&[], &["bundle_events"]));
+        policy.validate().unwrap();
+        policy
+            .liftable_facets
+            .retain(|facet| facet != "bundle_events");
+        assert!(policy.validate().is_err());
     }
 
     #[test]

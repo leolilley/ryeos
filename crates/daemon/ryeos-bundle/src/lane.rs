@@ -105,6 +105,20 @@ impl Facet {
     }
 }
 
+/// Manifest declarations no policy can lift. This is the floor: a policy
+/// listing one of these as liftable is refused, so a policy mistake cannot
+/// lower it.
+pub const NEVER_LIFTABLE: &[&str] = &[
+    "provides_kinds",
+    "operator_vault",
+    "state_home",
+    "route_capabilities",
+    "isolation_backends",
+    "external_providers",
+    "external_lifecycle_adapters",
+    "executors",
+];
+
 /// What this node admits for one lane bundle, taken from its signed policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneGrants {
