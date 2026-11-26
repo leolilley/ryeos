@@ -10,13 +10,14 @@
 use std::path::{Path, PathBuf};
 
 /// (function, expected count of `name(` occurrences in non-test source outside
-/// operator_authority.rs). The seventh is a substring of the third, as the
+/// operator_authority.rs, up to the file's top-level test module: an item-level
+/// `#[cfg(test)]` earlier in a file is not the end of its production code). The seventh is a substring of the third, as the
 /// scan counts text.
 const EXPECTED: &[(&str, usize)] = &[
-    ("require_admitted_operator(", 65),
-    ("disclosure_class_for(", 9),
+    ("require_admitted_operator(", 73),
+    ("disclosure_class_for(", 10),
     ("admitted_operator_authority_digest(", 11),
-    ("admitted_operator_authority_for_principal(", 8),
+    ("admitted_operator_authority_for_principal(", 10),
     ("admitted_binding_owner_authority_for_principal(", 1),
     ("retained_admitted_operator_authority(", 5),
     ("retained_admitted_operator_authority_digest(", 1),
@@ -53,7 +54,7 @@ fn the_operator_decision_functions_have_exactly_the_callers_the_impact_table_lis
         }
         let text = std::fs::read_to_string(root.join(file)).unwrap();
         let body = text
-            .find("#[cfg(test)]")
+            .find("\n#[cfg(test)]\nmod ")
             .map_or(text.as_str(), |end| &text[..end]);
         for (index, (name, _)) in EXPECTED.iter().enumerate() {
             counts[index] += body.matches(name).count();
