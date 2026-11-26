@@ -32,6 +32,8 @@
 //! the facets it lists are what the bundle declares, not what any policy would
 //! admit.
 
+pub mod apply;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -279,6 +281,7 @@ fn is_evidence_name(name: &str) -> bool {
         && name.len() <= 64
         && name != RECORD_FILE
         && name != TREE_DIR
+        && name != apply::REFUSAL_FILE
         && !name.starts_with('.')
         && name.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
@@ -461,6 +464,9 @@ pub struct StagedBundle {
     pub record: StagingRecord,
     /// The stage directory.
     pub dir: PathBuf,
+    /// The node-signed marker of a refused apply, when one verifies. A marker
+    /// that does not verify is ignored: it is never evidence of anything.
+    pub refusal: Option<apply::ApplyRefusalMarker>,
 }
 
 impl StagedBundle {
@@ -469,8 +475,11 @@ impl StagedBundle {
         self.dir.join(TREE_DIR)
     }
 
-    /// Check every evidence file against the digest the signed record holds.
-    pub fn verify_evidence(&self) -> Result<(), StagingRefusal> {
+    /// Check every evidence file against the digest the signed record holds,
+    /// and return the bytes that were checked. A caller that audits the
+    /// evidence uses these bytes and never reads the files again.
+    pub fn verify_evidence(&self) -> Result<BTreeMap<String, Vec<u8>>, StagingRefusal> {
+        let mut verified = BTreeMap::new();
         for (name, digest) in &self.record.evidence {
             let path = self.dir.join(name);
             let file = std::fs::File::open(&path)
@@ -482,8 +491,26 @@ impl StagedBundle {
                     "evidence {name} does not match the digest the staging record signs"
                 )));
             }
+            verified.insert(name.clone(), bytes);
         }
-        Ok(())
+        Ok(verified)
+    }
+}
+
+/// A stage whose record signature, name and evidence were all verified, with
+/// the evidence bytes that were hashed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStage {
+    pub bundle: StagedBundle,
+    /// Each evidence file's bytes exactly as they were verified.
+    pub evidence: BTreeMap<String, Vec<u8>>,
+}
+
+impl std::ops::Deref for VerifiedStage {
+    type Target = StagedBundle;
+
+    fn deref(&self) -> &StagedBundle {
+        &self.bundle
     }
 }
 
@@ -640,10 +667,10 @@ impl StagingArea {
         &self,
         tree_digest: &str,
         node_key: &VerifyingKey,
-    ) -> Result<StagedBundle, StagingRefusal> {
-        let stage = self.read_record(tree_digest, node_key)?;
-        stage.verify_evidence()?;
-        Ok(stage)
+    ) -> Result<VerifiedStage, StagingRefusal> {
+        let bundle = self.read_record(tree_digest, node_key)?;
+        let evidence = bundle.verify_evidence()?;
+        Ok(VerifiedStage { bundle, evidence })
     }
 
     fn read_record(
@@ -679,7 +706,12 @@ impl StagingArea {
                 path.display()
             )));
         }
-        Ok(StagedBundle { record, dir })
+        let refusal = apply::read_refusal_marker(&dir, tree_digest, node_key);
+        Ok(StagedBundle {
+            record,
+            dir,
+            refusal,
+        })
     }
 
     /// Refuse now when a stage of `additional_bytes` for `requester` would pass
@@ -768,6 +800,7 @@ impl StagingArea {
             bundle: StagedBundle {
                 record,
                 dir: final_dir,
+                refusal: None,
             },
             already_staged: false,
         })
