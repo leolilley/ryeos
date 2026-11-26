@@ -458,7 +458,7 @@ async fn an_origin_operator_delivers_an_offline_operation_through_its_node() -> 
 /// linked is refused: on HOSTED that key is a principal, not an operator.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_origin_operator_that_hosted_never_linked_is_refused_on_hosted() -> Result<()> {
-    let mut pair = start_pair(false).await?;
+    let pair = start_pair(false).await?;
     pair.delegate(&[SUBMIT_CAP, FACTS_CAP, STATUS_CAP]).await?;
     let (status, facts) = pair
         .origin_service(
