@@ -257,10 +257,7 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
     // The bundle is now installed, so a second pull moves nothing.
     let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
     assert_eq!(status, 409, "{again:#}");
-    assert_eq!(
-        again["error"]["code"], "bundle_already_installed",
-        "{again:#}"
-    );
+    assert_eq!(again["code"], "bundle_already_installed", "{again:#}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -282,7 +279,7 @@ async fn a_pull_never_takes_a_name_a_native_install_holds() {
     .await;
     assert_eq!(status, 409, "{refused:#}");
     assert_eq!(
-        refused["error"]["code"], "bundle_name_held_by_native_lane",
+        refused["code"], "bundle_name_held_by_native_lane",
         "{refused:#}"
     );
     assert_eq!(
