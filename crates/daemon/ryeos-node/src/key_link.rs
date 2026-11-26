@@ -521,7 +521,7 @@ mod tests {
                     &authoring.verifying_key(),
                     "authoring",
                     SignerRole::Authoring,
-                    SignerScope::operator_default(),
+                    SignerScope::authoring_default(),
                     SignerStatus::Active,
                 ),
             ],
