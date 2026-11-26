@@ -1577,14 +1577,7 @@ impl<'a> SessionMarkers<'a> {
         let key = &facts.compiled.binding.principal_id;
         match facts.state.engine.trust_store.owner_for(key) {
             Ok(owner) => Ok(owner.principal.to_string()),
-            Err(ryeos_engine::trust::OwnerRefusal::KeyNotActive { .. }) => Err(marker_refusal(
-                "owner_key_not_active",
-                "this seat's key no longer acts for an owner",
-            )),
-            Err(error) => Err(HandlerError::Internal(format!(
-                "resolve the owner of the seat key: {error}"
-            ))
-            .into()),
+            Err(refusal) => Err(owner_marker_refusal(refusal)),
         }
     }
 
@@ -1600,6 +1593,21 @@ impl<'a> SessionMarkers<'a> {
                 "project_required",
                 "this signed binding entry requires a seat that states a project",
             )),
+        }
+    }
+}
+
+/// What `@session:principal` answers when the node cannot name the owner of
+/// the seat's key: a retired or revoked key is the typed `owner_key_not_active`;
+/// any other refusal is the node's own fault.
+fn owner_marker_refusal(refusal: ryeos_engine::trust::OwnerRefusal) -> anyhow::Error {
+    match refusal {
+        ryeos_engine::trust::OwnerRefusal::KeyNotActive { .. } => marker_refusal(
+            "owner_key_not_active",
+            "this seat's key no longer acts for an owner",
+        ),
+        other => {
+            HandlerError::Internal(format!("resolve the owner of the seat key: {other}")).into()
         }
     }
 }
@@ -2994,6 +3002,85 @@ mod tests {
             Some(HandlerError::Structured { code, .. }) => Some(code.clone()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn a_retired_or_revoked_key_is_the_typed_owner_refusal_and_other_faults_are_not() {
+        use ryeos_engine::trust::{OwnerRefusal, SignerStatus};
+        for status in [SignerStatus::Retired, SignerStatus::Revoked] {
+            let error = owner_marker_refusal(OwnerRefusal::KeyNotActive { status });
+            assert_eq!(
+                refusal_code(&error).as_deref(),
+                Some("owner_key_not_active")
+            );
+        }
+        let error = owner_marker_refusal(OwnerRefusal::Unavailable);
+        assert!(
+            refusal_code(&error).is_none(),
+            "a damaged registry is not a seat refusal"
+        );
+    }
+
+    #[test]
+    fn a_seat_on_a_registered_checkout_states_its_project_and_loses_it_with_the_registration() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        let canonical = checkout.path().canonicalize().expect("canonical checkout");
+        let identity = crate::test_support::register_operator_checkout(&state, &canonical, "demo");
+
+        // A seat of the operator's key on that checkout, sealed with the
+        // project the registration states.
+        let operator = crate::test_support::operator_launch_context(&state);
+        let key = if operator.fingerprint.starts_with("fp:") {
+            operator.fingerprint.clone()
+        } else {
+            format!("fp:{}", operator.fingerprint)
+        };
+        let mut launch = crate::test_support::launch_context(
+            "surface:ryeos/ui/base",
+            Some(canonical.to_string_lossy().as_ref()),
+            crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+            None,
+        );
+        {
+            let binding = &mut Arc::make_mut(&mut launch.compiled_binding).binding;
+            binding.principal_id = key;
+            binding.signer_project =
+                ryeos_state::project_identity::LogicalProject::Stated(identity.clone());
+        }
+        let (session_id, token) = crate::test_support::mint_launch(&state, launch);
+        let ui = get_ui_state(&state).expect("UI state");
+        assert_eq!(
+            ui.browser_sessions.consume_launch_token(&token),
+            Some(session_id.clone())
+        );
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("session");
+        let attachment = session.attachments[&session.root_attachment_id].clone();
+        let scopes = vec!["*".to_owned()];
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+
+        // The registration states the project: the marker is its identity, with the name.
+        let stated = resolve_session_markers(&json!("@session:project"), &markers).unwrap();
+        assert_eq!(stated, json!(identity.to_string()));
+        assert!(stated.as_str().unwrap().ends_with("/demo"));
+
+        // The registration is gone: the same seat answers the typed absence,
+        // so the answer is judged now and not carried from mint.
+        ryeos_node::project_registry::unregister(
+            &ryeos_node::project_registry::RegistrationChange {
+                app_root: &state.config.app_root,
+                node: &state.identity,
+                request_digest: &"0".repeat(64),
+                path: &canonical,
+                identity: &identity,
+            },
+        )
+        .expect("unregister the checkout");
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("unregistered"));
     }
 
     #[test]
