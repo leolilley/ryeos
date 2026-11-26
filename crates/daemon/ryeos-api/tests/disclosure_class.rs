@@ -30,6 +30,13 @@ fn the_class_is_operator_exactly_when_the_node_admits_the_key_as_operator() {
         Some(AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
+    let forwarded_operator = HandlerContext::new_with_authority(
+        local.principal_id(),
+        vec![],
+        true,
+        Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
+        Some("site:source".to_owned()),
+    );
     let other_local = HandlerContext::new_with_authority(
         format!("fp:{}", "b".repeat(64)),
         vec![],
@@ -44,12 +51,17 @@ fn the_class_is_operator_exactly_when_the_node_admits_the_key_as_operator() {
             DisclosureClass::Operator,
         ),
         (
-            "forwarded operator with origin proof",
+            "the operator's own key forwarded from another of its nodes",
+            forwarded_operator,
+            DisclosureClass::Operator,
+        ),
+        (
+            "another key forwarded with origin proof, not speaking for the operator's owner",
             remote(
                 AuthorizedKeyPrincipalClass::RemotePrincipal,
                 Some("site:source"),
             ),
-            DisclosureClass::Operator,
+            DisclosureClass::Principal,
         ),
         (
             "remote principal without origin proof",
@@ -82,4 +94,26 @@ fn the_class_is_operator_exactly_when_the_node_admits_the_key_as_operator() {
             );
         }
     }
+}
+
+/// A remote principal that does not speak for the operator's owner is refused
+/// with a typed code, so no operator-only act can be reached through it.
+#[test]
+fn a_remote_principal_that_does_not_speak_for_the_operator_owner_is_refused_with_a_typed_code() {
+    let (_tmp, _owner, state) = test_state::build_test_state();
+    let stranger = remote(
+        AuthorizedKeyPrincipalClass::RemotePrincipal,
+        Some("site:source"),
+    );
+    let error = require_admitted_operator(&state, &stranger)
+        .expect_err("a key that does not speak for the operator owner is not an operator");
+    assert!(
+        format!("{error:#}").contains("operator_owner_not_spoken_for")
+            || ryeos_app::handler_error::extract_handler_error(&error).is_some(),
+        "{error:#}"
+    );
+    assert_eq!(
+        disclosure_class_for(&state, &stranger),
+        DisclosureClass::Principal
+    );
 }
