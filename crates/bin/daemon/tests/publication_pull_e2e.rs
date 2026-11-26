@@ -192,21 +192,8 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
         "a refused pull left a registration behind"
     );
 
-    // The remote install is refused the same way, before any remote is asked.
-    let (status, refused) = service(
-        &b,
-        "service:remote/bundle-install",
-        json!({"remote": "nowhere", "bundle_name": BUNDLE}),
-    )
-    .await;
-    assert_eq!(status, 501, "{refused:#}");
-    assert_eq!(
-        refused["code"], "live_install_staged_unavailable",
-        "{refused:#}"
-    );
-
-    // The refused calls were recorded as threads whose terminal write
-    // succeeded (the 501 answers above), the node answers, and it boots again.
+    // The refused pull was recorded as a thread whose terminal write
+    // succeeded (the 501 answer above), the node answers, and it boots again.
     let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
     assert_eq!(status, 200, "{listed:#}");
     b.restart()

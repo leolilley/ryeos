@@ -86,9 +86,6 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if !LIVE_INSTALLS_ARE_STAGED {
-        return Err(anyhow::Error::new(live_install_refused()));
-    }
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
@@ -102,6 +99,12 @@ pub async fn handle(
     }
 
     let client = crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?;
+
+    // The caller is authorized to act through this remote; only now does it
+    // learn that a live install is refused, before anything is fetched.
+    if !LIVE_INSTALLS_ARE_STAGED {
+        return Err(anyhow::Error::new(live_install_refused()));
+    }
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -1181,6 +1184,19 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_install_is_refused_with_its_typed_code_and_sentence() {
+        use crate::handler_error::HandlerError;
+        let HandlerError::Structured { code, status, body } = live_install_refused() else {
+            panic!("a structured refusal");
+        };
+        assert_eq!(code, "live_install_staged_unavailable");
+        assert_eq!(status, 501);
+        assert_eq!(body["code"], "live_install_staged_unavailable");
+        let text = body["error"].as_str().expect("error text");
+        assert!(text.contains("live installs are staged; staging is not available yet"));
+    }
 
     fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
         BundleExportEntry {
