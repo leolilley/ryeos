@@ -1125,7 +1125,20 @@ mod tests {
             std::fs::write(&full, bytes).unwrap();
             lillux::tree_entry::test_support::set_mode(&full, 0o644).unwrap();
         }
+        set_directory_modes(&tree);
         (dir, tree)
+    }
+
+    /// Give `dir` and every directory below it mode 0o755, whatever the
+    /// process umask was when they were created.
+    fn set_directory_modes(dir: &Path) {
+        lillux::tree_entry::test_support::set_mode(dir, 0o755).unwrap();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                set_directory_modes(&path);
+            }
+        }
     }
 
     const LIMITS: TreeLimits = TreeLimits {
@@ -1200,6 +1213,7 @@ mod tests {
 
         let (_d, tree) = tree_with(&[("a.txt", b"one")]);
         std::fs::create_dir(tree.join("empty")).unwrap();
+        lillux::tree_entry::test_support::set_mode(&tree.join("empty"), 0o755).unwrap();
         assert!(refused(&tree).to_string().contains("empty directory"));
 
         let (_d, tree) = tree_with(&[("sub/a.txt", b"one")]);
@@ -1209,11 +1223,16 @@ mod tests {
         assert!(refused(&tree).to_string().contains("writable"));
         lillux::tree_entry::test_support::set_mode(&tree.join("sub"), 0o755).unwrap();
         tree_digest_from_dir("demo", &tree, &LIMITS).unwrap();
+        lillux::tree_entry::test_support::set_mode(&tree, 0o775).unwrap();
+        assert!(refused(&tree).to_string().contains("writable"));
+        lillux::tree_entry::test_support::set_mode(&tree, 0o755).unwrap();
+        tree_digest_from_dir("demo", &tree, &LIMITS).unwrap();
 
         // An empty tree holds nothing to digest.
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().join("tree");
         std::fs::create_dir(&empty).unwrap();
+        lillux::tree_entry::test_support::set_mode(&empty, 0o755).unwrap();
         assert!(refused(&empty).to_string().contains("empty directory"));
     }
 

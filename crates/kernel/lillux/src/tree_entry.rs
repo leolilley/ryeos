@@ -105,6 +105,33 @@ pub fn open_tree_regular_file_no_follow(path: &Path) -> Result<(File, TreeEntryO
     }
 }
 
+/// Set `root` and every directory below it to mode `0o755`, whatever umask
+/// they were created under. Links are never followed and non-directories are
+/// left alone.
+pub fn set_tree_directory_modes(root: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        anyhow::bail!("tree directory modes are unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use anyhow::Context as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = std::fs::symlink_metadata(root)
+            .with_context(|| format!("observe {}", root.display()))?;
+        if !metadata.file_type().is_dir() {
+            return Ok(());
+        }
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("set mode of {}", root.display()))?;
+        for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+            set_tree_directory_modes(&entry?.path())?;
+        }
+        Ok(())
+    }
+}
+
 /// Helpers that build odd tree shapes for tests in other crates.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {

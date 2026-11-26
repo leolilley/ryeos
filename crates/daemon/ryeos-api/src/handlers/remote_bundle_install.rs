@@ -222,6 +222,10 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         remove_remote_fetch_heartbeat(&tree)?;
     }
 
+    // Directories made while materialising took the process umask; the staged
+    // tree's directories are exactly 0o755 whatever it was.
+    lillux::set_tree_directory_modes(&tree).context("set the staged tree's directory modes")?;
+
     // The bytes on disk must be exactly the verified entry list: recompute the
     // digest from the materialised tree and compare it with the list's.
     let files: Vec<staging::TreeFile> = entries

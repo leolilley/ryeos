@@ -133,7 +133,7 @@ pub use subordinate_process::{
 };
 pub use tree_entry::{
     TreeEntryKind, TreeEntryObservation, observe_tree_entry_no_follow,
-    open_tree_regular_file_no_follow,
+    open_tree_regular_file_no_follow, set_tree_directory_modes,
 };
 
 #[cfg(target_os = "linux")]
