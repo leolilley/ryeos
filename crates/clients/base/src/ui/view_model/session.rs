@@ -12,6 +12,18 @@ pub struct RyeOsSessionVm {
     pub surfaces: Vec<RyeOsSurfaceChoiceVm>,
     pub user_principal_id: Option<String>,
     pub posture: crate::ui::binding::UiEffectivePosture,
+    /// The project the root seat states, as inert length-bounded text: the
+    /// project's name, or the signed sentence for why it states none. Absent
+    /// when the seat is bound to no project. Display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_chip: Option<RyeOsProjectChipVm>,
+}
+
+/// What the project chip draws.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsProjectChipVm {
+    pub text: String,
+    pub tone: super::RyeOsTone,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

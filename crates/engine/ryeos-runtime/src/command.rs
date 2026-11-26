@@ -897,6 +897,16 @@ mod tests {
         assert!(matches!(err, CommandRegistryError::DuplicateTokens { .. }));
     }
 
+    /// A bundle named with `[]` holds no registration caps and still registers
+    /// a command whose claims no rule protects. This is why a bundle the
+    /// policy does not name at all is refused any command, not treated as `[]`.
+    #[test]
+    fn a_command_claiming_nothing_protected_registers_with_no_caps() {
+        let record = command("plain-tool", &["plain-tool"]);
+        assert!(record.provenance.command_registration_caps.is_empty());
+        CommandRegistry::from_records(&[record], &policy()).unwrap();
+    }
+
     #[test]
     fn command_claiming_protected_root_requires_registration_cap() {
         let err =

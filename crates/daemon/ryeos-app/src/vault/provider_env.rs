@@ -146,6 +146,15 @@ impl ProviderEnvironment {
             .collect()
     }
 
+    /// Every captured value, for the exact-match output floor only. The
+    /// caller owns zeroizing every returned value.
+    pub(super) fn all_values(&self) -> Vec<Zeroizing<String>> {
+        self.values
+            .values()
+            .map(|value| Zeroizing::new(value.as_str().to_owned()))
+            .collect()
+    }
+
     /// Copy the values of the requested declared names that are present.
     /// The caller owns zeroizing every returned value.
     pub(super) fn read_declared(&self, requested: &[String]) -> HashMap<String, String> {

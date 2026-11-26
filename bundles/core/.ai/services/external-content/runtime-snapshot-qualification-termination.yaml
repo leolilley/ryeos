@@ -1,7 +1,9 @@
-# ryeos:signed:2026-09-28T09:42:59Z:76096a8431fb334adf2f2f70473fd23bc32bc4093bece968dc161d5fa89d5a32:ulPt4Cv0OYFfY4MRoDU/KVu11S1rHxBod8XfpjybNPvPevFxp6MGWRS4utGZyt4AVHnsWrT4VkTdnRtztg1JCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:ede6122739bc3961db82d45ca61b6ebcb0540c9394e391787d54574926ead46c:5Q7VTf7d7/6AT3OxS8F2N3hNBZQLuKS9/Mk4qTvO/s94WqI2frY+CGavISJNRxMTNsZRZiShAuYbLZCaBs4HBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.runtime-snapshot-qualification-termination
 required_caps: ["ryeos.execute.service.external-content/runtime-snapshot-qualification-termination"]
 schema:
   operation_id: string
 description: Read one exact operator-owned qualification termination record without provider contact
+# Requires the admitted or local configured operator; no principal is served.
+disclosure: {}

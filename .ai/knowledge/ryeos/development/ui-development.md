@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T16:53:50Z:313f1de5b5e7aa0875d9b0ed626bc8a282f97c3e80084f0d92d3d12c9be74542:BvHRf3ZrpaOZpdifPQFAxZ0GO45++fnZgQ2trlKc9q9oWyrl2sji5GWTVwbVroJi+I4D+eWBmyrOcuKL1tiQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:22:30Z:3fb02177536acfc700c297278d004a52a35cea61059541c9e4422feef3b609e8:zW9hWvXigaM7J42iDHWvuZwxKVsXlDSbAb17ITGuRrw0Dj8dQfU63MjP1yFyNBehHastbbcajepxTiQVOUp+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -299,6 +299,16 @@ list and bounds, and an event that cannot be shaped ends the stream with a
 
 Attachment count is bounded by the signed `ui_browser_sessions` node policy.
 There is no daemon fallback value. Test fixtures must supply that policy too.
+The same policy (schema 6) bounds the picture grants a session may hold
+(`max_art_grants`); `BrowserSessionStore::grant_art` takes the bound from the
+caller, which reads it from the policy. A node still on schema 5 needs
+`ryeos node reset policy-generation` after the new profile is installed.
+
+Themes are signed `theme` items, not renderer constants. A client never holds a
+palette of its own: the stored preference is `system` or an installed theme's
+ref, validated by the daemon against the installed set, and the palettes arrive
+as `theme_catalogue` from the config source. The only embedded copy is the
+shipped item files themselves, used for the boot palette and for fixtures.
 Releasing an unused attachment is an explicit session-wide operation: another
 browser tab may share it. Never infer permission to revoke from one renderer's
 last closed mount. The shared command dialog offers release only when this

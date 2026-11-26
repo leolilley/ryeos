@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T01:40:30Z:fa9b946b64ee3385716ef619000efe724ad503c6fe2297e9c0eaca5a1a1aab58:S6z6R9IBc1nmu9O3iYLJfjbhEy2Wue1p9McRDn6YV43dHQ6M1fOXYNe1jD2usu3NEkwBEYNiqNlz5apvjFluDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:87537de4a7210b0ee61740da803cfa96720a295b8b3dfc5ac3eb7651ac6a6b9b:YrKg/CEs5Ta8cgoRViawm79yNbodRXJw9FwkhpkcuTPbh3N/bOg7TdPzDs6W3q7F03OUbHAk0Zazsq9xjgfBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.get-any
 required_caps: ["ryeos.execute.service.objects/get-any"]
@@ -8,3 +8,24 @@ schema:
   blob_chunk: object?
   large_object_chunk: object?
 description: "Operator-only unscoped read of typed CAS object/blob batches or bounded chunks by hash, with no root. Never part of a recommended remote grant; the node operator uses it to read their own node"
+disclosure:
+  principal:
+    - "/entries/*/hash"
+    - "/entries/*/kind"
+    - "/blob_chunk/hash"
+    - "/blob_chunk/kind"
+    - "/blob_chunk/offset"
+    - "/blob_chunk/total_size"
+    - "/blob_chunk/eof"
+    - "/large_object_chunk/hash"
+    - "/large_object_chunk/kind"
+    - "/large_object_chunk/offset"
+    - "/large_object_chunk/total_size"
+    - "/large_object_chunk/eof"
+  interim_free_text:
+    - "/entries/*/value"  # removed by: m4
+    - "/entries/*/data"  # removed by: m4
+    - "/blob_chunk/data"  # removed by: m4
+    - "/large_object_chunk/data"  # removed by: m4
+  max_items: 4096
+  max_result_bytes: 8388608

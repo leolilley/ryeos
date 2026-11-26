@@ -1,5 +1,18 @@
-# ryeos:signed:2026-11-13T23:11:57Z:ca4da8ed92b98760ffc4b0521e511253b009500c19570175a3c7e9d6c82f12f0:rwC2sz0Zqt/ZqUhH8ao5OkW6Bu2r4bgFu1qMywuXRP/HlXGvJK+U0d5RYh3mqKzS3mUZzZw1hV1oYqYC+l69Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:5165ec1980e288478b94ba61c76a6e55aa2ab66f34c91ac45c2970b7f37c8a66:Wnab1wR2cUgIBX9GPzp8ygXhDx6bvBw+NAW7X/tO7G4OrFOdLT8NK7np0weT0BblscucMHAEk4xvg21U1YzNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: offline-operations.facts
 required_caps: ["ryeos.execute.service.offline-operations/facts"]
 description: "The node's offline-operation precondition facts and ledger head, which a request is signed against, and under `signer` the authority the caller holds on the node: the local operator, or its grant's current digest and origin site, which `sign` names in the request"
+disclosure:
+  principal:
+    - "/node_fingerprint"
+    - "/facts/*"
+    - "/ledger_head"
+    - "/ledger_sequence"
+    - "/signer/fingerprint"
+    - "/signer/local_operator"
+    - "/signer/principal_class"
+    - "/signer/grant_digest"
+    - "/signer/origin_site_id"
+  free_text:
+    - "/signer/grant_error"

@@ -115,6 +115,62 @@ pub fn operator_launch_context(state: &AppState) -> ryeos_app::handler_context::
     local_operator_context(state, vec!["*".into()])
 }
 
+/// Register `checkout` for the node operator's owner under `name`, the way
+/// `node.project.register` does, and declare the same name in the checkout's
+/// manifest. A seat the operator launches on that checkout then states the
+/// returned project.
+pub fn register_operator_checkout(
+    state: &AppState,
+    checkout: &std::path::Path,
+    name: &str,
+) -> ryeos_state::project_identity::ProjectIdentity {
+    let canonical = checkout.canonicalize().expect("canonical checkout");
+    std::fs::create_dir_all(canonical.join(".ai")).expect("create the checkout's .ai");
+    std::fs::write(
+        canonical.join(ryeos_state::project_identity::PROJECT_DECLARATION_PATH),
+        format!("name: {name}\n"),
+    )
+    .expect("declare the project name");
+    let operator = operator_launch_context(state);
+    let owner = state
+        .engine
+        .trust_store
+        .owner_for(&operator.fingerprint)
+        .expect("the operator key acts for an owner")
+        .principal;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(
+        owner,
+        name.parse().expect("fixture project name"),
+    );
+    ryeos_node::project_registry::register(&ryeos_node::project_registry::RegistrationChange {
+        app_root: &state.config.app_root,
+        node: &state.identity,
+        request_digest: &"0".repeat(64),
+        path: &canonical,
+        identity: &identity,
+    })
+    .expect("register the operator's checkout");
+    identity
+}
+
+/// The host folders registered in the verified non-operator fixture
+/// principal's private registry.
+pub async fn non_operator_registered_roots(state: &AppState) -> Vec<String> {
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let resolver =
+        ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
+    let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
+        .await
+        .unwrap();
+    let projects: crate::handlers::ui_projects::ProjectsFile =
+        store.load_yaml(&store.paths().projects_config()).unwrap();
+    projects
+        .projects
+        .into_iter()
+        .map(|entry| entry.root)
+        .collect()
+}
+
 /// Append `project_root` to the verified non-operator fixture principal's
 /// private registry and return its local id. Seat registration through `projects/add` is a
 /// local-operator act, so a non-operator fixture seeds its registry here.
@@ -238,11 +294,12 @@ fn session_context_and_root(
         .get_session(id)
         .unwrap();
     let root = session.attachments[&session.root_attachment_id].coordinate();
-    let ctx = ryeos_app::handler_context::HandlerContext::new(
-        format!("session:{id}"),
-        session.granted_caps.clone(),
-        false,
-    );
+    let ctx = crate::invokers::browser_session_invocation::session_route_principal(
+        id,
+        session.user_principal_id.as_deref(),
+        &session.granted_caps,
+    )
+    .handler_context();
     (ctx, root)
 }
 
@@ -450,6 +507,7 @@ pub fn launch_context(
             )
         }),
         registered_project_id: None,
+        seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
     }
 }
 
@@ -531,7 +589,7 @@ fn test_node_policy(
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 5,
+                        schema: 6,
                         session_ttl_secs: 28800,
                         session_idle_secs: 3600,
                         launch_token_ttl_secs: 60,
@@ -540,6 +598,7 @@ fn test_node_policy(
                         max_live_binding_attachments_per_session: 16,
                         max_presentations_per_session: 16,
                         max_surface_instances_per_presentation: 16,
+                        max_art_grants: 256,
                         shared_presentation: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SharedPresentationPolicyLimits {
                             max_declaration_bytes: 65536,
                             max_dialogs: 16,

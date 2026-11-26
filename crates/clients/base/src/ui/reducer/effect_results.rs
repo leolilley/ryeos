@@ -912,13 +912,29 @@ impl RyeOsCore {
             // Surface may supply it. An unreadable response clears it, and
             // every coverage line then reads as unknown.
             // The preference is the principal's, so any admitted Surface may
-            // supply it. A value outside the allowed list clears it, and the
+            // supply it. A value that names no installed theme clears it, and the
             // presentation then follows the platform.
             Some("theme_preference") => {
+                // The stored value is judged against the catalogue it arrives
+                // with; without a readable catalogue no value is applied.
+                self.data.theme_catalogue = data
+                    .get("theme_catalogue")
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::theme_preference::ThemeCatalogue>(
+                            value.clone(),
+                        )
+                        .ok()
+                    })
+                    .filter(|catalogue| catalogue.validate().is_ok());
                 self.data.theme_preference = data
                     .get("theme")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|stored| crate::theme_preference::ALLOWED.contains(stored))
+                    .filter(|stored| {
+                        self.data
+                            .theme_catalogue
+                            .as_ref()
+                            .is_some_and(|catalogue| catalogue.allows(stored))
+                    })
                     .map(str::to_owned);
             }
             Some("coverage_wording") => {
@@ -1760,26 +1776,98 @@ mod tests {
                 .theme
                 .id
         };
+        let preference = |stored: &str| {
+            let palette = serde_json::json!({
+                "bg": "#000000", "ink": "#ffffff", "accent": "#ff8000",
+                "good": "#00ff00", "warn": "#ffff00", "danger": "#ff0000"
+            });
+            let theme = |id: &str| {
+                serde_json::json!({
+                    "ref": format!("theme:ryeos/{id}"), "id": id, "title": id,
+                    "palette": palette
+                })
+            };
+            serde_json::json!({
+                "theme": stored,
+                "theme_catalogue": {
+                    "schema_version": crate::theme_preference::THEME_CATALOGUE_CONTRACT,
+                    "themes": [theme("night"), theme("paper"), theme("gruvbox")],
+                    "system": {"dark": "theme:ryeos/night", "light": "theme:ryeos/paper"},
+                    "default": "theme:ryeos/night"
+                }
+            })
+        };
         // Before the preference is read the presentation follows the platform.
         assert_eq!(theme_id(&core), "system");
         let id = preference_fetch(&core.initial_effects()).expect("opening reads the preference");
-        send(&mut core, id, serde_json::json!({"theme": "gruvbox"}));
-        assert_eq!(core.data.theme_preference.as_deref(), Some("gruvbox"));
-        assert_eq!(theme_id(&core), "gruvbox");
+        send(&mut core, id, preference("theme:ryeos/gruvbox"));
+        assert_eq!(
+            core.data.theme_preference.as_deref(),
+            Some("theme:ryeos/gruvbox")
+        );
+        assert_eq!(theme_id(&core), "theme:ryeos/gruvbox");
 
         // A service success reaches the `service` hint, so a changed
         // preference is read again and applied without reopening the seat.
         let id = preference_fetch(&core.effects_for_hint("service"))
             .expect("a service hint reads the preference again");
-        send(&mut core, id, serde_json::json!({"theme": "paper"}));
-        assert_eq!(theme_id(&core), "paper");
+        send(&mut core, id, preference("theme:ryeos/paper"));
+        assert_eq!(theme_id(&core), "theme:ryeos/paper");
 
-        // A value outside the allowed list (the earlier light/dark values
-        // included) is not applied; the presentation follows the platform.
+        // A value that names no installed theme (the earlier palette ids and
+        // light/dark values included) is not applied; the presentation
+        // follows the platform.
+        for refused in ["dark", "night", "theme:ryeos/neon"] {
+            let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
+            send(&mut core, id, preference(refused));
+            assert_eq!(core.data.theme_preference, None, "{refused}");
+            assert_eq!(theme_id(&core), "system");
+        }
+        // The active Surface's ground arrives per theme and reaches the
+        // presentation by theme ref; a failed binding stays an unavailable
+        // entry rather than vanishing.
+        let root_ref = core
+            .active_surface_attachment()
+            .expect("an active Surface")
+            .root_ref
+            .clone();
         let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
-        send(&mut core, id, serde_json::json!({"theme": "dark"}));
+        let mut with_grounds = preference("system");
+        let ground = |value: serde_json::Value| {
+            let mut grounds = serde_json::Map::new();
+            grounds.insert(root_ref.clone(), value);
+            serde_json::Value::Object(grounds)
+        };
+        with_grounds["theme_catalogue"]["themes"][0]["surface_grounds"] = ground(
+            serde_json::json!({"picture": {"sha256": "a".repeat(64), "media_type": "image/webp"}}),
+        );
+        with_grounds["theme_catalogue"]["themes"][1]["surface_grounds"] =
+            ground(serde_json::json!({"picture_state": "unavailable"}));
+        send(&mut core, id, with_grounds);
+        let grounds = crate::ui::view_model::build_view_model(&core)
+            .presentation
+            .theme
+            .grounds;
+        assert_eq!(grounds.len(), 2);
+        assert_eq!(
+            grounds["theme:ryeos/night"]
+                .picture
+                .as_ref()
+                .unwrap()
+                .sha256,
+            "a".repeat(64)
+        );
+        assert_eq!(grounds["theme:ryeos/night"].origin, "theme");
+        assert!(grounds["theme:ryeos/paper"].picture.is_none());
+        assert_eq!(
+            grounds["theme:ryeos/paper"].picture_state.as_deref(),
+            Some("unavailable")
+        );
+        // A response with no readable catalogue applies nothing either.
+        let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
+        send(&mut core, id, serde_json::json!({"theme": "system"}));
         assert_eq!(core.data.theme_preference, None);
-        assert_eq!(theme_id(&core), "system");
+        assert!(core.data.theme_catalogue.is_none());
     }
 
     #[test]

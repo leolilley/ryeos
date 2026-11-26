@@ -146,6 +146,8 @@ pub async fn handle(
         engine: state.engine.clone(),
         plan_ctx: plan_ctx.clone(),
         requested_call: None,
+        // Applicability checks resolve a launch contract; no handler runs.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
     };
     let applicability = ryeos_executor::dispatch::launch_contract_applicability(
         &req.item_ref,

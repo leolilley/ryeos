@@ -566,6 +566,12 @@ impl SchedulerContext for AppSchedulerContext {
             engine: provenance.request_engine().clone(),
             plan_ctx,
             requested_call: None,
+            // The class of the key the schedule was admitted under, from the
+            // revalidated scheduled authority.
+            disclosure_class: ryeos_app::operator_authority::disclosure_class_for(
+                &self.0,
+                &handler_context,
+            ),
         };
         let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
             &exec_ctx.engine,

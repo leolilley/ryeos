@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:cf622b0af6cf0dcdddd5851952b18bc6668a86062426b909cd2797f7d97cda1a:njacYovyyyXsP+tvgQdT69Ct9NXJE2G8XXuo+cs7AV5SYFMqtprPC6I6CguDkrzF/el5BRfmj6yy+5JKcoV6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:27Z:9edd513fc4db0cd01cca1d766bf94f29ca0e18bde1c885dab8043834278db686:tga/EMyqZN6/tZgYuDqTb9ScpvwaPgoZp9dMHjEePQmdvnlIokbazMtG5QHnz4QhbO4s9KNM9d/2uVOH27BXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.list
 availability: both
@@ -12,3 +12,39 @@ schema:
   limit: integer?
   cursor: string?
 description: "List the signed revision records of one project item, oldest first, each with what was checked (signature, signer, links), the chain's standing against the node's signed head, and whether the live file is what the last record wrote"
+disclosure:
+  principal:
+    - "/item_ref"
+    - "/total"
+    - "/sound"
+    - "/head/status"
+    - "/head/seq"
+    - "/head/head_seq"
+    - "/head/tip_seq"
+    - "/next_cursor"
+    - "/records/*/seq"
+    - "/records/*/hash"
+    - "/records/*/verify/status"
+    - "/records/*/verify/scheme"
+    - "/records/*/verify/signer"
+    - "/records/*/unrecorded_change_before"
+    - "/records/*/tombstone"
+    - "/records/*/recorded_at"
+    - "/records/*/actor/fingerprint"
+    - "/records/*/actor/role"
+    - "/records/*/before_digest"
+    - "/records/*/after_digest"
+    - "/records/*/file_ext"
+    - "/records/*/provenance/authored_by"
+    - "/records/*/provenance/action"
+    - "/records/*/provenance/thread_id"
+    - "/records/*/provenance/invocation_id"
+    - "/records/*/provenance/parent_item_ref"
+    - "/records/*/provenance/authoring_capability"
+    - "/records/*/provenance/target_ref"
+    - "/records/*/provenance/content_digest"
+  free_text:
+    - "/file"
+    - "/records/*/verify/reason"
+  max_items: 200
+  max_result_bytes: 524288

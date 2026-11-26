@@ -1,7 +1,9 @@
-# ryeos:signed:2026-10-10T04:34:12Z:52a5a8141dcca64c309b2d04ab869b97c66f3b7dfd06eb830e44e5b7c0b196e7:2yook/CFc/tKCCn5jSRvk6TOMqLL5N6DAV5RfdCNj+wA+OjrJUCUZlH7aLQwH9XDO/8EL0BSjFJIFubdOnDsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:7f9619237ca7f5c2c2cf2f9c1fb5ffda91204cf8ab9a7d37c8d510aa5b0da361:TuovfyY0iQS/6WA43MRuwzp17K+10ROiF3quaUmxCe3XfDZYmxvAW9UrVvARpb/C5099DDwq1jE5JV4bzS9DBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.continue-runtime-snapshot-create
 required_caps: ["ryeos.execute.service.external-content/continue-runtime-snapshot-create"]
 schema:
   operation_id: string
 description: Continue only the one unclaimed create stage of an exact accepted upload using its retained signed producer and adapter closure; no new upload is permitted
+# The handler requires the admitted node operator (external content acquisition and qualification).
+disclosure: {}

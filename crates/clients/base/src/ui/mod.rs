@@ -35,6 +35,7 @@ pub mod reducer;
 mod reproof;
 pub mod seat;
 pub mod seat_digest;
+pub mod seat_project;
 pub mod source_key;
 #[cfg(test)]
 mod surface_discovery_tests;
@@ -81,6 +82,7 @@ pub use model::{
 pub use reproof::AuthenticatedReproofGuard;
 pub use seat::{InputRoute, InvokeTemplate, SeatEvent, SeatEventKind, SeatFold, SeatLog};
 pub use seat_digest::{SeatPayloadDigestError, seat_payload_digest};
+pub use seat_project::{UiSeatAbsence, UiSeatProject, UiSeatProjectChip};
 pub use source_key::{RyeOsSourceChannel, RyeOsSourceInstanceKey};
 pub use timeline::{RyeOsLiveDelta, RyeOsTimelineEntryVm};
 pub use tokenize::{InputLine, TokenizeError, classify_line};

@@ -481,6 +481,12 @@ pub struct RyeOsDataState {
     /// follows the platform (`system`).
     #[serde(default)]
     pub theme_preference: Option<String>,
+    /// The installed themes (palettes, and the Surface grounds the daemon
+    /// granted this session) from the same source. Absent until read; the
+    /// presentation then carries no palette and a renderer keeps its boot
+    /// palette.
+    #[serde(default)]
+    pub theme_catalogue: Option<crate::theme_preference::ThemeCatalogue>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,
@@ -4047,6 +4053,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: Default::default(),
             }],
             ..Default::default()
@@ -4502,6 +4509,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: super::super::binding::UiBindingRequestBounds {
                     max_request_bytes: 4096,
                     max_input_bytes: 1024,

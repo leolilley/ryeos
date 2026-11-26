@@ -40,6 +40,10 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::events::RuntimeEventType;
 
+use super::detached_workspace_input::{
+    DetachedWorkloadAdmission, DetachedWorkspaceHandoff, capture_detached_workspace_input,
+};
+
 /// Admit and launch a detached, lineage-linked child under the calling parent.
 ///
 /// `child_provenance` is the parent's already-borrowed child provenance (the
@@ -51,7 +55,7 @@ use ryeos_runtime::events::RuntimeEventType;
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-pub async fn spawn_detached_child(
+pub(crate) async fn spawn_detached_child(
     state: &AppState,
     thread_auth: &ThreadAuthState,
     cap: &CallbackCapability,
@@ -63,8 +67,26 @@ pub async fn spawn_detached_child(
     launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
     operation_id: &str,
     request_hash: &str,
+    workload: Option<&DetachedWorkloadAdmission<'_>>,
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
+    // A parent that keeps running (it holds a workload-client grant) hands the
+    // child its workspace as captured data input with the program resolved
+    // from the base generation; any other parent keeps the freeze handoff. The
+    // two must agree with the admission the caller built, so a grant-bearing
+    // parent can never fall into the freeze path by omission.
+    let handoff = DetachedWorkspaceHandoff::for_parent(cap);
+    match (handoff, workload.is_some()) {
+        (DetachedWorkspaceHandoff::BaseGeneration, true)
+        | (DetachedWorkspaceHandoff::CandidateFreeze, false) => {}
+        (DetachedWorkspaceHandoff::BaseGeneration, false) => {
+            anyhow::bail!("detach: a grant-bearing parent's launch lost its workspace admission")
+        }
+        (DetachedWorkspaceHandoff::CandidateFreeze, true) => {
+            anyhow::bail!("detach: a workspace admission was supplied for a parent with no grant")
+        }
+    }
+    let parent_project_path = child_provenance.effective_path().to_path_buf();
 
     let child_ref = CanonicalRef::parse(child_item_ref)
         .with_context(|| format!("detach: invalid child item ref '{child_item_ref}'"))?;
@@ -109,14 +131,27 @@ pub async fn spawn_detached_child(
             width: 1,
         },
     });
-    let child_thread_id = state.state_store.reserve_runtime_action_intent(
-        operation_id,
-        &parent_thread_id,
-        ryeos_app::runtime_db::RuntimeActionMode::Detached,
-        request_hash,
-        &new_thread_id(),
-        None,
-    )?;
+    let child_thread_id = match workload {
+        Some(admission) => state
+            .state_store
+            .reserve_runtime_action_intent_with_workspace(
+                operation_id,
+                &parent_thread_id,
+                ryeos_app::runtime_db::RuntimeActionMode::Detached,
+                request_hash,
+                &new_thread_id(),
+                None,
+                &admission.workspace_seed,
+            )?,
+        None => state.state_store.reserve_runtime_action_intent(
+            operation_id,
+            &parent_thread_id,
+            ryeos_app::runtime_db::RuntimeActionMode::Detached,
+            request_hash,
+            &new_thread_id(),
+            None,
+        )?,
+    };
     let reserved_intent = state
         .state_store
         .get_runtime_action_intent(operation_id)?
@@ -131,10 +166,23 @@ pub async fn spawn_detached_child(
                 "detach: child {child_thread_id} exists without sealed project authority"
             );
         }
-        let inherited_stop =
-            state
-                .state_store
-                .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
+        if workload.is_some()
+            && reserved_intent
+                .workspace_operation
+                .as_ref()
+                .map(|operation| operation.phase)
+                != Some(ryeos_app::runtime_db::RuntimeWorkspaceOperationPhase::Released)
+        {
+            anyhow::bail!(
+                "detach: child {child_thread_id} exists but its workspace operation is not released"
+            );
+        }
+        let inherited_stop = state.state_store.record_child_link_with_cancel_flag(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+            workload.is_some(),
+        )?;
         // The child exists, so an earlier drive may have crashed between
         // its link and its lineage event. A settled parent is the normal
         // case on a late retry and must not turn the repair into a failure.
@@ -193,6 +241,37 @@ pub async fn spawn_detached_child(
         ));
     }
 
+    // Capture the parent's current workspace as pinned data input before the
+    // child's authority is derived. The child itself is resolved from the base
+    // generation below; this generation is never an item-resolution source.
+    // The capture releases the parent's workspace at once; the released intent
+    // keeps the generation reachable for GC until the child's row exists, and
+    // the child's sealed resume authority holds it from then on.
+    let workspace_input = if let Some(admission) = workload {
+        let retained_phase = reserved_intent
+            .workspace_operation
+            .as_ref()
+            .map(|operation| operation.phase)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "detach: reserved operation {operation_id} has no workspace operation"
+                )
+            })?;
+        Some(
+            capture_detached_workspace_input(
+                state,
+                &parent_thread_id,
+                operation_id,
+                &parent_project_path,
+                admission,
+                retained_phase,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     // Detached and followed children derive from the same sealed provenance.
     // The callback's effective capabilities authorize the requested child;
     // they are not a replacement project-authority ceiling.
@@ -245,7 +324,13 @@ pub async fn spawn_detached_child(
     let launch_snapshot_hash = parent_project_authority
         .operational_snapshot_projection()
         .map(str::to_owned);
+    // The freeze below is the follow-style handoff for a parent whose
+    // workspace passes to the child. A parent that keeps running (the
+    // base-generation handoff) never reaches it: freezing is one-way, so it
+    // would refuse that parent's next inline workspace call, and its drain
+    // would wait on the child-operation lease this very call holds.
     let mut inherited_generation = if !authority_already_bound
+        && handoff == DetachedWorkspaceHandoff::CandidateFreeze
         && matches!(
             &parent_project_authority,
             ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -351,6 +436,21 @@ pub async fn spawn_detached_child(
             child_lifeline,
             child_project_authority.clone(),
         )?;
+    }
+    // The captured generation rides the child's root provenance as data: its
+    // process receives a private copy by hash, while the program and every
+    // item it resolves still come from the child's own pinned generation.
+    if let Some(input) = workspace_input.as_ref() {
+        if input.output_capture_hash.is_some()
+            && child_project_authority.workspace_outputs().is_none()
+        {
+            anyhow::bail!(
+                "detach: the captured workspace input carries an output capture but the child's project authority admits no workspace outputs"
+            );
+        }
+        child_provenance = child_provenance
+            .with_detached_workspace_input(input.clone())
+            .context("detach: attach the captured workspace input to the child")?;
     }
 
     // Managed-runtime children only: a child kind served by a registered runtime
@@ -473,6 +573,8 @@ pub async fn spawn_detached_child(
         ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
     )
     .then(|| cap.provenance.original_project_path().to_path_buf());
+    let launch_parent_context =
+        detached_child_parent_context(cap, workload.map(|admission| admission.sealed_ceiling));
     let mut meta = RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
         .with_resume_context(ResumeContext {
@@ -513,11 +615,14 @@ pub async fn spawn_detached_child(
                     .into_iter()
                     .collect(),
             ),
-            thread_ceiling: cap.thread_ceiling,
+            thread_ceiling: launch_parent_context.thread_ceiling,
+            workspace_input: workspace_input.clone(),
+            // Recorded for every detached child, from the one shared builder: the
+            // spawning thread's own origin, else its chain.
+            evaluator_origin_chain: launch_parent_context.evaluator_origin_chain.clone(),
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         });
-    let launch_parent_context = crate::dispatch::ParentExecutionContext::for_child_of(cap);
     meta.follow_parent_context = Some(launch_parent_context.persisted());
     meta.follow_launch_window = persisted_launch_window.clone();
     let prepared = crate::execution::launch::prepare_follow_child_launch(
@@ -566,9 +671,17 @@ pub async fn spawn_detached_child(
             Some(prepared.launch_metadata()),
         )?;
     let prepared = prepared.with_persisted_birth_audit();
+    // The cancel-on-parent-end flag is recorded in the link's own transaction,
+    // and `require_dispatch_child_lineage` below puts it in the session chain
+    // before the child is launched. Only a grant-bearing parent sets it.
     let inherited_stop = match state
         .state_store
-        .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
+        .record_child_link_with_cancel_flag(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+            workload.is_some(),
+        )
         .and_then(|inherited_stop| {
             // A parent stopped during admission cannot author the
             // lineage event; the child is stopped below instead.
@@ -748,6 +861,25 @@ pub async fn spawn_detached_child(
         if queued { "created" } else { "running" },
         queued,
     ))
+}
+
+/// The parent context a detached child is launched with: it seals and
+/// persists the calling thread's workload ceiling through the one shared
+/// builder, so a detached child can never run under a wider ceiling than the
+/// thread that spawned it.
+///
+/// A grant-bearing parent's child is also bound by the ceiling the grant seals
+/// for the item; the grant can only narrow what the parent already carries.
+pub(crate) fn detached_child_parent_context(
+    cap: &ryeos_app::callback_token::CallbackCapability,
+    grant_ceiling: Option<ryeos_state::objects::ThreadWorkloadCeiling>,
+) -> crate::dispatch::ParentExecutionContext {
+    match grant_ceiling {
+        Some(ceiling) => {
+            crate::dispatch::ParentExecutionContext::for_detached_child_of(cap, ceiling)
+        }
+        None => crate::dispatch::ParentExecutionContext::for_child_of(cap),
+    }
 }
 
 fn detached_callback_response(child_thread_id: &str, status: &str, queued: bool) -> Value {

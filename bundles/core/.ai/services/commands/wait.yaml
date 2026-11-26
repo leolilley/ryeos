@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:44Z:ca1be7eba72a12456fbb483b3c317e1325dcb8fd0c784ea8f0a016c63dab363c:dwtcVdIqO0aH/YuyApgnMOHn8+DN0DgEMd1EnFooxKK1NY21kXkW/sfNFLyrL93m/dOpa6V76Idkh6tqC94ECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:6678f80b0b2486884291fa638b636746d6ec715be8e22fe1494fd7872756ed4c:haUJ5ALYcyI/XJXZIrOUkiquP18/EKsxwPZaOHNMd+uUaMPy/5WM/M3tIsO40zyZY/t/9m/q20DiwB6C/YoVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "wait"
 kind: service
@@ -8,3 +8,18 @@ schema:
   command_id: integer
   timeout_ms: integer?
 description: "Wait for a command record to settle and return its latest status"
+disclosure:
+  principal:
+    - "/command_id"
+    - "/thread_id"
+    - "/command_type"
+    - "/status"
+    - "/created_at"
+    - "/claimed_at"
+    - "/completed_at"
+    - "/settled"
+    - "/timed_out"
+  free_text:
+    - "/requested_by"
+    - "/params"
+    - "/result"

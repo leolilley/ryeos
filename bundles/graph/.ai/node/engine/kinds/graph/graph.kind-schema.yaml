@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T17:22:28Z:56caa8258b80e0f0dfd107339f22a63d5ebe0ed3594619ff9db5cd0492e27ea7:kQ3LC5x6xsK67bi1+hrygW8lN0d5ZLAbW1nl8jomwDTP4yv6527qyq2ssgv/D+45YPJZpJyref810/nCW2E6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T05:41:27Z:86bdc460c4fa4524a0172a43ba83e7571272919e4fb19e8e768f4903d6c29134:6UQWbCa5O7lT4L0N6+KSkGxXCxiXnLdqBNM5MWiCXAmninAWpcZhkJKf4B6ub6k4awhGj1jPODZ0ZrusWMBnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 inventory_policy:
   admission:
@@ -26,6 +26,12 @@ execution:
   effect_class_ceiling:
     path: [effects]
     unproven_max: recorded
+  # A graph has no direct workspace use of its own: it acts only through the
+  # nodes it dispatches, and each of those is judged against its own
+  # declaration when it is called. `none` says nothing wider. Only a signed
+  # kind schema can declare `none`.
+  workspace_access:
+    constant: none
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("graph")` to find the default
   # runtime serving this kind (today: `runtime:graph-runtime`).

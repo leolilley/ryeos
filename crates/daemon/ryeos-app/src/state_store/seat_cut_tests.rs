@@ -1043,7 +1043,11 @@ fn a_stopping_seat_takes_no_append_touch_or_action() {
     let a = anchor(&store, "S-stop");
     let base = tip_seq(&store, "S-stop");
     store
-        .request_thread_stop("S-stop", crate::runtime_db::StopIntent::Cancel)
+        .request_thread_stop(
+            "S-stop",
+            crate::runtime_db::StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .unwrap();
     assert!(matches!(
         store

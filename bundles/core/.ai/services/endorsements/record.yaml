@@ -1,7 +1,19 @@
-# ryeos:signed:2026-11-20T23:16:10Z:9572058cf0472ad922a6117aa6b809aa2aead069d239a6570538dec660fadc4c:+2ugCH7Z/EtiqYEQ6YAIl7b3+O+Mi4cLECmY0prNYYd3uDIuHdQLdgDYEci481EhdLGKKy61pxlZewg26mMVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:4ffa21728f78f1822d4ef2c90954dd9206a70392e41dffadf09906b91220c18f:TGrmMVLPA0NOWKA60Ow9hkJaoiG3QxK6oT6dXfyspP57H3Xtw33SyJ1uNmSXaeD45IpoJ9eZluZdxE6bY8PlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: endorsements.record
 required_caps: ["ryeos.execute.service.endorsements/record"]
 schema:
   endorsement: object?
 description: "Record an endorsement an operator signed with their own key: the node checks it against its signer registry, countersigns and stores it. Without an endorsement the response carries the ledger head and clock an operator needs to sign one."
+disclosure:
+  principal:
+    - "/ledger_head"
+    - "/now"
+    - "/max_clock_skew_secs"
+    - "/endorsement_digest"
+    - "/newly_recorded"
+    - "/index_identity"
+    - "/journal/recorded"
+    - "/journal/reason"
+  free_text:
+    - "/journal/error"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:17d7077e357dc543f4966c05078894716d09e3573bb7eed8843ed7c73b3fd2a1:2lGUkpdnAgLnMK8QylENo+UhdisMOGOgQJdlW72wCyFH4mepfXU0q2NvwMGe7Bn1y9d5kDMsdjXTdg0wWd5PBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:121d07bd3cae208ec7991912f33ef733c2179c8c348c97e285640f82139a5b0d:GyozODWLuf+E+7cKV51UAPR0+FiWqyl6ykd+/OlCmf2lcoldvtgyWFqSdEBBXhOJPjMlkTztxKYIp8F+d45NDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-admitted-heads
 required_caps: ["ryeos.execute.service.remote/sync-admitted-heads"]
@@ -17,3 +17,33 @@ schema:
   max_response_bytes: number?
   max_links_per_object: number?
 description: "Mirror missing verified admission heads from a pinned remote within node object_closure policy; defaults to at most 50 imports per batch"
+disclosure:
+  principal:
+    - "/job_id"
+    - "/attempt_id"
+    - "/remote"
+    - "/policy"
+    - "/partial"
+    - "/listed"
+    - "/already_mirrored"
+    - "/deferred"
+    - "/skipped"
+    - "/imported_heads"
+    - "/imported/*/subject_hash"
+    - "/imported/*/attestation_hash"
+    - "/imported/*/head_ref"
+    - "/imported/*/imported"
+    - "/imported/*/already_present"
+    - "/imported/*/bytes_written"
+    - "/imported/*/mirrored_objects"
+    - "/imported/*/mirrored_blobs"
+    - "/totals/imported"
+    - "/totals/already_present"
+    - "/totals/bytes_written"
+    - "/totals/mirrored_objects"
+    - "/totals/mirrored_blobs"
+    - "/fetched_hashes"
+  free_text:
+    - "/error"
+  max_items: 4096
+  max_result_bytes: 1048576

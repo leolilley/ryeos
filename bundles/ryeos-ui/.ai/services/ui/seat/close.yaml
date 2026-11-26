@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T02:16:20Z:3be18521d996e8b5d658996dddb7107245548e95e7587f6ab9d92b34e891c7bd:TmN4uRcnOiktMnX5vvcyIiDgKy325kmJ3i4zoU+dHsIEbsJvHzSGZvoiOnDVtSQIUN6IALcGq4j4lU5NW8bEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:ea345784ccd1e6127b846eef0d6727d2875d1ffd6d524192608a602bed6140fc:ZrB/hNjgtY1GMsCfu+Yv3e12qY7//gHvMWFyilAlD60T0AcgtylmnwB57FOAzchOp7Y8uDl9e5pZBLzt2lCmDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-close
 version: "1.0.0"
@@ -9,3 +9,12 @@ endpoint: ui.seat.close
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/presentation_id"
+    - "/thread_id"
+    - "/chain_root_id"
+    - "/operation_id"
+    - "/producer_incarnation"
+    - "/state"
+    - "/next_engine_seq"

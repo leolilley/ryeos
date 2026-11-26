@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:47Z:61bf85617410a8fa4d4934dfae9ccc05525cc1d8d6c58262c4262db2b51695f8:0A5ErQSCa/E46A0pX++bsWH7+4sxORB/1R4aDPMHhMb42GDUj9nHaCaQdpsfqDvrLwdd9CsCc8RfkaBAekPGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:47951a0e733667842538dae31e6cb8c7ce4678f30018f2e107c104cfd3d2bc37:duS2DPPNnfNxZ7UTNhid2JJeGF7YrQDLjwtf+R8LzNOcXRVYAZhOoF4aiLdDJBJxC0BXzgptHdcaLIq60R7bAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.doctor
 availability: local
@@ -9,3 +9,5 @@ schema:
   registry_root: string?
   registry_roots: array?
 description: "Local preflight checklist: manifest present/name-consistent, bundle verify, python import dry-run, advisory checks. The daemon may remain running."
+# Local preflight output is filesystem paths and probe output; operator-only.
+disclosure: {}

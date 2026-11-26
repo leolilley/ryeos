@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:46Z:7e5ce7594e21dc9cc261adb55f7b0f574bb878eca9da3c39d935e1f11877a289:tWP2XAIG40y8/fbxTFbU6NitbYjQ29QUQU/rlLDyuRSLIIxlmvfK1w/QvorYIfjFRiz5OEBkeyz1McozPyRmCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:4f3df8a71125644054e6c428877d3c4cbbf90f10224506f69c9b20e75e2372b3:2k3G0GB8FeJzKG0m8NWt04UCQRUh79FkP/vUyj5GzM9K5odaKKwafpvEASu7nS8ykQB0m1NEz7tO88vAX6LBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "set_facet"
 kind: service
@@ -9,3 +9,19 @@ schema:
   key: string
   value: string
 description: "Set an event-backed metadata facet on an owned thread"
+disclosure:
+  principal:
+    - "/event_id"
+    - "/event_hash"
+    - "/chain_root_id"
+    - "/chain_seq"
+    - "/thread_id"
+    - "/thread_seq"
+    - "/event_type"
+    - "/storage_class"
+    - "/ts"
+    - "/prev_chain_event_hash"
+    - "/prev_thread_event_hash"
+    - "/payload/key"
+  free_text:
+    - "/payload/value"

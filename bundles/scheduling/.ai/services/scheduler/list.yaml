@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:10Z:a783f946ddf948fbd91c6b374503c3dab42636761e6f7617c7d93baca344c9e0:x/NpUqi+dJcQyraIcP96MoqVGUM7s1gGRl9+Q3d2Ol2iR/jBXdtVdW4dZdBmeS69bCWSY4AlT15bLaZhLnjNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:9321a926363a43e833a3280cb07f6bcd415e03ca15e672d6602b6d3d0c520b82:OQcBS4dhQJO+3Ltni4g3Pkx/V/cAxx0iK0Alf6Hb+zhVbsKGIz+EAPssgHq0U4PpehxIT+RW5U/7Bm0hrd5VDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "list"
 kind: service
@@ -8,3 +8,40 @@ state_access: read_only_existing
 record_thread: false
 required_caps: []
 description: "List all registered schedules"
+disclosure:
+  principal:
+    - "/identity_filtered"
+    - "/node_owned_included"
+    - "/anonymous"
+    - "/schedules/*/schedule_id"
+    - "/schedules/*/item_ref"
+    - "/schedules/*/schedule_type"
+    - "/schedules/*/expression"
+    - "/schedules/*/timezone"
+    - "/schedules/*/enabled"
+    - "/schedules/*/registered_at"
+    - "/schedules/*/misfire_policy"
+    - "/schedules/*/overlap_policy"
+    - "/schedules/*/lateness_grace_secs"
+    - "/schedules/*/last_scheduled_at"
+    - "/schedules/*/last_reserved_at"
+    - "/schedules/*/last_dispatched_at"
+    - "/schedules/*/last_fire_status"
+    - "/schedules/*/last_fire_outcome"
+    - "/schedules/*/current_due_at"
+    - "/schedules/*/current_due_within_grace"
+    - "/schedules/*/misfire_horizon_exclusive"
+    - "/schedules/*/next_fire_at"
+    - "/schedules/*/cursor_last_scheduled_at"
+    - "/schedules/*/cursor_next_fire_at"
+    - "/schedules/*/cursor_updated_at"
+    - "/schedules/*/cursor_fresh"
+    - "/schedules/*/decision"
+    - "/schedules/*/lifetime_exhausted"
+    - "/schedules/*/total_fires"
+  free_text:
+    - "/note"
+    - "/schedules/*/last_fire_reason"
+    - "/schedules/*/decision_reason"
+  max_items: 2048
+  max_result_bytes: 1048576

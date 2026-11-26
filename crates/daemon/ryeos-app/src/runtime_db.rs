@@ -114,6 +114,108 @@ pub enum ChildLinkInsertOutcome {
     AlreadyPresent,
 }
 
+/// The slice of a session's spend total reserved for one child, written with
+/// the child's link. `session_key` is the session chain root, so every session
+/// in a chain draws against one total. `usd_nanos` is the accounting money
+/// representation (non-negative integer nanos).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildSpendDraw {
+    pub usd_nanos: i64,
+    pub session_key: String,
+}
+
+/// The spend columns of one child link, as recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildLinkSpend {
+    pub draw: Option<ChildSpendDraw>,
+    pub released_usd_nanos: Option<i64>,
+    pub settled_at_ms: Option<i64>,
+}
+
+/// The account limit for a child: the smallest of what the child asked for,
+/// the node's cap, and the draw reserved for it on its link. The draw is the
+/// enforcement of the session total; the child's own account caps its real
+/// spend at this value.
+pub fn child_account_limit(child_request: i64, node_cap: i64, draw: i64) -> i64 {
+    child_request.min(node_cap).min(draw)
+}
+
+/// What a settlement releases back to the session. Only a complete usage
+/// status releases the unspent part of the draw (`draw - final_cost`, never
+/// negative); a partial or unavailable settlement releases nothing, so the
+/// live draw and the released amount stay separate facts.
+pub fn settlement_release_usd_nanos(draw: i64, final_cost: i64, usage_complete: bool) -> i64 {
+    if usage_complete {
+        draw.saturating_sub(final_cost).clamp(0, draw.max(0))
+    } else {
+        0
+    }
+}
+
+/// One spend-bearing link row, as the integrity check reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildLinkSpendRow {
+    pub child_thread_id: String,
+    pub draw: Option<i64>,
+    pub released: Option<i64>,
+    pub settled_at_ms: Option<i64>,
+    pub session_key: Option<String>,
+}
+
+/// Integrity findings over the link table's spend columns. Used by
+/// `ryeos node doctor` once it can read the runtime store. The table CHECKs
+/// make these states unreachable through the writers; the check finds a store
+/// written around them.
+///
+/// Covered: a release above its draw, a release without a settlement time, a
+/// release without a draw, a settled draw without a release, a draw without a
+/// session key, a negative amount, and a per-session sum of unreleased draws that overflows.
+///
+/// Not covered here, because each needs data the link table does not hold: a
+/// session whose unreleased draws exceed its grant total needs the grant
+/// total (the grant is not stored), and a settled child whose account still
+/// has unsettled spend needs the accounting join. Both are supplied by the
+/// spend unit that writes draws.
+pub fn child_link_spend_findings(rows: &[ChildLinkSpendRow]) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut sums: BTreeMap<&str, Option<i64>> = BTreeMap::new();
+    for row in rows {
+        let id = &row.child_thread_id;
+        if row.draw.is_some_and(|d| d < 0) || row.released.is_some_and(|r| r < 0) {
+            findings.push(format!("{id}: negative spend amount"));
+        }
+        if row.draw.is_some() && row.session_key.is_none() {
+            findings.push(format!("{id}: draw without a session key"));
+        }
+        if let Some(released) = row.released {
+            match row.draw {
+                None => findings.push(format!("{id}: release without a draw")),
+                Some(draw) if released > draw => {
+                    findings.push(format!("{id}: release {released} exceeds draw {draw}"));
+                }
+                Some(_) => {}
+            }
+            if row.settled_at_ms.is_none() {
+                findings.push(format!("{id}: release without a settlement time"));
+            }
+        }
+        if row.draw.is_some() && row.settled_at_ms.is_some() && row.released.is_none() {
+            findings.push(format!("{id}: settled draw without a release"));
+        }
+        if let (Some(draw), Some(key)) = (row.draw, row.session_key.as_deref()) {
+            let unreleased = draw.saturating_sub(row.released.unwrap_or(0).min(draw));
+            let entry = sums.entry(key).or_insert(Some(0));
+            *entry = entry.and_then(|sum| sum.checked_add(unreleased));
+        }
+    }
+    for (key, sum) in sums {
+        if sum.is_none() {
+            findings.push(format!("session {key}: unreleased draws overflow"));
+        }
+    }
+    findings
+}
+
 /// Durable stop behavior coupled to a child-link write.
 ///
 /// Keeping this policy inside the runtime database transaction closes the
@@ -141,6 +243,52 @@ impl StopIntent {
         }
     }
 }
+
+/// Provenance of a durable stop, stored in `thread_runtime.stop_origin`
+/// beside the intent. It is provenance only: a stop is authorized by key and
+/// capability, whoever wrote it. The first writer's origin is kept for the
+/// life of the stop, as its timestamp is: a later writer can escalate the
+/// intent (cancel to kill) but never changes the origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOrigin {
+    /// An explicit stop: a person's, a key's or an MCP caller's cancel or
+    /// kill, a cascade of one, or any recovery path.
+    Explicit,
+    /// The stop written because the flagged child's parent session ended: by
+    /// the parent-end sweep, or by the link of a flagged child born under an
+    /// ended or stopped parent. It is what makes a stopped child finalize as
+    /// `cancelled_by_parent_end`.
+    ParentEnd,
+}
+
+impl StopOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::ParentEnd => "parent_end",
+        }
+    }
+
+    /// Parses only the two stored values; anything else is a hard error.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "explicit" => Ok(Self::Explicit),
+            "parent_end" => Ok(Self::ParentEnd),
+            other => bail!("invalid durable stop origin `{other}`"),
+        }
+    }
+}
+
+/// SQL assignments merging a stop request into `thread_runtime`: `?2` is the
+/// request time, `?3` the intent text and `?4` the origin text. A kill
+/// dominates a cancel; the time and the origin of the first writer are kept.
+const MERGE_STOP_SQL: &str = "stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
+    stop_intent = CASE
+        WHEN stop_intent IS NULL THEN ?3
+        WHEN ?3 = 'kill' THEN 'kill'
+        ELSE stop_intent
+    END,
+    stop_origin = COALESCE(stop_origin, ?4)";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeInfo {
@@ -2088,6 +2236,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT,
+    stop_origin TEXT CHECK (
+        stop_origin IS NULL OR stop_origin IN ('explicit', 'parent_end')
+    ),
     process_quarantine TEXT,
     workspace_id TEXT,
     workspace_view_identity TEXT,
@@ -2100,7 +2251,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     ),
     -- A quarantine describes the attached identity recovery cannot prove
     -- gone; it is cleared in the same statement that clears the identity.
-    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL)
+    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL),
+    -- A stop origin is provenance of a stop intent; it never stands alone.
+    CHECK (stop_origin IS NULL OR stop_intent IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -2252,7 +2405,7 @@ CREATE TABLE IF NOT EXISTS runtime_action_intent (
         )
         OR
         (
-            mode = 'inline'
+            (mode = 'inline' OR (mode = 'detached' AND workspace_access = 'immutable_current_generation'))
             AND
             workspace_id IS NOT NULL
             AND workspace_access IS NOT NULL
@@ -2402,11 +2555,27 @@ CREATE TABLE IF NOT EXISTS thread_child_link (
     child_thread_id TEXT PRIMARY KEY,
     parent_thread_id TEXT NOT NULL,
     relation TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    cancel_on_parent_end INTEGER NOT NULL DEFAULT 0 CHECK (cancel_on_parent_end IN (0, 1)),
+    spend_draw_usd_nanos INTEGER CHECK (spend_draw_usd_nanos IS NULL OR spend_draw_usd_nanos >= 0),
+    spend_released_usd_nanos INTEGER CHECK (spend_released_usd_nanos IS NULL OR spend_released_usd_nanos >= 0),
+    settled_at_ms INTEGER,
+    session_key TEXT,
+    CHECK (spend_draw_usd_nanos IS NULL OR session_key IS NOT NULL),
+    CHECK (spend_released_usd_nanos IS NULL
+           OR (spend_draw_usd_nanos IS NOT NULL
+               AND spend_released_usd_nanos <= spend_draw_usd_nanos
+               AND settled_at_ms IS NOT NULL)),
+    CHECK (spend_draw_usd_nanos IS NULL
+           OR settled_at_ms IS NULL
+           OR spend_released_usd_nanos IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
     ON thread_child_link(parent_thread_id);
+
+CREATE INDEX IF NOT EXISTS idx_thread_child_link_session
+    ON thread_child_link(session_key);
 
 CREATE TABLE IF NOT EXISTS launch_window (
     child_chain_root_id TEXT PRIMARY KEY,
@@ -2777,7 +2946,41 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // the capsule commits it; an epoch-144 store holds launch rows without it,
 // which the strict launch decode refuses, so it is a predecessor and is reset
 // without decoding: `--schema-cut-from 144 --schema-cut-to 145`.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 145;
+// Epoch 146: stored `launch_metadata` is launch-metadata schema 40 sealing
+// admitted launch capsule schema 41. Every resume identity carries the
+// required-nullable `workspace_input` (the parent workspace generation a
+// detached child reads as data) and `evaluator_origin_chain` (the chain the
+// launch originated from), and the capsule commits both; an epoch-145 store
+// holds launch rows without them, which the strict launch decode refuses, so
+// it is a predecessor and is reset without decoding:
+// `--schema-cut-from 145 --schema-cut-to 146`. The same cut gives
+// `thread_child_link` the `cancel_on_parent_end` column, written with the
+// link by a detached spawn from a grant-bearing parent, and lets a detached
+// runtime action carry an immutable workspace operation (the
+// `runtime_action_intent` workspace CHECK admits `detached` beside `inline`).
+// The same cut gives the link the session spend draw: `spend_draw_usd_nanos`
+// (the slice of the session total reserved for the child, written with the
+// link before the child's account exists), `session_key` (the session chain
+// root the draw is summed under, so a successor session cannot reset its
+// total), `spend_released_usd_nanos` and `settled_at_ms` (written together,
+// only after the child's accounting settlement is durable). CHECKs: a draw
+// carries a session key, a release carries a draw and a settlement time, a
+// release never exceeds its draw, and a settled link that carries a draw
+// carries its release too (0 when nothing is released). A link with no draw
+// settles with `settled_at_ms` alone, written by the child's terminal path.
+// The same cut gives `thread_runtime` the `stop_origin` column beside
+// `stop_intent`: who wrote the stop (`explicit` or `parent_end`), written
+// with the intent by the first writer and kept. CHECKs: an origin is one of
+// the two values, and an origin carries an intent.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 146;
+
+/// Most steps up the child links a launch-lineage walk takes before it refuses
+/// to answer. Real ancestry is a handful of chains deep; a longer walk is a
+/// cycle in the links.
+const LINEAGE_WALK_MAX_DEPTH: usize = 64;
+
+/// Most distinct parent chains one step of a launch-lineage walk may reach.
+const LINEAGE_WALK_MAX_CHAINS_PER_STEP: usize = 4096;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -4908,6 +5111,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "stop_origin",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "process_quarantine",
                         col_type: "TEXT",
                         pk: false,
@@ -5780,6 +5989,36 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cancel_on_parent_end",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_draw_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_released_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "session_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -6793,6 +7032,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_thread_child_link_parent",
                 table: "thread_child_link",
                 columns: &["parent_thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_child_link_session",
+                table: "thread_child_link",
+                columns: &["session_key"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -9076,9 +9321,9 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
         authority.validate()?;
     }
     if let Some(operation) = &intent.workspace_operation {
-        if !matches!(intent.mode, RuntimeActionMode::Inline) {
+        if !workspace_operation_admitted_in_mode(&intent.mode, operation.access) {
             bail!(
-                "runtime action `{}` carries workspace authority outside unary inline mode",
+                "runtime action `{}` carries workspace authority outside its admitted mode",
                 intent.operation_id
             );
         }
@@ -9123,6 +9368,22 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
         }
     }
     Ok(())
+}
+
+/// A workspace operation rides a unary inline call, or a detached launch that
+/// receives the parent's captured generation as data. A detached launch never
+/// takes shared-exclusive access to the parent's workspace.
+fn workspace_operation_admitted_in_mode(
+    mode: &RuntimeActionMode,
+    access: ryeos_engine::kind_registry::WorkspaceAccess,
+) -> bool {
+    match mode {
+        RuntimeActionMode::Inline => true,
+        RuntimeActionMode::Detached => {
+            access == ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration
+        }
+        RuntimeActionMode::AwaitedRoot => false,
+    }
 }
 
 fn validate_runtime_workspace_operation(operation: &RuntimeWorkspaceOperation) -> Result<()> {
@@ -17275,8 +17536,12 @@ impl RuntimeDb {
             if matches!(mode, RuntimeActionMode::Inline) && child_project_authority.is_some() {
                 bail!("inline runtime action cannot carry root project authority");
             }
-            if workspace_operation.is_some() && !matches!(mode, RuntimeActionMode::Inline) {
-                bail!("shared-workspace runtime action must use unary inline child execution");
+            if let Some(seed) = workspace_operation
+                && !workspace_operation_admitted_in_mode(&mode, seed.access)
+            {
+                bail!(
+                    "shared-workspace runtime action must be a unary inline call or a detached launch reading an immutable generation"
+                );
             }
             validate_runtime_action_intent(
                 operation_id,
@@ -17558,6 +17823,63 @@ impl RuntimeDb {
             }
             tx.commit()?;
             Ok(())
+        })
+    }
+
+    /// `(operation_id, child_thread_id)` of every detached intent that a
+    /// reaper may consider retiring: its workspace operation is released, it
+    /// is older than `created_before_ms`, and it was never sealed (any of the
+    /// child's project authority, admitted capsule, launch metadata or
+    /// initial events is still absent). A sealed intent is never listed:
+    /// startup recovery rebuilds its child from the seal. The caller must
+    /// still prove that no child thread row exists before it retires one.
+    pub fn unsealed_released_detached_intents(
+        &self,
+        created_before_ms: i64,
+    ) -> Result<Vec<(String, String)>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation_id, child_thread_id FROM runtime_action_intent
+                  WHERE mode='detached' AND workspace_operation_phase='released'
+                    AND created_at_ms < ?1
+                    AND (child_project_authority IS NULL
+                         OR admitted_launch_capsule_hash IS NULL
+                         OR launch_metadata IS NULL
+                         OR initial_events IS NULL)
+                  ORDER BY created_at_ms, operation_id",
+            )?;
+            let rows = statement
+                .query_map(params![created_before_ms], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(anyhow::Error::from)?;
+            Ok(rows)
+        })
+    }
+
+    /// Delete one detached intent of the kind
+    /// [`Self::unsealed_released_detached_intents`] lists, by its exact
+    /// operation and child identity. The same predicate guards the delete, so
+    /// an intent that was sealed or moved out of `released` since it was
+    /// listed is left alone. Returns whether a row was deleted.
+    pub fn delete_unsealed_released_detached_intent(
+        &self,
+        operation_id: &str,
+        child_thread_id: &str,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let deleted = conn.execute(
+                "DELETE FROM runtime_action_intent
+                  WHERE operation_id=?1 AND child_thread_id=?2
+                    AND mode='detached' AND workspace_operation_phase='released'
+                    AND (child_project_authority IS NULL
+                         OR admitted_launch_capsule_hash IS NULL
+                         OR launch_metadata IS NULL
+                         OR initial_events IS NULL)",
+                params![operation_id, child_thread_id],
+            )?;
+            Ok(deleted == 1)
         })
     }
 
@@ -20527,7 +20849,8 @@ impl RuntimeDb {
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
                 "UPDATE thread_runtime SET stop_requested_at_ms=COALESCE(stop_requested_at_ms, ?4),
-                stop_intent='kill'
+                stop_intent='kill',
+                stop_origin=COALESCE(stop_origin, 'explicit')
               WHERE thread_id=?1 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND EXISTS(SELECT 1 FROM thread_process_scope_reservation
                     WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3)",
@@ -20947,18 +21270,21 @@ impl RuntimeDb {
     /// return the process identity that was attached before the tombstone.
     /// A concurrent attach is serialized by the StateStore lock: it either
     /// lands first and is returned here, or observes the tombstone and fails.
-    pub fn request_thread_stop(&self, thread_id: &str, intent: StopIntent) -> Result<RuntimeInfo> {
+    pub fn request_thread_stop(
+        &self,
+        thread_id: &str,
+        intent: StopIntent,
+        origin: StopOrigin,
+    ) -> Result<RuntimeInfo> {
         self.conn.with_sql(|conn| {
             let now_ms = lillux::time::timestamp_millis();
             let updated = conn.execute(
-                "UPDATE thread_runtime
-                SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                    stop_intent = CASE
-                        WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
-                        ELSE 'cancel'
-                    END
-              WHERE thread_id = ?1",
-                params![thread_id, now_ms, intent.as_str()],
+                &format!(
+                    "UPDATE thread_runtime
+                SET {MERGE_STOP_SQL}
+              WHERE thread_id = ?1"
+                ),
+                params![thread_id, now_ms, intent.as_str(), origin.as_str()],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -20966,6 +21292,27 @@ impl RuntimeDb {
             self.get_runtime_info(thread_id)?
                 .ok_or_else(|| anyhow::anyhow!("thread_runtime row disappeared for {thread_id}"))
         })
+    }
+
+    /// The stored origin of the thread's durable stop, or `None` when no stop
+    /// was requested. An unknown stored value is an error.
+    pub fn thread_stop_origin(&self, thread_id: &str) -> Result<Option<StopOrigin>> {
+        self.conn.with_sql(|conn| {
+            let text: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT stop_origin FROM thread_runtime WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            text.flatten().as_deref().map(StopOrigin::parse).transpose()
+        })
+    }
+
+    /// Whether the thread's stop was written by the parent-end stop of a
+    /// flagged child (see [`StopOrigin::ParentEnd`]).
+    pub fn thread_stopped_by_parent_end(&self, thread_id: &str) -> Result<bool> {
+        Ok(self.thread_stop_origin(thread_id)? == Some(StopOrigin::ParentEnd))
     }
 
     /// Record that recovery holds the exact attached identity in quarantine.
@@ -23013,17 +23360,54 @@ impl RuntimeDb {
         relation: &str,
         stop_policy: ChildLinkStopPolicy,
     ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
+        self.record_child_link_with_options(
+            parent_thread_id,
+            child_thread_id,
+            relation,
+            stop_policy,
+            false,
+            None,
+        )
+    }
+
+    /// As [`Self::record_child_link_with_stop_policy`], also recording in the
+    /// same transaction whether the child is to be cancelled when its parent
+    /// ends. The flag only ever moves from unset to set. The launch and
+    /// recovery paths replay the link without stating it (`false`) and leave
+    /// the recorded value; the spawn that owns the flag replays it as `true`,
+    /// which sets it on a link a recovery path happened to record first.
+    ///
+    /// `spend_draw`, when given, is written in the same statement, before the
+    /// child's account exists. A replay never changes a recorded draw: the
+    /// same draw is accepted, a different one is refused, and a replay that
+    /// states none keeps what is recorded. A draw stated on a replay of a link
+    /// that has none is refused rather than added, so a draw exists from the
+    /// link's birth or not at all.
+    pub fn record_child_link_with_options(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+        stop_policy: ChildLinkStopPolicy,
+        cancel_on_parent_end: bool,
+        spend_draw: Option<&ChildSpendDraw>,
+    ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
         self.conn.with_sql(|conn| {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
-                "INSERT INTO thread_child_link (child_thread_id, parent_thread_id, relation, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO thread_child_link
+                    (child_thread_id, parent_thread_id, relation, created_at_ms, cancel_on_parent_end,
+                     spend_draw_usd_nanos, session_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(child_thread_id) DO NOTHING",
                 params![
                     child_thread_id,
                     parent_thread_id,
                     relation,
-                    lillux::time::timestamp_millis()
+                    lillux::time::timestamp_millis(),
+                    cancel_on_parent_end,
+                    spend_draw.map(|draw| draw.usd_nanos),
+                    spend_draw.map(|draw| draw.session_key.as_str())
                 ],
             )?;
             let outcome = if inserted == 1 {
@@ -23031,10 +23415,20 @@ impl RuntimeDb {
             } else {
                 let existing = tx
                     .query_row(
-                    "SELECT parent_thread_id, relation FROM thread_child_link
+                    "SELECT parent_thread_id, relation, cancel_on_parent_end,
+                            spend_draw_usd_nanos, session_key
+                       FROM thread_child_link
                  WHERE child_thread_id = ?1",
                     params![child_thread_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
                 )
                 .optional()?
                 .ok_or_else(|| {
@@ -23048,6 +23442,26 @@ impl RuntimeDb {
                         existing.0,
                         existing.1
                     );
+                }
+                if let Some(draw) = spend_draw {
+                    let same = existing.3 == Some(draw.usd_nanos)
+                        && existing.4.as_deref() == Some(draw.session_key.as_str());
+                    if !same {
+                        bail!(
+                            "child {child_thread_id} link already records spend draw {:?} for session {:?}; refusing replay with draw {} for session {}",
+                            existing.3,
+                            existing.4,
+                            draw.usd_nanos,
+                            draw.session_key
+                        );
+                    }
+                }
+                if cancel_on_parent_end && !existing.2 {
+                    tx.execute(
+                        "UPDATE thread_child_link SET cancel_on_parent_end = 1
+                          WHERE child_thread_id = ?1",
+                        params![child_thread_id],
+                    )?;
                 }
                 ChildLinkInsertOutcome::AlreadyPresent
             };
@@ -23063,18 +23477,30 @@ impl RuntimeDb {
                 ChildLinkStopPolicy::IfInserted(_) => None,
             };
             let effective_stop = if let Some(intent) = requested_stop {
+                // A stop inherited by a flagged dispatch child because its
+                // parent ended or was stopped is the parent-end stop.
+                let flagged: bool = tx.query_row(
+                    "SELECT relation = 'dispatch' AND cancel_on_parent_end = 1
+                       FROM thread_child_link WHERE child_thread_id = ?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )?;
+                let origin = if flagged {
+                    StopOrigin::ParentEnd
+                } else {
+                    StopOrigin::Explicit
+                };
                 let updated = tx.execute(
-                    "UPDATE thread_runtime
-                    SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
-                        stop_intent = CASE
-                            WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
-                            ELSE 'cancel'
-                        END
-                  WHERE thread_id = ?1",
+                    &format!(
+                        "UPDATE thread_runtime
+                    SET {MERGE_STOP_SQL}
+                  WHERE thread_id = ?1"
+                    ),
                     params![
                         child_thread_id,
                         lillux::time::timestamp_millis(),
-                        intent.as_str()
+                        intent.as_str(),
+                        origin.as_str()
                     ],
                 )?;
                 if updated == 0 {
@@ -23094,10 +23520,260 @@ impl RuntimeDb {
         })
     }
 
+    /// Whether the child's link asks that it be cancelled when its parent
+    /// ends, or `None` when no link has been recorded. The flag is recorded
+    /// with the link so the parent's end can find the children it owes a stop
+    /// (see [`Self::flagged_dispatch_children`]).
+    pub fn child_link_cancel_on_parent_end(&self, child_thread_id: &str) -> Result<Option<bool>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT cancel_on_parent_end FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The spend columns of the child's link, or `None` when no link has been
+    /// recorded.
+    pub fn child_link_spend(&self, child_thread_id: &str) -> Result<Option<ChildLinkSpend>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT spend_draw_usd_nanos, session_key, spend_released_usd_nanos, settled_at_ms
+                   FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| {
+                    let draw: Option<i64> = row.get(0)?;
+                    let session_key: Option<String> = row.get(1)?;
+                    Ok(ChildLinkSpend {
+                        draw: match (draw, session_key) {
+                            (Some(usd_nanos), Some(session_key)) => Some(ChildSpendDraw {
+                                usd_nanos,
+                                session_key,
+                            }),
+                            _ => None,
+                        },
+                        released_usd_nanos: row.get(2)?,
+                        settled_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The draw recorded on the child's link, if any.
+    pub fn child_link_spend_draw(&self, child_thread_id: &str) -> Result<Option<ChildSpendDraw>> {
+        Ok(self
+            .child_link_spend(child_thread_id)?
+            .and_then(|spend| spend.draw))
+    }
+
+    /// The sum over the session of `draw - released` for every link carrying a
+    /// draw (an unreleased draw counts in full). Overflow is refused, never
+    /// wrapped or saturated.
+    pub fn session_unreleased_draw_total(&self, session_key: &str) -> Result<i64> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT spend_draw_usd_nanos - COALESCE(spend_released_usd_nanos, 0)
+                   FROM thread_child_link
+                  WHERE session_key = ?1 AND spend_draw_usd_nanos IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(params![session_key], |row| row.get::<_, i64>(0))?;
+            let mut total: i64 = 0;
+            for row in rows {
+                total = total.checked_add(row?).ok_or_else(|| {
+                    anyhow::anyhow!("unreleased spend draws for session {session_key} overflow")
+                })?;
+            }
+            Ok(total)
+        })
+    }
+
+    /// The number of live detached children of the session: dispatch links
+    /// flagged to be cancelled with their parent that have not settled.
+    pub fn session_live_count(&self, session_key: &str) -> Result<u64> {
+        self.conn.with_sql(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM thread_child_link
+                  WHERE session_key = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1 AND settled_at_ms IS NULL",
+                params![session_key],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+    }
+
+    /// Settle the child's link: record `released_usd_nanos` and the settlement
+    /// time in one statement, only when the link carries a draw and is not
+    /// already settled. Returns whether this call settled it. A release above
+    /// the draw is refused. Called only after the child's accounting
+    /// settlement is durable, with the amount derived from the accounting
+    /// record (see [`settlement_release_usd_nanos`]).
+    pub fn release_child_link_draw(
+        &self,
+        child_thread_id: &str,
+        released_usd_nanos: i64,
+        settled_at_ms: i64,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let draw: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT spend_draw_usd_nanos FROM thread_child_link WHERE child_thread_id=?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let draw = draw
+                .ok_or_else(|| anyhow::anyhow!("no child link for {child_thread_id}"))?
+                .ok_or_else(|| anyhow::anyhow!("child link {child_thread_id} carries no spend draw"))?;
+            if released_usd_nanos < 0 || released_usd_nanos > draw {
+                bail!(
+                    "release {released_usd_nanos} for child {child_thread_id} is outside its draw {draw}"
+                );
+            }
+            let updated = conn.execute(
+                "UPDATE thread_child_link
+                    SET spend_released_usd_nanos = ?2, settled_at_ms = ?3
+                  WHERE child_thread_id = ?1 AND settled_at_ms IS NULL",
+                params![child_thread_id, released_usd_nanos, settled_at_ms],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    /// Settle a link that carries no spend draw: record `settled_at_ms` only
+    /// when the link is not already settled. Returns whether this call settled
+    /// it. A link with a draw is refused: it settles through
+    /// [`Self::release_child_link_draw`], after its accounting settlement, and
+    /// must never be settled without its release. An absent link is `Ok(false)`.
+    pub fn settle_child_link(&self, child_thread_id: &str, settled_at_ms: i64) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let draw: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT spend_draw_usd_nanos FROM thread_child_link WHERE child_thread_id=?1",
+                    params![child_thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match draw {
+                None => return Ok(false),
+                Some(Some(_)) => bail!(
+                    "child link {child_thread_id} carries a spend draw; it settles only by releasing it"
+                ),
+                Some(None) => {}
+            }
+            let updated = conn.execute(
+                "UPDATE thread_child_link SET settled_at_ms = ?2
+                  WHERE child_thread_id = ?1 AND settled_at_ms IS NULL
+                    AND spend_draw_usd_nanos IS NULL",
+                params![child_thread_id, settled_at_ms],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    /// Up to `limit` children whose links are not yet settled, in child id
+    /// order and strictly after `after` (empty for the first page), so a caller
+    /// can page through a set larger than one batch.
+    pub fn unsettled_child_links(&self, after: &str, limit: usize) -> Result<Vec<String>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id FROM thread_child_link
+                  WHERE settled_at_ms IS NULL AND child_thread_id > ?1
+                  ORDER BY child_thread_id ASC
+                  LIMIT ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![after, limit as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
+    /// Every spend-bearing or settled link row, for [`child_link_spend_findings`].
+    pub fn child_link_spend_rows(&self) -> Result<Vec<ChildLinkSpendRow>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id, spend_draw_usd_nanos, spend_released_usd_nanos,
+                        settled_at_ms, session_key
+                   FROM thread_child_link
+                  WHERE spend_draw_usd_nanos IS NOT NULL OR spend_released_usd_nanos IS NOT NULL
+                     OR settled_at_ms IS NOT NULL OR session_key IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ChildLinkSpendRow {
+                    child_thread_id: row.get(0)?,
+                    draw: row.get(1)?,
+                    released: row.get(2)?,
+                    settled_at_ms: row.get(3)?,
+                    session_key: row.get(4)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
     pub fn child_link_relation(&self, child_thread_id: &str) -> Result<Option<String>> {
         self.conn.with_sql(|conn| {
             conn.query_row(
                 "SELECT relation FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The `(parent thread, relation)` of the link that records
+    /// `child_thread_id`, or `None` when no link has been recorded.
+    pub fn child_link_parent_and_relation(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT parent_thread_id, relation FROM thread_child_link
+                  WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// The direct children of `parent_thread_id` whose link is a `dispatch`
+    /// link flagged to be cancelled when the parent ends, in spawn order. Any
+    /// other relation, and any unflagged dispatch link, is excluded.
+    pub fn flagged_dispatch_children(&self, parent_thread_id: &str) -> Result<Vec<String>> {
+        self.conn.with_sql(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT child_thread_id FROM thread_child_link
+                  WHERE parent_thread_id = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1
+                  ORDER BY created_at_ms ASC, child_thread_id ASC",
+            )?;
+            let rows = stmt.query_map(params![parent_thread_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
+    /// The parent of `child_thread_id` when its link is a `dispatch` link
+    /// flagged to be cancelled when the parent ends, else `None`.
+    pub fn flagged_dispatch_parent(&self, child_thread_id: &str) -> Result<Option<String>> {
+        self.conn.with_sql(|conn| {
+            conn.query_row(
+                "SELECT parent_thread_id FROM thread_child_link
+                  WHERE child_thread_id = ?1 AND relation = 'dispatch'
+                    AND cancel_on_parent_end = 1",
                 params![child_thread_id],
                 |row| row.get(0),
             )
@@ -23135,6 +23811,75 @@ impl RuntimeDb {
                 }
             }
             Ok(order)
+        })
+    }
+
+    /// Whether the launch ancestry of `origin_chain` reaches `source_chain`.
+    ///
+    /// `origin_chain` is the origin a launch sealed: a chain root id, or the id
+    /// of a thread inside a chain, which resolves to its chain. The walk goes
+    /// up, one chain per step: every thread of a chain that was spawned by
+    /// another thread names that thread's chain as its parent chain, through
+    /// the child link, whatever its relation. The answer is true as soon as
+    /// the source chain is among the chains reached, including the origin
+    /// itself.
+    ///
+    /// The walk is bounded and fails closed: a parent thread with no runtime
+    /// row, a chain count above [`LINEAGE_WALK_MAX_CHAINS_PER_STEP`], or an
+    /// ancestry still unresolved after [`LINEAGE_WALK_MAX_DEPTH`] steps (a
+    /// cycle in the links never resolves) is an error, never a "no".
+    pub fn lineage_reaches_chain(&self, origin_chain: &str, source_chain: &str) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let start = conn
+                .query_row(
+                    "SELECT chain_root_id FROM thread_runtime WHERE thread_id = ?1",
+                    params![origin_chain],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| origin_chain.to_owned());
+            let mut parents = conn.prepare(
+                "SELECT parent.chain_root_id
+                   FROM thread_runtime AS member
+                   JOIN thread_child_link AS link ON link.child_thread_id = member.thread_id
+              LEFT JOIN thread_runtime AS parent ON parent.thread_id = link.parent_thread_id
+                  WHERE member.chain_root_id = ?1",
+            )?;
+            let mut frontier = BTreeSet::from([start]);
+            for _ in 0..=LINEAGE_WALK_MAX_DEPTH {
+                if frontier.contains(source_chain) {
+                    return Ok(true);
+                }
+                if frontier.is_empty() {
+                    return Ok(false);
+                }
+                let mut next = BTreeSet::new();
+                for chain in &frontier {
+                    let reached = parents
+                        .query_map(params![chain], |row| row.get::<_, Option<String>>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    for parent_chain in reached {
+                        let parent_chain = parent_chain.ok_or_else(|| {
+                            anyhow!(
+                                "launch lineage of chain {chain} names a parent thread with no runtime row"
+                            )
+                        })?;
+                        // A child spawned inside its own chain adds nothing.
+                        if &parent_chain != chain {
+                            next.insert(parent_chain);
+                        }
+                    }
+                }
+                if next.len() > LINEAGE_WALK_MAX_CHAINS_PER_STEP {
+                    bail!(
+                        "launch lineage of {origin_chain} reaches more than {LINEAGE_WALK_MAX_CHAINS_PER_STEP} chains in one step"
+                    );
+                }
+                frontier = next;
+            }
+            bail!(
+                "launch lineage of {origin_chain} is unresolved after {LINEAGE_WALK_MAX_DEPTH} steps"
+            )
         })
     }
 
@@ -24801,6 +25546,8 @@ mod tests {
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:storage-fixture".to_owned()),
             runtime_ref: Some("runtime:storage-fixture".to_owned()),
         };
@@ -32357,10 +33104,37 @@ mod tests {
         };
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        // With no stop written yet, the fence records an explicit kill: every
+        // stop has an origin.
+        db.fence_thread_process_scope_recovery(&reservation)
+            .unwrap();
+        let fenced = db.get_runtime_info("scope-recovery").unwrap().unwrap();
+        assert_eq!(fenced.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("scope-recovery").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // A parent-end cancel written first keeps its origin through the
+        // fence's escalation to kill (reset the row to model that order).
+        db.conn
+            .with_sql(|conn| {
+                conn.execute(
+                    "UPDATE thread_runtime SET stop_requested_at_ms = 1,
+                        stop_intent = 'cancel', stop_origin = 'parent_end'
+                      WHERE thread_id = 'scope-recovery'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         db.fence_thread_process_scope_recovery(&reservation)
             .unwrap();
         let runtime = db.get_runtime_info("scope-recovery").unwrap().unwrap();
         assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("scope-recovery").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
         assert!(runtime.stop_requested_at_ms.is_some());
         assert!(
             db.thread_process_scope_reservation("scope-recovery")
@@ -32593,6 +33367,84 @@ mod tests {
     }
 
     #[test]
+    fn lineage_walk_reaches_the_source_chain_through_nested_children() {
+        let (_tmp, db) = fresh_db();
+        // session -> child (own chain, dispatch link) -> grandchild (own chain,
+        // dispatch link); an inline thread inside the session chain; an
+        // unrelated person-launched chain.
+        for (thread, chain) in [
+            ("S", "S"),
+            ("S-inline", "S"),
+            ("D1", "D1"),
+            ("D2", "D2"),
+            ("U", "U"),
+        ] {
+            db.insert_thread_runtime(thread, chain).unwrap();
+        }
+        db.record_child_link("S", "S-inline", "dispatch").unwrap();
+        db.record_child_link("S-inline", "D1", "dispatch").unwrap();
+        db.record_child_link("D1", "D2", "dispatch").unwrap();
+
+        assert!(db.lineage_reaches_chain("S", "S").unwrap());
+        assert!(db.lineage_reaches_chain("D1", "S").unwrap());
+        assert!(db.lineage_reaches_chain("D2", "S").unwrap());
+        // An origin named by a thread inside a chain resolves to its chain.
+        assert!(db.lineage_reaches_chain("S-inline", "S").unwrap());
+        assert!(!db.lineage_reaches_chain("U", "S").unwrap());
+        // Ancestry only goes up: the session does not descend from its child.
+        assert!(!db.lineage_reaches_chain("S", "D2").unwrap());
+        // An origin no thread knows is its own unlinked chain.
+        assert!(!db.lineage_reaches_chain("T-unknown", "S").unwrap());
+    }
+
+    #[test]
+    fn lineage_walk_fails_closed_on_a_cycle_and_on_a_missing_parent() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("A", "A").unwrap();
+        db.insert_thread_runtime("B", "B").unwrap();
+        db.record_child_link("A", "B", "dispatch").unwrap();
+        db.record_child_link("B", "A", "dispatch").unwrap();
+        // The walk ends with an error, never with a "no".
+        let error = db
+            .lineage_reaches_chain("A", "SOURCE")
+            .expect_err("a cycle never resolves");
+        assert!(error.to_string().contains("unresolved"), "{error:#}");
+        // The source is still found if it lies on the cycle.
+        assert!(db.lineage_reaches_chain("A", "B").unwrap());
+
+        db.insert_thread_runtime("C", "C").unwrap();
+        db.record_child_link("GONE", "C", "dispatch").unwrap();
+        let error = db
+            .lineage_reaches_chain("C", "SOURCE")
+            .expect_err("a parent with no runtime row cannot be proved unrelated");
+        assert!(error.to_string().contains("no runtime row"), "{error:#}");
+    }
+
+    #[test]
+    fn child_link_reader_names_the_one_recorded_parent_and_relation() {
+        let (_tmp, db) = fresh_db();
+        db.record_child_link("S", "child", "dispatch").unwrap();
+        db.record_child_link("child", "grandchild", "dispatch")
+            .unwrap();
+        db.record_child_link("S", "successor", "continuation")
+            .unwrap();
+        assert_eq!(
+            db.child_link_parent_and_relation("child").unwrap(),
+            Some(("S".to_owned(), "dispatch".to_owned()))
+        );
+        // A descendant of a child names the child, not the session.
+        assert_eq!(
+            db.child_link_parent_and_relation("grandchild").unwrap(),
+            Some(("child".to_owned(), "dispatch".to_owned()))
+        );
+        assert_eq!(
+            db.child_link_parent_and_relation("successor").unwrap(),
+            Some(("S".to_owned(), "continuation".to_owned()))
+        );
+        assert_eq!(db.child_link_parent_and_relation("T-never").unwrap(), None);
+    }
+
+    #[test]
     fn record_child_link_is_idempotent_on_the_child() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
@@ -32641,6 +33493,10 @@ mod tests {
             db.get_runtime_info("child").unwrap().unwrap().stop_intent,
             Some(StopIntent::Cancel)
         );
+        assert_eq!(
+            db.thread_stop_origin("child").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
 
         let (outcome, stop) = db
             .record_child_link_with_stop_policy(
@@ -32652,6 +33508,152 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, ChildLinkInsertOutcome::AlreadyPresent);
         assert_eq!(stop, None);
+    }
+
+    #[test]
+    fn stop_origin_checks_refuse_an_unknown_value_and_an_origin_without_an_intent() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t", "t").unwrap();
+        db.conn
+            .with_sql(|conn| {
+                assert!(
+                    conn.execute(
+                        "UPDATE thread_runtime SET stop_requested_at_ms = 1,
+                            stop_intent = 'cancel', stop_origin = 'operator'
+                          WHERE thread_id = 't'",
+                        [],
+                    )
+                    .is_err(),
+                    "an unknown origin value must be refused"
+                );
+                assert!(
+                    conn.execute(
+                        "UPDATE thread_runtime SET stop_origin = 'explicit' WHERE thread_id = 't'",
+                        [],
+                    )
+                    .is_err(),
+                    "an origin with no intent must be refused"
+                );
+                assert!(
+                    conn.execute(
+                        "INSERT INTO thread_runtime (thread_id, chain_root_id, stop_origin)
+                         VALUES ('t2', 't2', 'parent_end')",
+                        [],
+                    )
+                    .is_err(),
+                    "an origin with no intent must be refused on insert"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(db.thread_stop_origin("t").unwrap(), None);
+    }
+
+    #[test]
+    fn an_unknown_stored_stop_origin_is_a_hard_error_for_the_reader() {
+        assert_eq!(StopOrigin::parse("explicit").unwrap(), StopOrigin::Explicit);
+        assert_eq!(
+            StopOrigin::parse("parent_end").unwrap(),
+            StopOrigin::ParentEnd
+        );
+        for bad in ["", "operator", "cancel_parent_end", "Explicit"] {
+            assert!(StopOrigin::parse(bad).is_err(), "{bad:?} must not parse");
+        }
+        assert!(StopIntent::parse("cancel_parent_end").is_err());
+        assert!(StopIntent::parse("kill_parent_end").is_err());
+    }
+
+    #[test]
+    fn the_first_writers_stop_origin_is_kept_while_kill_dominates_the_intent() {
+        let (_tmp, db) = fresh_db();
+        for id in ["a", "b", "c", "d"] {
+            db.insert_thread_runtime(id, id).unwrap();
+        }
+        // Stop request: explicit cancel first, then a parent-end kill.
+        db.request_thread_stop("a", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        db.request_thread_stop("a", StopIntent::Kill, StopOrigin::ParentEnd)
+            .unwrap();
+        // Stop request: parent-end cancel first, then an explicit cancel.
+        db.request_thread_stop("b", StopIntent::Cancel, StopOrigin::ParentEnd)
+            .unwrap();
+        let runtime = db
+            .request_thread_stop("b", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Cancel));
+        assert_eq!(
+            db.thread_stop_origin("b").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
+        assert_eq!(
+            db.get_runtime_info("a").unwrap().unwrap().stop_intent,
+            Some(StopIntent::Kill)
+        );
+        assert_eq!(
+            db.thread_stop_origin("a").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // A kill is never softened by a later cancel.
+        let runtime = db
+            .request_thread_stop("a", StopIntent::Cancel, StopOrigin::ParentEnd)
+            .unwrap();
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("a").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // Link-time inherited stop: a flagged child already stopped by an
+        // explicit cancel keeps `explicit` when the link escalates to kill.
+        db.request_thread_stop("c", StopIntent::Cancel, StopOrigin::Explicit)
+            .unwrap();
+        let (_, stop) = db
+            .record_child_link_with_options(
+                "parent",
+                "c",
+                "dispatch",
+                ChildLinkStopPolicy::Always(StopIntent::Kill),
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(stop, Some(StopIntent::Kill));
+        assert_eq!(
+            db.thread_stop_origin("c").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        // A fresh flagged child born under a stopped parent is parent-end; an
+        // unflagged one is explicit.
+        let (_, stop) = db
+            .record_child_link_with_options(
+                "parent",
+                "d",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(stop, Some(StopIntent::Cancel));
+        assert_eq!(
+            db.thread_stop_origin("d").unwrap(),
+            Some(StopOrigin::ParentEnd)
+        );
+        db.insert_thread_runtime("e", "e").unwrap();
+        db.record_child_link_with_options(
+            "parent",
+            "e",
+            "dispatch",
+            ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.thread_stop_origin("e").unwrap(),
+            Some(StopOrigin::Explicit)
+        );
+        assert!(!db.thread_stopped_by_parent_end("e").unwrap());
+        assert!(db.thread_stopped_by_parent_end("d").unwrap());
     }
 
     #[test]
@@ -32667,6 +33669,439 @@ mod tests {
             .expect_err("missing stop target must roll back lineage");
         assert!(error.to_string().contains("thread_runtime row missing"));
         assert!(db.descendant_thread_ids("parent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn child_link_records_cancel_on_parent_end_in_the_link_transaction() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(db.child_link_cancel_on_parent_end("flagged").unwrap(), None);
+
+        // The flag commits or rolls back with the link and its stop write.
+        let error = db
+            .record_child_link_with_options(
+                "parent",
+                "missing-child-runtime",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+                None,
+            )
+            .expect_err("missing stop target must roll back the link and its flag");
+        assert!(error.to_string().contains("thread_runtime row missing"));
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("missing-child-runtime")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.child_link_relation("missing-child-runtime").unwrap(),
+            None
+        );
+
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "flagged",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+                None,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::Inserted
+        );
+        db.record_child_link("parent", "plain", "dispatch").unwrap();
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("flagged").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("plain").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.child_link_relation("flagged").unwrap().as_deref(),
+            Some("dispatch")
+        );
+
+        // The launch and recovery paths replay the link without stating the
+        // flag and leave it.
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "flagged",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+                None,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.record_child_link("parent", "flagged", "dispatch")
+                .unwrap(),
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("flagged").unwrap(),
+            Some(true)
+        );
+        // The spawn that owns the flag sets it on a link a recovery path
+        // recorded first; a conflicting parent is still refused.
+        assert_eq!(
+            db.record_child_link_with_options(
+                "parent",
+                "plain",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+                None,
+            )
+            .unwrap()
+            .0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            db.child_link_cancel_on_parent_end("plain").unwrap(),
+            Some(true)
+        );
+        let error = db
+            .record_child_link_with_options(
+                "other",
+                "plain",
+                "dispatch",
+                ChildLinkStopPolicy::None,
+                true,
+                None,
+            )
+            .expect_err("a conflicting parent is still refused");
+        assert!(error.to_string().contains("refusing conflicting"));
+    }
+
+    fn draw(usd_nanos: i64, session_key: &str) -> ChildSpendDraw {
+        ChildSpendDraw {
+            usd_nanos,
+            session_key: session_key.to_owned(),
+        }
+    }
+
+    fn link_with_draw(
+        db: &RuntimeDb,
+        parent: &str,
+        child: &str,
+        spend: Option<&ChildSpendDraw>,
+    ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
+        db.record_child_link_with_options(
+            parent,
+            child,
+            "dispatch",
+            ChildLinkStopPolicy::None,
+            true,
+            spend,
+        )
+    }
+
+    fn raw_insert(db: &RuntimeDb, child: &str, columns: &str, values: &str) -> Result<usize> {
+        db.conn.with_sql(|conn| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO thread_child_link
+                        (child_thread_id, parent_thread_id, relation, created_at_ms, {columns})
+                     VALUES ('{child}', 'p', 'dispatch', 1, {values})"
+                ),
+                [],
+            )
+            .map_err(Into::into)
+        })
+    }
+
+    #[test]
+    fn link_spend_checks_refuse_each_violating_combination() {
+        let (_tmp, db) = fresh_db();
+        let cols = "spend_draw_usd_nanos, session_key, spend_released_usd_nanos, settled_at_ms";
+        // Valid shapes.
+        raw_insert(&db, "ok-draw", cols, "10, 's', NULL, NULL").unwrap();
+        raw_insert(&db, "ok-released", cols, "10, 's', 4, 99").unwrap();
+        raw_insert(&db, "ok-zero", cols, "10, 's', 0, 99").unwrap();
+        // Each violation is refused.
+        for (name, values) in [
+            ("negative-draw", "-1, 's', NULL, NULL"),
+            ("draw-no-key", "10, NULL, NULL, NULL"),
+            ("released-over-draw", "10, 's', 11, 99"),
+            ("released-no-settled", "10, 's', 4, NULL"),
+            ("released-no-draw", "NULL, NULL, 4, 99"),
+            ("negative-release", "10, 's', -1, 99"),
+            ("settled-draw-no-release", "10, 's', NULL, 99"),
+        ] {
+            raw_insert(&db, name, cols, values).expect_err(&format!("{name} must violate a CHECK"));
+        }
+        // A settled link with no release and no draw is a plain non-spend link.
+        raw_insert(&db, "plain-settled", "settled_at_ms", "5").unwrap();
+    }
+
+    #[test]
+    fn child_link_spend_draw_rolls_back_with_the_link() {
+        let (_tmp, db) = fresh_db();
+        let d = draw(50, "session-1");
+        let error = db
+            .record_child_link_with_options(
+                "parent",
+                "missing-child-runtime",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+                true,
+                Some(&d),
+            )
+            .expect_err("missing stop target must roll back the link and its draw");
+        assert!(error.to_string().contains("thread_runtime row missing"));
+        assert_eq!(db.child_link_spend("missing-child-runtime").unwrap(), None);
+        assert_eq!(db.session_unreleased_draw_total("session-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn child_link_spend_draw_replay_discipline() {
+        let (_tmp, db) = fresh_db();
+        let d = draw(50, "session-1");
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", Some(&d)).unwrap().0,
+            ChildLinkInsertOutcome::Inserted
+        );
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d.clone()));
+        // Equal replay is accepted; a replay stating none keeps the draw.
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", Some(&d)).unwrap().0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            link_with_draw(&db, "parent", "child", None).unwrap().0,
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
+        db.record_child_link("parent", "child", "dispatch").unwrap();
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d.clone()));
+        // A different amount or session is refused and changes nothing.
+        link_with_draw(&db, "parent", "child", Some(&draw(51, "session-1")))
+            .expect_err("different amount");
+        link_with_draw(&db, "parent", "child", Some(&draw(50, "session-2")))
+            .expect_err("different session");
+        assert_eq!(db.child_link_spend_draw("child").unwrap(), Some(d));
+        // A draw cannot be added to a link recorded without one.
+        link_with_draw(&db, "parent", "bare", None).unwrap();
+        link_with_draw(&db, "parent", "bare", Some(&draw(5, "session-1")))
+            .expect_err("a draw is written with the link or not at all");
+        assert_eq!(db.child_link_spend_draw("bare").unwrap(), None);
+        assert_eq!(db.child_link_spend_draw("absent").unwrap(), None);
+    }
+
+    #[test]
+    fn release_child_link_draw_settles_once_and_within_the_draw() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "parent", "child", Some(&draw(100, "s"))).unwrap();
+        link_with_draw(&db, "parent", "bare", None).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        db.release_child_link_draw("child", 101, 7)
+            .expect_err("a release above the draw is refused");
+        db.release_child_link_draw("child", -1, 7)
+            .expect_err("a negative release is refused");
+        db.release_child_link_draw("bare", 0, 7)
+            .expect_err("a link without a draw has nothing to release");
+        db.release_child_link_draw("absent", 0, 7)
+            .expect_err("no link");
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+
+        assert!(db.release_child_link_draw("child", 60, 7).unwrap());
+        let spend = db.child_link_spend("child").unwrap().unwrap();
+        assert_eq!(spend.released_usd_nanos, Some(60));
+        assert_eq!(spend.settled_at_ms, Some(7));
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 40);
+        // Settled once: a second release changes nothing.
+        assert!(!db.release_child_link_draw("child", 100, 9).unwrap());
+        let spend = db.child_link_spend("child").unwrap().unwrap();
+        assert_eq!(spend.released_usd_nanos, Some(60));
+        assert_eq!(spend.settled_at_ms, Some(7));
+    }
+
+    #[test]
+    fn settle_child_link_settles_no_draw_links_once_and_refuses_draws() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "bare", None).unwrap();
+        link_with_draw(&db, "p", "drawn", Some(&draw(100, "s"))).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        assert!(db.settle_child_link("bare", 5).unwrap());
+        assert_eq!(
+            db.child_link_spend("bare").unwrap().unwrap().settled_at_ms,
+            Some(5)
+        );
+        assert!(!db.settle_child_link("bare", 9).unwrap());
+        assert_eq!(
+            db.child_link_spend("bare").unwrap().unwrap().settled_at_ms,
+            Some(5)
+        );
+        assert!(!db.settle_child_link("absent", 9).unwrap());
+        db.settle_child_link("drawn", 9)
+            .expect_err("a draw settles only by release");
+        let spend = db.child_link_spend("drawn").unwrap().unwrap();
+        assert_eq!(spend.settled_at_ms, None);
+        assert_eq!(spend.released_usd_nanos, None);
+        assert_eq!(db.session_unreleased_draw_total("s").unwrap(), 100);
+        // A release of zero still satisfies the settled-draw CHECK.
+        assert!(db.release_child_link_draw("drawn", 0, 9).unwrap());
+    }
+
+    #[test]
+    fn settle_child_link_drops_the_live_count_and_unsettled_listing() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "plain1", None).unwrap();
+        link_with_draw(&db, "p", "plain2", None).unwrap();
+        // session_live_count keys on session_key, which only a draw sets, so
+        // the flagged link below carries one and a no-draw link is not counted.
+        assert_eq!(db.session_live_count("s").unwrap(), 0);
+        db.conn
+            .with_sql(|conn| {
+                Ok(conn.execute(
+                    "UPDATE thread_child_link SET session_key = 's' WHERE child_thread_id = 'plain1'",
+                    [],
+                )?)
+            })
+            .unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 1);
+        assert_eq!(db.unsettled_child_links("", 10).unwrap().len(), 2);
+        assert_eq!(db.unsettled_child_links("", 1).unwrap(), vec!["plain1"]);
+        assert_eq!(
+            db.unsettled_child_links("plain1", 1).unwrap(),
+            vec!["plain2"]
+        );
+        assert!(db.settle_child_link("plain1", 3).unwrap());
+        assert_eq!(db.session_live_count("s").unwrap(), 0);
+        assert_eq!(db.unsettled_child_links("", 10).unwrap(), vec!["plain2"]);
+    }
+
+    #[test]
+    fn settlement_releases_only_for_complete_usage() {
+        assert_eq!(settlement_release_usd_nanos(100, 30, true), 70);
+        assert_eq!(settlement_release_usd_nanos(100, 100, true), 0);
+        // Spend above the draw releases nothing, never a negative amount.
+        assert_eq!(settlement_release_usd_nanos(100, 150, true), 0);
+        // Partial or unavailable usage releases nothing: the draw stays live.
+        assert_eq!(settlement_release_usd_nanos(100, 30, false), 0);
+    }
+
+    #[test]
+    fn session_unreleased_total_overflow_is_refused_and_successors_share_the_total() {
+        let (_tmp, db) = fresh_db();
+        // A successor session is keyed by the chain root, so its draws add to
+        // the predecessor's under one total even under a different parent.
+        link_with_draw(&db, "session-a-thread", "c1", Some(&draw(40, "chain-root"))).unwrap();
+        link_with_draw(&db, "session-b-thread", "c2", Some(&draw(30, "chain-root"))).unwrap();
+        link_with_draw(&db, "other-thread", "c3", Some(&draw(5, "other-root"))).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("chain-root").unwrap(), 70);
+        assert_eq!(db.session_unreleased_draw_total("other-root").unwrap(), 5);
+        assert_eq!(db.session_unreleased_draw_total("none").unwrap(), 0);
+        db.release_child_link_draw("c1", 10, 1).unwrap();
+        assert_eq!(db.session_unreleased_draw_total("chain-root").unwrap(), 60);
+
+        link_with_draw(&db, "x", "big1", Some(&draw(i64::MAX, "huge"))).unwrap();
+        link_with_draw(&db, "x", "big2", Some(&draw(1, "huge"))).unwrap();
+        let error = db
+            .session_unreleased_draw_total("huge")
+            .expect_err("overflow is refused");
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn session_live_count_counts_unsettled_flagged_dispatch_links() {
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "live1", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "live2", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "done", Some(&draw(10, "s"))).unwrap();
+        link_with_draw(&db, "p", "elsewhere", Some(&draw(10, "t"))).unwrap();
+        // Not flagged, or not a dispatch link: not live.
+        db.record_child_link_with_options(
+            "p",
+            "unflagged",
+            "dispatch",
+            ChildLinkStopPolicy::None,
+            false,
+            Some(&draw(10, "s")),
+        )
+        .unwrap();
+        db.record_child_link_with_options(
+            "p",
+            "follower",
+            "follow",
+            ChildLinkStopPolicy::None,
+            true,
+            Some(&draw(10, "s")),
+        )
+        .unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 3);
+        db.release_child_link_draw("done", 0, 1).unwrap();
+        assert_eq!(db.session_live_count("s").unwrap(), 2);
+        assert_eq!(db.session_live_count("none").unwrap(), 0);
+    }
+
+    #[test]
+    fn child_account_limit_is_the_smallest_of_the_three() {
+        assert_eq!(child_account_limit(10, 20, 30), 10);
+        assert_eq!(child_account_limit(20, 10, 30), 10);
+        assert_eq!(child_account_limit(30, 20, 10), 10);
+        assert_eq!(child_account_limit(5, 5, 5), 5);
+    }
+
+    #[test]
+    fn child_link_spend_findings_flag_each_corruption() {
+        fn row(
+            id: &str,
+            draw: Option<i64>,
+            released: Option<i64>,
+            settled: Option<i64>,
+            key: Option<&str>,
+        ) -> ChildLinkSpendRow {
+            ChildLinkSpendRow {
+                child_thread_id: id.to_owned(),
+                draw,
+                released,
+                settled_at_ms: settled,
+                session_key: key.map(str::to_owned),
+            }
+        }
+        let clean = [
+            row("a", Some(10), None, None, Some("s")),
+            row("b", Some(10), Some(4), Some(1), Some("s")),
+        ];
+        assert!(child_link_spend_findings(&clean).is_empty());
+        let bad = [
+            row("over", Some(10), Some(11), Some(1), Some("s")),
+            row("nosettled", Some(10), Some(4), None, Some("s")),
+            row("nokey", Some(10), None, None, None),
+            row("nodraw", None, Some(4), Some(1), None),
+            row("norelease", Some(10), None, Some(1), Some("s")),
+            row("max1", Some(i64::MAX), None, None, Some("huge")),
+            row("max2", Some(1), None, None, Some("huge")),
+        ];
+        let findings = child_link_spend_findings(&bad);
+        for needle in [
+            "over: release 11 exceeds draw 10",
+            "nosettled: release without a settlement time",
+            "nokey: draw without a session key",
+            "nodraw: release without a draw",
+            "norelease: settled draw without a release",
+            "session huge: unreleased draws overflow",
+        ] {
+            assert!(
+                findings.iter().any(|f| f == needle),
+                "missing {needle:?} in {findings:?}"
+            );
+        }
+        // The reader feeds the check from the table.
+        let (_tmp, db) = fresh_db();
+        link_with_draw(&db, "p", "c", Some(&draw(10, "s"))).unwrap();
+        db.release_child_link_draw("c", 3, 1).unwrap();
+        let rows = db.child_link_spend_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(child_link_spend_findings(&rows).is_empty());
     }
 
     #[test]

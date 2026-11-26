@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T02:43:18Z:c89b19ab4da05720e9797b342611b8fdd3089b171a13512c26880d2fcdd8c9d0:jbIpeUZJpOzp8sZY7kMMQNGj32V9+i4zJC36S+YI/lE4vzd9xnqWVskYwVeJO0p5L8BLMy6YBA47HtLfqP46Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:c97b848879af6b0dec2e940a8921394ad0715f6c1279d55ef99a36bffea19528:gbmRsxMlMW3kw2FTrFQ6HnZLuyK0H4A/t4GQyrFtZBIfBB/mhJW+vijKUo7yq3cgxhUN8NuBUbS/O+y7khCqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node.journal
 availability: both
@@ -15,3 +15,5 @@ schema:
   limit: integer?
   if_revision: string?
 description: "Read the node's signed histories as one page in the shared read envelope, newest first: the node journal, offline-operation receipts and trust key events, each row naming its source, where its time comes from and what stands behind its actor key. Nothing is copied; a record that does not verify refuses the read"
+# The node's signed histories carry actor keys, subjects and signer fingerprints of other principals; the node operator only.
+disclosure: {}

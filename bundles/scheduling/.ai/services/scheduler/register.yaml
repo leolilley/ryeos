@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T01:08:33Z:6b5f3a48a5b3d033cb7c857cdea23f4a5f2766ed59d5930d2fab41c7ce05d3ea:Qtm4IQxeiOAASgUDwv9z1Mwm5CERYlwvvipRNfhljpoeLpW7DSlSaXj8JDvs+SVGAsRw+MU6dYD/SlErEWfDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:07Z:e97b02e60708da468b6f674039d72bfd1aead388d0f9f633632e93a6b57bc8e3:wWK/X69wYBRPB/S2pWdIBGXplMdGVdO69a9OZfa27zCmJlu64p0lSFseoYcCw/oBlzDJE7WyuACU+WiB49qZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
@@ -23,3 +23,21 @@ schema:
   max_fires: integer?
   expires_at: string?
 description: "Create or update a schedule spec"
+disclosure:
+  principal:
+    - "/schedule_id"
+    - "/item_ref"
+    - "/schedule_type"
+    - "/expression"
+    - "/timezone"
+    - "/misfire_policy"
+    - "/overlap_policy"
+    - "/lateness_grace_secs"
+    - "/enabled"
+    - "/max_fires"
+    - "/expires_at"
+    - "/created"
+  free_text:
+    - "/ref_bindings"
+    - "/limits"
+    - "/spec_path"

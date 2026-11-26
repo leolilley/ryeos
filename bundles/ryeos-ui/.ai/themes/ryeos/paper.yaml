@@ -1,0 +1,25 @@
+# ryeos:signed:2026-11-22T00:22:30Z:b0b51051bfc30dbb6b88d5bfdcedf0b100fc61ac6156f03196bc5e568a70b3d7:HsoeJoJc5IwkDh0pwFrHOtwdoM53d+hvnGRvtiyypqhCpzeIQ5iQpTtdVtr9sPJ9xJ3cMbMoyA/7MnU86FrCBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: paper
+title: Paper
+palette:
+  bg: "#ece8df"
+  ink: "#1a1917"
+  accent: "#c2410c"
+  good: "#3f7a3a"
+  warn: "#a16207"
+  danger: "#b42318"
+# The picture drawn behind each Surface. The daemon resolves the picture
+# ref, so a re-signed picture follows this theme without an edit here.
+surface_grounds:
+  "surface:ryeos/ui/base": { picture: "picture:ryeos/marble-youth", role: hero }
+  "surface:ryeos/ui/lens": { picture: "picture:ryeos/marble-youth", role: hero }
+  "surface:ryeos/ui/workbench": { picture: "picture:ryeos/marble-youth", role: hero }
+  "surface:ryeos/ui/project": { picture: "picture:ryeos/piranesi-tower", role: hero }
+  "surface:ryeos/ui/node": { picture: "picture:ryeos/piranesi-tower", role: hero }
+# Pictures for a subject that has none of its own, by slot. A subject takes
+# the entry at sha256(subject key) mod list length.
+grounds:
+  project:
+    - { picture: "picture:ryeos/marble-youth", role: card }
+    - { picture: "picture:ryeos/marble-polykleitos", role: card }
+    - { picture: "picture:ryeos/piranesi-tower", role: card }

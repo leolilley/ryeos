@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:b6bdf90cdf7d19fcd81ea13cda1c6411beac4356e38e0eacd006c5b63ab94a6c:Wtlt6pJHlSxtt8P0WKM4ONA0Yd6tBdZ5D6qCT0bglaSRUkQNI3xWLO+8kAxT6SrLc1/tqfwga7MmZJ/gekuMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:2467113b5544178f688daeb60c338df7d31790dd9191ecfb94369e9e7b9425de:doGh9AYeqWR7vYoFuDZ+Carq2IIi89a+BtN3pEo8qcS28hWneVASpcnKG0C+nDpiB0RRypWf7oPoToDQS3y+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-qualify
 version: "1.1.0"
@@ -23,3 +23,5 @@ schema:
   build_recipe_signed_config: string
   capture_recipe_signed_config: string
   capture_recipe_raw_digest: string
+# Release authority operation: run by the node operator's release graph only; a principal is served nothing.
+disclosure: {}

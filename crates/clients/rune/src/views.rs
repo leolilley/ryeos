@@ -618,6 +618,7 @@ fn body_in(
             source_status,
             columns,
             column_roles,
+            column_priorities,
             total_rows,
             rows,
             empty,
@@ -629,6 +630,7 @@ fn body_in(
             TableShape {
                 columns,
                 roles: column_roles,
+                priorities: column_priorities,
                 width,
             },
             *total_rows,
@@ -1164,6 +1166,9 @@ fn is_unreadable(state: &str) -> bool {
 struct TableShape<'a> {
     columns: &'a [String],
     roles: &'a [ColumnRole],
+    /// Each column's signed drop priority, parallel to `columns`; a column
+    /// past the end has none.
+    priorities: &'a [Option<u8>],
     width: f32,
 }
 
@@ -1334,10 +1339,15 @@ fn role_width(role: ColumnRole, has_ref: bool, has_time: bool) -> ColumnWidth {
 }
 
 /// When a tile is too narrow for every column, columns go in the table's
-/// drop order, lowest first. A status says what happened to a row and never
-/// goes.
-fn drop_rank(role: ColumnRole) -> Option<u8> {
-    L.px.table.columns.drop_rank(role)
+/// drop order, lowest first: a column's signed priority when it has one,
+/// else its role's default rank. A status or action never goes.
+fn drop_rank(role: ColumnRole, priority: Option<u8>) -> Option<u8> {
+    L.px.table.columns.drop_rank(role, priority)
+}
+
+/// A column's signed drop priority; `None` past the end of `priorities`.
+fn priority_at(priorities: &[Option<u8>], index: usize) -> Option<u8> {
+    priorities.get(index).copied().flatten()
 }
 
 /// Each column's width, or `None` for one the tile has no room for. Columns
@@ -1372,7 +1382,12 @@ fn table_plan(shape: TableShape<'_>, action: bool) -> Vec<Option<ColumnWidth>> {
         shown.iter().sum::<f32>() + shown.len().saturating_sub(1) as f32 * L.px.table.cell_gap
     };
     while needed(&plan) > room {
-        let rank = |index: usize| drop_rank(role_at(shape.roles, index));
+        let rank = |index: usize| {
+            drop_rank(
+                role_at(shape.roles, index),
+                priority_at(shape.priorities, index),
+            )
+        };
         let leaving = (0..plan.len())
             .filter(|index| plan[*index].is_some())
             .filter_map(|index| rank(index).map(|rank| (rank, index)))
@@ -3026,6 +3041,7 @@ mod tests {
         let shape = super::TableShape {
             columns: &columns,
             roles: &roles,
+            priorities: &[],
             width,
         };
         super::table_plan(shape, false)
@@ -3048,6 +3064,60 @@ mod tests {
         assert_eq!(shown(190.0), vec![false, false, false, false, true, false]);
         // A window with no width yet keeps every column.
         assert_eq!(shown(f32::MAX), vec![true; 6]);
+    }
+
+    /// The widest width, stepping down by one, at which each column is first
+    /// absent from the plan; `None` for a column that is never dropped.
+    fn first_gone(roles: &[super::ColumnRole], priorities: &[Option<u8>]) -> Vec<Option<u32>> {
+        let columns: Vec<String> = roles.iter().map(|_| String::new()).collect();
+        let mut gone = vec![None; roles.len()];
+        for width in (1..=1200u32).rev() {
+            let shape = super::TableShape {
+                columns: &columns,
+                roles,
+                priorities,
+                width: width as f32,
+            };
+            for (index, cell) in super::table_plan(shape, false).iter().enumerate() {
+                if cell.is_none() && gone[index].is_none() {
+                    gone[index] = Some(width);
+                }
+            }
+        }
+        gone
+    }
+
+    #[test]
+    fn signed_priorities_set_the_drop_order_against_the_role_order() {
+        use ryeos_client_base::ui::content::ColumnRole as R;
+        let roles = [R::Id, R::Time, R::Text];
+        // By role alone the time goes before the id.
+        let by_role = first_gone(&roles, &[]);
+        assert!(
+            by_role[1] > by_role[0],
+            "role order drops the time first: {by_role:?}"
+        );
+        // Signed the other way round, the id goes before the time.
+        let signed = first_gone(&roles, &[Some(1), Some(9), None]);
+        assert!(
+            signed[0] > signed[1],
+            "signed order drops the id first: {signed:?}"
+        );
+        // A column with no signed value past the end of the list keeps its
+        // role order.
+        assert_eq!(first_gone(&roles, &[None, None]), by_role);
+    }
+
+    #[test]
+    fn a_status_and_an_action_survive_the_narrowest_width() {
+        use ryeos_client_base::ui::content::ColumnRole as R;
+        let roles = [R::Id, R::Text, R::Status, R::Action];
+        for priorities in [vec![], vec![None, None, Some(0), Some(0)]] {
+            let gone = first_gone(&roles, &priorities);
+            assert!(gone[0].is_some() && gone[1].is_some(), "{gone:?}");
+            assert_eq!(gone[2], None, "status stays");
+            assert_eq!(gone[3], None, "action stays");
+        }
     }
 
     #[test]

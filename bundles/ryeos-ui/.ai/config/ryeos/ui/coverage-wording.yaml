@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T05:20:58Z:9133175b58047af1cadf02088e24217fa59c84923bcf05399841ed583d546647:D3n3BkGDx38noAxY8oGKohtRiYmNjBGIQ4QEQcTq9WQAuEkNSbntCT0ojlE0ws1JbORYdTkNH6NQmjOg9MsxDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:58:24Z:a3fe1a7656c573c33e36a2753eff3d4e52fdb62dc5f1fb3a933bbd05985a6bef:w7YIi3qa0nzXgKuU3lAA5lE0SXNJe4vx5QpYyLPEt8/dUjLVf+Fw/ZIdUHn7ChWveYHv1iM/Rqv2yD984vzpDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -11,6 +11,11 @@ description: The sentence and tone a table's coverage line shows for each state 
 # `reasons` also holds the sentences a view says in place of rows. A view names
 # one under `body.empty`, and `empty` when it names none. They are plain
 # sentences like the rest and need no service to report them.
+# `reasons` also holds the sentence a seat's project chip draws when the seat
+# is bound to a checkout that states no project, under `seat_project_<code>`
+# for each of the four absence codes. A code with no entry here reads as the
+# client's fixed "not known" line. The chip draws no sentence for a seat that
+# states a project (it draws the name) or has none.
 # Tone is one of none, good, warn, danger, accent. A sentence is plain, in
 # normal case, and says what the page shows or does not show.
 fallback:
@@ -116,4 +121,16 @@ reasons:
     tone: none
   empty_project:
     label: Nothing observed in this project yet.
+    tone: none
+  seat_project_unregistered:
+    label: This folder is not registered as a project, so no project is shown. Register the folder to show one.
+    tone: none
+  seat_project_owner_key_not_active:
+    label: The key for this seat is not active, so no project is shown. Activate the key to show one.
+    tone: warn
+  seat_project_no_project_name:
+    label: This folder's manifest names no project, so no project is shown. Add a name to its manifest.
+    tone: none
+  seat_project_checkout_name_changed:
+    label: This folder's manifest now names a different project than it was registered under, so no project is shown. Register it again under the new name.
     tone: none

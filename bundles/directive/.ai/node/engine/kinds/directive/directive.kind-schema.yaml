@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T02:37:24Z:025570d55f8ccdf4113c1cadeda8d2cdff09ae00648d8485c89cfb9ba47b65c3:lulGlLLhBiEA8HO0DGJ3UxnLQjJdU84QYey7BZfqc9ae/UoelEBK9j98C28VBnK7c9UAcM97uzjj4ZsW/ZTmDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T05:41:27Z:d84d5d5c2b57b7d008fa7b01fc5195a5d34edeb7ac7f9f396c9208a299ed4be4:Aq9o2ZxxP6S4+If+x9xAG2g1fhvG8LlyzFpJqoZD6+HryAhAiYx2eojkqCfiHZWCm8h1FLLLAHCH1aZh9H5TBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -17,6 +17,16 @@ launch_trust:
   allowed_trust: [trusted_bundle, trusted_project]
   operator_may_admit: [untrusted_project]
 execution:
+  # A directive has no direct tool-call effect and no direct workspace use of
+  # its own: it acts only through the tools it dispatches, and each of those
+  # is judged against its own declaration when it is called. `none` says
+  # nothing wider. The directive's model calls are not covered by it; they
+  # are judged at launch by the sealed external-effect authority against any
+  # thread ceiling. Only a signed kind schema can declare `none`.
+  effect_class_ceiling:
+    constant: none
+  workspace_access:
+    constant: none
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("directive")` to find the
   # default runtime serving this kind (today: `runtime:directive-runtime`).

@@ -994,7 +994,15 @@ pub struct TableColumn {
     /// value (`directive_run` as `directive`). Applied before `present`, and
     /// `time_relative` reads its `yesterday` entry from the same map.
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Signed drop priority, `0..=15`: when a tile is too narrow, a column
+    /// with a lower value leaves before one with a higher value. `None` when
+    /// the column declares none, or the value is not an integer in range;
+    /// the column then leaves by its role's default order.
+    pub priority: Option<u8>,
 }
+
+/// The largest signed column priority the view kind schema admits.
+pub const COLUMN_PRIORITY_MAX: u8 = 15;
 
 /// Optional structural projection for a hierarchy-aware table. The source owns
 /// semantic ancestry; the client owns indentation, connectors, and local folds.
@@ -1140,7 +1148,7 @@ fn present_time_date(value: &str) -> Option<String> {
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, role?, tone?, present?, fallback?}` (label defaults to the field
+/// `{label, field, role?, priority?, tone?, present?, fallback?}` (label defaults to the field
 /// path). A column missing a field is skipped; absent `columns` → empty (the
 /// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
@@ -1170,6 +1178,11 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("fallback")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        priority: col
+                            .get("priority")
+                            .and_then(Value::as_u64)
+                            .and_then(|priority| u8::try_from(priority).ok())
+                            .filter(|priority| *priority <= COLUMN_PRIORITY_MAX),
                         labels: col
                             .get("labels")
                             .and_then(Value::as_object)
@@ -2002,6 +2015,31 @@ mod local_projection_contract_tests {
                 serde_json::json!({"widget":"rows","input":{"id":"query","mode":"live_filter"}})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_column_priority_is_read_only_when_it_is_an_integer_in_range() {
+        let binding: ViewBinding = serde_json::from_value(serde_json::json!({
+            "widget": "table",
+            "projections": {"columns": [
+                {"field": "a", "priority": 0},
+                {"field": "b", "priority": 15},
+                {"field": "c", "priority": 16},
+                {"field": "d", "priority": -1},
+                {"field": "e", "priority": "3"},
+                {"field": "f", "priority": 2.5},
+                {"field": "g"}
+            ]}
+        }))
+        .unwrap();
+        let priorities: Vec<Option<u8>> = table_columns(&binding)
+            .iter()
+            .map(|column| column.priority)
+            .collect();
+        assert_eq!(
+            priorities,
+            [Some(0), Some(15), None, None, None, None, None]
         );
     }
 

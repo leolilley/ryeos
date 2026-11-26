@@ -491,6 +491,9 @@ pub struct PictureEntry {
     pub sha256: String,
     pub media_type: PictureMediaType,
     pub role: String,
+    /// Position of this rendition in its record's `renditions` list; the
+    /// first rendition is the record's default.
+    pub rendition_index: usize,
     pub width: u32,
     pub height: u32,
     pub bytes: u64,
@@ -671,7 +674,7 @@ fn collect_entries(
     let mut blobs = list_blobs(ai_dir)?;
     let mut entries = BTreeMap::new();
     for (relative, record) in records {
-        for rendition in record.renditions {
+        for (rendition_index, rendition) in record.renditions.into_iter().enumerate() {
             let media_type = PictureMediaType::from_mime(&rendition.media_type)
                 .ok_or_else(|| anyhow!("picture record {relative}: unknown media type"))?;
             let (path, stored_type) = blobs.remove(&rendition.sha256).ok_or_else(|| {
@@ -747,6 +750,7 @@ fn collect_entries(
                     sha256: rendition.sha256,
                     media_type,
                     role: rendition.role,
+                    rendition_index,
                     width: rendition.width,
                     height: rendition.height,
                     bytes: rendition.bytes,

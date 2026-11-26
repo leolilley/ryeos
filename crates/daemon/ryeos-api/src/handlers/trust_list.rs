@@ -1,9 +1,10 @@
 //! `trust.list` and `trust.show` — read-only views of the node's signer
 //! registry: records, statuses, scopes and the key-event chain.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::registry::ServiceDescriptor;
@@ -107,10 +108,8 @@ pub async fn handle_show(req: ShowRequest, state: Arc<AppState>) -> Result<Value
         .iter()
         .find(|record| record.fingerprint == req.fingerprint)
     else {
-        bail!(
-            "trust_signer_unknown: no signer {} is pinned. List signers with `ryeos trust list`",
-            req.fingerprint
-        );
+        return Err(typed_refusal("trust_signer_unknown", 404, format!("trust_signer_unknown: no signer {} is pinned. List signers with `ryeos trust list`",
+            req.fingerprint)).into());
     };
     let events = events_json(&view, &req.fingerprint);
     Ok(json!({

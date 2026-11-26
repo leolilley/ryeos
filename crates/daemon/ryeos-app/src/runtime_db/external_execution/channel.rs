@@ -3481,8 +3481,12 @@ pub(super) mod tests {
             "daemon:replacement",
         )
         .unwrap();
-        db.request_thread_stop(&binding.placement_thread_id, StopIntent::Cancel)
-            .unwrap();
+        db.request_thread_stop(
+            &binding.placement_thread_id,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
+        .unwrap();
         assert!(
             !db.conn
                 .with_sql(|connection| direct_owner_is_contactable(
@@ -3609,8 +3613,12 @@ pub(super) mod tests {
                     ready(&db, &binding, &SigningKey::from_bytes(&[23; 32]));
                 }
                 if loss == "stop" {
-                    db.request_thread_stop(placement, StopIntent::Cancel)
-                        .unwrap();
+                    db.request_thread_stop(
+                        placement,
+                        StopIntent::Cancel,
+                        crate::runtime_db::StopOrigin::Explicit,
+                    )
+                    .unwrap();
                 } else {
                     // Alter one authoritative stored-claim coordinate to prove
                     // each boundary rechecks the full tuple, not just thread ID.
@@ -4218,8 +4226,12 @@ pub(super) mod tests {
                     .unwrap(),
                 output
             );
-            db.request_thread_stop(placement, StopIntent::Cancel)
-                .unwrap();
+            db.request_thread_stop(
+                placement,
+                StopIntent::Cancel,
+                crate::runtime_db::StopOrigin::Explicit,
+            )
+            .unwrap();
             assert!(
                 db.external_direct_settled_owner_output(placement)
                     .unwrap()
@@ -4516,8 +4528,12 @@ pub(super) mod tests {
                 db.register_external_execution_channel(&binding).unwrap();
             }
             let original_cancel = if case == "stale" {
-                db.request_thread_stop(&placement, StopIntent::Cancel)
-                    .unwrap();
+                db.request_thread_stop(
+                    &placement,
+                    StopIntent::Cancel,
+                    crate::runtime_db::StopOrigin::Explicit,
+                )
+                .unwrap();
                 None
             } else {
                 Some(
@@ -4730,8 +4746,12 @@ pub(super) mod tests {
         db.begin_external_supervisor_activation(placement, &intent)
             .unwrap();
         db.register_external_execution_channel(&binding).unwrap();
-        db.request_thread_stop(placement, StopIntent::Cancel)
-            .unwrap();
+        db.request_thread_stop(
+            placement,
+            StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
+        .unwrap();
         let (ready_wire, _) = wire(
             &binding,
             &supervisor,

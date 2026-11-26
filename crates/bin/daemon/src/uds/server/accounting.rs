@@ -138,6 +138,36 @@ struct SealedLaunchFinancialAuthority {
     admitted_sessions: BTreeMap<String, String>,
 }
 
+/// Code a provider-attempt method is refused under when a thread under a
+/// workload ceiling sealed no external-effect authority at launch.
+pub(super) const THREAD_CEILING_NO_SEALED_EFFECT_AUTHORITY: &str =
+    "thread_ceiling_no_sealed_effect_authority";
+
+/// Under a `Bounded` workload ceiling the provider-attempt methods act only on
+/// authority the launch sealed and judged against the ceiling. A launch that
+/// sealed none has no external effect of its own, and a method must not
+/// create one, so it is refused with a typed code rather than by whatever
+/// missing-authority error follows. An `Unbounded` ceiling is not judged here.
+fn require_sealed_authority_under_ceiling(
+    ceiling: &ryeos_state::objects::ThreadWorkloadCeiling,
+    thread_id: &str,
+    sealed_authority_present: bool,
+) -> Result<()> {
+    if ceiling.is_bounded() && !sealed_authority_present {
+        return Err(anyhow::Error::new(
+            ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                code: THREAD_CEILING_NO_SEALED_EFFECT_AUTHORITY.to_owned(),
+                message: format!(
+                    "thread {thread_id} runs under a workload ceiling and sealed no \
+                     external-effect authority at launch, so it has no provider attempt to act on"
+                ),
+                binding: None,
+            },
+        ));
+    }
+    Ok(())
+}
+
 fn sealed_financial_authority(
     state: &AppState,
     thread_id: &str,
@@ -148,6 +178,7 @@ fn sealed_financial_authority(
         .ok_or_else(|| {
             anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
         })?;
+    let thread_ceiling = capsule.thread_ceiling;
     let closure = capsule.execution_closure;
     let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
         prepared_runtime_launch: prepared_value,
@@ -159,6 +190,11 @@ fn sealed_financial_authority(
     let prepared: ryeos_executor::execution::launch_preparation::PreparedRuntimeLaunch =
         serde_json::from_value(prepared_value)
             .context("decode admitted prepared launch authority")?;
+    require_sealed_authority_under_ceiling(
+        &thread_ceiling,
+        thread_id,
+        prepared.financial_authority.is_some() && prepared.external_effect_authority.is_some(),
+    )?;
     let financial = prepared.financial_authority.ok_or_else(|| {
         anyhow!("thread {thread_id} was admitted without a sealed financial authority")
     })?;
@@ -1670,6 +1706,30 @@ pub(super) fn handle_provider_attempt_local_stream_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_attempts_under_a_ceiling_are_refused_typed_when_the_launch_sealed_no_authority() {
+        let bounded = ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+            workspace_access:
+                ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let error = require_sealed_authority_under_ceiling(&bounded, "T-ceiling", false)
+            .expect_err("a bounded thread with no sealed authority has no attempt to prepare");
+        let refusal = error
+            .downcast_ref::<ryeos_executor::dispatch_error::DispatchError>()
+            .expect("the refusal is a typed dispatch error");
+        assert_eq!(refusal.code(), THREAD_CEILING_NO_SEALED_EFFECT_AUTHORITY);
+        require_sealed_authority_under_ceiling(&bounded, "T-ceiling", true).unwrap();
+        // An unbounded thread is not judged here; the sealed-authority lookup
+        // that follows keeps refusing a launch without one.
+        require_sealed_authority_under_ceiling(
+            &ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            "T-root",
+            false,
+        )
+        .unwrap();
+    }
 
     fn retry_decision(
         failed_attempt_number: u32,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:d79329f977d2d2d4a75ccab37bf484f79798a996757c2ac67d47e1f4ea628209:rFoC3dM2qDditW22YnPINdyuqfmbtp+23ijck8Ui/QY14S0Dl/Q3S7nXXWW+sb5gf4WpiAvj7WqoULJcXP+MCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:3a299fe5b5d299900170398acfb199e6f7984a7e4f5741eeb88cc6e5a3625077:TGYjJ1ZqxKUKOFeeyB6y/WcZRa5odLe+rVoiUNy8mjzZO1WIGGHXro7DVErM/ROBLir/dUMZE95bU+6IWO+0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-build
 version: "1.0.0"
@@ -19,3 +19,5 @@ schema:
   bundle_publication_policy_section_digest: string
   trust_epoch: integer
   release_input: object
+# Release build tool: only the node operator builds the Core seed generation.
+disclosure: {}

@@ -31,6 +31,12 @@ pub struct Request {
     pub descriptor: PathBuf,
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // A pin decides whose signatures the node accepts from that remote, so
     // only the configured local operator may make one.
@@ -42,9 +48,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             req.descriptor.display()
         )
     })?;
-    let descriptor = config::RemoteDescriptor::parse_signed(&text)
-        .map_err(anyhow::Error::new)
-        .with_context(|| format!("invalid remote descriptor: {}", req.descriptor.display()))?;
+    let descriptor = config::RemoteDescriptor::parse_signed(&text).map_err(|error| {
+        refuse(
+            "remote_descriptor_invalid",
+            400,
+            format!(
+                "invalid remote descriptor: {}: {error:#}",
+                req.descriptor.display()
+            ),
+        )
+    })?;
     let name = req.remote.unwrap_or_else(|| descriptor.name.clone());
     let digest = lillux::cas::canonical_json(&serde_json::json!({
         "remote": name,

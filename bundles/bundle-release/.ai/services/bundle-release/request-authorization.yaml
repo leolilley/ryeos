@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:492e597055b16a74595bc185cb4834336fe2deab1e01f41eff75b1c4ec4977b3:LimH4N6yPRDQPehlre/ZYiWIEjRG3dbSWHMJRwG3bSQH7s9aiXQAz9wRB5tXq3/4apLD9EbAo3jYrpLt/R+HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:c3418a1491b8c4557dcb0c09ddef4cbc7b8be8b9954016ec4f58919285b3a420:9w4FjE/fO8WVDoXw48MTbpOrC0oRcb4RFiv8NSc6tfpsqJv2/m2DUrtQEqBS4X8P2c7w/2QJAPuLiPMCLa76AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: request-authorization
 version: "1.0.0"
@@ -13,3 +13,5 @@ schema:
   generation_hash: string
   qualification_evidence_hashes: array
   expected_publisher_fingerprint: string
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:41:50Z:069191f44fa0ce62ad5fb618bb4b32f919f61ae1a2b961ed061c44645410fe4e:fpYZkFKvTc9iWtYTjWQrXm3imyi3AQcHWVoeQ6v+asiiXDE7NkSg9aAeaV+YrfHixwTl/1/0CKhEWGSar4TgBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:102bef352fa248d9743b19c839a8e88994ac2ca8f3bef4e7c1c832e0f63fce92:se2wy91FsQtbaeyySso3czF/4NQESHz+kShjbr0BH8gJ6lpsDTfXkVfgiXN88UXPR5WdmVWDjBgtAAHjN8r6Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: trust.list
 availability: both
@@ -6,3 +6,12 @@ state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.trust/list"]
 description: "List the node's signer registry: every pinned signer with role, scope, status and the time it was first pinned, the registry digest and the key-event chain head"
+disclosure:
+  principal:
+    - "/node_fingerprint"
+    - "/registry_digest"
+    - "/event_head/seq"
+    - "/event_head/digest"
+  free_text:
+    - "/signers"
+    - "/owners"
