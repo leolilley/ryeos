@@ -299,6 +299,14 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
     };
     if recovered.is_some() {
         (env.generation_changed)("reconciled bundle transaction");
+        // Reconciliation may have committed or removed a registration. The
+        // registration set is pinned by the signed init completion, so it is
+        // resealed here, unconditionally and before anything else can refuse:
+        // a registration that is real must never be left unsealed, because a
+        // node whose registrations differ from its sealed record cannot boot.
+        // The reseal rewrites the record from current state, so repeating it
+        // is harmless.
+        (env.seal)()?;
     }
     if matches!(
         recovered,
@@ -309,8 +317,10 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
     ) && transaction.target().is_dir()
         && !req.replace
     {
+        // The completed install is already sealed. Whether it is the bundle
+        // this caller meant is decided after, and a refusal leaves it
+        // installed and sealed.
         (checks.converged)(transaction.target())?;
-        (env.seal)()?;
         return Ok(serde_json::json!({
             "name": req.name,
             "path": transaction.target(),
@@ -2117,7 +2127,7 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_rerun_refuses_and_seals_nothing_when_the_installed_tree_is_not_the_stage() {
+    fn a_staged_rerun_seals_then_refuses_when_the_installed_tree_is_not_the_stage() {
         let tmp = tempfile::tempdir().unwrap();
         let (src, _bundles, target, key) = atomic_fixture(tmp.path());
         digest_tree(&src);
@@ -2137,7 +2147,11 @@ mod tests {
             refusal_code(&error),
             Some(ApplyRefusalCode::BundleAlreadyInstalled)
         );
-        assert_eq!(seals, 0);
+        // The crashed install passed admission and its registration is real:
+        // it is sealed first, so the node boots, and the refusal comes after.
+        assert_eq!(seals, 1);
+        assert!(tmp.path().join(".ai/node/bundles/demo.yaml").is_file());
+        assert!(target.is_dir());
     }
 
     #[test]
