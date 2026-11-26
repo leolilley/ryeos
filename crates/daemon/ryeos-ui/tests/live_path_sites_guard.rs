@@ -161,11 +161,13 @@ const ROOT_LIVE_FS_CALLERS: &[&str] = &[
     "crates/daemon/ryeos-app/src/execution_provenance.rs",
 ];
 
-/// Production files that name a child live provenance: its definition and
-/// derivation from a parent, and the readers that match on it. A child
-/// inherits its parent's admitted root, so a new file here is a new way to
-/// make one.
-const CHILD_LIVE_PROJECT_FILES: &[&str] = &[
+/// Production files that name a root or child live provenance variant: the
+/// definition and derivation from a parent (execution_provenance.rs) and the
+/// readers that match on it. Only the definition file builds one; a child
+/// inherits its parent's admitted root. A new file naming either variant is a
+/// new way to make a live provenance without `root_live_fs`, so it trips the
+/// guard.
+const LIVE_VARIANT_FILES: &[&str] = &[
     "crates/daemon/ryeos-app/src/execution_provenance.rs",
     "crates/daemon/ryeos-app/src/launch_metadata.rs",
     "crates/daemon/ryeos-app/src/thread_lifecycle/sealed_request.rs",
@@ -179,12 +181,16 @@ fn live_provenance_has_only_the_listed_constructors_and_matchers() {
     workspace_files(&root, &root.join("crates"), &mut files);
     let mut roots = std::collections::BTreeSet::new();
     let mut children = std::collections::BTreeSet::new();
+    let mut root_variant = std::collections::BTreeSet::new();
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
         let body = non_test_text(&text);
         let name = file.to_string_lossy().replace('\\', "/");
         if body.contains("root_live_fs(") {
             roots.insert(name.clone());
+        }
+        if body.contains("RootLiveProject {") {
+            root_variant.insert(name.clone());
         }
         if body.contains("ChildLiveProject {") {
             children.insert(name);
@@ -200,8 +206,13 @@ fn live_provenance_has_only_the_listed_constructors_and_matchers() {
     );
     assert_eq!(
         children,
-        expect(CHILD_LIVE_PROJECT_FILES),
+        expect(LIVE_VARIANT_FILES),
         "the production files naming ChildLiveProject changed"
+    );
+    assert_eq!(
+        root_variant,
+        expect(LIVE_VARIANT_FILES),
+        "the production files naming RootLiveProject changed"
     );
 }
 
