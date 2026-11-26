@@ -579,7 +579,11 @@ mod tests {
         KeyLinkBody {
             schema: KEY_LINK_SCHEMA.to_owned(),
             nonce: "ab".repeat(16),
-            principal: PrincipalId::solo(&fp(by)).unwrap().to_string(),
+            principal: crate::trust::SuccessionGraph::default()
+                .ownership_of(fp(by).trim_start_matches("fp:"))
+                .unwrap()
+                .principal
+                .to_string(),
             key: fp(added),
             key_public: public(added),
             linked_by: fp(by),
