@@ -1942,10 +1942,9 @@ impl RemoteClient {
                 .as_str()
                 .context("missing fingerprint in authorize-key response")?
                 .to_string(),
-            label: resp["label"]
-                .as_str()
-                .context("missing label in authorize-key response")?
-                .to_string(),
+            // The label is operator-supplied free text the remote withholds
+            // from a non-operator's answer, so the caller's own is reported.
+            label: label.to_string(),
             scopes: resp["scopes"]
                 .as_array()
                 .map(|a| {
@@ -3683,6 +3682,8 @@ pub struct ClosureMissingObject {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ClosureMalformedObject {
     pub hash: String,
+    /// Free text the remote shows only its operator.
+    #[serde(default)]
     pub reason: String,
 }
 

@@ -873,6 +873,22 @@ fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_ba
             &["schema", "project_materialization_ms"],
         ),
         (
+            "worker-executions/handoff",
+            &[
+                "schema",
+                "checkpoint_load_ms",
+                "closure_verification_ms",
+                "target_prepare_ms",
+                "source_publication_ms",
+                "target_adoption_ms",
+                "event_replay_ms",
+                "project_materialization_ms",
+                "worker_attach_recovery_ms",
+                "adoption_path",
+                "total_handoff_ms",
+            ],
+        ),
+        (
             "worker-placements/adopt",
             &[
                 "schema",

@@ -310,12 +310,15 @@ pub fn facts_report(app_root: &Path, node: &NodeIdentity, signer: Option<&str>) 
 /// one, the reason in `grant_error`. Read afresh for every report, so a grant
 /// replaced since is reported as it now stands.
 pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) -> Value {
-    let ungranted = |error: Option<String>| {
+    // `grant_error_code` is the closed form a non-operator may read; the
+    // free-text `grant_error` stays operator-only.
+    let ungranted = |code: Option<&str>, error: Option<String>| {
         json!({
             "fingerprint": fingerprint,
             "local_operator": false,
             "grant_digest": Value::Null,
             "grant_error": error,
+            "grant_error_code": code,
         })
     };
     match super::envelope::local_operator(app_root) {
@@ -324,9 +327,12 @@ pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) ->
         }
         Ok(_) => {}
         Err(error) => {
-            return ungranted(Some(format!(
-                "the local operator identity cannot be read: {error:#}"
-            )));
+            return ungranted(
+                Some("operator_identity_unreadable"),
+                Some(format!(
+                    "the local operator identity cannot be read: {error:#}"
+                )),
+            );
         }
     }
     let directory = super::envelope::authorized_keys_dir(app_root);
@@ -339,8 +345,8 @@ pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) ->
             "grant_digest": grant.source_file_hash,
             "origin_site_id": grant.configured_origin_site_id,
         }),
-        Ok(None) => ungranted(None),
-        Err(error) => ungranted(Some(format!("{error:#}"))),
+        Ok(None) => ungranted(None, None),
+        Err(error) => ungranted(Some("grant_unverifiable"), Some(format!("{error:#}"))),
     }
 }
 

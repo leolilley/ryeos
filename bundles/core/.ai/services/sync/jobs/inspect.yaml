@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:9fb39599efc0b0715e6c514693abd7c339f6ce1597b8bab5cd1f43d6bc32f9c7:+WSvs+/Qm9jVtatMHvN84yC8qwJZBpPs+qY3bDeP9wAByp95r1B2aIaxkwrsAbMDySTdPGoIfy+20y/OUkmXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:50:54Z:94804ab1e5fa42efb14419b0fe29d6d977050d7791a631ec68065f3496565cc4:TwQ6ks91wBlsdxpMLb8W1RX9lPW+0b5FX+/lHcvDYNZ65Ly/qK9/dHt/C9dI+VJk3g1kYY2mTOMkJTBAOapkBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sync.jobs.inspect
 required_caps: ["ryeos.execute.service.sync/jobs/inspect"]
@@ -20,6 +20,10 @@ disclosure:
     - "/job/created_at"
     - "/job/updated_at"
     - "/job/finished_at"
+    - "/job/roots"
+    - "/job/heads"
+    - "/job/uploaded_hashes"
+    - "/job/fetched_hashes"
     - "/attempts/*/attempt_id"
     - "/attempts/*/job_id"
     - "/attempts/*/attempt_number"
@@ -33,8 +37,6 @@ disclosure:
     - "/job/peer"
     - "/job/last_error"
     - "/job/result"
-    - "/job/roots"
-    - "/job/heads"
     - "/attempts/*/error"
     - "/attempts/*/result"
   max_items: 1024

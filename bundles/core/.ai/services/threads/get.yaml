@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:14:51Z:c49812311c9a870e708a35e95a5fb5fdfbf9144fecfa4dc1a8a8d9defc34f446:6f4TZzErNnHcE6QGzqKZ9XJXwiJLMR6mkFV9jy982UH5fhKe38JXo+w6jCZXM2bB9k0K+pTUcXWOgQcDwhqABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:50:54Z:8c9de6efe544181b7efe3f08383d53f55ebf3a8f792a740560e67beccd2b1fe2:njtSRMDUExA1fe6rQ0/XpNtv9O00TCIg8V9ay73OGBH39RselFJkt8EPCusqwMj6OIPtB29M405PB3aCkom8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "get"
 kind: service
@@ -34,6 +34,8 @@ disclosure:
     - "/thread/follow/child_thread_id"
     - "/thread/follow/child_chain_root_id"
     - "/thread/follow/child_terminal_status"
+    - "/thread/project_authority/base_snapshot_hash"
+    - "/thread/admitted_launch_capsule_hash"
     - "/result/outcome_code"
     - "/artifacts/*/artifact_id"
     - "/artifacts/*/artifact_type"
@@ -43,9 +45,7 @@ disclosure:
     - "/thread/project_root"
     - "/thread/project/path"
     - "/thread/project/name"
-    - "/thread/project_authority"
     - "/thread/lifecycle_authority"
-    - "/thread/admitted_launch_capsule_hash"
     - "/thread/result_project_snapshot_hash"
     - "/thread/result_workspace_output_capture_hash"
     - "/thread/runtime"
