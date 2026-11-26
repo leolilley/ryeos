@@ -314,6 +314,15 @@ pub(crate) async fn install_entries<S: BlobSource>(
         let registration = transaction
             .commit_present(state.identity.signing_key())
             .context("commit remote bundle registration")?;
+        // The registration set is pinned by the signed init completion
+        // record; reseal it under the node's state lock so the node with this
+        // bundle boots. A crash between the commit and this seal leaves the
+        // node refusing until the install is re-run, which reseals it.
+        ryeos_node::seal_init_completion_after_bundle_registration_change(
+            &state.config.app_root,
+            &state.controller_lifetime,
+        )
+        .context("commit remote bundle registration into initialized state")?;
         Ok((canonical, registration))
     })();
 

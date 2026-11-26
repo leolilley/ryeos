@@ -124,7 +124,7 @@ async fn pull(b: &DaemonHarness, url: &str, node: &str, expect: &str) -> (u16, V
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_pins() {
     let (a, a_fixture) = start_publisher().await;
-    let (b, _b_fixture) = start_puller().await;
+    let (mut b, _b_fixture) = start_puller().await;
     let publication = publish_on(&a, &a_fixture).await;
     let node_pin = format!("fp:{}", publication.node_fingerprint);
 
@@ -194,6 +194,22 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
         assert_eq!(lillux::sha256_hex(&bytes), entry.hash, "{}", entry.path);
         assert_eq!(bytes.len() as u64, entry.size, "{}", entry.path);
     }
+
+    // The install resealed the signed init completion record, so the node
+    // boots again with the bundle and lists it.
+    b.restart()
+        .await
+        .expect("the node boots with the pulled bundle");
+    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    assert_eq!(status, 200, "{listed:#}");
+    assert!(
+        listed["result"]["bundles"]
+            .as_array()
+            .expect("bundles")
+            .iter()
+            .any(|entry| entry["name"] == BUNDLE),
+        "{listed:#}"
+    );
 
     // The bundle is now installed, so a second pull moves nothing.
     let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
