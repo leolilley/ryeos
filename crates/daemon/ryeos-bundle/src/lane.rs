@@ -2,18 +2,21 @@
 //!
 //! A bundle registered with a lane marker arrived through a publication pull:
 //! its publisher signed the bytes and the node pinned that key, but nothing
-//! built, qualified or attested it. Such a bundle may carry items, but it may
-//! not carry authority: no kinds, no manifest-declared runtime authority, no
-//! native executables and no node extensions. The check runs on the staged
-//! tree at admission and again whenever the node loads its registrations, so a
-//! tree edited after install is refused too.
+//! built, qualified or attested it. Such a bundle may carry items of exactly
+//! four kinds (tool, directive, graph, knowledge) and nothing else: no other
+//! item kind, no kinds of its own, no manifest-declared runtime authority, no
+//! native executables, no node extensions, no file whose bytes are an
+//! executable image and no file outside an item directory. The path rules run
+//! on the publication's file list before any blob is fetched; the whole check
+//! runs on the staged tree at admission and again whenever the node loads its
+//! registrations, so a tree edited after install is refused too.
 //!
 //! Commands need no check here. The node-config loader already refuses a
 //! command item from any bundle that the node's `command_registration` policy
 //! does not name (`UnnamedBundleCommand`), and a laned bundle is never named.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::manifest::BundleManifest;
 
@@ -29,6 +32,50 @@ const NODE_EXTENSION_DIRS: &[&str] = &[
 
 /// Directories, relative to the bundle root, that hold native executables.
 const NATIVE_EXECUTABLE_DIRS: &[&str] = &["bin", ".ai/bin"];
+
+/// The only item directories a lane bundle may carry, with the kind each one
+/// holds. A tool's own source files live under the tools directory.
+const ITEM_KIND_DIRS: &[(&str, &str)] = &[
+    (".ai/tools", "tool"),
+    (".ai/directives", "directive"),
+    (".ai/graphs", "graph"),
+    (".ai/knowledge", "knowledge"),
+];
+
+/// Directories that name a refused kind. A directory under `.ai` that is in
+/// neither table is refused as a kind of its own name.
+const REFUSED_KIND_DIRS: &[(&str, &str)] = &[
+    (".ai/services", "service"),
+    (".ai/config", "config"),
+    (".ai/node", "node"),
+    (".ai/routes", "route"),
+    (".ai/ui", "ui"),
+];
+
+/// Bundle control data that is neither an item nor executable: the signed
+/// manifest, the manifest's content-addressed payload, and the publisher's
+/// trust file. Each is a path or a directory prefix.
+const CONTROL_PATHS: &[&str] = &[
+    ".ai/manifest.yaml",
+    ".ai/manifest.source.yaml",
+    ".ai/objects",
+    ".ai/refs",
+    "PUBLISHER_TRUST.toml",
+];
+
+/// Leading bytes of an executable image: ELF, the four Mach-O thin magics
+/// in both byte orders, and the fat/universal magic.
+const EXECUTABLE_MAGICS: &[&[u8]] = &[
+    b"\x7fELF",
+    &[0xfe, 0xed, 0xfa, 0xce],
+    &[0xfe, 0xed, 0xfa, 0xcf],
+    &[0xce, 0xfa, 0xed, 0xfe],
+    &[0xcf, 0xfa, 0xed, 0xfe],
+    &[0xca, 0xfe, 0xba, 0xbe],
+];
+
+/// How much of a file is read to recognise an executable image.
+const MAGIC_PROBE_BYTES: usize = 4096;
 
 /// The closing sentence of every refusal.
 const LANE_LIMIT_NOT_LIFTABLE: &str =
@@ -59,6 +106,21 @@ pub enum LaneRefusal {
     )]
     NodeExtension { found: String },
     #[error(
+        "publication_lane_kind_refused: {path} is an item of kind `{kind}`; a publication-lane bundle may carry only tool, directive, graph and knowledge items. {}",
+        LANE_LIMIT_NOT_LIFTABLE
+    )]
+    KindRefused { kind: String, path: String },
+    #[error(
+        "publication_lane_stray_file: {path} is outside the item directories and is not bundle control data; a publication-lane bundle may carry nothing else. {}",
+        LANE_LIMIT_NOT_LIFTABLE
+    )]
+    StrayFile { path: String },
+    #[error(
+        "publication_lane_executable_image: {path} begins with the bytes of an executable image; a publication-lane bundle may not carry one. {}",
+        LANE_LIMIT_NOT_LIFTABLE
+    )]
+    ExecutableImage { path: String },
+    #[error(
         "bundle_lane_unreadable: the bundle tree at {path} could not be inspected ({detail}); a publication-lane bundle is refused when it cannot be checked. {}",
         LANE_LIMIT_NOT_LIFTABLE
     )]
@@ -73,6 +135,9 @@ impl LaneRefusal {
             Self::RuntimeAuthority { .. } => "bundle_lane_runtime_authority",
             Self::NativeExecutable { .. } => "bundle_lane_native_executable",
             Self::NodeExtension { .. } => "bundle_lane_node_extension",
+            Self::KindRefused { .. } => "publication_lane_kind_refused",
+            Self::StrayFile { .. } => "publication_lane_stray_file",
+            Self::ExecutableImage { .. } => "publication_lane_executable_image",
             Self::Unreadable { .. } => "bundle_lane_unreadable",
         }
     }
@@ -97,19 +162,119 @@ pub fn refuse_lane_authority(
         });
     }
 
-    if let Some(path) = native_executable_dir(bundle_root)? {
-        return Err(LaneRefusal::NativeExecutable { path });
-    }
-
-    let mut found = node_extension_manifest_fields(manifest);
-    for dir in NODE_EXTENSION_DIRS {
-        if let Some(file) = first_non_directory(&bundle_root.join(dir))? {
-            found.push(format!("file {}", display_relative(bundle_root, &file)));
-        }
-    }
+    let found = node_extension_manifest_fields(manifest);
     if !found.is_empty() {
         return Err(LaneRefusal::NodeExtension {
             found: found.join(", "),
+        });
+    }
+
+    for rel in tree_files(bundle_root)? {
+        refuse_lane_path(&rel)?;
+        refuse_executable_image(bundle_root, &rel)?;
+    }
+    Ok(())
+}
+
+/// Refuse a publication's file list before any blob is fetched: the path
+/// rules of the lane, applied to bundle-relative `/`-separated paths.
+pub fn refuse_lane_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<(), LaneRefusal> {
+    paths.into_iter().try_for_each(refuse_lane_path)
+}
+
+fn under(path: &str, dir: &str) -> bool {
+    path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The path rules, in order: native executable directories, node-extension
+/// directories, then the allow-list of item directories and control data.
+fn refuse_lane_path(path: &str) -> Result<(), LaneRefusal> {
+    if let Some(dir) = NATIVE_EXECUTABLE_DIRS.iter().find(|dir| under(path, dir)) {
+        return Err(LaneRefusal::NativeExecutable {
+            path: (*dir).to_string(),
+        });
+    }
+    if NODE_EXTENSION_DIRS.iter().any(|dir| under(path, dir)) {
+        return Err(LaneRefusal::NodeExtension {
+            found: format!("file {path}"),
+        });
+    }
+    if ITEM_KIND_DIRS.iter().any(|(dir, _)| under(path, dir))
+        || CONTROL_PATHS.iter().any(|control| under(path, control))
+    {
+        return Ok(());
+    }
+    if let Some(kind_dir) = path
+        .strip_prefix(".ai/")
+        .and_then(|rest| rest.split('/').next())
+    {
+        let dir = format!(".ai/{kind_dir}");
+        let kind = REFUSED_KIND_DIRS
+            .iter()
+            .find(|(known, _)| *known == dir)
+            .map_or(kind_dir, |(_, kind)| *kind);
+        return Err(LaneRefusal::KindRefused {
+            kind: kind.to_string(),
+            path: path.to_string(),
+        });
+    }
+    Err(LaneRefusal::StrayFile {
+        path: path.to_string(),
+    })
+}
+
+/// Every file below `root` as a bundle-relative `/`-separated path. A symlink
+/// is refused: a lane bundle holds only the bytes it names.
+fn tree_files(root: &Path) -> Result<Vec<String>, LaneRefusal> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let entries = fs::read_dir(&current).map_err(|error| unreadable(&current, &error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| unreadable(&current, &error))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| unreadable(&path, &error))?;
+            let relative = display_relative(root, &path).replace('\\', "/");
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                files.push(relative);
+            } else {
+                return Err(LaneRefusal::StrayFile { path: relative });
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Refuse a file that begins like an ELF, Mach-O or PE image.
+fn refuse_executable_image(root: &Path, relative: &str) -> Result<(), LaneRefusal> {
+    use std::io::Read as _;
+    let path = root.join(relative);
+    let mut head = Vec::with_capacity(MAGIC_PROBE_BYTES);
+    fs::File::open(&path)
+        .and_then(|file| file.take(MAGIC_PROBE_BYTES as u64).read_to_end(&mut head))
+        .map_err(|error| unreadable(&path, &error))?;
+    let portable_executable = head.starts_with(b"MZ")
+        && head
+            .get(0x3c..0x40)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_le_bytes)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .is_some_and(|offset| head.get(offset..offset + 4) == Some(b"PE\0\0".as_slice()));
+    if portable_executable
+        || EXECUTABLE_MAGICS
+            .iter()
+            .any(|magic| head.starts_with(magic))
+    {
+        return Err(LaneRefusal::ExecutableImage {
+            path: relative.to_string(),
         });
     }
     Ok(())
@@ -143,27 +308,6 @@ fn runtime_authority_families(manifest: &BundleManifest) -> Vec<&'static str> {
     families
 }
 
-/// The native-executable check: a `bin` directory at the bundle root or
-/// under `.ai` that holds any entry. Returns the relative path found.
-fn native_executable_dir(bundle_root: &Path) -> Result<Option<String>, LaneRefusal> {
-    for dir in NATIVE_EXECUTABLE_DIRS {
-        let path = bundle_root.join(dir);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(unreadable(&path, &error)),
-        };
-        if !metadata.is_dir() {
-            return Ok(Some((*dir).to_string()));
-        }
-        let mut entries = fs::read_dir(&path).map_err(|error| unreadable(&path, &error))?;
-        if entries.next().is_some() {
-            return Ok(Some((*dir).to_string()));
-        }
-    }
-    Ok(None)
-}
-
 /// Manifest declarations that extend the node: isolation backends, external
 /// providers and external lifecycle adapters.
 fn node_extension_manifest_fields(manifest: &BundleManifest) -> Vec<String> {
@@ -178,32 +322,6 @@ fn node_extension_manifest_fields(manifest: &BundleManifest) -> Vec<String> {
         found.push("manifest external_lifecycle_adapters".to_string());
     }
     found
-}
-
-/// The first non-directory entry anywhere below `dir`, or none when `dir` is
-/// absent or holds only empty directories.
-fn first_non_directory(dir: &Path) -> Result<Option<PathBuf>, LaneRefusal> {
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(current) = pending.pop() {
-        let entries = match fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(unreadable(&current, &error)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| unreadable(&current, &error))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|error| unreadable(&path, &error))?;
-            if file_type.is_dir() {
-                pending.push(path);
-            } else {
-                return Ok(Some(path));
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn display_relative(root: &Path, path: &Path) -> String {
@@ -261,13 +379,131 @@ mod tests {
         assert!(message.ends_with(LANE_LIMIT_NOT_LIFTABLE), "{message}");
     }
 
+    fn write_bytes(root: &Path, rel: &str, bytes: &[u8]) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
-    fn plain_bundle_passes() {
+    fn a_bundle_of_only_the_four_kinds_and_control_data_passes() {
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), ".ai/knowledge/note.md");
+        for rel in [
+            ".ai/tools/ryeos/pulled/tool.yaml",
+            ".ai/tools/ryeos/pulled/src/helper.py",
+            ".ai/directives/pulled/plan.md",
+            ".ai/graphs/pulled/flow.yaml",
+            ".ai/knowledge/pulled/note.md",
+            ".ai/manifest.yaml",
+            ".ai/manifest.source.yaml",
+            ".ai/objects/objects/44/a5/blob.json",
+            ".ai/refs/bundles/manifest",
+            "PUBLISHER_TRUST.toml",
+        ] {
+            write(tmp.path(), rel);
+        }
         fs::create_dir_all(tmp.path().join("bin")).unwrap();
-        fs::create_dir_all(tmp.path().join(".ai/handlers/empty")).unwrap();
         refuse_lane_authority(tmp.path(), &manifest()).unwrap();
+    }
+
+    #[test]
+    fn every_other_kind_directory_is_refused_naming_kind_and_path() {
+        for (rel, kind) in [
+            (".ai/services/pulled/s.yaml", "service"),
+            (".ai/config/pulled/c.yaml", "config"),
+            (".ai/node/engine/kinds/k.yaml", "node"),
+            (".ai/routes/pulled/r.yaml", "route"),
+            (".ai/ui/pulled/v.yaml", "ui"),
+            (".ai/schedules/pulled/s.yaml", "schedules"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write(tmp.path(), rel);
+            let error = refusal(tmp.path(), &manifest());
+            assert_message(&error, "publication_lane_kind_refused");
+            let message = error.to_string();
+            assert!(message.contains(&format!("`{kind}`")), "{message}");
+            assert!(message.contains(rel), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_file_outside_the_item_directories_is_refused() {
+        for rel in [
+            "README.md",
+            "scripts/install.sh",
+            "other/.ai/knowledge/n.md",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write(tmp.path(), rel);
+            assert_message(
+                &refusal(tmp.path(), &manifest()),
+                "publication_lane_stray_file",
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_with_executable_magic_is_refused_wherever_it_sits() {
+        let mut pe = vec![0_u8; 0x80];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        for (name, bytes) in [
+            ("elf", b"\x7fELF\x02\x01".to_vec()),
+            ("macho", vec![0xcf, 0xfa, 0xed, 0xfe, 0, 0]),
+            ("fat", vec![0xca, 0xfe, 0xba, 0xbe, 0, 0]),
+            ("pe", pe),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_bytes(
+                tmp.path(),
+                &format!(".ai/knowledge/pulled/{name}.md"),
+                &bytes,
+            );
+            assert_message(
+                &refusal(tmp.path(), &manifest()),
+                "publication_lane_executable_image",
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        write_bytes(
+            tmp.path(),
+            ".ai/knowledge/pulled/mz.md",
+            b"MZ is a prefix of prose",
+        );
+        refuse_lane_authority(tmp.path(), &manifest()).unwrap();
+    }
+
+    #[test]
+    fn the_publication_file_list_is_refused_before_any_fetch() {
+        refuse_lane_paths([".ai/knowledge/a.md", ".ai/manifest.yaml"]).unwrap();
+        for (path, code) in [
+            ("bin/tool", "bundle_lane_native_executable"),
+            (".ai/handlers/h.yaml", "bundle_lane_node_extension"),
+            (".ai/services/s.yaml", "publication_lane_kind_refused"),
+            ("README.md", "publication_lane_stray_file"),
+        ] {
+            assert_eq!(
+                refuse_lane_paths([".ai/knowledge/a.md", path])
+                    .unwrap_err()
+                    .code(),
+                code,
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), ".ai/knowledge/a.md");
+        std::os::unix::fs::symlink("/etc/passwd", tmp.path().join(".ai/knowledge/link.md"))
+            .unwrap();
+        assert_message(
+            &refusal(tmp.path(), &manifest()),
+            "publication_lane_stray_file",
+        );
     }
 
     #[test]
@@ -328,8 +564,9 @@ mod tests {
     #[test]
     fn unreadable_tree_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), ".ai/handlers");
-        // `.ai/handlers` is a file, so reading it as a directory fails.
-        assert_message(&refusal(tmp.path(), &manifest()), "bundle_lane_unreadable");
+        assert_message(
+            &refusal(&tmp.path().join("missing"), &manifest()),
+            "bundle_lane_unreadable",
+        );
     }
 }

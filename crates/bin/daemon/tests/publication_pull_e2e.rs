@@ -286,24 +286,9 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pull_never_takes_core_or_a_name_a_native_install_holds() {
+async fn a_pull_never_takes_a_name_a_native_install_holds() {
     let (a, a_fixture) = start_publisher().await;
     let (b, _b_fixture) = start_puller().await;
-
-    // `core` is never pulled.
-    let core = publish_bundle_with_id(&a, &a_fixture, "core", 0x42).await;
-    let (status, refused) = pull(
-        &b,
-        &core.url,
-        &format!("fp:{}", core.node_fingerprint),
-        &core.record_hash,
-    )
-    .await;
-    assert_eq!(status, 422, "{refused:#}");
-    assert_eq!(
-        refused["error"]["code"], "bundle_core_never_pulled",
-        "{refused:#}"
-    );
 
     // The puller's `knowledge` bundle is a native install; a publication of the
     // same name does not take it.
@@ -420,4 +405,112 @@ async fn a_publication_signed_by_a_publisher_the_puller_does_not_trust_is_refuse
         signers_before,
         "the pull changed B's trust"
     );
+}
+
+/// Synthetic bundles that each carry one thing a publication-lane bundle may
+/// not: (bundle name, file path, file bytes, expected typed code).
+const LANE_REFUSALS: &[(&str, &str, &[u8], &str)] = &[
+    (
+        "lane-service",
+        ".ai/services/x/s.yaml",
+        b"x",
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-config",
+        ".ai/config/x/c.yaml",
+        b"x",
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-node",
+        ".ai/node/x/n.yaml",
+        b"x",
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-route",
+        ".ai/routes/x/r.yaml",
+        b"x",
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-bin",
+        "bin/tool",
+        b"x",
+        "bundle_lane_native_executable",
+    ),
+    (
+        "lane-handler",
+        ".ai/handlers/x/h.yaml",
+        b"x",
+        "bundle_lane_node_extension",
+    ),
+    (
+        "lane-stray",
+        "README.md",
+        b"x",
+        "publication_lane_stray_file",
+    ),
+    (
+        "lane-elf",
+        ".ai/knowledge/x/note.md",
+        b"\x7fELF\x02\x01\x01",
+        "publication_lane_executable_image",
+    ),
+];
+
+async fn start_publisher_with_lane_refusals() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            for (bundle, path, bytes, _) in LANE_REFUSALS {
+                register_config_fixture_bundle(state_path, bundle, fixture, |root| {
+                    let file = root.join(path);
+                    std::fs::create_dir_all(file.parent().expect("a parent directory"))?;
+                    std::fs::write(file, bytes)?;
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the publishing node")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_that_carries_more_than_items_is_refused_with_its_typed_code_and_nothing_is_written()
+ {
+    let (a, a_fixture) = start_publisher_with_lane_refusals().await;
+    let (b, _b_fixture) = start_puller().await;
+    for (index, (bundle, _, _, code)) in LANE_REFUSALS.iter().enumerate() {
+        let publication = publish_bundle_with_id(&a, &a_fixture, bundle, 0x50 + index as u8).await;
+        let (status, refused) = pull(
+            &b,
+            &publication.url,
+            &format!("fp:{}", publication.node_fingerprint),
+            &publication.record_hash,
+        )
+        .await;
+        assert_eq!(status, 422, "{bundle}: {refused:#}");
+        assert_eq!(refused["error"]["code"], *code, "{bundle}: {refused:#}");
+        assert!(
+            refused
+                .to_string()
+                .contains("cannot be lifted on this build"),
+            "{bundle}: {refused:#}"
+        );
+        assert!(
+            !b.state_path.join(".ai/bundles").join(bundle).exists(),
+            "{bundle}: a refused pull left a bundle behind"
+        );
+        assert!(
+            !b.state_path
+                .join(".ai/node/bundles")
+                .join(format!("{bundle}.yaml"))
+                .exists(),
+            "{bundle}: a refused pull left a registration behind"
+        );
+    }
 }

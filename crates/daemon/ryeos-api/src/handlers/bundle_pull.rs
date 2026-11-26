@@ -480,14 +480,13 @@ pub(crate) fn pull_receipt(publisher: &str, node: &str) -> String {
          bytes and this node pinned that key; node fp:{node} served them. No release evidence \
          chain exists for this bundle: it was not built, qualified or attested by a release \
          node. It carries no command, kind, executable or runtime authority unless this node's \
-         policy names it. The publisher signed these bytes; nothing authorizes an exact set."
+         policy names it. Its tools and directives run under the caller's own grants. The publisher \
+         signed these bytes; nothing authorizes an exact set."
     )
 }
 
-/// Refuse, before any blob moves, a name a pull may not take: `core`, and a
-/// name this node already holds as a natively installed bundle. A name held by
-/// a laned bundle falls through to the install precheck's own refusal.
-fn precheck_pull_name(bundle_name: &str, state: &AppState) -> HandlerResult<()> {
+/// `core` is never installed through a publication pull.
+fn refuse_core_name(bundle_name: &str) -> HandlerResult<()> {
     if bundle_name == "core" {
         return Err(ryeos_app::handler_error::typed_refusal(
             "bundle_core_never_pulled",
@@ -495,6 +494,14 @@ fn precheck_pull_name(bundle_name: &str, state: &AppState) -> HandlerResult<()> 
             "the `core` bundle is never installed through a publication pull",
         ));
     }
+    Ok(())
+}
+
+/// Refuse, before any blob moves, a name a pull may not take: `core`, and a
+/// name this node already holds as a natively installed bundle. A name held by
+/// a laned bundle falls through to the install precheck's own refusal.
+fn precheck_pull_name(bundle_name: &str, state: &AppState) -> HandlerResult<()> {
+    refuse_core_name(bundle_name)?;
     if state
         .node_config
         .bundles
@@ -936,6 +943,12 @@ pub async fn handle(
         )));
     }
     precheck_pull_name(&bundle_name, &state)?;
+    // The lane's path rules run on the file list, so a bundle that may not be
+    // installed is refused before a single blob is fetched.
+    ryeos_bundle::lane::refuse_lane_paths(response.entries.iter().map(|entry| entry.path.as_str()))
+        .map_err(|refusal| {
+            ryeos_app::handler_error::typed_refusal(refusal.code(), 422, refusal.to_string())
+        })?;
     if let Some(report) = precheck_install(&bundle_name, &state).map_err(classify)? {
         return Ok(report);
     }

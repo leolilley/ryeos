@@ -548,8 +548,6 @@ pub(crate) fn admit_completed_staging(
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     lane: Option<&ryeos_engine::trust::BundleLane>,
 ) -> Result<AdmittedStaging> {
-    let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
-    verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     if lane.is_some() {
         // A laned bundle carries no kinds, runtime authority, executables or
         // node extensions; refuse before anything else looks at the tree.
@@ -563,6 +561,8 @@ pub(crate) fn admit_completed_staging(
             ))
         })?;
     }
+    let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
+    verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and policy-directory collisions are
     // rejected before activation. Command grants come only from the exact
