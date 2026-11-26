@@ -2094,23 +2094,42 @@ pub mod test_support {
                 {
                     anyhow::bail!("handoff measurement omitted its closure or total observation");
                 }
-                if record.failure_cut.is_none()
-                    && [
-                        record.observed.staging_and_transfer_ms,
-                        record.observed.closure_verification_ms,
-                        record.observed.source_publication_ms,
-                        record.observed.target_adoption_ms,
-                        record.observed.checkpoint_load_ms,
-                        record.observed.event_replay_ms,
-                        record.observed.project_materialization_ms,
-                        record.observed.worker_attach_recovery_ms,
+                if record.failure_cut.is_none() {
+                    let missing = [
+                        (
+                            "staging_and_transfer_ms",
+                            record.observed.staging_and_transfer_ms,
+                        ),
+                        (
+                            "closure_verification_ms",
+                            record.observed.closure_verification_ms,
+                        ),
+                        (
+                            "source_publication_ms",
+                            record.observed.source_publication_ms,
+                        ),
+                        ("target_adoption_ms", record.observed.target_adoption_ms),
+                        ("checkpoint_load_ms", record.observed.checkpoint_load_ms),
+                        ("event_replay_ms", record.observed.event_replay_ms),
+                        (
+                            "project_materialization_ms",
+                            record.observed.project_materialization_ms,
+                        ),
+                        (
+                            "worker_attach_recovery_ms",
+                            record.observed.worker_attach_recovery_ms,
+                        ),
                     ]
                     .into_iter()
-                    .any(|measurement| measurement.is_none())
-                {
-                    anyhow::bail!(
-                        "successful handoff measurement omitted an executed stage observation"
-                    );
+                    .filter(|(_, measurement)| measurement.is_none())
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        anyhow::bail!(
+                            "successful handoff measurement omitted an executed stage observation: {}",
+                            missing.join(", ")
+                        );
+                    }
                 }
             }
             let encoded = lillux::canonical_json(&serde_json::to_value(self)?)?;

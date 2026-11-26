@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-26T00:55:57Z:6c2fd0f68a3d2af5966387e312ca345a612657c9bd5cdf8f8b8ecf9e8cabee79:BheYIc1q8gHrH71/ARctk96c/QnmcN68p7uLf9nTY6h9fgNPU9Hc5/U7YXqeyqVkqup8J9PNJplbRaFlgGYkDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/thread-result
+path: /threads/{thread_id}/result
+methods:
+  - GET
+auth: ryeos_signed
+response:
+  mode: json
+  source: service:threads/result
+  source_config:
+    thread_id: "${path.thread_id}"

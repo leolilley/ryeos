@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:59Z:f33cfbbd0bafc0cc55d246aa43a7e067e2353ee6d91f62b5d95e8cb4b0d133b2:WGRGZqNOzST9VTFpT377Tq5lYgsgXuU5m9h+MUiV2sG6AIDHF1Ev7mGrEvhHS/STenm9iJ9Kvke4/JQSW54PCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:30:21Z:483b1d66ae4e15573bcd5de169681a0ef5d638309095544927c3bc5ce1db88b1:3z9w4e47n7AN+uFg5q40TAsyVqyLDDubCOPIv/uSvc83zIWSM3KdhQYDwwcF9By4pSRW7kxXVGclWUimz/huDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "3.0.0"
 # A project file may not take the ref of a surface an installed bundle
@@ -217,7 +217,9 @@ composed_value_contract:
           optional:
             role: { type: single, prim: string }
             params: { type: single, prim: mapping }
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             refresh: { type: single, prim: mapping }
             dynamic_parameters:
               type: single
@@ -228,6 +230,7 @@ composed_value_contract:
               prim: string
               enum: [initial, on_demand]
             requires_project: { type: single, prim: boolean }
+            contract: { type: single, prim: string }
     affordances:
       type: single
       prim: sequence

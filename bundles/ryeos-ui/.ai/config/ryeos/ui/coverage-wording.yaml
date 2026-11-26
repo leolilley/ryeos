@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T04:01:05Z:6917aa9e0f33fc0a95b2130d9663e724ffa075038c405e8a0c853dd98615287e:tdcTi3Bn8WgVvrmo86NIc+1bUjq+XKlgHc6WIzwWcsVHS42V5E8wkipQ38iF+QdaGe9JpwkQgr+R8D3D3A+RAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:30:21Z:04c232467ae28375d91833eb88312bdbf7fd3bd814c226a6484cea86aa3dbae4:+mg37DPQV/oWgCC4c/z7ZuPL3KmZ5uyq29j7+xdBA/NVRzuUf0+PskIdYNF+BpVhs+YJl3iZWHpzG50oyfErAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -37,7 +37,28 @@ states:
   unavailable:
     label: This source is not available.
     tone: warn
+  not_reported:
+    label: This source did not report this list.
+    tone: warn
+  wrong_shape:
+    label: This source reported this list in a form this page cannot read.
+    tone: warn
+  key_collision:
+    label: This list was not shown because an entry already has the field its name would be stored in.
+    tone: danger
+# `limits` are bounds the client applies to what a source shows. `source_rows`
+# is the most rows one source shows, whether it reports an array or a map; when
+# rows are cut the source reads as `partial` with the reason `source_row_limit`,
+# whose sentence may use `{limit}` (the bound) and `{total}` (rows that exist).
+limits:
+  source_rows: 500
 reasons:
+  source_row_limit:
+    label: Showing the first {limit} of {total} rows.
+    tone: warn
+  contract_mismatch:
+    label: This source answered in a form this page was not written for, so nothing from it is shown.
+    tone: danger
   coverage_not_reported:
     label: This source did not say what it covers.
     tone: warn

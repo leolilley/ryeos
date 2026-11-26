@@ -92,15 +92,28 @@ pub(crate) fn sync_job_attempt_to_json(attempt: ryeos_state::SyncJobAttemptRecor
     })
 }
 
+/// Sync jobs are the node's own, with no owner on the record: a job names
+/// its peer, its roots and heads, and for a handoff the principal it runs for.
+/// Only the node's admitted operator reads them; any other key is refused with
+/// the typed operator refusal.
+pub async fn handle_for_operator(
+    req: Request,
+    ctx: &ryeos_app::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    ryeos_app::operator_authority::require_admitted_operator(&state, ctx)?;
+    handle(req, state).await
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:sync/jobs/list",
     endpoint: "sync.jobs.list",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.sync/jobs/list"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle_for_operator(req, &ctx, state).await
         })
     },
 };

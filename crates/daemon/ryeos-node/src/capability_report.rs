@@ -20,7 +20,7 @@ use lillux::process_control::{
 use ryeos_engine::isolation::add_pid_namespace_containment;
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v9";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v10";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 /// Provider id of the environment the hosting provider delivers to the node
@@ -156,6 +156,159 @@ impl DurableIdentityFacts {
     }
 }
 
+/// One publication the node serves now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LivePublicationFacts {
+    pub id: String,
+    pub bundle_name: String,
+    pub manifest_hash: String,
+    pub not_after: String,
+}
+
+/// One publication the node stopped serving, listed for 30 days.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredPublicationFacts {
+    pub id: String,
+    pub bundle_name: String,
+    pub retired_at: String,
+    /// `operator`, `expired` or `version_cut`; never free text.
+    pub reason: String,
+}
+
+/// What the node publishes to strangers and the limits it publishes under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationsReport {
+    /// When the lists below were read. They change when a publication is
+    /// published or retired; an expiry shows from the next such change.
+    pub as_of: String,
+    pub live: Vec<LivePublicationFacts>,
+    /// Publications retired or expired in the last 30 days.
+    pub retired: Vec<RetiredPublicationFacts>,
+    /// Bytes the `/published` routes serve per rolling 24 hours, node-wide.
+    pub daily_byte_cap: u64,
+    /// Set when the publication store could not be read.
+    pub store_error: Option<String>,
+    pub cap_note: String,
+    pub per_address_limits: bool,
+    pub copies_note: String,
+    pub retirement_note: String,
+    pub node_key_rotation_note: String,
+    pub operator_key_rotation_note: String,
+}
+
+impl PublicationsReport {
+    fn with_notes(as_of: String, daily_byte_cap: u64) -> Self {
+        Self {
+            as_of,
+            live: Vec::new(),
+            retired: Vec::new(),
+            daily_byte_cap,
+            store_error: None,
+            cap_note: "there are no per-address limits yet: a stranger can exhaust both the daily byte cap (every read is then refused until the window rolls) and the in-flight request slots (a request beyond them is answered publication_busy); the caps protect the node's bill, not its availability".to_owned(),
+            per_address_limits: false,
+            copies_note: ryeos_engine::trust::PUBLICATION_STATEMENT.to_owned(),
+            retirement_note: ryeos_engine::trust::PUBLICATION_RETIREMENT_NOTE.to_owned(),
+            node_key_rotation_note: ryeos_engine::trust::PUBLICATION_KEY_ROTATION_NOTE.to_owned(),
+            operator_key_rotation_note: "a publication is served only while the operator key that signed it is active; after an operator key rotation, sign publications again".to_owned(),
+        }
+    }
+
+    /// No publications, under `daily_byte_cap`.
+    pub fn empty(daily_byte_cap: u64) -> Self {
+        Self::with_notes(lillux::time::iso8601_now(), daily_byte_cap)
+    }
+
+    /// Read the publication store of the node at `app_root` as of `now`. A
+    /// store that cannot be read is reported, never fatal.
+    pub fn observe(
+        app_root: &Path,
+        node_key: &lillux::crypto::VerifyingKey,
+        daily_byte_cap: u64,
+        now: u64,
+    ) -> Self {
+        use ryeos_engine::trust::{
+            PublicationLedger, PublicationReason, RETIRED_REPORT_WINDOW_SECS,
+        };
+        let mut report =
+            Self::with_notes(lillux::time::iso8601_from_unix_secs(now), daily_byte_cap);
+        let ledger = match PublicationLedger::load(app_root, node_key) {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                report.store_error = Some(error.to_string());
+                return report;
+            }
+        };
+        let window_start = now.saturating_sub(RETIRED_REPORT_WINDOW_SECS);
+        for stored in &ledger.publications {
+            let record = &stored.record;
+            let retired_at = ledger
+                .tombstones
+                .iter()
+                .find(|tombstone| tombstone.id == record.id);
+            let retired = |retired_at: String, reason: PublicationReason| RetiredPublicationFacts {
+                id: record.id.clone(),
+                bundle_name: record.bundle_name.clone(),
+                retired_at,
+                reason: reason.as_str().to_owned(),
+            };
+            match retired_at {
+                Some(tombstone) => {
+                    let at =
+                        lillux::time::unix_secs_from_iso8601(&tombstone.retired_at).unwrap_or(0);
+                    if at >= window_start {
+                        report
+                            .retired
+                            .push(retired(tombstone.retired_at.clone(), tombstone.reason));
+                    }
+                }
+                None if record.not_after_secs() <= now => {
+                    if record.not_after_secs() >= window_start {
+                        report.retired.push(retired(
+                            record.not_after.clone(),
+                            PublicationReason::Expired,
+                        ));
+                    }
+                }
+                None => report.live.push(LivePublicationFacts {
+                    id: record.id.clone(),
+                    bundle_name: record.bundle_name.clone(),
+                    manifest_hash: record.root.manifest_hash.clone(),
+                    not_after: record.not_after.clone(),
+                }),
+            }
+        }
+        report.live.sort_by(|a, b| a.id.cmp(&b.id));
+        report.retired.sort_by(|a, b| a.id.cmp(&b.id));
+        report
+    }
+}
+
+/// Re-read the publication store into the recorded report and sign it again,
+/// so the report follows each publish and retire. Without a recorded report
+/// there is nothing to refresh.
+pub fn refresh_publications(
+    app_root: &Path,
+    signing_key: &lillux::crypto::SigningKey,
+    daily_byte_cap: u64,
+) -> Result<bool> {
+    let Some(signed) = SignedNodeCapabilityReport::read_verified(app_root)? else {
+        return Ok(false);
+    };
+    let publications = PublicationsReport::observe(
+        app_root,
+        &signing_key.verifying_key(),
+        daily_byte_cap,
+        lillux::time::unix_secs_now(),
+    );
+    let mut report = signed.report;
+    report.publications = publications;
+    report.sign(signing_key)?.write(app_root)?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeCapabilityReport {
@@ -189,6 +342,8 @@ pub struct NodeCapabilityReport {
     /// before any debit; the two differ only if the kernel refused a lock
     /// the limits allowed and the swap proof was used instead.
     pub established_residency: Option<ResidencyProof>,
+    /// What the node publishes to strangers, and under what limits.
+    pub publications: PublicationsReport,
 }
 
 /// The report, its canonical digest, and the node key's signature over the
@@ -231,6 +386,8 @@ pub struct ReportInputs<'a> {
     pub provider_environment: &'a ryeos_app::vault::ProviderEnvironment,
     /// What the node measured of its in-place import roots at start.
     pub in_place_roots: BTreeMap<String, ryeos_node_runtime::in_place_roots::InPlaceRootReport>,
+    /// What the node publishes to strangers, read from its publication store.
+    pub publications: PublicationsReport,
 }
 
 impl NodeCapabilityReport {
@@ -336,6 +493,7 @@ impl NodeCapabilityReport {
             capacity,
             floor,
             established_residency: None,
+            publications: inputs.publications,
         })
     }
 
@@ -969,6 +1127,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publications_section_states_the_limits_a_stranger_should_know() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[5; 32]);
+        let observed = PublicationsReport::observe(
+            directory.path(),
+            &key.verifying_key(),
+            1 << 20,
+            1_800_000_000,
+        );
+        assert!(observed.live.is_empty() && observed.retired.is_empty());
+        assert_eq!(observed.store_error, None);
+        assert_eq!(observed.daily_byte_cap, 1 << 20);
+        assert!(!observed.per_address_limits);
+        for part in [
+            "no per-address limits yet",
+            "exhaust both the daily byte cap",
+            "in-flight request slots",
+            "not its availability",
+        ] {
+            assert!(observed.cap_note.contains(part), "{part}");
+        }
+        assert!(
+            observed
+                .node_key_rotation_note
+                .contains("existing publication links stop verifying; re-share them")
+        );
+        assert!(observed.copies_note.contains("not recalled"));
+        assert!(
+            observed
+                .retirement_note
+                .contains("does not record which operator request")
+        );
+        assert!(CAPABILITY_REPORT_SCHEMA.ends_with("/v10"));
+    }
+
+    #[test]
+    fn an_unreadable_publication_store_is_reported_not_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ryeos_engine::trust::publications_dir(directory.path());
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join(format!("{}.json", "1".repeat(32))), "unsigned").unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[5; 32]);
+        let observed =
+            PublicationsReport::observe(directory.path(), &key.verifying_key(), 1, 1_800_000_000);
+        assert!(observed.store_error.is_some());
+        assert!(observed.live.is_empty());
+    }
+
+    #[test]
     fn durable_identity_facts_report_stability_and_serialize_by_name() {
         let directory = tempfile::tempdir().unwrap();
         let facts = DurableIdentityFacts::observe(directory.path()).unwrap();
@@ -1076,6 +1283,7 @@ mod tests {
             missing: provided.missing,
             capacity: BTreeMap::new(),
             established_residency: None,
+            publications: PublicationsReport::empty(1 << 30),
         }
     }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T04:00:36Z:9c609f635ba4e2f5fc934fac083817a8e2efdc3a02e66846af9f14ec3a69038e:bzTYfbjtYcYiQpD/oTslUUNnlHzVy0h5Iice686JSkzylsAsZol5exJWMpHeSCnBYWbdfcbdP05jQtSWdVQpDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T09:35:52Z:f44590900bb92c0a4502093b149e41b823addf3286ec4279600551df79318c02:p8YI4El4+zq2XexmqDzSIf4PpliNVtuxemXJ+zrO6ofq0v/PA5v4Xax5OLS0Qp3cfNL1XxhGQbZxUf1LcpwDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -159,6 +159,18 @@ policies:
     # `refuse` is final. A class not listed is refused, so no class is accepted
     # until it is listed `allow` here.
     classes: {}
+  publication:
+    schema: 1
+    # What this node publishes to strangers. daily_bytes caps the bytes the
+    # /published routes serve over a rolling 24 hours, across every publication
+    # and reader: it bounds the bill, not availability, since a stranger can use
+    # up the day's cap. max_lifetime_days bounds how far ahead a publication's
+    # not_after may be; code adds a hard maximum node data cannot raise.
+    daily_bytes: 1073741824
+    max_lifetime_days: 90
+    # Most /published requests worked at once, node-wide; one past it is
+    # answered publication_busy before any read.
+    max_in_flight: 16
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

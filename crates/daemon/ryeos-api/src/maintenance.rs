@@ -498,6 +498,8 @@ struct GcRunInput<'a> {
     external_content_limits:
         ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     state_store: &'a ryeos_app::state_store::StateStore,
+    /// Manifest hashes of live publications: roots for the sweep.
+    publication_manifest_roots: Vec<String>,
     accounting: Option<&'a ryeos_app::accounting_db::AccountingDb>,
     scheduler: Option<&'a mut dyn SchedulerRetentionGuard>,
     fire_retention: Option<gc::retention::FireRetentionPolicy>,
@@ -641,6 +643,15 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         .state_store
         .with_state_db(|db| db.pinned_authority())
         .context("capture pinned state authority for GC")?;
+    // A live publication's frozen manifest, and through it every blob it
+    // serves, stays reachable until the publication is retired or expires. A
+    // store that cannot be read fails the pass rather than risk collecting one.
+    let publication_manifest_roots = ryeos_engine::trust::PublicationLedger::load(
+        &state.config.app_root,
+        &state.identity.signing_key().verifying_key(),
+    )
+    .map_err(|error| anyhow::anyhow!("read the publication store before CAS sweep: {error}"))?
+    .pinned_manifest_hashes(lillux::time::unix_secs_now());
     let (guard_ready_tx, guard_ready_rx) =
         tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel(1);
@@ -690,6 +701,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                     params: &params_clone,
                     external_content_limits,
                     state_store: &state_store,
+                    publication_manifest_roots,
                     accounting: accounting.as_deref(),
                     scheduler: match scheduler_guard.as_mut() {
                         Some(guard) => Some(guard.as_mut()),
@@ -791,6 +803,7 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         params,
         external_content_limits,
         state_store,
+        publication_manifest_roots,
         accounting,
         mut scheduler,
         fire_retention,
@@ -841,6 +854,7 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             .active_resume_snapshot_roots()
             .context("failed to collect active runtime snapshot roots")?,
     );
+    operational_object_roots.extend(publication_manifest_roots);
     if let Some(scheduler) = scheduler.as_deref() {
         operational_object_roots.extend(
             scheduler

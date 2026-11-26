@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T08:31:46Z:c555adf9a19abce9ef70dd2835f67dfdd5e0baee05d178f5f46721cfcbba915c:REy0MCe0M/7+KLDgU6v8XvGOJYvsc2s+l3xrRDOClJzbsREjlQOG3MN0fChhUJB/uGRP2a/mIhUmW6kdK+RMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:30:21Z:8768abe47af3a2b7d1543ccb9d3cd6e7fe48cdfb2c94279293eba046873b645f:kbS9RvLEUbIcBbM3u5U8SFd/W1+n0KEy97fBfp8+AUtCqRU3EKd7MKurlRvm6x18UWli6aw0kgwDRCYMeQVFDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.3.0"
 # A project file may not take the ref of a view an installed bundle
@@ -101,7 +101,9 @@ composed_value_contract:
           optional:
             role: { type: single, prim: string }
             params: { type: single, prim: mapping }
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             coverage: { type: single, prim: string }
             refresh: { type: single, prim: mapping }
             dynamic_parameters:
@@ -113,6 +115,7 @@ composed_value_contract:
               prim: string
               enum: [initial, on_demand]
             requires_project: { type: single, prim: boolean }
+            contract: { type: single, prim: string }
     selection:
       type: single
       prim: mapping
@@ -160,7 +163,9 @@ composed_value_contract:
             title: { type: single, prim: string }
             source_channel: { type: single, prim: string }
           optional:
-            collection: { type: single, prim: string }
+            collection:
+              type: union
+              prims: [string, mapping]
             projection: { type: single, prim: mapping }
             activate: { type: single, prim: string }
     body:

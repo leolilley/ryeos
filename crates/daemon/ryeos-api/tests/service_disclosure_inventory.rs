@@ -115,6 +115,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/manifest-sign",
     "bundle/profile-sign",
     "bundle/publish",
+    "bundle/pull",
     "bundle/remove",
     "bundle/sign",
     "bundle/smoke",
@@ -174,6 +175,10 @@ const OPERATOR_ONLY: &[&str] = &[
     "project/snapshot-status",
     "projection/rebuild",
     "projection/verify",
+    "publication/freeze",
+    "publication/list",
+    "publication/publish",
+    "publication/retire",
     "remote-worker-workflows/query",
     "remote-worker-workflows/resume",
     "remote-worker-workflows/start",
@@ -184,6 +189,8 @@ const OPERATOR_ONLY: &[&str] = &[
     "remote/pin",
     "remote/reconcile-project-head",
     "remote/threads",
+    "sync/jobs/inspect",
+    "sync/jobs/list",
     "system/routes",
     "threads/accounting/summary",
     "trust/show",
@@ -896,5 +903,224 @@ fn the_records_reads_tier_the_envelope_leaves() {
                 "{service} does not list {leaf} in the right tier"
             );
         }
+    }
+}
+
+/// The target of a worker handoff is called by the peer node's key, which is
+/// not the operator, so its answer is shaped by the service item's tier. The
+/// source reads the target's stage timings from `qualification_measurements`
+/// (test builds only). A leaf in no tier is cut, and the qualification then
+/// reports an executed stage as unobserved, so both tiers name exactly these
+/// leaves, the same in every build.
+#[test]
+fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_back() {
+    let wanted: &[(&str, &[&str])] = &[
+        (
+            "worker-placements/prepare",
+            &["schema", "project_materialization_ms"],
+        ),
+        (
+            "worker-executions/handoff",
+            &[
+                "schema",
+                "checkpoint_load_ms",
+                "closure_verification_ms",
+                "target_prepare_ms",
+                "source_publication_ms",
+                "target_adoption_ms",
+                "event_replay_ms",
+                "project_materialization_ms",
+                "worker_attach_recovery_ms",
+                "adoption_path",
+                "total_handoff_ms",
+            ],
+        ),
+        (
+            "worker-placements/adopt",
+            &[
+                "schema",
+                "event_replay_ms",
+                "worker_attach_recovery_ms",
+                "adoption_path",
+            ],
+        ),
+    ];
+    let all = services();
+    for (service, leaves) in wanted {
+        let body = &all
+            .iter()
+            .find(|(name, _)| name == service)
+            .unwrap_or_else(|| panic!("{service} is not a service"))
+            .1;
+        let mut named: Vec<String> = body["disclosure"]["principal"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{service} has no principal tier"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|leaf| leaf.strip_prefix("/qualification_measurements/"))
+            .map(str::to_owned)
+            .collect();
+        named.sort();
+        let mut expected: Vec<String> = leaves.iter().map(|leaf| (*leaf).to_owned()).collect();
+        expected.sort();
+        assert_eq!(named, expected, "{service}");
+    }
+}
+
+/// The 1-based lines of `source` that write the measurements key outside a
+/// `handoff-test-support` gate. Code under `#[cfg(test)]` is skipped as the
+/// item it attributes: a `;`-terminated item (`mod x;`) ends at its `;`, and a
+/// braced item (`mod tests { .. }`) ends where its braces balance.
+fn ungated_measurement_writes(source: &str) -> Vec<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut skipped = vec![false; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index].trim() != "#[cfg(test)]" {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut depth = 0_i64;
+        let mut opened = false;
+        let mut end = index;
+        'item: for (offset, line) in lines[index + 1..].iter().enumerate() {
+            end = index + 1 + offset;
+            if !opened && line.trim_start().starts_with("#[") {
+                continue;
+            }
+            for character in line.chars() {
+                match character {
+                    '{' => {
+                        opened = true;
+                        depth += 1;
+                    }
+                    '}' => depth -= 1,
+                    ';' if !opened => break 'item,
+                    _ => {}
+                }
+                if opened && depth == 0 {
+                    break 'item;
+                }
+            }
+        }
+        for flag in &mut skipped[start..=end] {
+            *flag = true;
+        }
+        index = end + 1;
+    }
+    let mut ungated = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if skipped[index] || !line.contains("[\"qualification_measurements\"] =") {
+            continue;
+        }
+        let gated = lines[..index]
+            .iter()
+            .rev()
+            .take(12)
+            .any(|above| above.contains("feature = \"handoff-test-support\""));
+        if !gated {
+            ungated.push(index + 1);
+        }
+    }
+    ungated
+}
+
+/// The measurements key reaches a response only in a build with
+/// `handoff-test-support` (or a test build): every place in production code
+/// that writes it sits under that cfg gate, so a shipped build emits no such
+/// key.
+#[test]
+fn the_measurements_key_is_written_only_under_the_test_support_gate() {
+    let handlers = repo().join("crates/daemon/ryeos-api/src/handlers");
+    for file in ["worker_placements.rs", "dedicated_sessions.rs"] {
+        let text = std::fs::read_to_string(handlers.join(file)).unwrap();
+        let ungated = ungated_measurement_writes(&text);
+        assert!(
+            ungated.is_empty(),
+            "{file}:{ungated:?} writes qualification_measurements outside the test-support gate"
+        );
+    }
+}
+
+#[test]
+fn the_gate_scan_skips_test_modules_and_flags_ungated_production_writes() {
+    let gated = "#[cfg(any(test, feature = \"handoff-test-support\"))]\nfn f(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert!(ungated_measurement_writes(gated).is_empty());
+
+    let ungated = "fn f(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert_eq!(ungated_measurement_writes(ungated), vec![2]);
+
+    let in_test_module = "#[cfg(test)]\nmod tests {\n    fn t() {\n        w[\"qualification_measurements\"] = x;\n    }\n}\n";
+    assert!(ungated_measurement_writes(in_test_module).is_empty());
+
+    // Production code after a test module is still scanned.
+    let after = format!(
+        "{in_test_module}fn g(r: &mut V) {{\n    r[\"qualification_measurements\"] = x;\n}}\n"
+    );
+    assert_eq!(ungated_measurement_writes(&after), vec![8]);
+
+    // A `;`-terminated test item skips only itself.
+    let file_module = "#[cfg(test)]\n#[path = \"x.rs\"]\nmod x;\nfn g(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert_eq!(ungated_measurement_writes(file_module), vec![5]);
+}
+
+/// The publication services are operator acts and operator bookkeeping. An
+/// empty `disclosure: {}` is not a grant: a principal or an unauthenticated
+/// caller is shaped to an empty answer and never sees the result. Their
+/// capability requirement is separate and unchanged.
+#[test]
+fn the_publication_services_disclose_nothing_to_a_non_operator() {
+    use ryeos_node_runtime::disclosure::{DisclosureClass, shape_result};
+    let all = services();
+    for name in [
+        "bundle/pull",
+        "publication/freeze",
+        "publication/list",
+        "publication/publish",
+        "publication/retire",
+    ] {
+        let body = all
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == name)
+            .unwrap_or_else(|| panic!("{name}: no such service item"))
+            .1
+            .clone();
+        let block = body
+            .get("disclosure")
+            .unwrap_or_else(|| panic!("{name}: no disclosure block"));
+        let declared = ServiceDisclosure::parse(block).unwrap();
+        let result = serde_json::json!({
+            "record_hash": "a".repeat(64),
+            "publications": [{ "id": "b".repeat(32), "bundle_name": "demo" }],
+        });
+        for class in [DisclosureClass::Principal, DisclosureClass::Public] {
+            let shaped = shape_result(class, Some(&declared), result.clone(), declared.bounds())
+                .unwrap_or_else(|refusal| panic!("{name}: {refusal}"));
+            assert_eq!(
+                shaped,
+                Value::Null,
+                "{name} disclosed something to {class:?}"
+            );
+        }
+        let operator = shape_result(
+            DisclosureClass::Operator,
+            Some(&declared),
+            result.clone(),
+            declared.bounds(),
+        )
+        .unwrap();
+        assert_eq!(
+            operator, result,
+            "{name}: the operator must get the full answer"
+        );
+        assert!(
+            body.get("required_caps")
+                .and_then(Value::as_array)
+                .is_some_and(|caps| caps
+                    .iter()
+                    .any(|cap| cap == &Value::from(format!("ryeos.execute.service.{name}")))),
+            "{name}: the capability requirement must stay"
+        );
     }
 }
