@@ -1781,7 +1781,7 @@ mod tests {
             core.data
                 .sources
                 .values()
-                .find_map(|response| crate::ui::read_envelope::read_envelope(response))
+                .find_map(crate::ui::read_envelope::read_envelope)
                 .map(|read| {
                     (
                         read.state,

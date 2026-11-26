@@ -3313,6 +3313,28 @@ mod tests {
     }
 
     #[test]
+    fn a_view_with_a_refused_source_declaration_degrades_alone() {
+        let surface = json!({ "views": {
+            "view:test/good": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows", "collection": "rows"}}},
+            "view:test/key-named-value": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows",
+                "collection": {"path": "items", "entries": "map", "key_as": "value"}}}},
+            "view:test/bad-contract": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows", "contract": "node.journal"}}}
+        }});
+        let out = views_from_surface(Some(&surface));
+        assert!(out["view:test/good"].degraded.is_none());
+        for refused in ["view:test/key-named-value", "view:test/bad-contract"] {
+            let reason = out[refused].degraded.as_deref().expect("degraded");
+            assert!(
+                reason.starts_with("invalid view binding"),
+                "{refused}: {reason}"
+            );
+        }
+    }
+
+    #[test]
     fn degraded_entry_has_no_authorship() {
         let surface = json!({ "views": {
             "view:ryeos/gone": { "degraded": "item not found" }

@@ -5039,6 +5039,36 @@ mod tests {
     }
 
     #[test]
+    fn a_table_waits_for_the_signed_row_bound_and_then_shows_its_rows() {
+        let (mut core, tile) = table_with_roles();
+        let read = |core: &RyeOsCore| {
+            let RyeOsViewVm::Table {
+                total_rows,
+                source_status,
+                ..
+            } = bound_view_vm(core, tile, "view:test/source-status")
+            else {
+                panic!("table")
+            };
+            (total_rows, source_status.map(|status| status.state))
+        };
+        // No wording yet: the bound is not known, so no row is drawn and the
+        // table says it is loading, never that it is empty.
+        core.data.coverage_wording = None;
+        assert_eq!(read(&core), (0, Some("loading".to_owned())));
+        // Wording that states a bound: the rows are drawn, the wait is over.
+        core.data.coverage_wording = Some(wording());
+        let (rows, status) = read(&core);
+        assert_eq!(rows, 1);
+        assert_ne!(status.as_deref(), Some("loading"));
+        // Wording that states no bound is an unbounded source: rows draw too.
+        let mut unbounded = wording();
+        unbounded.limits.source_rows = None;
+        core.data.coverage_wording = Some(unbounded);
+        assert_eq!(read(&core).0, 1);
+    }
+
+    #[test]
     fn shipped_tables_name_the_roles_their_fields_obviously_are() {
         use crate::ui::content::{ColumnRole, ViewBinding, table_columns};
         let history: ViewBinding = serde_yaml::from_str(include_str!(
