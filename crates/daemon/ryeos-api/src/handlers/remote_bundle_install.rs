@@ -222,6 +222,33 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         remove_remote_fetch_heartbeat(&tree)?;
     }
 
+    // The bytes on disk must be exactly the verified entry list: recompute the
+    // digest from the materialised tree and compare it with the list's.
+    let files: Vec<staging::TreeFile> = entries
+        .iter()
+        .map(|entry| staging::TreeFile {
+            path: entry.path.clone(),
+            hash: entry.hash.clone(),
+            size: entry.size,
+            mode: entry.mode,
+        })
+        .collect();
+    let tree_digest = staging::tree_digest(bundle_name, &files).map_err(stage_refusal)?;
+    let on_disk = staging::tree_digest_from_dir(
+        bundle_name,
+        &tree,
+        &staging::TreeLimits {
+            max_files: super::bundle_export::MAX_EXPORTED_BUNDLE_FILES,
+            max_bytes: super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES,
+        },
+    )
+    .map_err(stage_refusal)?;
+    if on_disk.digest != tree_digest {
+        return Err(stage_refusal(staging::StagingRefusal::Invalid(
+            "the materialised tree does not match the verified file list".to_owned(),
+        )));
+    }
+
     // The signed manifest inside the verified tree states what the bundle
     // declares. A bundle that cannot state it could never be installed.
     let verified_manifest = ryeos_bundle::manifest::load_verified_manifest(
@@ -240,16 +267,6 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         uses_kinds: verified_manifest.manifest.uses_kinds.clone(),
     };
 
-    let files: Vec<staging::TreeFile> = entries
-        .iter()
-        .map(|entry| staging::TreeFile {
-            path: entry.path.clone(),
-            hash: entry.hash.clone(),
-            size: entry.size,
-            mode: entry.mode,
-        })
-        .collect();
-    let tree_digest = staging::tree_digest(bundle_name, &files).map_err(stage_refusal)?;
     let record = staging::StagingRecord {
         schema: staging::STAGING_SCHEMA.to_owned(),
         bundle_name: bundle_name.to_owned(),

@@ -39,6 +39,7 @@ pub mod subordinate_process;
 pub mod task;
 pub mod test_hooks;
 pub mod time;
+pub mod tree_entry;
 pub mod vault;
 
 pub use character_device::{
@@ -129,6 +130,10 @@ pub use subordinate_process::{
     SubordinateDiagnosticDrainEnd, SubordinateProcess, SubordinateProcessDiagnostics,
     SubordinateProcessError, SubordinateProcessExit, SubordinateProcessInput,
     SubordinateProcessOutput, SubordinateProcessRequest,
+};
+pub use tree_entry::{
+    TreeEntryKind, TreeEntryObservation, observe_tree_entry_no_follow,
+    open_tree_regular_file_no_follow,
 };
 
 #[cfg(target_os = "linux")]

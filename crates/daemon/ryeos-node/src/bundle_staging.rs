@@ -304,6 +304,152 @@ pub fn tree_digest(bundle_name: &str, files: &[TreeFile]) -> Result<String, Stag
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
+/// Bounds on a tree walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeLimits {
+    pub max_files: usize,
+    pub max_bytes: u64,
+}
+
+/// Deepest directory nesting a tree walk accepts.
+pub const MAX_TREE_DEPTH: usize = 64;
+
+/// What a tree walk found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeSummary {
+    pub digest: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+}
+
+/// Compute the tree digest of `bundle_name` from a directory on disk, with the
+/// same definition as [`tree_digest`] over a file list. Stage and apply both
+/// call this and compare the result with the digest they expect.
+///
+/// The walk uses `lstat` and never follows a link. Only regular files and
+/// non-empty directories are accepted: a symlink, device, fifo, socket or empty
+/// directory is refused, so no entry exists that the digest does not cover.
+/// Every entry must be owned by the node's effective user and no directory may
+/// be group- or other-writable. Each file is hashed as a stream, its exact
+/// permission bits are part of the digest input, and the file count, total size
+/// and depth are bounded. The walk reads the tree alone: a file nobody named
+/// simply changes the digest.
+pub fn tree_digest_from_dir(
+    bundle_name: &str,
+    tree: &Path,
+    limits: &TreeLimits,
+) -> Result<TreeSummary, StagingRefusal> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+
+    let invalid = |reason: String| StagingRefusal::Invalid(format!("the staged tree: {reason}"));
+    let uid = lillux::effective_uid().map_err(StagingRefusal::store)?;
+    let observe =
+        |path: &Path| lillux::observe_tree_entry_no_follow(path).map_err(StagingRefusal::store);
+    let mut files: Vec<TreeFile> = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut pending = vec![(tree.to_path_buf(), String::new(), 0_usize)];
+    while let Some((dir, prefix, depth)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(invalid(format!(
+                "nests deeper than {MAX_TREE_DEPTH} directories"
+            )));
+        }
+        let observed = observe(&dir)?;
+        if observed.kind != lillux::TreeEntryKind::Directory {
+            return Err(invalid(format!("{} is not a directory", dir.display())));
+        }
+        if observed.owner != uid {
+            return Err(invalid(format!(
+                "{} is not owned by the node's user",
+                dir.display()
+            )));
+        }
+        if observed.group_or_other_writable() {
+            return Err(invalid(format!(
+                "{} is group- or other-writable",
+                dir.display()
+            )));
+        }
+        let mut entries = 0_usize;
+        for entry in std::fs::read_dir(&dir).map_err(StagingRefusal::store)? {
+            let entry = entry.map_err(StagingRefusal::store)?;
+            entries += 1;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid("has a file name that is not UTF-8".to_owned()))?;
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let path = entry.path();
+            match observe(&path)?.kind {
+                lillux::TreeEntryKind::Directory => pending.push((path, relative, depth + 1)),
+                lillux::TreeEntryKind::RegularFile => {
+                    if files.len() >= limits.max_files {
+                        return Err(invalid(format!(
+                            "holds more than {} files",
+                            limits.max_files
+                        )));
+                    }
+                    let (mut file, opened) = lillux::open_tree_regular_file_no_follow(&path)
+                        .map_err(|e| invalid(format!("{e:#}")))?;
+                    if opened.owner != uid {
+                        return Err(invalid(format!(
+                            "{relative} is not owned by the node's user"
+                        )));
+                    }
+                    total_bytes = total_bytes.saturating_add(opened.size);
+                    if total_bytes > limits.max_bytes {
+                        return Err(invalid(format!(
+                            "holds more than {} bytes",
+                            limits.max_bytes
+                        )));
+                    }
+                    let mut hasher = Sha256::new();
+                    let mut read_total = 0_u64;
+                    let mut buffer = vec![0_u8; 64 * 1024];
+                    loop {
+                        let read = file.read(&mut buffer).map_err(StagingRefusal::store)?;
+                        if read == 0 {
+                            break;
+                        }
+                        read_total = read_total.saturating_add(read as u64);
+                        if read_total > opened.size {
+                            break;
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    if read_total != opened.size {
+                        return Err(invalid(format!("{relative} changed while it was hashed")));
+                    }
+                    files.push(TreeFile {
+                        path: relative,
+                        hash: format!("{:x}", hasher.finalize()),
+                        size: opened.size,
+                        mode: opened.mode,
+                    });
+                }
+                lillux::TreeEntryKind::Other => {
+                    return Err(invalid(format!(
+                        "{relative} is a link or special file, which a bundle may not hold"
+                    )));
+                }
+            }
+        }
+        if entries == 0 {
+            return Err(invalid(format!("{} is an empty directory", dir.display())));
+        }
+    }
+    Ok(TreeSummary {
+        digest: tree_digest(bundle_name, &files)?,
+        file_count: files.len() as u64,
+        total_bytes,
+    })
+}
+
 /// A committed stage with a verified record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedBundle {
@@ -968,5 +1114,121 @@ mod tests {
         assert!(!StagingArea::root_for(dir.path()).exists());
         StagingArea::open(dir.path()).unwrap();
         assert!(StagingArea::open_if_present(dir.path()).unwrap().is_some());
+    }
+
+    fn tree_with(files: &[(&str, &[u8])]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        for (path, bytes) in files {
+            let full = tree.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, bytes).unwrap();
+            lillux::tree_entry::test_support::set_mode(&full, 0o644).unwrap();
+        }
+        (dir, tree)
+    }
+
+    const LIMITS: TreeLimits = TreeLimits {
+        max_files: 100,
+        max_bytes: 1 << 20,
+    };
+
+    fn listed(files: &[(&str, &[u8])]) -> Vec<TreeFile> {
+        files
+            .iter()
+            .map(|(path, bytes)| TreeFile {
+                path: (*path).to_owned(),
+                hash: lillux::sha256_hex(bytes),
+                size: bytes.len() as u64,
+                mode: 0o644,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_disk_digest_agrees_with_the_entry_list_digest() {
+        let files: &[(&str, &[u8])] = &[("b/two.txt", b"two"), ("a.txt", b"one")];
+        let (_dir, tree) = tree_with(files);
+        let summary = tree_digest_from_dir("demo", &tree, &LIMITS).unwrap();
+        assert_eq!(summary.digest, tree_digest("demo", &listed(files)).unwrap());
+        assert_eq!(summary.file_count, 2);
+        assert_eq!(summary.total_bytes, 6);
+    }
+
+    #[test]
+    fn a_changed_byte_or_mode_or_extra_file_changes_the_disk_digest() {
+        let files: &[(&str, &[u8])] = &[("a.txt", b"one"), ("b.txt", b"two")];
+        let (_dir, tree) = tree_with(files);
+        let expected = tree_digest("demo", &listed(files)).unwrap();
+
+        std::fs::write(tree.join("a.txt"), b"onE").unwrap();
+        let changed = tree_digest_from_dir("demo", &tree, &LIMITS).unwrap();
+        assert_ne!(changed.digest, expected);
+        std::fs::write(tree.join("a.txt"), b"one").unwrap();
+        assert_eq!(
+            tree_digest_from_dir("demo", &tree, &LIMITS).unwrap().digest,
+            expected
+        );
+
+        lillux::tree_entry::test_support::set_mode(&tree.join("a.txt"), 0o755).unwrap();
+        assert_ne!(
+            tree_digest_from_dir("demo", &tree, &LIMITS).unwrap().digest,
+            expected
+        );
+        lillux::tree_entry::test_support::set_mode(&tree.join("a.txt"), 0o644).unwrap();
+
+        std::fs::write(tree.join("extra.txt"), b"x").unwrap();
+        lillux::tree_entry::test_support::set_mode(&tree.join("extra.txt"), 0o644).unwrap();
+        assert_ne!(
+            tree_digest_from_dir("demo", &tree, &LIMITS).unwrap().digest,
+            expected
+        );
+    }
+
+    #[test]
+    fn the_disk_walk_refuses_links_special_files_empty_and_writable_directories() {
+        let refused = |tree: &Path| tree_digest_from_dir("demo", tree, &LIMITS).unwrap_err();
+
+        let (_d, tree) = tree_with(&[("a.txt", b"one")]);
+        lillux::tree_entry::test_support::make_symlink(Path::new("a.txt"), &tree.join("link"))
+            .unwrap();
+        assert_eq!(refused(&tree).code(), "bundle_stage_invalid");
+
+        let (_d, tree) = tree_with(&[("a.txt", b"one")]);
+        lillux::tree_entry::test_support::make_fifo(&tree.join("pipe")).unwrap();
+        assert_eq!(refused(&tree).code(), "bundle_stage_invalid");
+
+        let (_d, tree) = tree_with(&[("a.txt", b"one")]);
+        std::fs::create_dir(tree.join("empty")).unwrap();
+        assert!(refused(&tree).to_string().contains("empty directory"));
+
+        let (_d, tree) = tree_with(&[("sub/a.txt", b"one")]);
+        lillux::tree_entry::test_support::set_mode(&tree.join("sub"), 0o775).unwrap();
+        assert!(refused(&tree).to_string().contains("writable"));
+        lillux::tree_entry::test_support::set_mode(&tree.join("sub"), 0o757).unwrap();
+        assert!(refused(&tree).to_string().contains("writable"));
+        lillux::tree_entry::test_support::set_mode(&tree.join("sub"), 0o755).unwrap();
+        tree_digest_from_dir("demo", &tree, &LIMITS).unwrap();
+
+        // An empty tree holds nothing to digest.
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("tree");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(refused(&empty).to_string().contains("empty directory"));
+    }
+
+    #[test]
+    fn the_disk_walk_is_bounded() {
+        let (_d, tree) = tree_with(&[("a.txt", b"one"), ("b.txt", b"two")]);
+        let few = TreeLimits {
+            max_files: 1,
+            max_bytes: 1 << 20,
+        };
+        assert!(tree_digest_from_dir("demo", &tree, &few).is_err());
+        let small = TreeLimits {
+            max_files: 10,
+            max_bytes: 5,
+        };
+        assert!(tree_digest_from_dir("demo", &tree, &small).is_err());
     }
 }
