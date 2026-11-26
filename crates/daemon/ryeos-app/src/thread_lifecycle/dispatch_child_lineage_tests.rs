@@ -424,6 +424,8 @@ fn same_chain_child_with_a_derived_edge_still_gets_its_lineage_event() {
     let mut child = thread_record("T-child");
     child.chain_root_id = "T-parent".to_string();
     child.upstream_thread_id = Some("T-parent".to_string());
+    // A non-root thread carries no captured history policy of its own.
+    child.captured_history_policy = None;
     store
         .create_thread_for_test(&child)
         .expect("same-chain child");
