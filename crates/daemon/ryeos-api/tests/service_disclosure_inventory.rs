@@ -920,29 +920,100 @@ fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_ba
     }
 }
 
+/// The 1-based lines of `source` that write the measurements key outside a
+/// `handoff-test-support` gate. Code under `#[cfg(test)]` is skipped as the
+/// item it attributes: a `;`-terminated item (`mod x;`) ends at its `;`, and a
+/// braced item (`mod tests { .. }`) ends where its braces balance.
+fn ungated_measurement_writes(source: &str) -> Vec<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut skipped = vec![false; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index].trim() != "#[cfg(test)]" {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut depth = 0_i64;
+        let mut opened = false;
+        let mut end = index;
+        'item: for (offset, line) in lines[index + 1..].iter().enumerate() {
+            end = index + 1 + offset;
+            if !opened && line.trim_start().starts_with("#[") {
+                continue;
+            }
+            for character in line.chars() {
+                match character {
+                    '{' => {
+                        opened = true;
+                        depth += 1;
+                    }
+                    '}' => depth -= 1,
+                    ';' if !opened => break 'item,
+                    _ => {}
+                }
+                if opened && depth == 0 {
+                    break 'item;
+                }
+            }
+        }
+        for flag in &mut skipped[start..=end] {
+            *flag = true;
+        }
+        index = end + 1;
+    }
+    let mut ungated = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if skipped[index] || !line.contains("[\"qualification_measurements\"] =") {
+            continue;
+        }
+        let gated = lines[..index]
+            .iter()
+            .rev()
+            .take(12)
+            .any(|above| above.contains("feature = \"handoff-test-support\""));
+        if !gated {
+            ungated.push(index + 1);
+        }
+    }
+    ungated
+}
+
 /// The measurements key reaches a response only in a build with
-/// `handoff-test-support` (or a test build): every place that writes it sits
-/// under that cfg gate, so a shipped build emits no such key.
+/// `handoff-test-support` (or a test build): every place in production code
+/// that writes it sits under that cfg gate, so a shipped build emits no such
+/// key.
 #[test]
 fn the_measurements_key_is_written_only_under_the_test_support_gate() {
     let handlers = repo().join("crates/daemon/ryeos-api/src/handlers");
     for file in ["worker_placements.rs", "dedicated_sessions.rs"] {
         let text = std::fs::read_to_string(handlers.join(file)).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        for (index, line) in lines.iter().enumerate() {
-            if !line.contains("[\"qualification_measurements\"] =") {
-                continue;
-            }
-            let gated = lines[..index]
-                .iter()
-                .rev()
-                .take(12)
-                .any(|above| above.contains("feature = \"handoff-test-support\""));
-            assert!(
-                gated,
-                "{file}:{} writes qualification_measurements outside the test-support gate",
-                index + 1
-            );
-        }
+        let ungated = ungated_measurement_writes(&text);
+        assert!(
+            ungated.is_empty(),
+            "{file}:{ungated:?} writes qualification_measurements outside the test-support gate"
+        );
     }
+}
+
+#[test]
+fn the_gate_scan_skips_test_modules_and_flags_ungated_production_writes() {
+    let gated = "#[cfg(any(test, feature = \"handoff-test-support\"))]\nfn f(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert!(ungated_measurement_writes(gated).is_empty());
+
+    let ungated = "fn f(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert_eq!(ungated_measurement_writes(ungated), vec![2]);
+
+    let in_test_module = "#[cfg(test)]\nmod tests {\n    fn t() {\n        w[\"qualification_measurements\"] = x;\n    }\n}\n";
+    assert!(ungated_measurement_writes(in_test_module).is_empty());
+
+    // Production code after a test module is still scanned.
+    let after = format!(
+        "{in_test_module}fn g(r: &mut V) {{\n    r[\"qualification_measurements\"] = x;\n}}\n"
+    );
+    assert_eq!(ungated_measurement_writes(&after), vec![8]);
+
+    // A `;`-terminated test item skips only itself.
+    let file_module = "#[cfg(test)]\n#[path = \"x.rs\"]\nmod x;\nfn g(r: &mut V) {\n    r[\"qualification_measurements\"] = x;\n}\n";
+    assert_eq!(ungated_measurement_writes(file_module), vec![5]);
 }
