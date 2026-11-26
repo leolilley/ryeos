@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T02:38:14Z:ee07405b9c5ce2fde563fee281212937c6e786f3bd0811e1f0e55fbfb89d1646:IFUhPUh2tA290hhuiadkEUSRHZDZ+zVKTt1SK3jXTfPNKRzmaOtT+NYwEGtBOwMovZUAWFgqKob/2R3MPWV8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T09:46:19Z:371fe2cc45e06d5f2c8381868f1f67d59789073ba36b5f1c63d077fb6db8a314:YFr5uofush+aAQnTeNFSwtsDEhITzwfbijMAc5rd7SUsW8d8uO+op3FqIDnGRx2xyvzclZF0v6P0LTipr3rTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.apply-published
 required_caps: ["ryeos.execute.service.project/apply-published"]
@@ -7,7 +7,7 @@ schema:
   base_snapshot_hash: string
   result_snapshot_hash: string
   checkout: json
-description: "Apply a published result (the difference between the snapshot it was authored against and the snapshot it produced) to the caller's registered checkout. Only paths the result changes are checked; every conflict is reported at once and nothing is written when there is one; nothing is merged"
+description: "Apply a published result (the difference between the snapshot it was authored against and the snapshot it produced) to the caller's registered checkout. Only paths the result changes are checked; every conflict is reported at once and nothing is written when there is one; nothing is merged. A caller who is not the operator sees each conflict's reason and the counts, not the conflicting paths"
 disclosure:
   principal:
     - "/applied"

@@ -2691,6 +2691,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_nested_quarantine_file_makes_the_apply_refuse_and_write_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        // A replaced file's quarantine sits beside it, not at the project root.
+        std::fs::write(root.join("sub/.ryeos-quarantine.abc"), b"left behind").unwrap();
+        let cas = CasStore::new(tmp.path().join("cas"));
+        let new = store_project_file(&cas, b"new");
+        let result = make_tree(&[("a.txt", &new)]);
+
+        let error = apply_tree_diff(&cas, &root, &make_tree(&[]), &result, &[7_u8; 32])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PullResultsError::RecoveryRequired(_)),
+            "expected RecoveryRequired, got {error:?}"
+        );
+        assert!(
+            !root.join("a.txt").exists(),
+            "nothing of the result is written"
+        );
+    }
+
     // ── extract_snapshot_hash coverage ──
 
     #[test]
