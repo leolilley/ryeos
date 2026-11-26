@@ -502,6 +502,131 @@ pub(crate) async fn endorse_items(
     Ok(recorded)
 }
 
+/// The instant `--not-after` names: a date (the end of that UTC day) or a
+/// canonical UTC instant (`YYYY-MM-DDTHH:MM:SSZ`).
+fn parse_not_after(text: &str) -> Result<String, CliError> {
+    let candidate = if text.len() == 10 {
+        format!("{text}T23:59:59Z")
+    } else {
+        text.to_owned()
+    };
+    lillux::time::unix_secs_from_iso8601(&candidate)
+        .map(lillux::time::iso8601_from_unix_secs)
+        .ok_or_else(|| {
+            local("--not-after must be a UTC date (YYYY-MM-DD) or instant (YYYY-MM-DDTHH:MM:SSZ)")
+        })
+}
+
+/// Publish an installed bundle to anyone holding the link: freeze it on the
+/// node, sign the publication record with the operator key in this process,
+/// and hand it to the node, which checks the signer and countersigns. The key
+/// never leaves this process.
+pub(crate) async fn publish_bundle(
+    app_root: &Path,
+    console: &crate::tty::Console,
+    parameters: &Value,
+) -> Result<Value, CliError> {
+    let bundle_name = parameters
+        .get("bundle_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("publish requires a bundle name"))?
+        .to_owned();
+    let not_after = parse_not_after(
+        parameters
+            .get("not_after")
+            .and_then(Value::as_str)
+            .ok_or_else(|| local("publish requires --not-after <date>"))?,
+    )?;
+    console
+        .info(&crate::tty::Diagnostic::info(
+            "anything published can be copied and cannot be recalled",
+        ))
+        .map_err(CliError::Io)?;
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let facts = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:publication/freeze",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "bundle_name": bundle_name },
+        }),
+    )
+    .await?;
+    let text = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("the node's freeze answer omits {name}")))
+    };
+    let number = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| local(format!("the node's freeze answer omits {name}")))
+    };
+    let (node_fingerprint, manifest_hash) = (text("node_fingerprint")?, text("manifest_hash")?);
+    let read_bound = number("largest_file_bytes")?
+        .max(number("manifest_bytes")?)
+        .clamp(
+            ryeos_engine::trust::MIN_PUBLICATION_READ_BYTES,
+            ryeos_engine::trust::MAX_PUBLICATION_READ_BYTES,
+        );
+    let id: [u8; 16] = rand::random();
+    let nonce: [u8; 16] = rand::random();
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let record = ryeos_engine::trust::PublicationRecord::new(
+        &hex(&id),
+        &hex(&nonce),
+        &node_fingerprint,
+        &manifest_hash,
+        &bundle_name,
+        &not_after,
+        &lillux::time::iso8601_now(),
+        read_bound,
+    );
+    record.validate_shape().map_err(local_error)?;
+    let signing_text = record.operator_signing_text().map_err(local_error)?;
+    let signature = signer.sign_bytes_base64(signing_text.as_bytes());
+    let mut published = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:publication/publish",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "record": record, "signature": signature },
+        }),
+    )
+    .await?;
+    if let (Some(id), Some(hash)) = (
+        published
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        published
+            .get("record_hash")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    ) {
+        published["share"] = json!({
+            "path": format!("/published/{id}"),
+            "node": format!("fp:{node_fingerprint}"),
+            "expect": hash,
+        });
+    }
+    Ok(published)
+}
+
 /// Tell a running node about a change this process made, so seats that show
 /// the changed items can pick it up. The node verifies the change against the
 /// revision record or the endorsement ledger before it announces anything.

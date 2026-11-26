@@ -94,6 +94,7 @@ pub mod project_apply_snapshot;
 pub mod project_owner;
 pub mod project_snapshot_status;
 pub mod project_status;
+pub mod publication;
 pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
@@ -360,6 +361,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     endorsements::RECORD,
     endorsements::REVOKE,
     endorsements::LIST,
+    publication::FREEZE,
+    publication::PUBLISH,
+    publication::RETIRE,
+    publication::LIST,
     items_revised::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,

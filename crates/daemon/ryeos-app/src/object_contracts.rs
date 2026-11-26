@@ -144,6 +144,11 @@ fn install_objects() -> anyhow::Result<()> {
             validate_materialization,
             materialization_links,
         ),
+        registration(
+            ryeos_engine::trust::PUBLICATION_MANIFEST_KIND,
+            validate_publication_manifest,
+            publication_manifest_links,
+        ),
     ])
 }
 
@@ -157,6 +162,32 @@ fn registration(
         validate,
         links,
     }
+}
+
+fn parse_publication_manifest(
+    value: &Value,
+) -> Result<ryeos_engine::trust::PublicationManifest, String> {
+    let manifest: ryeos_engine::trust::PublicationManifest =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    manifest
+        .validate_shape()
+        .map_err(|error| error.to_string())?;
+    Ok(manifest)
+}
+fn validate_publication_manifest(value: &Value) -> anyhow::Result<()> {
+    parse_publication_manifest(value)
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
+}
+/// A frozen publication manifest keeps every blob its entries name.
+fn publication_manifest_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
+    let manifest = parse_publication_manifest(value)?;
+    let mut links = RegisteredObjectLinks::default();
+    let mut hashes: Vec<String> = manifest.entries.into_iter().map(|e| e.hash).collect();
+    hashes.sort();
+    hashes.dedup();
+    links.blob_hashes = hashes;
+    Ok(links)
 }
 
 fn validate_generation(value: &Value) -> anyhow::Result<()> {

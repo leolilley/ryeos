@@ -624,6 +624,12 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "publish_bundle" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "publish.yaml")?;
+            crate::client_handlers::publish_bundle(app_root, console, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;

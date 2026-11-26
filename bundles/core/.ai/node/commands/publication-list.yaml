@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-25T03:41:20Z:5a50c5c563663a2500d0cf9ee5bca44029eba9ee35505e765671308879d00050:XhQLZLCDlSUXGFrbSrbB+qOVTqR8ex6tJY0kvXJP3xyvOFwayI2wxfqEeHb/m/rk2iOFjVkR2EJSPQu2ys1KBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- publication
+- list
+description: List the publications recorded on this node
+help:
+  usage: "ryeos publication list"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:publication/list
