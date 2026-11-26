@@ -282,9 +282,40 @@ pub struct RyeOsCoverageWordingDto {
     pub states: std::collections::BTreeMap<String, RyeOsWordingEntry>,
     /// The sentence for a reason, whichever state reports it.
     pub reasons: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+    /// Signed bounds the client applies to what a source shows.
+    #[serde(default)]
+    pub limits: RyeOsCoverageLimitsDto,
+}
+
+/// The signed bounds that ride with the coverage wording.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RyeOsCoverageLimitsDto {
+    /// The most rows one source shows, whether it is an array or a map. Absent
+    /// means no bound.
+    #[serde(default)]
+    pub source_rows: Option<usize>,
 }
 
 impl RyeOsCoverageWordingDto {
+    /// The wording unit tests of this crate start from: the fixed "not known"
+    /// sentence for every state, the signed 500-row bound, and nothing else.
+    /// A test of the unloaded state clears the field.
+    #[cfg(test)]
+    pub(crate) fn unit_test_default() -> Self {
+        Self {
+            fallback: RyeOsWordingEntry {
+                label: "This page's coverage is not known.".into(),
+                tone: "none".into(),
+            },
+            states: Default::default(),
+            reasons: Default::default(),
+            limits: RyeOsCoverageLimitsDto {
+                source_rows: Some(500),
+            },
+        }
+    }
+
     /// Read a response of the contract this client speaks. Any other version,
     /// an empty sentence or a tone outside the closed list is refused.
     pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
@@ -312,6 +343,9 @@ impl RyeOsCoverageWordingDto {
                     entry.tone
                 ));
             }
+        }
+        if wording.limits.source_rows == Some(0) {
+            return Err("coverage wording has a zero source row limit".into());
         }
         Ok(wording)
     }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:06Z:d7599f2d026fc2aa5428c4fe623cb12e719aae8d293d2f628d81ff762d9990d5:IKVvoesE7NzLpnBGlVSnJ9m1AWD5I73vf7GWo8wVKigfximg7UAkbav3Pdb/dqDNf+7cvXNNp9uY/eHe0djqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:50:54Z:69118c3847a9ffd9251eb4373e76a66e47494d0c1ea2ea1100be03a291e7dd90:xBU1r670LUwdrTKcu1aigP8LdnpWaMg7ae/bCtGt/AjETmiazdtN+44vFScVYQMY5JLAdW4P0d58/5rYIkMzAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.handoff
 required_caps: ["ryeos.execute.service.worker-executions/handoff"]
@@ -19,3 +19,15 @@ disclosure:
     - "/target_chain_head_hash"
     - "/delivery"
     - "/terminal_status"
+    # test builds only: the stage timings the handoff qualification reads back
+    - "/qualification_measurements/schema"
+    - "/qualification_measurements/checkpoint_load_ms"
+    - "/qualification_measurements/closure_verification_ms"
+    - "/qualification_measurements/target_prepare_ms"
+    - "/qualification_measurements/source_publication_ms"
+    - "/qualification_measurements/target_adoption_ms"
+    - "/qualification_measurements/event_replay_ms"
+    - "/qualification_measurements/project_materialization_ms"
+    - "/qualification_measurements/worker_attach_recovery_ms"
+    - "/qualification_measurements/adoption_path"
+    - "/qualification_measurements/total_handoff_ms"

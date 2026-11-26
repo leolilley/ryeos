@@ -161,6 +161,7 @@ const DEVELOPMENT_BUNDLE_INVENTORY: &[&str] = &[
 pub enum FastFixtureProfile {
     Core,
     CoreScheduling,
+    CoreKnowledge,
     Standard,
     StandardCentralAuth,
     Development,
@@ -176,6 +177,7 @@ impl FastFixtureProfile {
         match self {
             Self::Core => "core",
             Self::CoreScheduling => "core-scheduling",
+            Self::CoreKnowledge => "core-knowledge",
             Self::Standard => "standard",
             Self::StandardCentralAuth => "standard-central-auth",
             Self::Development | Self::DevelopmentHosted => "development",
@@ -186,6 +188,7 @@ impl FastFixtureProfile {
         match self {
             Self::Core => Some(&["core"]),
             Self::CoreScheduling => Some(&["core", "scheduling"]),
+            Self::CoreKnowledge => Some(&["core", "knowledge"]),
             Self::Standard => Some(STANDARD_BUNDLE_INVENTORY),
             Self::StandardCentralAuth => Some(STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY),
             Self::Development | Self::DevelopmentHosted => Some(DEVELOPMENT_BUNDLE_INVENTORY),
@@ -877,6 +880,11 @@ pub fn register_workflow_bundles(state_path: &Path, fixture: &FastFixture) -> Re
 /// source list.
 pub fn register_standard_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     register_composition(state_path, fixture, STANDARD_BUNDLE_INVENTORY)
+}
+
+/// Register the bundles the authored Core-knowledge profile selects.
+pub fn register_core_knowledge_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    register_composition(state_path, fixture, &["core", "knowledge"])
 }
 
 /// Register every bundle selected by the authored Standard-central-auth

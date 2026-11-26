@@ -309,6 +309,14 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
 
+[tests.publication_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/bin/daemon/src/startup.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/handlers/publication.rs", "crates/engine/ryeos-engine/src/authority/trust/publication.rs"]
+
+[tests.publication_pull_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-http-egress", "ryeos-node"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_pull.rs", "crates/daemon/ryeos-api/src/handlers/bundle_pull/**", "crates/daemon/ryeos-api/src/handlers/remote_bundle_install.rs", "crates/daemon/ryeos-api/src/published.rs"]
+
 [tests.python_runtime_contract]
 covers = ["ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowledge-runtime"]
 

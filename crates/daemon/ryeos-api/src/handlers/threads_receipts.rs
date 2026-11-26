@@ -1,7 +1,7 @@
 //! `threads.receipts` — per-node graph receipts for a thread.
 //!
 //! Ownership-checked exactly like `threads.get`: callers can only inspect
-//! their own threads, and a missing/!owned thread returns `null` (not 403) to
+//! their own threads, and a missing/!owned thread returns `NotFound` (not 403) to
 //! avoid leaking existence.
 //!
 //! Returns the thread's `graph_node_receipt` artifacts (written by
@@ -39,10 +39,10 @@ pub async fn handle(
         .get_thread(&req.thread_id)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
-    // Mirror `threads.get`: null for missing OR non-owned (after the owner
-    // check below), so existence is never leaked.
+    // Mirror `threads.get`: a missing thread and one that is not the
+    // caller's are one answer (`NotFound`), so existence is never leaked.
     let Some(detail) = thread else {
-        return Ok(Value::Null);
+        return Err(HandlerError::NotFound);
     };
     ctx.require_owner(detail.requested_by.as_deref())?;
 

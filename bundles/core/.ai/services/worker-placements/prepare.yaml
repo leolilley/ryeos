@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:07Z:6a9341fd99a2557c6486812edef714cfcf102a9bd33ebe1b6e752859fb5860ff:GP+gJRQ4KS/KpnjHUhWQ4X+GEFhKmLTTZwhwJvQafWR/7AsBhKb7kUSJylcvG/aDOxV2rPV+Tidv0i3vfb1HCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:41:39Z:f4f272847e8c9760ff8b7ec9efa740aacf710fa324ff62703403da8fe7075e20:tnpxhbzWJGdZLckOFxvqCxg0cF69sGfhnLQouYysiqHNh0HZs4hoY2znHtDM2H8abWdZ0PxtNnB10t77160eDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.prepare
 required_caps: ["ryeos.execute.service.worker-placements/prepare"]
@@ -52,6 +52,9 @@ disclosure:
     - "/placement/credential_reservation/reservation_id"
     - "/placement/credential_reservation/subject_contract_digest"
     - "/placement/credential_reservation/subject_digest"
+    # test builds only: the target's stage timings the handoff qualification reads back
+    - "/qualification_measurements/schema"
+    - "/qualification_measurements/project_materialization_ms"
   interim_free_text:
     - "/credential_reservation/profile_id"  # removed by: m4
     - "/credential_reservation/owner_principal"  # removed by: m4

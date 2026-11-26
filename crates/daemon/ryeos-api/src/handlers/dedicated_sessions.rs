@@ -4446,6 +4446,10 @@ async fn handoff(
                 .as_ref()
                 .and_then(|value| value.get("worker_attach_recovery_ms"))
                 .and_then(Value::as_u64),
+            "adoption_path":_target_adoption_qualification_measurements
+                .as_ref()
+                .and_then(|value| value.get("adoption_path"))
+                .and_then(Value::as_str),
             "total_handoff_ms":qualification_started.elapsed_millis(),
         });
         response

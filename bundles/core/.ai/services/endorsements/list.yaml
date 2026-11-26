@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:05Z:9de6412e64af1da794e4325ab88a2d73ad8f603edea8c8b59992fd91cadb1fe9:cGRPAKOc09Z8+u2KSu0bKkoIA3v/RpM2WeBajjbTLumlQEtNXJvca4daFHuFcNZszmiUr9/Q8lzcRNK/uZtRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T03:38:52Z:f663428c1a185648a71429c8b2fc1461bc70a2da5941b8e33488379b83aefd87:GCleOrLTgN8FkHtj+l3Y4wogzatFmC93gP8zLoXgwT9/cIw0KlLlnhcQRgXJMkmaQPbA3aH7CN9xEDuMZMkkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: endorsements.list
 required_caps: ["ryeos.execute.service.endorsements/list"]
@@ -7,8 +7,9 @@ schema:
 description: "List the recorded endorsements with their targets, endorsers, times and whether each is in force or revoked, and the current ledger head."
 disclosure:
   principal:
-    - "/ledger_head"
     - "/endorsements/*/endorsement_digest"
+    # The canonical project identity (`pid:v1:<owner hex>/<validated name>`); the owner filter means a principal sees only projects it owns.
+    - "/endorsements/*/project"
     - "/endorsements/*/endorsed_at"
     - "/endorsements/*/received_at"
     - "/endorsements/*/in_force"
@@ -19,7 +20,6 @@ disclosure:
     - "/endorsements/*/target/items/*/kind"
     - "/endorsements/*/target/items/*/digest"
   free_text:
-    - "/endorsements/*/project"
     - "/endorsements/*/endorser"
     - "/endorsements/*/via"
     - "/endorsements/*/target/items/*/item_ref"

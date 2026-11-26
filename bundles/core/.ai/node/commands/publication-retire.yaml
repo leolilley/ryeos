@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-25T03:41:20Z:c298833297a7a86656fb0cff4e4047f387e94bf3f4fc82cee7b8b633674911d4:S9esSJref0fkvBfhOPzdPtPnmFSpmv73+XVMIg0h2N/cbL3bR1YgvV+GAGEF7BpPYhXgkrINKPIMu//cWC75CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- publication
+- retire
+description: Stop serving one publication; copies already taken are not recalled
+help:
+  usage: "ryeos publication retire --id <publication id>"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:publication/retire

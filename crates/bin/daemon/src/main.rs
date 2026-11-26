@@ -10881,6 +10881,7 @@ mod node_capability_report_reader_tests {
             missing: view.missing,
             capacity: Default::default(),
             established_residency: None,
+            publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
         };
         report
             .sign(identity.signing_key())

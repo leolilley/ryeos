@@ -292,6 +292,19 @@ fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
         ..Default::default()
     };
     let mut core = RyeOsCore::new(session, PRESENTATION, BrowserViewport::default(), 0);
+    // The signed row bound arrives with the coverage wording; rows are drawn
+    // only once it has.
+    core.data.coverage_wording = Some(ryeos_client_base::ui::dto::RyeOsCoverageWordingDto {
+        fallback: ryeos_client_base::ui::dto::RyeOsWordingEntry {
+            label: "This page's coverage is not known.".into(),
+            tone: "none".into(),
+        },
+        states: Default::default(),
+        reasons: Default::default(),
+        limits: ryeos_client_base::ui::dto::RyeOsCoverageLimitsDto {
+            source_rows: Some(500),
+        },
+    });
     let event = SeatEvent {
         producer_engine_seq: None,
         seq: 1,

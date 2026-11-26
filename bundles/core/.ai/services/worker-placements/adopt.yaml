@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:07Z:318d23962bc3133e16de206a7358f126bdc12c3048fb78243f584d129b820d46:ScoS4w0jRe5hwomL52nXAlt3AWRKoZpWSUqi/VD+eEf1FJzXmSH8p+sHm8YrD8NzyX/xSvPY43DH/XZ7AZ/YBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T00:42:38Z:9f6f2a143ee01fc675b4b67e3d8f44231210955aa405089e74f0dd7379050229:NLd3jaVdE9TdYMCHlhAlvYhbxHr7o69aT1QDUlHwZVnl5Wzh5Jm7TbRvx7axWzPzasD8qemy9hjJYMk2WuF5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.adopt
 required_caps: ["ryeos.execute.service.worker-placements/adopt"]
@@ -30,3 +30,8 @@ disclosure:
     - "/completion/target_chain_head_hash"
     - "/completion/terminal_status"
     - "/completion/credential_disposition"
+    # test builds only: the target's stage timings the handoff qualification reads back
+    - "/qualification_measurements/schema"
+    - "/qualification_measurements/event_replay_ms"
+    - "/qualification_measurements/worker_attach_recovery_ms"
+    - "/qualification_measurements/adoption_path"

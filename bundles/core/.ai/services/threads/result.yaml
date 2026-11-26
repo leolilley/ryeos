@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-26T00:55:41Z:4bc75a0c191c0d784e5d09aec564c914082c769f4e5c5edcd6aabe13ff0e333c:DXFz08k65bF2e2lttaOTmQ+HIAz1BP3EVU+cinv0FM3HDGI0Oj5YRX+Pc3JVw3UIuIyMBzmhQLGqE2HtPsoyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "result"
+kind: service
+endpoint: threads.result
+record_thread: false
+required_caps: []
+schema:
+  thread_id: string
+description: "Get the body a thread finished with, for the thread's owner"
+# The body is the thread's own finished output: one declared content leaf for the key that owns the thread (the same ownership check as threads/get, so a thread that is not the caller's answers as one that does not exist). It is bounded and refused when larger, never cut. threads/get names it only by result_digest.
+disclosure:
+  principal:
+    - "/thread_id"
+    - "/result_digest"
+    - "/result"
+  max_result_bytes: 1048576

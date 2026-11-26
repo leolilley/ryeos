@@ -30,9 +30,11 @@ use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
 mod ownership;
+mod publication;
 mod registry;
 pub use endorsement::*;
 pub use ownership::*;
+pub use publication::*;
 pub use registry::*;
 
 use crate::contracts::{
