@@ -1742,7 +1742,15 @@ jobs:
           # The credential-transition test re-executes the test binary as
           # uid 65534, which cannot traverse the runner's home: install the
           # exact binary where every account can execute it.
-          bin="$(cargo test -p lillux --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable')"
+          build_json="$RUNNER_TEMP/build-lillux.jsonl"
+          if ! cargo test -p lillux --locked --lib --no-run --message-format=json > "$build_json"; then
+            # cargo's stderr does not repeat the compiler's error text, which
+            # only the JSON stream holds: print it so a failed build says what failed.
+            echo "::error::building the lillux tests failed; the compiler's messages follow" >&2
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.rendered' "$build_json" >&2 || true
+            exit 1
+          fi
+          bin="$(jq -r 'select(.profile.test == true and .executable != null) | .executable' "$build_json")"
           [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one lillux test executable, got: $bin" >&2; exit 1; }
           sudo -n install -D -m 755 "$bin" /opt/ryeos-root-tests/lillux-tests
           sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_TEST_BINARY=/opt/ryeos-root-tests/lillux-tests "$RUNNER_TEMP/run-ignored" 2 \
