@@ -61,6 +61,26 @@ pub(crate) struct BundleExportEntry {
     pub(crate) mode: u32,
 }
 
+/// A live install never changes the node's bundle registrations: they are
+/// pinned by the signed init completion record, and the running node holds
+/// that record open. Until live installs are staged and activated by a signed
+/// offline operation, they are refused before anything is fetched or written.
+pub(crate) const LIVE_INSTALLS_ARE_STAGED: bool = false;
+
+pub(crate) const LIVE_INSTALL_REFUSED_CODE: &str = "live_install_staged_unavailable";
+
+pub(crate) fn live_install_refused() -> crate::handler_error::HandlerError {
+    let message = "live installs are staged; staging is not available yet";
+    crate::handler_error::HandlerError::Structured {
+        code: LIVE_INSTALL_REFUSED_CODE.to_owned(),
+        status: 501,
+        body: serde_json::json!({
+            "code": LIVE_INSTALL_REFUSED_CODE,
+            "error": format!("{LIVE_INSTALL_REFUSED_CODE}: {message}"),
+        }),
+    }
+}
+
 pub async fn handle(
     req: Request,
     ctx: crate::handler_context::HandlerContext,
@@ -79,6 +99,12 @@ pub async fn handle(
     }
 
     let client = crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?;
+
+    // The caller is authorized to act through this remote; only now does it
+    // learn that a live install is refused, before anything is fetched.
+    if !LIVE_INSTALLS_ARE_STAGED {
+        return Err(anyhow::Error::new(live_install_refused()));
+    }
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -1158,6 +1184,19 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_install_is_refused_with_its_typed_code_and_sentence() {
+        use crate::handler_error::HandlerError;
+        let HandlerError::Structured { code, status, body } = live_install_refused() else {
+            panic!("a structured refusal");
+        };
+        assert_eq!(code, "live_install_staged_unavailable");
+        assert_eq!(status, 501);
+        assert_eq!(body["code"], "live_install_staged_unavailable");
+        let text = body["error"].as_str().expect("error text");
+        assert!(text.contains("live installs are staged; staging is not available yet"));
+    }
 
     fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
         BundleExportEntry {

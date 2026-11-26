@@ -901,6 +901,12 @@ pub async fn handle(
             .map(|entry| (entry.hash.clone(), entry.size))
             .collect(),
     };
+    // Nothing has been fetched but the record and its manifest, and nothing
+    // is written: a live install cannot change the registrations the signed
+    // completion record pins.
+    if !super::remote_bundle_install::LIVE_INSTALLS_ARE_STAGED {
+        return Err(super::remote_bundle_install::live_install_refused());
+    }
     let mut installed = install_entries(
         &state,
         &ctx.fingerprint,
