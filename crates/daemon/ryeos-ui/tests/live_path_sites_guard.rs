@@ -108,9 +108,12 @@ fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The part of a source file before its first `#[cfg(test)]`.
+/// The part of a source file before its test module. A `#[cfg(test)]` on a
+/// single item or import earlier in the file is not the end of production
+/// code, so the cut is the top-level test module only.
 fn non_test_text(text: &str) -> &str {
-    text.find("#[cfg(test)]").map_or(text, |end| &text[..end])
+    text.find("\n#[cfg(test)]\nmod ")
+        .map_or(text, |end| &text[..end])
 }
 
 #[test]
