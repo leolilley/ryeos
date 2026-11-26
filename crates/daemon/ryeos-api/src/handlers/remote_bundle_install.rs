@@ -44,21 +44,21 @@ pub struct Request {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BundleExportResponse {
-    bundle_name: String,
-    file_count: usize,
-    total_bytes: u64,
-    entries: Vec<BundleExportEntry>,
+pub(crate) struct BundleExportResponse {
+    pub(crate) bundle_name: String,
+    pub(crate) file_count: usize,
+    pub(crate) total_bytes: u64,
+    pub(crate) entries: Vec<BundleExportEntry>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BundleExportEntry {
-    kind: String,
-    path: String,
-    hash: String,
-    size: u64,
-    mode: u32,
+pub(crate) struct BundleExportEntry {
+    pub(crate) kind: String,
+    pub(crate) path: String,
+    pub(crate) hash: String,
+    pub(crate) size: u64,
+    pub(crate) mode: u32,
 }
 
 pub async fn handle(
@@ -69,44 +69,13 @@ pub async fn handle(
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
-    let bundles_root = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("bundles");
-    let local_target = bundles_root.join(&req.bundle_name);
-    let prospective_validator = state
+    state
         .extensions
         .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
         .context("prospective node-config validator is not installed at the composition root")?;
 
-    // Reconcile/check under the same global -> per-name lock order used by the
-    // final mutation, then release both before opening a socket. This avoids a
-    // needless transfer for a known installed generation without allowing any
-    // remote wait to block unrelated bundle mutations.
-    {
-        let registry_lock = ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(
-            &state.config.app_root,
-        )?;
-        scavenge_stale_remote_fetches(&bundles_root)?;
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
-            &registry_lock,
-            &req.bundle_name,
-        )?;
-        if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
-            return Ok(report);
-        }
-        if local_target.exists() {
-            return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
-                "bundle_already_installed",
-                409,
-                format!(
-                    "bundle '{}' already installed locally at {}",
-                    req.bundle_name,
-                    local_target.display()
-                ),
-            )));
-        }
+    if let Some(report) = precheck_install(&req.bundle_name, &state)? {
+        return Ok(report);
     }
 
     let client = crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?;
@@ -122,6 +91,83 @@ pub async fn handle(
         bail!("remote bundle '{}' has no files", req.bundle_name);
     }
 
+    let source = RemoteBlobSource {
+        client: &client,
+        read_root: crate::objects_read_scope::ReadRoot::BundleExport {
+            bundle_name: req.bundle_name.clone(),
+        },
+    };
+    install_entries(
+        &state,
+        &ctx.fingerprint,
+        &req.bundle_name,
+        &source,
+        &entries,
+        &format!("remote:{}", req.remote),
+    )
+    .await
+}
+
+/// Reconcile and check the local state for `bundle_name` before any transfer:
+/// an interrupted install is repaired (and reported), and a bundle already
+/// installed locally is refused. Reconcile/check run under the same global ->
+/// per-name lock order used by the final mutation, then release both before a
+/// socket is opened, so a known installed generation costs no transfer and no
+/// remote wait blocks unrelated bundle mutations.
+pub(crate) fn precheck_install(bundle_name: &str, state: &AppState) -> Result<Option<Value>> {
+    let bundles_root = state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("bundles");
+    let local_target = bundles_root.join(bundle_name);
+    let registry_lock =
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
+    scavenge_stale_remote_fetches(&bundles_root)?;
+    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+        &registry_lock,
+        bundle_name,
+    )?;
+    if let Some(report) = reconcile_remote_install(bundle_name, state, &transaction)? {
+        return Ok(Some(report));
+    }
+    if local_target.exists() {
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_already_installed",
+            409,
+            format!(
+                "bundle '{}' already installed locally at {}",
+                bundle_name,
+                local_target.display()
+            ),
+        )));
+    }
+    Ok(None)
+}
+
+/// Materialize `entries` from `source` into a request-unique hidden generation
+/// and install it: fetch with no bundle lock held, then take the registry and
+/// per-name locks, admit the completed staging, activate and journal it. The
+/// journal records `journal_source` as where the bundle came from.
+pub(crate) async fn install_entries<S: BlobSource>(
+    state: &AppState,
+    actor: &str,
+    bundle_name: &str,
+    source: &S,
+    entries: &[BundleExportEntry],
+    journal_source: &str,
+) -> Result<Value> {
+    let bundles_root = state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("bundles");
+    let local_target = bundles_root.join(bundle_name);
+    let prospective_validator = state
+        .extensions
+        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
+        .context("prospective node-config validator is not installed at the composition root")?;
+
     // 2. Materialize a request-unique hidden generation in bounded CAS batches
     // while no bundle transaction lock is held. No response or decoded
     // bundle-wide blob map is retained: at most one bounded batch is live.
@@ -129,7 +175,7 @@ pub async fn handle(
         .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
     let transfer_staging = bundles_root.join(format!(
         ".{}.remote-fetch-{}",
-        req.bundle_name,
+        bundle_name,
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir(&transfer_staging).with_context(|| {
@@ -141,11 +187,8 @@ pub async fn handle(
     let mut staging_cleanup = RemoteStagingCleanup::new(transfer_staging.clone());
     write_remote_fetch_heartbeat(&transfer_staging)
         .context("initialize remote bundle transfer heartbeat")?;
-    let read_root = crate::objects_read_scope::ReadRoot::BundleExport {
-        bundle_name: req.bundle_name.clone(),
-    };
     let (files_installed, total_bytes) =
-        fetch_and_materialize_files(&client, &read_root, &entries, &transfer_staging).await?;
+        fetch_and_materialize_files(source, entries, &transfer_staging).await?;
     lillux::sync_tree_durable(&transfer_staging).with_context(|| {
         format!(
             "flush remote transfer staging {}",
@@ -164,9 +207,9 @@ pub async fn handle(
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
     let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
         &registry_lock,
-        &req.bundle_name,
+        bundle_name,
     )?;
-    if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
+    if let Some(report) = reconcile_remote_install(bundle_name, state, &transaction)? {
         return Ok(report);
     }
     if local_target.exists() {
@@ -175,7 +218,7 @@ pub async fn handle(
             409,
             format!(
                 "bundle '{}' appeared during remote transfer at {}",
-                req.bundle_name,
+                bundle_name,
                 local_target.display()
             ),
         )));
@@ -186,7 +229,7 @@ pub async fn handle(
     // admitted as bundle content.
     remove_remote_fetch_heartbeat(&transfer_staging)?;
 
-    let transaction_staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
+    let transaction_staging = bundles_root.join(format!(".{}.remote-staging", bundle_name));
     remove_stale_transaction_staging(&transaction_staging)?;
     match lillux::rename_path_durable(&transfer_staging, &transaction_staging) {
         Ok(()) => staging_cleanup.retarget(transaction_staging.clone()),
@@ -207,7 +250,7 @@ pub async fn handle(
 
     let admission = crate::handlers::bundle_install::admit_completed_staging(
         &state.config.app_root,
-        &req.bundle_name,
+        bundle_name,
         &transaction_staging,
         false,
         &state.engine.node_trust_store,
@@ -218,12 +261,8 @@ pub async fn handle(
         // The canonical staging name is shared by transaction recovery. Remove
         // this request's rejected generation before releasing its lock.
         staging_cleanup.cleanup_now();
-        return Err(error).with_context(|| {
-            format!(
-                "prospective admission failed for bundle '{}'",
-                req.bundle_name
-            )
-        });
+        return Err(error)
+            .with_context(|| format!("prospective admission failed for bundle '{}'", bundle_name));
     }
 
     let mut cache_invalidated = false;
@@ -242,7 +281,7 @@ pub async fn handle(
                     staging_cleanup.disarm();
                     durability_uncertain = true;
                     tracing::warn!(
-                        bundle = %req.bundle_name,
+                        bundle = %bundle_name,
                         %error,
                         "remote bundle activation is visible but its parent durability barrier failed"
                     );
@@ -263,7 +302,7 @@ pub async fn handle(
         let new_gen = state.engine_cache.bump_system_install_generation();
         cache_invalidated = true;
         tracing::info!(
-            bundle = %req.bundle_name,
+            bundle = %bundle_name,
             engine_cache_generation = new_gen,
             "remote bundle namespace activated: bumped engine cache generation"
         );
@@ -287,7 +326,7 @@ pub async fn handle(
             if !cache_invalidated && local_target.is_dir() {
                 let new_gen = state.engine_cache.bump_system_install_generation();
                 tracing::warn!(
-                    bundle = %req.bundle_name,
+                    bundle = %bundle_name,
                     engine_cache_generation = new_gen,
                     error = %format!("{error:#}"),
                     "remote bundle activation failed after target became visible: bumped engine cache generation"
@@ -304,17 +343,17 @@ pub async fn handle(
     // The install is committed; the journal records it. A journal failure is
     // reported, never turned into a failed install.
     let journaled = journal_install(
-        &state,
-        &ctx.fingerprint,
-        &req.bundle_name,
-        &req.remote,
+        state,
+        actor,
+        bundle_name,
+        journal_source,
         &registration,
         files_installed,
         total_bytes,
     );
 
     Ok(serde_json::json!({
-        "bundle_name": req.bundle_name,
+        "bundle_name": bundle_name,
         "files_installed": files_installed,
         "total_bytes": total_bytes,
         "path": canonical_target.display().to_string(),
@@ -328,7 +367,7 @@ fn journal_install(
     state: &AppState,
     actor: &str,
     bundle: &str,
-    remote: &str,
+    source: &str,
     registration: &Path,
     files: usize,
     bytes: u64,
@@ -344,7 +383,7 @@ fn journal_install(
             )
             .record_bundle_installed(&ryeos_node::node_journal::BundleInstalledFacts {
                 bundle,
-                source: &format!("remote:{remote}"),
+                source,
                 registration_digest: &digest,
                 actor,
                 files: u64::try_from(files).unwrap_or(u64::MAX),
@@ -673,9 +712,66 @@ impl Drop for RemoteStagingCleanup {
 
 /// Fetch and materialize all unique blobs in bounded batches. Reused hashes
 /// are fetched once and may materialize at multiple declared paths.
-async fn fetch_and_materialize_files(
-    client: &RemoteClient,
-    read_root: &crate::objects_read_scope::ReadRoot,
+/// A fetched blob whose content or size is not what the export declared.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct BlobMismatch(pub(crate) String);
+
+/// Where a bundle's blobs come from. The pure helpers below (batching, the
+/// export limits, hashing, materialisation) are shared by every source: the
+/// signed remote transport and the unauthenticated publication fetch.
+pub(crate) trait BlobSource: Sync {
+    /// Fetch the blobs `hashes` names, keyed by hash. A hash the source did
+    /// not return is reported by the caller as missing.
+    async fn fetch_batch(&self, hashes: &[String]) -> Result<HashMap<String, Vec<u8>>>;
+
+    /// Stream one large blob into `sink` and return the bytes written.
+    async fn stream_blob(&self, hash: &str, sink: &mut std::fs::File) -> Result<u64>;
+}
+
+/// The signed remote transport reading a bundle export from a remote node.
+struct RemoteBlobSource<'a> {
+    client: &'a RemoteClient,
+    read_root: crate::objects_read_scope::ReadRoot,
+}
+
+impl BlobSource for RemoteBlobSource<'_> {
+    async fn fetch_batch(&self, hashes: &[String]) -> Result<HashMap<String, Vec<u8>>> {
+        let response = self
+            .client
+            .objects_get_bundle_batch_with_response_limit(
+                &self.read_root,
+                hashes,
+                REMOTE_OBJECT_RESPONSE_MAX_BYTES,
+            )
+            .await
+            .context("fetch bounded remote bundle blob batch")?;
+        let mut blob_data = HashMap::with_capacity(response.entries.len());
+        for response_entry in response.entries {
+            if response_entry.kind != "blob" {
+                continue;
+            }
+            let encoded = response_entry
+                .data
+                .as_deref()
+                .context("remote blob response omitted base64 data")?;
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .with_context(|| format!("decode blob {}", response_entry.hash))?;
+            blob_data.insert(response_entry.hash, bytes);
+        }
+        Ok(blob_data)
+    }
+
+    async fn stream_blob(&self, hash: &str, sink: &mut std::fs::File) -> Result<u64> {
+        self.client
+            .stream_blob(&self.read_root, hash, sink)
+            .await
+            .with_context(|| format!("stream remote bundle blob {hash}"))
+    }
+}
+
+pub(crate) async fn fetch_and_materialize_files<S: BlobSource>(
+    source: &S,
     entries: &[BundleExportEntry],
     local_target: &std::path::Path,
 ) -> Result<(usize, u64)> {
@@ -692,15 +788,13 @@ async fn fetch_and_materialize_files(
             let declared_size = entries[entry_indices[0]].size;
             if declared_size > crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES {
                 let mut temporary = tempfile::NamedTempFile::new_in(local_target)?;
-                let actual_size = client
-                    .stream_blob(read_root, hash, temporary.as_file_mut())
-                    .await
-                    .with_context(|| format!("stream remote bundle blob {hash}"))?;
+                let actual_size = source.stream_blob(hash, temporary.as_file_mut()).await?;
                 temporary.as_file().sync_all()?;
                 if actual_size != declared_size {
-                    bail!(
+                    return Err(BlobMismatch(format!(
                         "remote bundle blob {hash} declared size {declared_size} but streamed {actual_size} bytes"
-                    );
+                    ))
+                    .into());
                 }
                 for index in entry_indices {
                     let entry = &entries[*index];
@@ -720,27 +814,7 @@ async fn fetch_and_materialize_files(
                 continue;
             }
         }
-        let response = client
-            .objects_get_bundle_batch_with_response_limit(
-                read_root,
-                &hashes,
-                REMOTE_OBJECT_RESPONSE_MAX_BYTES,
-            )
-            .await
-            .context("fetch bounded remote bundle blob batch")?;
-        let mut blob_data = HashMap::with_capacity(response.entries.len());
-        for response_entry in response.entries {
-            if response_entry.kind != "blob" {
-                continue;
-            }
-            let encoded = response_entry
-                .data
-                .as_deref()
-                .context("remote blob response omitted base64 data")?;
-            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-                .with_context(|| format!("decode blob {}", response_entry.hash))?;
-            blob_data.insert(response_entry.hash, bytes);
-        }
+        let blob_data = source.fetch_batch(&hashes).await?;
 
         for hash in hashes {
             let entry_indices = uses_by_hash
@@ -752,22 +826,21 @@ async fn fetch_and_materialize_files(
             let actual_size = u64::try_from(bytes.len()).context("remote blob size exceeds u64")?;
             let actual_hash = lillux::cas::sha256_hex(bytes);
             if actual_hash != hash {
-                bail!(
+                return Err(BlobMismatch(format!(
                     "remote bundle blob content hash mismatch: expected {}, found {}",
-                    hash,
-                    actual_hash
-                );
+                    hash, actual_hash
+                ))
+                .into());
             }
 
             for index in entry_indices {
                 let entry = &entries[*index];
                 if actual_size != entry.size {
-                    bail!(
+                    return Err(BlobMismatch(format!(
                         "remote bundle entry '{}' declared size {} but fetched {} bytes",
-                        entry.path,
-                        entry.size,
-                        actual_size
-                    );
+                        entry.path, entry.size, actual_size
+                    ))
+                    .into());
                 }
                 let file_path = local_target.join(&entry.path);
                 if let Some(parent) = file_path.parent() {
@@ -844,7 +917,7 @@ fn build_blob_fetch_batches(entries: &[BundleExportEntry]) -> Result<BlobFetchBa
     Ok((uses_by_hash, batches))
 }
 
-fn validate_export_response(
+pub(crate) fn validate_export_response(
     response: &BundleExportResponse,
     expected_bundle_name: &str,
 ) -> Result<()> {

@@ -1,0 +1,18 @@
+# ryeos:signed:2026-11-25T07:23:32Z:79b0ecb2669741e5435e31210d11fe53b3da79d336daaab051315fc9b6958df4:7onBX8oKSMgJoYYzEpaz9SIcpHxTZ/LhlPDPmlFxBxkjPb3UvqlOvTpozPI3Pc+PgDANZnqvZm4uMm55CXR3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- pull
+description: Install a published bundle from a link, checking the node key and record hash you were given
+help:
+  usage: "ryeos pull <https://host/published/id> --node fp:<node key fingerprint> --expect <record hash>"
+  examples:
+    - "ryeos pull https://example.com/published/0123456789abcdef0123456789abcdef --node fp:<node key fingerprint> --expect <record hash>"
+forms:
+- slots:
+  - field: url
+    matcher: string
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/pull
