@@ -70,7 +70,6 @@ impl<'a> BundleBootstrapLoader<'a> {
     ///
     /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
-
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         self.load_bundle_section_reporting_skipped()
             .map(|(records, _)| records)
