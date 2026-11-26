@@ -1,10 +1,10 @@
-//! `bundle/pull` — install a published bundle from a link and two pins.
+//! `bundle/pull` — fetch and stage a published bundle from a link and two pins.
 //!
 //! The operator gives a `/published/<id>` URL, the node key fingerprint they
 //! trust (`--node`) and the publication record hash they expect (`--expect`).
-//! The local daemon fetches, verifies and installs, so staging, the install
-//! journal and admission stay daemon-side, exactly as for
-//! `remote/bundle-install`.
+//! The local daemon fetches, verifies and stages the bundle, exactly as for
+//! `remote/bundle-install`. Nothing is installed or registered: a stage takes
+//! effect at the next start by a signed operation.
 //!
 //! The node verified that its active operator signed; the puller verifies the
 //! node. Checks run in this order, each with a typed refusal, and no blob is
@@ -20,8 +20,10 @@
 //! 4. the manifest's publisher is a signer this node trusts.
 //!
 //! Then every blob is fetched with one GET, hashed against its manifest entry
-//! and materialised, and the completed staging goes through the same admission
-//! and activation `remote/bundle-install` uses. The pull never carries, offers
+//! and materialised into the node's staging area, with a node-signed staging
+//! record that names the record hash and pins it was verified against and
+//! keeps the verified publication record and manifest beside the tree. The
+//! pull never carries, offers
 //! or adds trust: an unpinned publisher is refused with the command that pins
 //! one.
 //!
@@ -47,8 +49,8 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use super::remote_bundle_install::{
-    BlobMismatch, BlobSource, BundleExportEntry, BundleExportResponse, install_entries,
-    precheck_install, validate_export_response,
+    BlobMismatch, BlobSource, BundleExportEntry, BundleExportResponse, StageOrigin,
+    precheck_install, stage_entries, validate_export_response,
 };
 use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};
@@ -160,6 +162,11 @@ impl PullRefusal {
 /// Map an install-path error onto the pull's typed refusals. Anything else is
 /// the install's own failure (admission, activation) and keeps its message.
 fn classify(error: anyhow::Error) -> HandlerError {
+    // A refused stage already carries its typed code and status.
+    let error = match error.downcast::<HandlerError>() {
+        Ok(typed) => return typed,
+        Err(error) => error,
+    };
     if let Some(refusal) = error.downcast_ref::<PullRefusal>() {
         return refusal.clone().into_handler_error();
     }
@@ -890,7 +897,9 @@ pub async fn handle(
         return Ok(report);
     }
 
-    // Fetch every blob, hash it against its manifest entry, and install.
+    // Fetch every blob, hash it against its manifest entry, and stage the
+    // tree. Nothing is registered: a live install cannot change the
+    // registrations the signed completion record pins.
     let source = PublicBlobSource {
         http,
         origin: target.origin.clone(),
@@ -901,28 +910,59 @@ pub async fn handle(
             .map(|entry| (entry.hash.clone(), entry.size))
             .collect(),
     };
-    // Nothing has been fetched but the record and its manifest, and nothing
-    // is written: a live install cannot change the registrations the signed
-    // completion record pins.
-    if !super::remote_bundle_install::LIVE_INSTALLS_ARE_STAGED {
-        return Err(super::remote_bundle_install::live_install_refused());
-    }
-    let mut installed = install_entries(
+    let canonical_manifest = lillux::canonical_json(
+        &serde_json::to_value(&verified.manifest)
+            .map_err(|error| refuse(PullRefusal::Malformed(format!("the manifest: {error}"))))?,
+    )
+    .map_err(|_| {
+        refuse(PullRefusal::ManifestMismatch(
+            "the manifest is not canonicalizable".into(),
+        ))
+    })?;
+    let evidence = vec![
+        (
+            "publication.json".to_owned(),
+            serde_json::to_vec(&verified.served)
+                .map_err(|error| refuse(PullRefusal::Malformed(format!("the record: {error}"))))?,
+        ),
+        ("manifest.json".to_owned(), canonical_manifest.into_bytes()),
+        (
+            "origin-public-key.json".to_owned(),
+            serde_json::to_vec(&json!({
+                "fingerprint": key_doc.fingerprint,
+                "signing_key": key_doc.signing_key,
+                "version": key_doc.version,
+            }))
+            .map_err(|error| {
+                refuse(PullRefusal::Malformed(format!("the key document: {error}")))
+            })?,
+        ),
+    ];
+    let mut staged = stage_entries(
         &state,
         &ctx.fingerprint,
         &bundle_name,
         &source,
         &response.entries,
-        &format!("publication:{}", target.id),
+        StageOrigin {
+            source: ryeos_node::bundle_staging::StagedSource {
+                kind: ryeos_node::bundle_staging::SOURCE_PUBLICATION.to_owned(),
+                origin: format!("publication:{}", target.id),
+                publication_record_hash: Some(pins.expect.clone()),
+                pinned_node: Some(pins.node.clone()),
+                manifest_hash: Some(verified.served.record.root.manifest_hash.clone()),
+            },
+            evidence,
+        },
     )
     .await
     .map_err(classify)?;
-    if let Some(object) = installed.as_object_mut() {
+    if let Some(object) = staged.as_object_mut() {
         object.insert("publication_id".to_owned(), json!(target.id));
         object.insert("record_hash".to_owned(), json!(pins.expect));
         object.insert("node_fingerprint".to_owned(), json!(pins.node));
     }
-    Ok(installed)
+    Ok(staged)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

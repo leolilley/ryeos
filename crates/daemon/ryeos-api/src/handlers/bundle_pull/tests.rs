@@ -776,3 +776,16 @@ async fn allow_internal_accepts_a_proxied_position() {
         .unwrap_err();
     assert_eq!(refusal.code(), "publication_fetch_failed", "{refusal}");
 }
+
+#[test]
+fn a_refused_stage_keeps_its_typed_code_through_classify() {
+    let refusal = ryeos_node::bundle_staging::StagingRefusal::NodeCount { limit: 64 };
+    let error = anyhow::Error::new(super::super::remote_bundle_install::stage_refusal_error(
+        &refusal,
+    ));
+    let HandlerError::Structured { code, status, .. } = classify(error) else {
+        panic!("a structured refusal");
+    };
+    assert_eq!(code, "bundle_stage_node_count_cap");
+    assert_eq!(status, 507);
+}
