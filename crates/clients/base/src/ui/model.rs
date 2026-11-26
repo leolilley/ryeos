@@ -2071,6 +2071,7 @@ impl RyeOsCore {
             .source_stored_params
             .get(source_key)
             .is_some_and(|held| *held == without_if_revision(&params));
+        eprintln!("DEBUG2 key={source_key} params={params} held={:?} same={same_request}", self.data.source_stored_params.get(source_key));
         let revision = self
             .data
             .sources
