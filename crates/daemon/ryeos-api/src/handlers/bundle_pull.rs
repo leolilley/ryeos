@@ -560,14 +560,15 @@ impl reqwest::dns::Resolve for CheckedResolver {
             }
             let loopback_name = host.eq_ignore_ascii_case("localhost")
                 && addrs.iter().all(|addr| addr.ip().is_loopback());
-            if !allow_internal && !loopback_name {
-                if let Some(bad) = addrs.iter().find(|addr| is_internal_ip(addr.ip())) {
-                    return Err(Box::new(ResolvedInternal {
-                        host,
-                        address: bad.ip(),
-                    })
-                        as Box<dyn std::error::Error + Send + Sync>);
-                }
+            if !allow_internal
+                && !loopback_name
+                && let Some(bad) = addrs.iter().find(|addr| is_internal_ip(addr.ip()))
+            {
+                return Err(Box::new(ResolvedInternal {
+                    host,
+                    address: bad.ip(),
+                })
+                    as Box<dyn std::error::Error + Send + Sync>);
             }
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
@@ -613,6 +614,7 @@ impl PublicHttp {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_lookup(allow_internal: bool, lookup: Lookup) -> Result<Self, PullRefusal> {
         Self::with_env(allow_internal, lookup, Arc::new(|_: &str| None))
     }
