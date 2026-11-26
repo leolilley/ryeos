@@ -2060,3 +2060,498 @@ fn revoke_refuses_unknown_fingerprint_typed() {
         report.stopped
     );
 }
+
+// ── Applying a staged bundle ─────────────────────────────────────────────
+
+mod apply_staged {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+    use crate::bundle_staging::apply::{ApplyRefusal, ApplyRefusalCode};
+    use crate::bundle_staging::{
+        DeclaredFacets, SOURCE_REMOTE, STAGING_SCHEMA, StagedSource, StagingArea, StagingCaps,
+        StagingRecord, TreeFile, tree_digest,
+    };
+    use crate::offline_operation::bundle_apply::{bundle_set_after, installed_bundle_names};
+    use crate::offline_operation::host::StagedBundleApply;
+
+    const OPERATION: &str = "node.bundle.apply-staged";
+
+    /// What the fake host does when asked to apply a stage.
+    enum Behaviour {
+        /// Register the bundle as the install would and report success.
+        Install,
+        /// Refuse with a closed code.
+        Refuse(ApplyRefusalCode),
+        /// A fault of the environment.
+        Fault,
+    }
+
+    struct StagingHost {
+        behaviour: Behaviour,
+        calls: Cell<usize>,
+        seen: RefCell<Vec<(String, String, bool)>>,
+    }
+
+    impl StagingHost {
+        fn new(behaviour: Behaviour) -> Self {
+            Self {
+                behaviour,
+                calls: Cell::new(0),
+                seen: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl OfflineHost for StagingHost {
+        fn image_seed(&self) -> Option<crate::offline_operation::host::ImageSeed> {
+            None
+        }
+
+        fn scheduler_history_participant(
+            &self,
+            _app_root: &Path,
+        ) -> anyhow::Result<
+            Option<Box<dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant>>,
+        > {
+            Ok(None)
+        }
+
+        fn apply_staged_bundle(&self, request: StagedBundleApply<'_>) -> anyhow::Result<Value> {
+            request
+                .state_lock
+                .ensure_protects_app_root(request.app_root)?;
+            self.calls.set(self.calls.get() + 1);
+            self.seen.borrow_mut().push((
+                request.staged.record.bundle_name.clone(),
+                request.staged.record.tree_digest.clone(),
+                request.replace,
+            ));
+            match &self.behaviour {
+                Behaviour::Install => {
+                    let registrations = request.app_root.join(".ai/node/bundles");
+                    std::fs::create_dir_all(&registrations)?;
+                    std::fs::write(
+                        registrations.join(format!("{}.yaml", request.staged.record.bundle_name)),
+                        b"kind: node\n",
+                    )?;
+                    Ok(
+                        json!({ "name": request.staged.record.bundle_name, "replaced": request.replace }),
+                    )
+                }
+                Behaviour::Refuse(code) => Err(anyhow::Error::new(ApplyRefusal::new(
+                    *code,
+                    "refused by the host",
+                ))
+                .context("install")),
+                Behaviour::Fault => Err(anyhow::anyhow!("the disk is full")),
+            }
+        }
+    }
+
+    fn area(fx: &Fixture) -> StagingArea {
+        StagingArea::open(fx.path()).unwrap()
+    }
+
+    /// Commit a stage of `name` requested by an arbitrary key, and return its
+    /// digest.
+    fn stage(fx: &Fixture, name: &str, content: &[u8]) -> String {
+        let digest = tree_digest(
+            name,
+            &[TreeFile {
+                path: "f.txt".to_owned(),
+                hash: lillux::sha256_hex(content),
+                size: content.len() as u64,
+                mode: 0o644,
+            }],
+        )
+        .unwrap();
+        let record = StagingRecord {
+            schema: STAGING_SCHEMA.to_owned(),
+            bundle_name: name.to_owned(),
+            tree_digest: digest.clone(),
+            source: StagedSource {
+                kind: SOURCE_REMOTE.to_owned(),
+                origin: "remote:test".to_owned(),
+                publication_record_hash: None,
+                pinned_node: None,
+                manifest_hash: None,
+            },
+            // Not the operator: nothing the record says about who asked may
+            // matter to the decision.
+            requested_by: "e".repeat(64),
+            policy_generation: "4".repeat(64),
+            declared: DeclaredFacets {
+                provides_kinds: vec!["anything".to_owned()],
+                requires_kinds: Vec::new(),
+                uses_kinds: Vec::new(),
+            },
+            file_count: 1,
+            total_bytes: content.len() as u64,
+            evidence: BTreeMap::new(),
+            staged_at: "2026-11-27T00:00:00Z".to_owned(),
+        };
+        let area = area(fx);
+        let temp = area.begin().unwrap();
+        std::fs::write(temp.tree().join("f.txt"), content).unwrap();
+        area.commit(
+            temp,
+            record,
+            &[("note.json".to_owned(), b"{}".to_vec())],
+            &StagingCaps::DEFAULTS,
+            fx.node.signing_key(),
+        )
+        .unwrap();
+        digest
+    }
+
+    fn apply_body(fx: &Fixture, name: &str, digest: &str, expected: Option<String>) -> RequestBody {
+        let expected = expected.unwrap_or_else(|| {
+            bundle_set_after(&installed_bundle_names(fx.path()).unwrap(), name, digest).unwrap()
+        });
+        fx.body(
+            OPERATION,
+            json!({
+                "name": name,
+                "staged_digest": digest,
+                "expected_bundle_set": expected,
+            }),
+        )
+    }
+
+    fn run_with(fx: &Fixture, host: &StagingHost) -> ApplyReport {
+        apply_pending_offline_operations(fx.path(), host).unwrap()
+    }
+
+    fn receipt_result(fx: &Fixture, request: &SignedRequest) -> Value {
+        Ledger::new(&fx.store, &fx.node)
+            .find_receipt(&fx.ledger(), &request.digest().unwrap())
+            .unwrap()
+            .expect("the request has a receipt")
+            .body
+            .result
+    }
+
+    #[test]
+    fn a_good_stage_is_applied_receipted_and_removed_whoever_asked_for_it() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        let report = run_with(&fx, &host);
+        assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+        assert_eq!(
+            *host.seen.borrow(),
+            [("site".to_owned(), digest.clone(), false)]
+        );
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["outcome"], "applied");
+        assert_eq!(result["staged_digest"], digest);
+        assert_eq!(result["stage_policy_generation"], "4".repeat(64));
+        assert_eq!(result["current_policy_generation"], "absent");
+        assert_eq!(result["stage_removed"], true);
+        assert_eq!(result["converged"], false);
+        assert!(result["note"].as_str().unwrap().contains("not_after"));
+        // The stage is gone and the registration set changed.
+        assert!(
+            area(&fx)
+                .list(&fx.node.signing_key().verifying_key())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            installed_bundle_names(fx.path())
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["site".to_owned()]
+        );
+        // The request is consumed.
+        assert!(fx.inbox_names().is_empty());
+    }
+
+    #[test]
+    fn a_wrong_expected_bundle_set_is_refused_before_the_host_is_asked() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "site", &digest, Some("0".repeat(64))));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        let report = run_with(&fx, &host);
+        // A refusal is a receipt in the ledger and consumes the request.
+        assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+        assert_eq!(host.calls.get(), 0);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["outcome"], "refused");
+        assert_eq!(result["code"], "bundle_set_mismatch");
+        assert_eq!(result["marker_written"], true);
+        assert!(fx.inbox_names().is_empty());
+        assert!(installed_bundle_names(fx.path()).unwrap().is_empty());
+        // The stage stays, and now shows its refusal to an operator.
+        let listed = area(&fx)
+            .list(&fx.node.signing_key().verifying_key())
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].refusal.as_ref().map(|marker| marker.code),
+            Some(ApplyRefusalCode::BundleSetMismatch)
+        );
+        assert_eq!(
+            listed[0]
+                .refusal
+                .as_ref()
+                .map(|marker| marker.request_digest.clone()),
+            Some(request.digest().unwrap())
+        );
+        // Replaying the same request is refused by the ledger, not retried.
+        fx.drop_request(&request);
+        let again = run_with(&fx, &host);
+        assert!(again.applied.is_empty());
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn the_status_report_shows_the_refused_outcome_and_its_code() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        fx.drop_request(&fx.sign(apply_body(&fx, "site", &digest, Some("0".repeat(64)))));
+        run_with(&fx, &StagingHost::new(Behaviour::Install));
+        let status = crate::offline_operation::deliver::status_report(fx.path(), &fx.node).unwrap();
+        let receipts = status["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["operation"], OPERATION);
+        assert_eq!(receipts[0]["outcome"], "refused");
+        assert_eq!(receipts[0]["code"], "bundle_set_mismatch");
+    }
+
+    #[test]
+    fn a_missing_stage_or_area_is_refused_with_no_marker() {
+        let fx = fixture();
+        let digest = "d".repeat(64);
+        // No staging area at all.
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        assert_eq!(run_with(&fx, &host).applied.len(), 1);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["code"], "stage_not_found");
+        assert_eq!(result["marker_written"], false);
+        // An area with other stages but not this one.
+        stage(&fx, "other", b"x");
+        let second = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&second);
+        assert_eq!(run_with(&fx, &host).applied.len(), 1);
+        let result = receipt_result(&fx, &second);
+        assert_eq!(result["code"], "stage_not_found");
+        assert_eq!(result["marker_written"], false);
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn a_stage_whose_record_does_not_verify_is_refused_and_gets_no_marker() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let record = area(&fx).root().join(&digest).join("stage.record");
+        let mut bytes = std::fs::read(&record).unwrap();
+        let at = bytes.iter().position(|b| *b == b'"').unwrap();
+        bytes[at + 1] = b'X';
+        std::fs::write(&record, bytes).unwrap();
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        assert_eq!(run_with(&fx, &host).applied.len(), 1);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["code"], "stage_record_unverified");
+        assert_eq!(result["marker_written"], false);
+        assert!(
+            !area(&fx)
+                .root()
+                .join(&digest)
+                .join("apply.refused")
+                .exists()
+        );
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn an_edited_evidence_file_is_refused() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        std::fs::write(area(&fx).root().join(&digest).join("note.json"), b"{ }").unwrap();
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        run_with(&fx, &host);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["code"], "stage_evidence_mismatch");
+        // The record verified, so the node testifies to the refusal.
+        assert_eq!(result["marker_written"], true);
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn a_name_that_is_not_the_stages_is_refused() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "other", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        run_with(&fx, &host);
+        assert_eq!(receipt_result(&fx, &request)["code"], "stage_name_mismatch");
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn a_refusal_from_the_install_is_a_refused_receipt_with_its_code() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Refuse(ApplyRefusalCode::AdmissionRefused));
+        let report = run_with(&fx, &host);
+        assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["outcome"], "refused");
+        assert_eq!(result["code"], "admission_refused");
+        assert!(installed_bundle_names(fx.path()).unwrap().is_empty());
+        assert_eq!(
+            area(&fx)
+                .list(&fx.node.signing_key().verifying_key())
+                .unwrap()[0]
+                .refusal
+                .as_ref()
+                .map(|marker| marker.code),
+            Some(ApplyRefusalCode::AdmissionRefused)
+        );
+    }
+
+    #[test]
+    fn a_fault_of_the_environment_is_a_retry_not_a_refusal() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Fault);
+        let report = run_with(&fx, &host);
+        assert!(report.applied.is_empty());
+        assert!(matches!(
+            report.stopped,
+            Some(StopReason::HandlerFailed { .. })
+        ));
+        assert_eq!(fx.ledger().last_sequence, 0);
+        // No marker, and the stage is untouched.
+        assert!(
+            !area(&fx)
+                .root()
+                .join(&digest)
+                .join("apply.refused")
+                .exists()
+        );
+        assert!(area(&fx).root().join(&digest).join("stage.record").exists());
+    }
+
+    #[test]
+    fn a_rerun_after_the_marker_returns_the_same_refusal_without_the_host() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        // The node died after writing the marker and before the receipt.
+        area(&fx)
+            .write_refusal_marker(
+                &digest,
+                &request.digest().unwrap(),
+                ApplyRefusalCode::TreeDigestMismatch,
+                &fingerprint(&fx.operator),
+                fx.node.signing_key(),
+            )
+            .unwrap();
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        assert_eq!(run_with(&fx, &host).applied.len(), 1);
+        assert_eq!(host.calls.get(), 0);
+        let result = receipt_result(&fx, &request);
+        assert_eq!(result["outcome"], "refused");
+        assert_eq!(result["code"], "tree_digest_mismatch");
+    }
+
+    #[test]
+    fn a_marker_for_another_request_does_not_stop_a_new_one() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        area(&fx)
+            .write_refusal_marker(
+                &digest,
+                &"9".repeat(64),
+                ApplyRefusalCode::TreeInvalid,
+                &fingerprint(&fx.operator),
+                fx.node.signing_key(),
+            )
+            .unwrap();
+        let request = fx.sign(apply_body(&fx, "site", &digest, None));
+        fx.drop_request(&request);
+        let host = StagingHost::new(Behaviour::Install);
+        assert_eq!(run_with(&fx, &host).applied.len(), 1);
+        assert_eq!(host.calls.get(), 1);
+        assert_eq!(receipt_result(&fx, &request)["outcome"], "applied");
+    }
+
+    #[test]
+    fn the_replace_flag_reaches_the_host() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let mut body = apply_body(&fx, "site", &digest, None);
+        body.arguments["replace"] = json!(true);
+        fx.drop_request(&fx.sign(body));
+        let host = StagingHost::new(Behaviour::Install);
+        run_with(&fx, &host);
+        assert_eq!(*host.seen.borrow(), [("site".to_owned(), digest, true)]);
+    }
+
+    #[test]
+    fn only_the_local_operator_may_sign_it_even_with_the_exact_scope() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let scope = format!("ryeos.offline.{OPERATION}");
+        let (key, grant) = fx.remote_principal(&[scope.as_str()], SITE, WildcardPolicy::Reject);
+        let mut body = fx.remote_body(&key, &grant, SITE, OPERATION);
+        body.arguments = json!({
+            "name": "site",
+            "staged_digest": digest,
+            "expected_bundle_set": bundle_set_after(
+                &installed_bundle_names(fx.path()).unwrap(), "site", &digest
+            ).unwrap(),
+        });
+        fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
+        let host = StagingHost::new(Behaviour::Install);
+        run_with(&fx, &host);
+        assert_eq!(fx.only_refusal(), RefusalReason::LocalSignerOnly);
+        assert_eq!(host.calls.get(), 0);
+    }
+
+    #[test]
+    fn a_grant_without_the_scope_is_refused() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        let (key, grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+        let mut body = fx.remote_body(&key, &grant, SITE, OPERATION);
+        body.arguments = json!({
+            "name": "site",
+            "staged_digest": digest,
+            "expected_bundle_set": "0".repeat(64),
+        });
+        fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
+        run_with(&fx, &StagingHost::new(Behaviour::Install));
+        assert_eq!(fx.only_refusal(), RefusalReason::ScopeNotGranted);
+    }
+
+    #[test]
+    fn the_host_default_refuses_because_only_the_daemon_can_install() {
+        let fx = fixture();
+        let digest = stage(&fx, "site", b"hello");
+        fx.drop_request(&fx.sign(apply_body(&fx, "site", &digest, None)));
+        let report = fx.run();
+        assert!(report.applied.is_empty());
+        assert_eq!(fx.ledger().last_sequence, 0);
+    }
+}
