@@ -54,6 +54,7 @@ fn hex(bytes: &[u8]) -> String {
 struct Frozen {
     manifest_hash: String,
     node_fingerprint: String,
+    version: String,
     read_bound: u64,
 }
 
@@ -69,6 +70,10 @@ async fn freeze(h: &DaemonHarness) -> Frozen {
     Frozen {
         manifest_hash: result["manifest_hash"].as_str().expect("hash").to_owned(),
         node_fingerprint: result["node_fingerprint"].as_str().expect("fp").to_owned(),
+        version: result["bundle_version"]
+            .as_str()
+            .expect("version")
+            .to_owned(),
         read_bound: result["largest_file_bytes"]
             .as_u64()
             .unwrap()
@@ -93,6 +98,7 @@ fn record_at(frozen: &Frozen, id_seed: u8, not_after: u64) -> PublicationRecord 
         &frozen.node_fingerprint,
         &frozen.manifest_hash,
         BUNDLE,
+        &frozen.version,
         &lillux::time::iso8601_from_unix_secs(not_after),
         &lillux::time::iso8601_from_unix_secs(now),
         frozen.read_bound,
@@ -325,6 +331,35 @@ async fn a_publication_stops_being_served_after_not_after() {
     assert_eq!(gone["error"]["code"], "publication_expired");
     let (_, listed) = get_json(&h, "/published").await;
     assert_eq!(listed["publications"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_version_is_the_frozen_manifests_and_a_mismatch_is_refused() {
+    let (h, fixture) = start().await;
+    let frozen = freeze(&h).await;
+    let mut wrong = record(&frozen, 0x22, 3600);
+    wrong.version = format!("{}-other", frozen.version);
+    let (status, refused) = publish(&h, &wrong, &fixture.user).await;
+    assert_eq!(status, 400, "{refused:#}");
+    assert_eq!(
+        refused["error"]["code"], "publication_malformed",
+        "{refused:#}"
+    );
+    let right = record(&frozen, 0x23, 3600);
+    let (status, published) = publish(&h, &right, &fixture.user).await;
+    assert_eq!(status, 200, "{published:#}");
+    assert_eq!(published["result"]["version"], frozen.version.as_str());
+    let (_, listed) = get_json(&h, "/published").await;
+    assert_eq!(
+        listed["publications"][0]["version"],
+        frozen.version.as_str()
+    );
+    let (_, described) = get_json(&h, &format!("/published/{}", right.id)).await;
+    assert_eq!(described["record"]["version"], frozen.version.as_str());
+    assert_eq!(
+        described["manifest"]["bundle_version"],
+        frozen.version.as_str()
+    );
 }
 
 async fn gc(h: &DaemonHarness) -> Value {

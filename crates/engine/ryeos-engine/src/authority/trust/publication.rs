@@ -198,11 +198,20 @@ pub struct PublicationRecord {
     pub node_fingerprint: String,
     pub root: PublicationRoot,
     pub bundle_name: String,
+    /// The bundle's own version, read from its signed manifest at freeze and
+    /// never typed: publish refuses a record whose version is not the frozen
+    /// manifest's.
+    pub version: String,
     /// RFC 3339 UTC instant after which the node stops serving.
     pub not_after: String,
     pub created_at: String,
     pub limits: PublicationLimits,
     pub statement: String,
+}
+
+/// A bundle version: 1 to 64 printable ASCII bytes, no whitespace.
+fn is_bundle_version(version: &str) -> bool {
+    (1..=64).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_graphic())
 }
 
 impl PublicationRecord {
@@ -214,6 +223,7 @@ impl PublicationRecord {
         node_fingerprint: &str,
         manifest_hash: &str,
         bundle_name: &str,
+        version: &str,
         not_after: &str,
         created_at: &str,
         max_bytes_per_read: u64,
@@ -228,6 +238,7 @@ impl PublicationRecord {
                 manifest_hash: manifest_hash.to_owned(),
             },
             bundle_name: bundle_name.to_owned(),
+            version: version.to_owned(),
             not_after: not_after.to_owned(),
             created_at: created_at.to_owned(),
             limits: PublicationLimits { max_bytes_per_read },
@@ -259,6 +270,9 @@ impl PublicationRecord {
             || self.bundle_name.contains(['\0', '/'])
         {
             return malformed("bundle_name must be 1 to 128 bytes without `/`");
+        }
+        if !is_bundle_version(&self.version) {
+            return malformed("version must be 1 to 64 printable bytes");
         }
         if lillux::time::unix_secs_from_iso8601(&self.not_after).is_none()
             || lillux::time::unix_secs_from_iso8601(&self.created_at).is_none()
@@ -436,6 +450,8 @@ pub struct PublicationManifest {
     pub kind: String,
     pub schema: String,
     pub bundle_name: String,
+    /// The version in the bundle's signed manifest.
+    pub bundle_version: String,
     pub bundle_manifest_digest: String,
     pub publisher_fingerprint: String,
     pub file_count: u64,
@@ -485,6 +501,9 @@ impl PublicationManifest {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
         if self.kind != PUBLICATION_MANIFEST_KIND || self.schema != PUBLICATION_MANIFEST_SCHEMA {
             return malformed("manifest has an unknown kind or schema");
+        }
+        if !is_bundle_version(&self.bundle_version) {
+            return malformed("bundle_version must be 1 to 64 printable bytes");
         }
         if self.entries.len() > MAX_PUBLICATION_MANIFEST_ENTRIES
             || self.file_count != self.entries.len() as u64
