@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-25T23:30:06Z:7020c287dbaea4c086db6b7a5f4ba2c740068be10045eca166b2457d0e46a44b:oDTBcZCvXcWTOsL9GZzCDKHcbKDN5tKjpseSMLq6OuXK7k1+T03qzHkKGgBi3MSO+0KPeftaAt0a3a01evXpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T01:04:20Z:5e5b3d144cfd43675dfc3c8fe4a867a4d92e66340fb7fb9218f5d7cad8e585be:Z1TBaDEz0EZjo1Qw1bZO2C+TucrEnX6FU+mxNfOI0ze4kUezFfJAAcIo/9ZdziF/1cnfKFLtlE26JYC4KLM+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -27,17 +27,18 @@ occupied. Removing old readers does not make the number reusable.
 - Existing CAS bytes are never rewritten in place because their canonical bytes
   and SHA-256 hash are their identity.
 
-The current clean-cut execution formats include:
+The current clean-cut execution formats (checked against the code constants at
+the time of writing; the code is authoritative) include:
 
-- sealed root execution request schema 20;
+- sealed root execution request schema 23;
 - thread snapshot schema 13;
 - project snapshot schema 5;
-- admitted launch capsule schema 28;
-- persistent-session capsule schema 11 (enforced session source is runtime-owned,
+- admitted launch capsule schema 41;
+- persistent-session capsule schema 27 (enforced session source is runtime-owned,
   never a project mountpoint; predecessor capsules are not reinterpreted);
-- runtime launch metadata epoch 36;
-- the standalone runtime project-authority envelope epoch 5; and
-- the owned runtime SQLite operator schema epoch 35 (encoded in the RyeOS
+- runtime launch metadata schema 40;
+- the standalone runtime project-authority envelope epoch 6; and
+- the owned runtime SQLite operator schema epoch 146 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 Hosted command-outbox startup replay preserves an exact predecessor session
@@ -356,14 +357,16 @@ the explicit offline activation command:
 ryeos node reset replay-indexes --confirm
 ```
 
-For the exact immediate predecessor, that operation retires only
-`dispatch.effect` rows and preserves provider-call evidence because the epoch
-transition explicitly proves that namespace remains current. If a node skipped
-one or more replay generations, the same explicit reset still succeeds but
-retires every replay row; RyeOS does not compose unshipped compatibility claims
-across the skipped epochs. Credential profiles, sync state, admission
-attestations, accounting state, signed heads, and CAS bytes are preserved in
-both cases. The next ordinary GC reclaims objects that are no longer rooted.
+A stale epoch of any age retires every replay-index row, including
+provider-call rows. There is no narrower case: the replay reset deletes the
+whole replay table, and the report's scope is "all replay records" or
+"unchanged". So provider-call idempotence keys are discarded, and a provider
+call that was interrupted is no longer recognized as already made. Run it only
+with no execution in flight; with execution in flight use the execution-history
+reset. What survives: credential profiles, thread history, CAS bytes (the next
+ordinary GC reclaims objects that are no longer rooted), sync state, admission
+attestations, accounting state and signed heads. What is lost: every replay-index
+row (dispatch-effect and provider-call), nothing else.
 Launch-capsule schema changes must therefore make an explicit replay-epoch
 decision; they must never leave predecessor effect rows silently pinning an
 undecodable closure.
@@ -431,7 +434,7 @@ This is separate from normal retention and GC, requires the daemon to be
 stopped, and coordinates every thread-derived store under one durable recovery
 marker so interruption can be resumed. The transaction publishes that discard
 intent first, resets an incompatible runtime schema when required, retires
-chain and project HEADs, clears the remaining runtime execution state and
+chain HEADs (and project HEADs only with `--include-project-heads`), clears the remaining runtime execution state and
 scheduler fire history/projections, and only then completes the marker.
 Physical CAS sweeping may happen in the same command or later. It does not
 remove project worktrees, bundles, vault values, operator/node identities, or
