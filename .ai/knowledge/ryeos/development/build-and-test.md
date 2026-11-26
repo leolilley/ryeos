@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T01:04:20Z:6b0fae7e447efbef5065c9bd3f920dc6ef8e6ea8b7a8c751ea93f6add7d4a37d:YcN/3D2cnieUkGL6DiaAgB/RfW589TZRd7FJThD+RODipimt9lY6t868FqRi2QimZetZOSZbj9oa67wkHhdzCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T01:06:17Z:364fb80c8bb82e492d1b5a2d26847a2885c79d78501fd07ff8a59015792becc8:jz2SgXYjiRo3MTYfey8+PIPOanT+7b8MhIRNE0JVLmOd0kGiIhVX2W9dH3ZPXX99GomiLunx/Vic3rrsXARVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -258,11 +258,14 @@ thread history, the execution recovery rows and files, the scheduler fire
 history, every replay-index row (provider-call idempotence keys included, so an
 interrupted provider call is no longer recognized as already made), and the
 thread projection. With `--include-project-heads` it also removes principal and
-deployed project HEADs and their head-advance records; remote project
-bindings, heads pushed to peers and standing endorsements must then be
-re-created. What survives: project worktrees, installed bundles, vault values,
+deployed project HEADs and their head-advance records, so project heads that
+were pushed to peers must be pushed again. The reset does not touch the node's
+endorsement store or remote project bindings; they are redone only when the
+cut itself changes how projects are named (the epoch 144 owner+name cut did:
+its release note lists the re-bind and re-endorse steps). What survives: project worktrees, installed bundles, vault values,
 trust, node and signing identity, node config, credential profiles, signed
-schedule definitions, operational sync and admission state, and the accounting
+schedule definitions, operational sync and admission state, the endorsement
+store, and the accounting
 ledger (which has its own refusal and is removed separately, never by this
 reset). Run it with no execution in flight. Ordinary `ryeos maintenance gc`
 afterwards reclaims the newly unreachable CAS storage. No reinstall is needed
