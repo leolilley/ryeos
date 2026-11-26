@@ -42,6 +42,8 @@ struct BoundInvocation {
 }
 
 pub(crate) fn validate_prepared_operation_binding(
+    state: &AppState,
+    scopes: &[String],
     attachment: &AdmittedBindingAttachment,
     operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
 ) -> Result<()> {
@@ -51,7 +53,8 @@ pub(crate) fn validate_prepared_operation_binding(
     let marker = crate::seat_auth::attachment_project_query_identity(attachment)
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?
         .map(|path| path.to_string_lossy().into_owned());
-    let bound = resolve_binding_request(attachment, &admission.request, marker.as_deref())?;
+    let markers = SessionMarkers::for_attachment(state, attachment, scopes, marker.as_deref());
+    let bound = resolve_binding_request(attachment, &admission.request, &markers)?;
     use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
     let purpose = match bound.target.result_effect {
         Some(CompiledUiResultEffect::SurfaceOpening) => {
@@ -348,7 +351,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             (Some(_), Some(operation_id)) => {
                 let operation =
                     ingress.require_prepared(&state, &session, &producer, operation_id, &req)?;
-                validate_prepared_operation_binding(&attachment, &operation)?;
+                validate_prepared_operation_binding(
+                    &state,
+                    &session.granted_caps,
+                    &attachment,
+                    &operation,
+                )?;
                 if bound
                     .params
                     .get("creation_request_id")
