@@ -141,6 +141,7 @@ const PINNED_MARKER_LINES: &[(&str, &[&str])] = &[
             "SubjectResolutionAuthority::Projectless | SubjectResolutionAuthority::LiveFs",
             "live_project_root: matches!(self.subject_authority, SubjectResolutionAuthority::LiveFs)",
             "if matches!(self.subject_authority, SubjectResolutionAuthority::LiveFs) {",
+            "SubjectResolutionAuthority::LiveFs => {",
         ],
     ),
 ];
