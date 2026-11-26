@@ -81,6 +81,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+lillux = { workspace = true, features = ["test-support"] }
 ryeos-api = { workspace = true, features = ["test-support"] }
 futures-util = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

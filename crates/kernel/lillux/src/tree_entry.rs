@@ -148,6 +148,14 @@ pub mod test_support {
         std::os::unix::fs::symlink(target, link)
     }
 
+    /// Set the process umask and return the previous one. The umask is
+    /// process-wide: call it only in a process that owns it, such as a test
+    /// re-executed as its own child.
+    pub fn set_process_umask(mask: u32) -> u32 {
+        // SAFETY: umask takes and returns a plain mode and cannot fail.
+        unsafe { libc::umask(mask as libc::mode_t) as u32 }
+    }
+
     /// Create a named pipe at `path`.
     pub fn make_fifo(path: &Path) -> std::io::Result<()> {
         use std::os::unix::ffi::OsStrExt as _;

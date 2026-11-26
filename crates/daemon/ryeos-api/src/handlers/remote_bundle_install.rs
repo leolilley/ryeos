@@ -178,6 +178,58 @@ fn stage_refusal(refusal: ryeos_node::bundle_staging::StagingRefusal) -> anyhow:
     anyhow::Error::new(stage_refusal_error(&refusal))
 }
 
+/// Materialise `entries` from `source` into `tree`, give the tree's
+/// directories mode 0o755 whatever the process umask was, and check that the
+/// bytes on disk are exactly the verified file list. Returns the files and
+/// bytes written and the tree digest.
+pub(crate) async fn materialise_verified_tree<S: BlobSource>(
+    source: &S,
+    entries: &[BundleExportEntry],
+    bundle_name: &str,
+    tree: &Path,
+) -> Result<(usize, u64, String)> {
+    use ryeos_node::bundle_staging as staging;
+
+    write_remote_fetch_heartbeat(tree).context("initialize bundle stage transfer heartbeat")?;
+    let (files_staged, total_bytes) = fetch_and_materialize_files(source, entries, tree).await?;
+    if tree.join(REMOTE_FETCH_HEARTBEAT_FILE).exists() {
+        remove_remote_fetch_heartbeat(tree)?;
+    }
+
+    // Directories made while materialising took the process umask; the staged
+    // tree's directories are exactly 0o755 whatever it was.
+    lillux::set_tree_directory_modes(tree).context("set the staged tree's directory modes")?;
+
+    // The bytes on disk must be exactly the verified entry list: recompute the
+    // digest from the materialised tree and compare it with the list's.
+    let files: Vec<staging::TreeFile> = entries
+        .iter()
+        .map(|entry| staging::TreeFile {
+            path: entry.path.clone(),
+            hash: entry.hash.clone(),
+            size: entry.size,
+            mode: entry.mode,
+        })
+        .collect();
+    let tree_digest = staging::tree_digest(bundle_name, &files).map_err(stage_refusal)?;
+    let on_disk = staging::tree_digest_from_dir(
+        bundle_name,
+        tree,
+        &staging::TreeLimits {
+            max_files: super::bundle_export::MAX_EXPORTED_BUNDLE_FILES,
+            max_bytes: super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES,
+        },
+    )
+    .map_err(stage_refusal)?;
+    if on_disk.digest != tree_digest {
+        return Err(stage_refusal(staging::StagingRefusal::Invalid(
+            "the materialised tree does not match the verified file list".to_owned(),
+        )));
+    }
+
+    Ok((files_staged, total_bytes, tree_digest))
+}
+
 /// Fetch `entries` from `source`, verify every blob against its entry, and
 /// stage the result.
 ///
@@ -216,42 +268,8 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         area.begin().map_err(stage_refusal)?
     };
     let tree = temp.tree();
-    write_remote_fetch_heartbeat(&tree).context("initialize bundle stage transfer heartbeat")?;
-    let (files_staged, total_bytes) = fetch_and_materialize_files(source, entries, &tree).await?;
-    if tree.join(REMOTE_FETCH_HEARTBEAT_FILE).exists() {
-        remove_remote_fetch_heartbeat(&tree)?;
-    }
-
-    // Directories made while materialising took the process umask; the staged
-    // tree's directories are exactly 0o755 whatever it was.
-    lillux::set_tree_directory_modes(&tree).context("set the staged tree's directory modes")?;
-
-    // The bytes on disk must be exactly the verified entry list: recompute the
-    // digest from the materialised tree and compare it with the list's.
-    let files: Vec<staging::TreeFile> = entries
-        .iter()
-        .map(|entry| staging::TreeFile {
-            path: entry.path.clone(),
-            hash: entry.hash.clone(),
-            size: entry.size,
-            mode: entry.mode,
-        })
-        .collect();
-    let tree_digest = staging::tree_digest(bundle_name, &files).map_err(stage_refusal)?;
-    let on_disk = staging::tree_digest_from_dir(
-        bundle_name,
-        &tree,
-        &staging::TreeLimits {
-            max_files: super::bundle_export::MAX_EXPORTED_BUNDLE_FILES,
-            max_bytes: super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES,
-        },
-    )
-    .map_err(stage_refusal)?;
-    if on_disk.digest != tree_digest {
-        return Err(stage_refusal(staging::StagingRefusal::Invalid(
-            "the materialised tree does not match the verified file list".to_owned(),
-        )));
-    }
+    let (files_staged, total_bytes, tree_digest) =
+        materialise_verified_tree(source, entries, bundle_name, &tree).await?;
 
     // The signed manifest inside the verified tree states what the bundle
     // declares. A bundle that cannot state it could never be installed.
@@ -1031,6 +1049,156 @@ mod tests {
         ] {
             assert!(validate_unix_file_mode(mode, "f").is_err(), "{mode:#o}");
         }
+    }
+
+    /// An in-memory blob source for the materialisation tests.
+    struct MemorySource(HashMap<String, Vec<u8>>);
+
+    impl BlobSource for MemorySource {
+        async fn fetch_batch(&self, hashes: &[String]) -> Result<HashMap<String, Vec<u8>>> {
+            Ok(hashes
+                .iter()
+                .filter_map(|h| self.0.get(h).map(|b| (h.clone(), b.clone())))
+                .collect())
+        }
+
+        async fn stream_blob(&self, _hash: &str, _sink: &mut std::fs::File) -> Result<u64> {
+            bail!("the memory source streams nothing")
+        }
+    }
+
+    fn memory_bundle(modes: &[(&str, &[u8], u32)]) -> (MemorySource, Vec<BundleExportEntry>) {
+        let mut blobs = HashMap::new();
+        let mut entries = Vec::new();
+        for (path, bytes, mode) in modes {
+            let hash = lillux::sha256_hex(bytes);
+            blobs.insert(hash.clone(), bytes.to_vec());
+            entries.push(BundleExportEntry {
+                kind: super::super::bundle_export::EXPORTED_BUNDLE_ENTRY_KIND_FILE.to_string(),
+                path: (*path).to_string(),
+                hash,
+                size: bytes.len() as u64,
+                mode: *mode,
+            });
+        }
+        (MemorySource(blobs), entries)
+    }
+
+    const UMASK_CHILD: &str = "RYEOS_STAGE_UMASK_CHILD";
+
+    /// Run `test_name` again as its own process, with the umask marker set, so
+    /// the umask change cannot touch any other test.
+    fn rerun_in_child(test_name: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--test-threads", "1"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "the child ran no test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    fn materialise(
+        source: &MemorySource,
+        entries: &[BundleExportEntry],
+        tree: &Path,
+    ) -> Result<(usize, u64, String)> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(materialise_verified_tree(source, entries, "demo", tree))
+    }
+
+    #[test]
+    fn a_tree_materialised_under_umask_002_is_staged_with_exact_modes() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_002_is_staged_with_exact_modes";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        // umask 002 would leave directories group-writable (0o775).
+        lillux::tree_entry::test_support::set_process_umask(0o002);
+        let (source, entries) = memory_bundle(&[
+            (".ai/manifest.yaml", b"name: demo\n", 0o644),
+            (".ai/tools/run.sh", b"#!/bin/sh\n", 0o755),
+            (".ai/deep/er/file.txt", b"x", 0o644),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let (files, bytes, digest) = materialise(&source, &entries, &tree).unwrap();
+        assert_eq!(files, 3);
+        assert_eq!(bytes, 11 + 10 + 1);
+        let on_disk = ryeos_node::bundle_staging::tree_digest_from_dir(
+            "demo",
+            &tree,
+            &ryeos_node::bundle_staging::TreeLimits {
+                max_files: 100,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(on_disk.digest, digest);
+        let mode_of = |path: &str| {
+            lillux::observe_tree_entry_no_follow(&tree.join(path))
+                .unwrap()
+                .mode
+        };
+        assert_eq!(mode_of(".ai"), 0o755);
+        assert_eq!(mode_of(".ai/deep/er"), 0o755);
+        assert_eq!(mode_of(".ai/manifest.yaml"), 0o644);
+        assert_eq!(mode_of(".ai/tools/run.sh"), 0o755);
+    }
+
+    #[test]
+    fn a_group_writable_file_is_refused_even_under_umask_002() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_group_writable_file_is_refused_even_under_umask_002";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        lillux::tree_entry::test_support::set_process_umask(0o002);
+        // The entry validation refuses the declared mode before any transfer.
+        assert!(validate_unix_file_mode(0o664, ".ai/a").is_err());
+        // And a file whose declared mode is fine but whose bytes land
+        // group-writable on disk is refused by the on-disk check.
+        let (source, entries) = memory_bundle(&[(".ai/a", b"x", 0o644)]);
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        materialise(&source, &entries, &tree).unwrap();
+        lillux::tree_entry::test_support::set_mode(&tree.join(".ai/a"), 0o664).unwrap();
+        let on_disk = ryeos_node::bundle_staging::tree_digest_from_dir(
+            "demo",
+            &tree,
+            &ryeos_node::bundle_staging::TreeLimits {
+                max_files: 100,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let declared = ryeos_node::bundle_staging::tree_digest(
+            "demo",
+            &[ryeos_node::bundle_staging::TreeFile {
+                path: ".ai/a".into(),
+                hash: lillux::sha256_hex(b"x"),
+                size: 1,
+                mode: 0o644,
+            }],
+        )
+        .unwrap();
+        assert_ne!(
+            on_disk.digest, declared,
+            "the group-writable mode must not verify"
+        );
     }
 
     fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
