@@ -154,11 +154,16 @@ pub fn load_installed_bundle_records_with_trust(
         verify_installed_manifest(&name, &canonical, trust_store)
             .with_context(|| format!("verify installed bundle '{}' manifest", name))?;
 
-        if body.lane.is_some() {
-            let manifest = parse_manifest(&canonical, &name)
-                .with_context(|| format!("parse laned bundle '{}' manifest", name))?;
-            crate::lane::refuse_lane_authority(&canonical, &manifest)
-                .map_err(|error| anyhow::anyhow!("laned bundle '{}' refused: {error}", name))?;
+        if body.lane.is_some()
+            && let Err(refusal) = crate::lane::check_installed_lane_bundle(&canonical, &name)
+        {
+            tracing::error!(
+                bundle = %name,
+                code = refusal.code(),
+                error = %refusal,
+                "a publication-lane bundle no longer passes the lane limits; it is not loaded"
+            );
+            continue;
         }
 
         records.push(InstalledBundleRecord {
@@ -521,19 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn laned_bundle_with_a_native_executable_fails_the_load() {
+    fn laned_bundle_with_a_native_executable_is_not_loaded() {
         let layout = Layout::new();
         let bundle = layout.write_bundle("pulled");
         write_laned_registration(&layout, "pulled", &bundle, &lane_yaml(&"b".repeat(64)));
         fs::create_dir_all(bundle.join("bin")).unwrap();
         fs::write(bundle.join("bin/tool"), b"x").unwrap();
 
-        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("bundle_lane_native_executable"),
-            "{error:#}"
-        );
+        let records =
+            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+                .unwrap();
+        assert!(records.is_empty(), "the failing laned bundle was loaded");
     }
 
     #[test]

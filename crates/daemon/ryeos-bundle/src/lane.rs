@@ -53,13 +53,18 @@ const REFUSED_KIND_DIRS: &[(&str, &str)] = &[
 ];
 
 /// Bundle control data that is neither an item nor executable: the signed
-/// manifest, the manifest's content-addressed payload, and the publisher's
-/// trust file. Each is a path or a directory prefix.
+/// manifest, the manifest's content-addressed payload and the one ref that
+/// names it, and the publisher's trust file. Each is a path or a directory
+/// prefix. Any other ref (a pictures ref, say) is refused as a stray file.
+/// Only the binary resolver, the executor's manifest probe and the pictures
+/// reader read `.ai/objects`; items resolve from their kind directories, so
+/// a refused kind cannot be smuggled in by hash, and executable bytes in the
+/// payload are caught by the magic check.
 const CONTROL_PATHS: &[&str] = &[
     ".ai/manifest.yaml",
     ".ai/manifest.source.yaml",
     ".ai/objects",
-    ".ai/refs",
+    ".ai/refs/bundles/manifest",
     "PUBLISHER_TRUST.toml",
 ];
 
@@ -174,6 +179,19 @@ pub fn refuse_lane_authority(
         refuse_executable_image(bundle_root, &rel)?;
     }
     Ok(())
+}
+
+/// Check an installed laned bundle's whole tree and manifest again, as the
+/// node does every time it loads its registrations. A bundle that fails is
+/// not loaded; the refusal says why.
+pub fn check_installed_lane_bundle(bundle_root: &Path, name: &str) -> Result<(), LaneRefusal> {
+    let manifest = crate::manifest::parse_manifest(bundle_root, name).map_err(|error| {
+        LaneRefusal::Unreadable {
+            path: bundle_root.display().to_string(),
+            detail: format!("{error:#}"),
+        }
+    })?;
+    refuse_lane_authority(bundle_root, &manifest)
 }
 
 /// Refuse a publication's file list before any blob is fetched: the path
@@ -402,6 +420,12 @@ mod tests {
         ] {
             write(tmp.path(), rel);
         }
+        for rel in [
+            ".ai/directives/pulled/plan.md",
+            ".ai/graphs/pulled/flow.yaml",
+        ] {
+            write(tmp.path(), rel);
+        }
         fs::create_dir_all(tmp.path().join("bin")).unwrap();
         refuse_lane_authority(tmp.path(), &manifest()).unwrap();
     }
@@ -489,6 +513,34 @@ mod tests {
                     .code(),
                 code,
                 "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pictures_ref_and_an_unknown_ai_directory_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), ".ai/refs/bundles/pictures");
+        let error = refusal(tmp.path(), &manifest());
+        assert_message(&error, "publication_lane_kind_refused");
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), ".ai/whatever/x.yaml");
+        let error = refusal(tmp.path(), &manifest());
+        assert_message(&error, "publication_lane_kind_refused");
+        assert!(error.to_string().contains("`whatever`"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), ".ai/knowledge/a.md");
+        let fifo = tmp.path().join(".ai/knowledge/pipe.md");
+        let status = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if matches!(status, Ok(status) if status.success()) {
+            assert_message(
+                &refusal(tmp.path(), &manifest()),
+                "publication_lane_stray_file",
             );
         }
     }

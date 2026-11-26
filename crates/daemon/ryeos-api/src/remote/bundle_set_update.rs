@@ -445,6 +445,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                     .join("bundles")
                     .join(&entry.bundle_name);
                 let bytes = ryeos_app::bundle_transaction::prepare_signed_bundle_registration(
+                    app_root,
+                    &lane_trust,
                     &live_target,
                     &config.node_signing_key_path,
                 )?;

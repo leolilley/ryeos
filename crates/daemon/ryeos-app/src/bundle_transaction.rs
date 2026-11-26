@@ -29,10 +29,19 @@ pub enum BundlePhase {
 /// bundle transactions, without publishing them. The caller supplies the
 /// explicit node key whose public half is already pinned by current node
 /// trust; no operator or daemon-global key is discovered here.
+///
+/// The registration written here carries no lane marker, so it is refused for
+/// a name whose current registration has one: a laned bundle is never
+/// re-registered through this path.
 pub fn prepare_signed_bundle_registration(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
     installed_target: &Path,
     node_signing_key: &Path,
 ) -> Result<Vec<u8>> {
+    if let Some(name) = installed_target.file_name().and_then(|name| name.to_str()) {
+        refuse_laned_replacement(app_root, trust_store, name)?;
+    }
     let target = installed_target
         .to_str()
         .context("bundle registration target is not UTF-8")?;
