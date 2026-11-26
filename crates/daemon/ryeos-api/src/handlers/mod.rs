@@ -155,6 +155,7 @@ pub mod threads_cancel;
 pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
+pub mod threads_result;
 pub mod threads_input;
 pub mod threads_list;
 pub mod threads_receipts;
@@ -215,6 +216,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     launch_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
+    threads_result::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
     threads_tail::DESCRIPTOR,
     threads_timeline::DESCRIPTOR,

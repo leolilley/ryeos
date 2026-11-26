@@ -2097,6 +2097,14 @@ impl RemoteClient {
         self.signed_get(&format!("/threads/{}", thread_id)).await
     }
 
+    /// GET /threads/{id}/result (authenticated) — the body a thread finished
+    /// with, for the thread's owner. Names its own digest, which a caller
+    /// binds to the `result_digest` of the thread read.
+    pub async fn threads_result(&self, thread_id: &str) -> Result<Value> {
+        self.signed_get(&format!("/threads/{}/result", thread_id))
+            .await
+    }
+
     /// POST /bundle/export (authenticated) — export a bundle as CAS objects.
     pub async fn bundle_export(&self, bundle_name: &str) -> Result<Value> {
         let body = serde_json::json!({ "bundle_name": bundle_name });

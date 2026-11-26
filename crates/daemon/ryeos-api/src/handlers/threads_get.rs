@@ -51,9 +51,18 @@ pub async fn handle(
                 .list_thread_artifacts(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
+            // The body travels by `threads/result`; a thread read names it
+            // by digest so a peer can bind to exactly the body it fetches.
+            let result_digest = result
+                .as_ref()
+                .and_then(|record| record.result.as_ref())
+                .map(ryeos_state::objects::canonical_value_digest)
+                .transpose()
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
             serde_json::to_value(serde_json::json!({
                 "thread": view,
                 "result": result,
+                "result_digest": result_digest,
                 "artifacts": artifacts,
                 "facets": facets_map,
             }))
