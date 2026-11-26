@@ -485,7 +485,7 @@ const LANE_REFUSALS: &[(&str, &[&str], LaneFiles, &str)] = &[
     (
         "lane-service",
         &["service"],
-        &[(".ai/services/x/s.yaml", b"x")],
+        &[(".ai/knowledge/x/note.md", b"x")],
         "publication_lane_kind_refused",
     ),
     (
@@ -594,7 +594,7 @@ async fn start_publisher_with_named_and_twin() -> (DaemonHarness, FastFixture) {
         |state_path, _, fixture| {
             for bundle in [NAMED_BUNDLE, TWIN_BUNDLE] {
                 register_config_fixture_bundle(state_path, bundle, fixture, |root| {
-                    let item = root.join(".ai/config/lane-demo/demo.yaml");
+                    let item = root.join(format!(".ai/config/lane-demo-{bundle}/demo.yaml"));
                     std::fs::create_dir_all(item.parent().expect("a parent directory"))?;
                     std::fs::write(
                         item,
@@ -616,7 +616,7 @@ async fn start_publisher_with_named_and_twin() -> (DaemonHarness, FastFixture) {
                     &manifest,
                     lillux::signature::sign_content_at(
                         &format!(
-                            "name: {bundle}\nversion: 1.0.0\ndescription: lane lift\nprovides_kinds: []\nrequires_kinds:\n  - config\nuses_kinds: []\nowns_namespaces:\n  - lane-demo\n"
+                            "name: {bundle}\nversion: 1.0.0\ndescription: lane lift\nprovides_kinds: []\nrequires_kinds:\n  - config\nuses_kinds: []\nowns_namespaces:\n  - lane-demo-{bundle}\n"
                         ),
                         &fixture.publisher,
                         "#",
@@ -692,7 +692,7 @@ async fn a_named_bundle_installs_what_the_policy_lifts_and_its_unnamed_twin_is_r
         b.state_path
             .join(".ai/bundles")
             .join(NAMED_BUNDLE)
-            .join(".ai/config/lane-demo/demo.yaml")
+            .join(format!(".ai/config/lane-demo-{NAMED_BUNDLE}/demo.yaml"))
             .is_file()
     );
 }
