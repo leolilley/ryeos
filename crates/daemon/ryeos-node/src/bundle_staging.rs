@@ -60,6 +60,11 @@ pub const SOURCE_PUBLICATION: &str = "publication";
 /// Source kind of a stage fetched from a configured remote node.
 pub const SOURCE_REMOTE: &str = "remote";
 
+/// Mode of the staging area root, of each temporary stage and of each
+/// committed stage directory: only the node's user may enter them. The `tree/`
+/// inside keeps 0o755.
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const TREE_DIR_MODE: u32 = 0o755;
 const TEMP_PREFIX: &str = ".tmp-";
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 32 * 1024 * 1024;
@@ -538,13 +543,23 @@ impl StagingArea {
             .join(STAGING_DIR)
     }
 
-    /// Open the area, creating it if it is not there.
+    /// Open the area, creating it if it is not there. A new area is created
+    /// mode 0o700; an existing one must be owned by the node's user and be
+    /// exactly 0o700, or the open is refused (it is never chmodded).
     pub fn open(app_root: &Path) -> Result<Self, StagingRefusal> {
         let root = Self::root_for(app_root);
-        std::fs::create_dir_all(&root).map_err(StagingRefusal::store)?;
-        let directory =
-            lillux::PinnedDirectory::open_or_create(&root).map_err(StagingRefusal::store)?;
-        Ok(Self { root, directory })
+        if let Some(parent) = root.parent() {
+            std::fs::create_dir_all(parent).map_err(StagingRefusal::store)?;
+        }
+        match std::fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                lillux::create_directory_exact_mode(&root, PRIVATE_DIR_MODE)
+                    .map_err(StagingRefusal::store)?;
+            }
+            Err(error) => return Err(StagingRefusal::store(error)),
+        }
+        Self::attach(root)
     }
 
     /// Open the area only if it already exists. A read must not create state:
@@ -556,9 +571,28 @@ impl StagingArea {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(StagingRefusal::store(error)),
         }
+        Self::attach(root).map(Some)
+    }
+
+    /// Check the area root is the node user's own private directory, then pin
+    /// it.
+    fn attach(root: PathBuf) -> Result<Self, StagingRefusal> {
+        let uid = lillux::effective_uid().map_err(StagingRefusal::store)?;
+        let observed =
+            lillux::observe_tree_entry_no_follow(&root).map_err(StagingRefusal::store)?;
+        if observed.kind != lillux::TreeEntryKind::Directory
+            || observed.owner != uid
+            || observed.mode != PRIVATE_DIR_MODE
+        {
+            return Err(StagingRefusal::Store(format!(
+                "the staging area {} must be a directory owned by the node's user with mode \
+                 {PRIVATE_DIR_MODE:#o}",
+                root.display()
+            )));
+        }
         let directory =
             lillux::PinnedDirectory::open_or_create(&root).map_err(StagingRefusal::store)?;
-        Ok(Some(Self { root, directory }))
+        Ok(Self { root, directory })
     }
 
     pub fn root(&self) -> &Path {
@@ -569,9 +603,11 @@ impl StagingArea {
     pub fn begin(&self) -> Result<TempStage, StagingRefusal> {
         let name = format!("{TEMP_PREFIX}{}", hex::encode(rand::random::<[u8; 16]>()));
         let dir = self.root.join(name);
-        std::fs::create_dir(&dir).map_err(StagingRefusal::store)?;
+        lillux::create_directory_exact_mode(&dir, PRIVATE_DIR_MODE)
+            .map_err(StagingRefusal::store)?;
         let stage = TempStage { dir, armed: true };
-        std::fs::create_dir(stage.tree()).map_err(StagingRefusal::store)?;
+        lillux::create_directory_exact_mode(&stage.tree(), TREE_DIR_MODE)
+            .map_err(StagingRefusal::store)?;
         Ok(stage)
     }
 
@@ -1269,5 +1305,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let area = StagingArea::open(dir.path()).unwrap();
         assert!(area.list(&key(1).verifying_key()).unwrap().is_empty());
+    }
+
+    const UMASK_CHILD: &str = "RYEOS_STAGING_UMASK_CHILD";
+
+    fn rerun_in_child(test_name: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--test-threads", "1"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        lillux::observe_tree_entry_no_follow(path).unwrap().mode
+    }
+
+    #[test]
+    fn the_staging_area_temp_and_stage_directories_are_private_even_under_umask_002() {
+        const NAME: &str = "bundle_staging::tests::the_staging_area_temp_and_stage_directories_are_private_even_under_umask_002";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        lillux::tree_entry::test_support::set_process_umask(0o002);
+        let dir = tempfile::tempdir().unwrap();
+        let area = StagingArea::open(dir.path()).unwrap();
+        assert_eq!(mode_of(area.root()), 0o700);
+        let node = key(1);
+        let temp = area.begin().unwrap();
+        assert_eq!(mode_of(temp.dir()), 0o700);
+        assert_eq!(mode_of(&temp.tree()), 0o755);
+        let committed = area
+            .commit(
+                temp,
+                record("demo", "aa", 10),
+                &[("note.json".to_owned(), b"{}".to_vec())],
+                &StagingCaps::DEFAULTS,
+                &node,
+            )
+            .unwrap();
+        assert_eq!(mode_of(&committed.bundle.dir), 0o700);
+        assert_eq!(mode_of(&committed.bundle.tree()), 0o755);
+        // The area reopens: it is still exactly 0o700.
+        StagingArea::open(dir.path()).unwrap();
+        assert!(StagingArea::open_if_present(dir.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_existing_area_that_is_not_exactly_private_is_refused_not_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        StagingArea::open(dir.path()).unwrap();
+        let root = StagingArea::root_for(dir.path());
+        for mode in [0o775, 0o750, 0o755, 0o777, 0o500] {
+            lillux::tree_entry::test_support::set_mode(&root, mode).unwrap();
+            let refused = StagingArea::open(dir.path()).err().expect("refused");
+            assert_eq!(refused.code(), "bundle_stage_store_failed", "{mode:#o}");
+            assert!(StagingArea::open_if_present(dir.path()).is_err());
+            assert_eq!(mode_of(&root), mode, "the open must not chmod");
+        }
+        lillux::tree_entry::test_support::set_mode(&root, 0o700).unwrap();
+        StagingArea::open(dir.path()).unwrap();
     }
 }

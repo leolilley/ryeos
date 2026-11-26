@@ -105,6 +105,28 @@ pub fn open_tree_regular_file_no_follow(path: &Path) -> Result<(File, TreeEntryO
     }
 }
 
+/// Create the directory `path` (its parent must exist) with exactly `mode`,
+/// whatever the process umask: it is created with `mode` and then set to
+/// `mode`. An existing directory is an error.
+pub fn create_directory_exact_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        anyhow::bail!("exact directory modes are unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use anyhow::Context as _;
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .mode(mode)
+            .create(path)
+            .with_context(|| format!("create directory {}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("set mode of {}", path.display()))
+    }
+}
+
 /// Set `root` and every directory below it to mode `0o755`, whatever umask
 /// they were created under. Links are never followed and non-directories are
 /// left alone.
