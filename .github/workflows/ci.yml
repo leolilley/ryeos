@@ -839,7 +839,8 @@ jobs:
     # seat read, dispatch or authority path would pass every other job. They
     # run here, in one place, and the count is exact: a test that is added,
     # removed, skipped or failing changes it and fails the job. Raise EXPECTED
-    # when an ignored UI test is added.
+    # when an ignored UI test is added, here and in the merge_gates
+    # changed-crates job's ryeos-ui step: the count is written in both places.
     needs: [bundles, workspace-archive]
     runs-on: ubuntu-latest
     timeout-minutes: 45
