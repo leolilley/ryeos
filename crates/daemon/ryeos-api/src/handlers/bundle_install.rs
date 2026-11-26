@@ -548,19 +548,6 @@ pub(crate) fn admit_completed_staging(
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     lane: Option<&ryeos_engine::trust::BundleLane>,
 ) -> Result<AdmittedStaging> {
-    if lane.is_some() {
-        // A laned bundle carries no kinds, runtime authority, executables or
-        // node extensions; refuse before anything else looks at the tree.
-        let manifest = ryeos_bundle::manifest::parse_manifest(staging, bundle_name)
-            .context("parse laned bundle manifest for lane admission")?;
-        ryeos_bundle::lane::refuse_lane_authority(staging, &manifest).map_err(|refusal| {
-            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
-                refusal.code(),
-                422,
-                refusal.to_string(),
-            ))
-        })?;
-    }
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is

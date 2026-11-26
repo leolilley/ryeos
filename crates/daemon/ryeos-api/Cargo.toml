@@ -11,6 +11,10 @@ default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service"]
 model-provider-setup = ["dep:ryeos-directive-definition"]
 handoff-test-support = ["ryeos-app/test-support"]
+# Lets `bundle/pull` install while the publication lane has no admission
+# policy. Only the end-to-end harness (`ryeosd`'s `test-support`) enables it;
+# no shipped build does.
+unadmitted-lane-test-support = []
 # Exposes `ryeos_api::test_support`, the shared application-state builders
 # used by this crate's tests.
 test-support = [

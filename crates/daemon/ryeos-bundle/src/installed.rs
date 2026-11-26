@@ -154,18 +154,6 @@ pub fn load_installed_bundle_records_with_trust(
         verify_installed_manifest(&name, &canonical, trust_store)
             .with_context(|| format!("verify installed bundle '{}' manifest", name))?;
 
-        if body.lane.is_some()
-            && let Err(refusal) = crate::lane::check_installed_lane_bundle(&canonical, &name)
-        {
-            tracing::error!(
-                bundle = %name,
-                code = refusal.code(),
-                error = %refusal,
-                "a publication-lane bundle no longer passes the lane limits; it is not loaded"
-            );
-            continue;
-        }
-
         records.push(InstalledBundleRecord {
             name,
             registration_path: path,
@@ -523,37 +511,6 @@ mod tests {
         let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
             .unwrap_err();
         assert!(format!("{error:#}").contains("record_hash"), "{error:#}");
-    }
-
-    #[test]
-    fn laned_bundle_with_a_native_executable_is_not_loaded() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("pulled");
-        write_laned_registration(&layout, "pulled", &bundle, &lane_yaml(&"b".repeat(64)));
-        fs::create_dir_all(bundle.join("bin")).unwrap();
-        fs::write(bundle.join("bin/tool"), b"x").unwrap();
-
-        let records =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap();
-        assert!(records.is_empty(), "the failing laned bundle was loaded");
-    }
-
-    #[test]
-    fn a_failing_laned_bundle_leaves_the_others_loading() {
-        let layout = Layout::new();
-        let core = layout.write_bundle("core");
-        layout.write_registration("core", &core);
-        let pulled = layout.write_bundle("pulled");
-        write_laned_registration(&layout, "pulled", &pulled, &lane_yaml(&"b".repeat(64)));
-        fs::create_dir_all(pulled.join("bin")).unwrap();
-        fs::write(pulled.join("bin/tool"), b"x").unwrap();
-
-        let records =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap();
-        let names: Vec<&str> = records.iter().map(|record| record.name.as_str()).collect();
-        assert_eq!(names, ["core"]);
     }
 
     #[test]

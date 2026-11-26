@@ -42,6 +42,7 @@ handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-suppor
 test-support = [
   "dep:tempfile",
   "ryeos-app/test-support",
+  "ryeos-api/unadmitted-lane-test-support",
   "ryeos-engine/test-support",
   "ryeos-node/test-support",
   "ryeos-node-runtime/test-support",

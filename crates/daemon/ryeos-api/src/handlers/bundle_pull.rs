@@ -472,17 +472,25 @@ fn publisher_fingerprint(manifest: &PublicationManifest) -> &str {
         .unwrap_or(&manifest.publisher_fingerprint)
 }
 
-/// The statement a pull returns about what it installed. It states the
-/// assurance the bundle does not have.
-pub(crate) fn pull_receipt(publisher: &str, node: &str) -> String {
-    format!(
-        "Installed from a publication, not a release. Publisher fp:{publisher} signed these \
-         bytes and this node pinned that key; node fp:{node} served them. No release evidence \
-         chain exists for this bundle: it was not built, qualified or attested by a release \
-         node. It carries no command, kind, executable or runtime authority unless this node's \
-         policy names it. Its tools and directives run under the caller's own grants. The publisher \
-         signed these bytes; nothing authorizes an exact set."
-    )
+/// Whether this build lets a pull install without lane admission. Only the
+/// end-to-end harness build does.
+fn unadmitted_lane_pull_allowed() -> bool {
+    cfg!(feature = "unadmitted-lane-test-support")
+}
+
+/// A pulled bundle sits in the publication lane, and the policy that says what
+/// such a bundle may carry does not exist yet. Until admission lands, the pull
+/// installs nothing.
+fn refuse_until_lane_admission() -> HandlerResult<()> {
+    if unadmitted_lane_pull_allowed() {
+        return Ok(());
+    }
+    Err(ryeos_app::handler_error::typed_refusal(
+        "bundle_lane_admission_unavailable",
+        422,
+        "bundle/pull installs into the publication lane, and this build has no lane admission \
+         policy yet, so it installs nothing. Nothing was fetched",
+    ))
 }
 
 /// `core` is never installed through a publication pull.
@@ -893,6 +901,7 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     super::publication::operator_caller(&ctx, &state)?;
+    refuse_until_lane_admission()?;
     let refuse = PullRefusal::into_handler_error;
 
     let pins = Pins::parse(&req.node, &req.expect).map_err(refuse)?;
@@ -943,12 +952,6 @@ pub async fn handle(
         )));
     }
     precheck_pull_name(&bundle_name, &state)?;
-    // The lane's path rules run on the file list, so a bundle that may not be
-    // installed is refused before a single blob is fetched.
-    ryeos_bundle::lane::refuse_lane_paths(response.entries.iter().map(|entry| entry.path.as_str()))
-        .map_err(|refusal| {
-            ryeos_app::handler_error::typed_refusal(refusal.code(), 422, refusal.to_string())
-        })?;
     if let Some(report) = precheck_install(&bundle_name, &state).map_err(classify)? {
         return Ok(report);
     }
@@ -964,9 +967,8 @@ pub async fn handle(
             .map(|entry| (entry.hash.clone(), entry.size))
             .collect(),
     };
-    let publisher = publisher_fingerprint(&verified.manifest).to_owned();
     let lane = ryeos_engine::trust::BundleLane::publication(
-        publisher.clone(),
+        publisher_fingerprint(&verified.manifest),
         pins.expect.clone(),
         pins.node.clone(),
         verified.manifest.bundle_version.clone(),
@@ -986,10 +988,6 @@ pub async fn handle(
         object.insert("publication_id".to_owned(), json!(target.id));
         object.insert("record_hash".to_owned(), json!(pins.expect));
         object.insert("node_fingerprint".to_owned(), json!(pins.node));
-        object.insert(
-            "receipt".to_owned(),
-            json!(pull_receipt(&publisher, &pins.node)),
-        );
     }
     Ok(installed)
 }

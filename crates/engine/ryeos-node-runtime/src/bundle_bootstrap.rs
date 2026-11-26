@@ -55,35 +55,14 @@ pub fn parse_bundle(ctx: &NodeItemContext, body: &Value) -> Result<BundleRecord>
     })
 }
 
-/// A laned bundle the loader refused to load because its tree no longer
-/// passes the lane limits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkippedLaneBundle {
-    pub name: String,
-    /// The stable `bundle_lane_*` or `publication_lane_*` code.
-    pub code: &'static str,
-    pub message: String,
-}
-
 impl<'a> BundleBootstrapLoader<'a> {
     /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
     /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
-    pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
-        self.load_bundle_section_reporting_skipped()
-            .map(|(records, _)| records)
-    }
 
-    /// As [`Self::load_bundle_section`], and also the laned bundles that were
-    /// not loaded because their tree failed the lane limits. A failing laned
-    /// bundle is left out and logged at error level; it never stops the node
-    /// from loading the others.
-    pub fn load_bundle_section_reporting_skipped(
-        &self,
-    ) -> Result<(Vec<BundleRecord>, Vec<SkippedLaneBundle>)> {
+    pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         let mut records: Vec<BundleRecord> = Vec::new();
-        let mut skipped: Vec<SkippedLaneBundle> = Vec::new();
 
         let node_dir = self
             .app_root
@@ -137,23 +116,6 @@ impl<'a> BundleBootstrapLoader<'a> {
                     record.path.display()
                 )
             })?;
-            if record.lane.is_some()
-                && let Err(refusal) =
-                    ryeos_bundle::lane::check_installed_lane_bundle(&canonical, &record.name)
-            {
-                tracing::error!(
-                    bundle = %record.name,
-                    code = refusal.code(),
-                    error = %refusal,
-                    "a publication-lane bundle no longer passes the lane limits; it is not loaded"
-                );
-                skipped.push(SkippedLaneBundle {
-                    name: record.name.clone(),
-                    code: refusal.code(),
-                    message: refusal.to_string(),
-                });
-                continue;
-            }
             record.path = canonical;
 
             records.push(record);
@@ -165,7 +127,7 @@ impl<'a> BundleBootstrapLoader<'a> {
             bail!("node-config section `bundles` violates AtLeastOne cardinality with 0 record(s)");
         }
 
-        Ok((records, skipped))
+        Ok(records)
     }
 }
 

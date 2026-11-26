@@ -778,19 +778,6 @@ async fn allow_internal_accepts_a_proxied_position() {
 }
 
 #[test]
-fn the_receipt_names_the_real_fingerprints_and_the_missing_evidence() {
-    let receipt = pull_receipt(&"a".repeat(64), &"b".repeat(64));
-    assert_eq!(
-        receipt,
-        format!(
-            "Installed from a publication, not a release. Publisher fp:{} signed these bytes and this node pinned that key; node fp:{} served them. No release evidence chain exists for this bundle: it was not built, qualified or attested by a release node. It carries no command, kind, executable or runtime authority unless this node's policy names it. Its tools and directives run under the caller's own grants. The publisher signed these bytes; nothing authorizes an exact set.",
-            "a".repeat(64),
-            "b".repeat(64)
-        )
-    );
-}
-
-#[test]
 fn core_is_never_pulled() {
     let refusal = refuse_core_name("core").unwrap_err();
     assert!(
@@ -798,4 +785,14 @@ fn core_is_never_pulled() {
         "{refusal:?}"
     );
     refuse_core_name("core-extras").unwrap();
+}
+
+#[cfg(not(feature = "unadmitted-lane-test-support"))]
+#[test]
+fn the_pull_installs_nothing_until_lane_admission_exists() {
+    let refusal = refuse_until_lane_admission().unwrap_err();
+    assert!(
+        format!("{refusal:?}").contains("bundle_lane_admission_unavailable"),
+        "{refusal:?}"
+    );
 }
