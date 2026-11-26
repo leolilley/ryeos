@@ -580,3 +580,168 @@ async fn a_bundle_that_carries_more_than_invoked_items_is_refused_with_its_typed
         );
     }
 }
+
+// ── A named bundle lifts what the policy names, and an unnamed twin does not ──
+
+const NAMED_BUNDLE: &str = "lane-named";
+const TWIN_BUNDLE: &str = "lane-twin";
+
+/// A bundle of one inert config item, declaring the namespace it owns. The
+/// two names carry the same bytes, so only the node's policy tells them apart.
+async fn start_publisher_with_named_and_twin() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            for bundle in [NAMED_BUNDLE, TWIN_BUNDLE] {
+                register_config_fixture_bundle(state_path, bundle, fixture, |root| {
+                    let item = root.join(".ai/config/lane-demo/demo.yaml");
+                    std::fs::create_dir_all(item.parent().expect("a parent directory"))?;
+                    std::fs::write(
+                        item,
+                        lillux::signature::sign_content_at(
+                            "schema: 1\nnote: an inert config item\n",
+                            &fixture.publisher,
+                            "#",
+                            None,
+                            FAST_FIXTURE_TIME,
+                        ),
+                    )?;
+                    Ok(())
+                })?;
+                let manifest = state_path
+                    .join(".ai/bundles")
+                    .join(bundle)
+                    .join(".ai/manifest.yaml");
+                std::fs::write(
+                    &manifest,
+                    lillux::signature::sign_content_at(
+                        &format!(
+                            "name: {bundle}\nversion: 1.0.0\ndescription: lane lift\nprovides_kinds: []\nrequires_kinds:\n  - config\nuses_kinds: []\nowns_namespaces:\n  - lane-demo\n"
+                        ),
+                        &fixture.publisher,
+                        "#",
+                        None,
+                        FAST_FIXTURE_TIME,
+                    ),
+                )?;
+            }
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the publishing node")
+}
+
+/// A puller whose signed publication_lane policy names `NAMED_BUNDLE`, applied
+/// before the node starts as `ryeos node policy-apply publication_lane` does.
+async fn start_puller_naming_a_bundle() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_core_knowledge_with_keys_and_plant(
+        SigningKey::from_bytes(&[0x5b; 32]),
+        SigningKey::from_bytes(&[0x5c; 32]),
+        |state_path, _, fixture| {
+            let body = format!(
+                "schema: 1\nadmit_activations:\n  - invoked\nnamed_bundles:\n  {NAMED_BUNDLE}:\n    kinds:\n      - config\n    facets:\n      - owns_namespaces\n"
+            );
+            std::fs::write(
+                state_path.join(".ai/node/policies/publication_lane.yaml"),
+                lillux::signature::sign_content(&body, &fixture.node, "#", None),
+            )?;
+            Ok(())
+        },
+    )
+    .await
+    .expect("start the pulling node")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_bundle_installs_what_the_policy_lifts_and_its_unnamed_twin_is_refused() {
+    let (a, a_fixture) = start_publisher_with_named_and_twin().await;
+    let (b, _b_fixture) = start_puller_naming_a_bundle().await;
+
+    let twin = publish_bundle_with_id(&a, &a_fixture, TWIN_BUNDLE, 0x70).await;
+    let (status, refused) = pull(
+        &b,
+        &twin.url,
+        &format!("fp:{}", twin.node_fingerprint),
+        &twin.record_hash,
+    )
+    .await;
+    assert_eq!(status, 422, "{refused:#}");
+    assert_eq!(
+        refused["error"]["code"], "publication_lane_facet_not_admitted",
+        "{refused:#}"
+    );
+    assert!(!b.state_path.join(".ai/bundles").join(TWIN_BUNDLE).exists());
+
+    let named = publish_bundle_with_id(&a, &a_fixture, NAMED_BUNDLE, 0x71).await;
+    let (status, installed) = pull(
+        &b,
+        &named.url,
+        &format!("fp:{}", named.node_fingerprint),
+        &named.record_hash,
+    )
+    .await;
+    assert_eq!(status, 200, "{installed:#}");
+    let receipt = installed["result"]["receipt"].as_str().expect("receipt");
+    assert!(
+        receipt.contains("kinds [config], facets [owns_namespaces]"),
+        "{receipt}"
+    );
+    assert!(
+        b.state_path
+            .join(".ai/bundles")
+            .join(NAMED_BUNDLE)
+            .join(".ai/config/lane-demo/demo.yaml")
+            .is_file()
+    );
+}
+
+// ── A laned bundle whose tree changed after install is skipped at boot ──
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_laned_bundle_whose_tree_changed_after_install_is_skipped_and_the_node_still_boots() {
+    let (a, a_fixture) = start_publisher_with_items_bundle().await;
+    let (mut b, _b_fixture) = start_puller().await;
+    let publication = publish_bundle_with_id(&a, &a_fixture, ITEMS_BUNDLE, 0x72).await;
+    let (status, installed) = pull(
+        &b,
+        &publication.url,
+        &format!("fp:{}", publication.node_fingerprint),
+        &publication.record_hash,
+    )
+    .await;
+    assert_eq!(status, 200, "{installed:#}");
+
+    // Something writes a native executable directory into the installed tree.
+    let installed_tree = b.state_path.join(".ai/bundles").join(ITEMS_BUNDLE);
+    std::fs::create_dir_all(installed_tree.join("bin")).expect("create bin");
+    std::fs::write(installed_tree.join("bin/tool"), b"x").expect("write bin/tool");
+
+    b.restart()
+        .await
+        .expect("the node boots with a skipped laned bundle");
+
+    // The bundle is not loaded, the rest are, and the loader reports why.
+    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    assert_eq!(status, 200, "{listed:#}");
+    let names: Vec<&str> = listed["result"]["bundles"]
+        .as_array()
+        .expect("bundles")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(!names.contains(&ITEMS_BUNDLE), "{names:?}");
+    assert!(names.contains(&"core"), "{names:?}");
+
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(&b.state_path)
+        .expect("load the node trust registry");
+    let (_, skipped) = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root: &b.state_path,
+        trust_store: &trust,
+    }
+    .load_bundle_section_reporting_skipped()
+    .expect("load the bundle section");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].name, ITEMS_BUNDLE);
+    assert_eq!(skipped[0].code, "publication_lane_never_admitted");
+}
