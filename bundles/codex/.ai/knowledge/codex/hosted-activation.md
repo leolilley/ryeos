@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T02:33:22Z:a679695c9462d817319c5b1f8152aafcc376f19df59ba68a3ee024e67d1351a3:D2rOEisFhvgh5tLm8iFOJ/0cuJIbKdJaMdH54YAollTkFJ3n0b1y6gMTb2ikbSt5uOdZfyGvgezx7rgd/Lx2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:47:10Z:97a458940bbd7d4e9393285f7019167e0595449264719b1f5ac1de87fddb031d:bmfJyo+lxQTIP+2lM8PdVkO6p8bqQw8I3zL2FaFbqIsghTbCdt0gPt85odxGwaV9ruIOJWAQMpcRrkylgm74Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -48,8 +48,8 @@ Before creating another login, discover the existing profiles on the selected
 node through the CLI:
 
 ```sh
-ryeos codex profile list
-ryeos codex profile get <profile-id>
+ryeos credential-profile list
+ryeos credential-profile get <profile-id>
 ```
 
 The list is restricted to the authenticated operator and contains profile IDs,
@@ -325,7 +325,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
    - `credential_confirm_lock_held`: a worker still holds the profile. The
      refusal names the holder and its login session; end it with
      `ryeos worker session terminate <chain-root-id> cancelled`, wait until
-     `codex profile get` shows no `lock_owner`, then confirm.
+     `credential-profile get` shows no `lock_owner`, then confirm.
    - `credential_confirm_expired`: the login window (at most 15 minutes) closed.
    - `credential_confirm_wrong_state`: the profile is not `confirming` at that
      login epoch.
@@ -333,10 +333,10 @@ configured-operator forwarding route to inspect profiles on a remote node.
    A login that nobody finished leaves the profile `enrolling` or `confirming`,
    and a new login then refuses with `credential_enrollment_abandoned` (or
    `credential_enrollment_in_progress` while the window is still open). Clear it
-   explicitly, naming the login epoch from `codex profile get`:
+   explicitly, naming the login epoch from `credential-profile get`:
 
    ```sh
-   ryeos codex profile abandon-login <profile-id> <login-epoch>
+   ryeos credential-profile abandon-login <profile-id> <login-epoch>
    ```
 
    This returns the profile to `unauthenticated` only when that login is
@@ -357,8 +357,8 @@ configured-operator forwarding route to inspect profiles on a remote node.
    `outbound_principal: delegated`; do not connect an operator-key
    client directly to the hosted daemon. Start the worker with the signed
    `config:codex/environments/default` environment (the local CLI spelling is
-   `codex session start <profile> --environment
-   config:codex/environments/default --async --current-head`; a typed remote
+   `worker session start worker_execution:codex/session <profile>
+   --environment config:codex/environments/default --async --current-head`; a typed remote
    request carries the same `environment` ref binding). Call `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
@@ -415,10 +415,10 @@ repairs the root-tested candidate boundary only after the private workspace is
 closed, waits for validate/publish/discard, then finalizes the RyeOS root.
 
 The route IDs above are canonical. Inspect a complete leaf such as
-`ryeos help codex session command` for its current CLI presentation; every
+`ryeos help worker session command` for its current CLI presentation; every
 command must still match the signed command and service contracts.
 After `turn.start`, retain the returned placement-local `command_sequence` and
-`placement_thread_id`. `ryeos codex session command-observation` resolves that
+`placement_thread_id`. `ryeos worker session command-observation` resolves that
 exact coordinate after the transient session status has returned to idle and
 returns the immutable turn-completion fence. Passing that fence as
 `completion` to the generic terminate service prevents a later command from
