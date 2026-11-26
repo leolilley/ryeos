@@ -185,7 +185,7 @@ mod tests {
             "--binding",
             "runtime_snapshot_production/render-snapshot",
             "--binding",
-            "external_execution/codex-qualification-session",
+            "external_execution/example-qualification-session",
             "--dry-run",
         ])
         .unwrap();
