@@ -2404,6 +2404,36 @@ mod tests {
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 
+    /// The caps a session's invocation is launched with are the session's own
+    /// grant. The executor then refuses any declared cap this grant does not
+    /// cover (`caller_capability_not_covered`, pinned in `root_admission_e2e`),
+    /// so a directive cannot be born with more than the session holds.
+    #[tokio::test]
+    async fn a_session_invocation_is_prepared_with_the_sessions_grant_alone() {
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai")).unwrap();
+        let mut granted = session(None);
+        granted.granted_caps = vec!["ryeos.execute.directive.only-this".to_string()];
+
+        let ctx = invocation_context_for_session(&granted);
+        let prepared = prepare_item_ref(&ctx, &state, project.path(), None)
+            .expect("prepare the session's invocation");
+
+        assert_eq!(
+            prepared.exec_ctx.principal_fingerprint,
+            granted.principal_id
+        );
+        assert_eq!(prepared.exec_ctx.caller_scopes, granted.granted_caps);
+        match &prepared.exec_ctx.plan_ctx.requested_by {
+            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+                assert_eq!(principal.fingerprint, granted.principal_id);
+                assert_eq!(principal.scopes, granted.granted_caps);
+            }
+            other => panic!("expected the session's local principal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn saved_surface_transition_rejects_extra_descriptors_and_coordinate_drift() {
         let presentation = "11111111-1111-4111-8111-111111111111";

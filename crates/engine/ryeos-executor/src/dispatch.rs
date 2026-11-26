@@ -8453,6 +8453,79 @@ runtime_authority:
         );
     }
 
+    /// A key whose items nobody has endorsed or trusted for the project is
+    /// classed `UntrustedProject`, never `TrustedProject`, and the class alone
+    /// keeps its project manifest from minting runtime authority, however
+    /// well the manifest is signed and backs the request.
+    #[test]
+    fn an_item_whose_signer_nobody_trusted_mints_no_runtime_authority() {
+        let project = tempdir().join("arc");
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &SELF_BUNDLE_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
+        let ctx = test_execution_context(project.clone());
+        let mut resolved = resolved_tool_in_space(
+            &project,
+            "tool:arc-project/send",
+            ryeos_engine::contracts::ItemSpace::Project,
+            &signing_key(),
+        );
+        resolved.resolved_item.metadata.extra = requires_extra(json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "item_authoring": [
+                    { "kind": "knowledge", "namespace": "runtime-authored/*" }
+                ]
+            } } }
+        }));
+        let requires = resolved.resolved_item.metadata.extra.get("requires");
+
+        for class in [
+            ryeos_engine::resolution::TrustClass::UntrustedProject,
+            ryeos_engine::resolution::TrustClass::Unsigned,
+        ] {
+            let err =
+                mint_runtime_capability_caps(requires, &resolved.resolved_item, class, &ctx.engine)
+                    .unwrap_err();
+            assert!(
+                err.contains("project runtime capability requirements need TrustedProject"),
+                "{class:?} must mint nothing: {err}"
+            );
+        }
+    }
+
+    /// A state home belongs to an installed bundle. A project item, trusted
+    /// and holding the caller's own `use` capability, is refused one.
+    #[test]
+    fn a_project_items_state_home_is_refused_even_when_trusted() {
+        let project = tempdir().join("arc");
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &STATE_HOME_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
+        let mut ctx = test_execution_context(project.clone());
+        ctx.caller_scopes = vec!["ryeos.use.bundle-state.*".to_owned()];
+        let mut resolved = resolved_tool_in_space(
+            &project,
+            "tool:arc-project/keep",
+            ryeos_engine::contracts::ItemSpace::Project,
+            &signing_key(),
+        );
+        resolved.resolved_item.metadata.extra = state_home_tool_requires();
+
+        let error = derive_tool_state_home_cap(
+            &resolved.resolved_item,
+            ryeos_engine::resolution::TrustClass::TrustedProject,
+            &ctx,
+            &json!({ "realm": "ns1" }),
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPreparationFailed { code, .. } = &error else {
+            panic!("expected a preparation refusal: {error}");
+        };
+        assert_eq!(code, "bundle_state_home_undeclared");
+    }
+
     #[test]
     fn no_requirement_mints_nothing_even_with_manifest_authority() {
         let bundle = tempdir().join("example-bundle");

@@ -2042,14 +2042,16 @@ pub(crate) fn authorize_launch_project(
         return Ok((authority, registered_project_id));
     }
 
-    // A non-operator seat has no project identity until the identity cut
-    // lands; the request path is never project authority, so refuse.
+    // Only the node's operator names a project root for a seat. A path in a
+    // request is never project authority, and registering a project is the
+    // operator's act, so a non-operator key has no registered project to
+    // launch into: refuse, whatever path it names.
     Err(HandlerError::Structured {
-        code: "project_seat_requires_identity_cut".into(),
+        code: "project_seat_operator_only".into(),
         status: 403,
         body: serde_json::json!({
-            "code": "project_seat_requires_identity_cut",
-            "error": "project roots are not available to this seat until project identity is cut over",
+            "code": "project_seat_operator_only",
+            "error": "a project root can be named for a seat only by the node's operator; this key has no registered project",
         }),
     }
     .into())

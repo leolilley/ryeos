@@ -816,6 +816,45 @@ enum FastBundleSelection {
 }
 
 impl DaemonHarness {
+    /// Register `checkout` to the owner `key` acts for on this node, as the
+    /// operator's offline registration would, under the project `name`. A key
+    /// that is not the node operator may run a live project only at a
+    /// checkout registered to its owner, so a test that has a second
+    /// principal run a live project registers it first. The daemon reads
+    /// registrations on every request, so no restart is needed.
+    pub fn register_checkout_for_key(
+        &self,
+        key: &lillux::crypto::SigningKey,
+        checkout: &Path,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let canonical = checkout.canonicalize()?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(&self.state_path)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let fingerprint = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        );
+        let owner = trust
+            .owner_for(&fingerprint)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?
+            .principal;
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &self.state_path.join(".ai/node/identity/private_key.pem"),
+        )?;
+        let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name.parse()?);
+        ryeos_node::project_registry::register(
+            &ryeos_node::project_registry::RegistrationChange {
+                app_root: &self.state_path,
+                node: &node,
+                request_digest: &"0".repeat(64),
+                path: &canonical,
+                identity: &identity,
+            },
+        )?;
+        Ok(())
+    }
+
     /// The daemon's stderr log so far, for tests that must see a refusal the
     /// retained thread record deliberately reduces to a closed code.
     pub fn stderr_so_far(&self) -> String {

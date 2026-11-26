@@ -68,6 +68,7 @@ pub mod launch_stage_timings;
 #[cfg(any(test, feature = "test-support"))]
 pub mod leased_session_rig;
 pub mod live_input_queue;
+pub mod live_project_path;
 pub mod managed_external_content;
 pub mod managed_external_content_operation;
 pub mod native_headroom;
