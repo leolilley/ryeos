@@ -123,10 +123,27 @@ fn report_request() -> Value {
     json!({"record_kind": "capability_report"})
 }
 
+/// The shared read envelope around a single record.
+fn record_envelope(record: Value, state: &str, reason: Value) -> Value {
+    json!({
+        "schema": "ryeos.read.records.get/v1",
+        "as_of": "2026-11-23T00:00:00Z",
+        "revision": "rev1:abc",
+        "coverage": {"state": state, "reason": reason},
+        "record": record,
+        "signers": {}
+    })
+}
+
 /// What `records/get` answers for the capability report, with fields a seat
 /// must not see: free-text reasons, paths, addresses, a failure detail and a
 /// field a later release might add.
 fn answer() -> Value {
+    record_envelope(record(), "observed", Value::Null)
+}
+
+/// The record inside that answer.
+fn record() -> Value {
     json!({
         "record_kind": "capability_report",
         "key": "singleton",
@@ -244,13 +261,18 @@ fn every_profile_lets_a_session_hold_the_record_read_capabilities() {
 fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
     let shown = shown();
     let text = serde_json::to_string(&shown).unwrap();
+    assert_eq!(shown["schema"], "ryeos.read.records.get/v1");
+    assert_eq!(shown["coverage"]["state"], "observed");
     // What is kept, including a report from an earlier policy generation
     // arriving marked not fresh.
-    assert_eq!(shown["record_kind"], "capability_report");
-    assert_eq!(shown["key"], "singleton");
-    assert_eq!(shown["verify"]["status"], "verified");
-    assert_eq!(shown["verify"]["scheme"], "node_signed_json_digest");
-    assert_eq!(shown["verify"]["fresh"], false);
+    assert_eq!(shown["record"]["record_kind"], "capability_report");
+    assert_eq!(shown["record"]["key"], "singleton");
+    assert_eq!(shown["record"]["verify"]["status"], "verified");
+    assert_eq!(
+        shown["record"]["verify"]["scheme"],
+        "node_signed_json_digest"
+    );
+    assert_eq!(shown["record"]["verify"]["fresh"], false);
     // What is left out: the body and its reasons, probe text, paths,
     // addresses, capacity, kernel release, lists of what is installed, the
     // signer, the verify detail, and any field no tier names.
@@ -284,30 +306,33 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
     }
     // What the capability view exists to show: names, grades, providers and the
     // closed coverage words, by literal collection name.
-    assert_eq!(shown["verify"]["signer_status"], "node");
-    assert_eq!(shown["body"]["composition"]["host_class"], "container");
-    assert_eq!(shown["body"]["floor"]["admitted"], true);
-    assert_eq!(shown["body"]["host"]["kernel_kind"], "native");
-    let provided = &shown["collections"]["provided"][0];
+    assert_eq!(shown["record"]["verify"]["signer_status"], "node");
+    assert_eq!(
+        shown["record"]["body"]["composition"]["host_class"],
+        "container"
+    );
+    assert_eq!(shown["record"]["body"]["floor"]["admitted"], true);
+    assert_eq!(shown["record"]["body"]["host"]["kernel_kind"], "native");
+    let provided = &shown["record"]["collections"]["provided"][0];
     assert_eq!(provided["name"], "isolation:pid_ns");
     assert_eq!(provided["source"], "measured");
     assert_eq!(provided["provider"], "pid_namespace_init");
     assert!(provided.get("basis").is_none(), "{provided}");
     assert_eq!(
-        shown["collections"]["missing"],
+        shown["record"]["collections"]["missing"],
         json!([{"name": "quiescence:pid_namespace"}]),
         "a missing proof is named without its reason"
     );
     assert_eq!(
-        shown["collections"]["floor_unmet"],
+        shown["record"]["collections"]["floor_unmet"],
         json!([{"label": "quiescence"}])
     );
     assert_eq!(
-        shown["collections"]["floor_met"][0],
+        shown["record"]["collections"]["floor_met"][0],
         json!({"label": "isolation", "name": "isolation:pid_ns", "source": "measured", "provider": "pid_namespace_init"})
     );
     assert_eq!(
-        shown["collections"]["capacity"],
+        shown["record"]["collections"]["capacity"],
         json!([{"name": "enclosure_memory_max_bytes"}]),
         "capacity is named and carries no number"
     );
@@ -318,11 +343,14 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
         "floor_unmet",
         "capacity",
     ] {
-        assert_eq!(shown["collections_coverage"][collection], "present");
+        assert_eq!(
+            shown["record"]["collections_coverage"][collection],
+            "present"
+        );
     }
     // The body itself is only the named leaves.
-    assert!(shown["body"].get("credential_home").is_none());
-    assert!(shown["body"].get("provided").is_none());
+    assert!(shown["record"]["body"].get("credential_home").is_none());
+    assert!(shown["record"]["body"].get("provided").is_none());
 }
 
 /// A node whose report says nothing of enforcement carries no
@@ -331,10 +359,10 @@ fn a_principal_sees_names_grades_and_providers_and_no_free_text() {
 #[test]
 fn a_report_silent_on_enforcement_shows_no_posture_row() {
     let mut silent = answer();
-    silent["collections"]["provided"] = json!([]);
+    silent["record"]["collections"]["provided"] = json!([]);
     let shaping = call(&standard(), GET, report_request()).expect("admitted");
     let shown = seat_view("get", &shaping, silent).expect("fits");
-    assert_eq!(shown["collections"]["provided"], json!([]));
+    assert_eq!(shown["record"]["collections"]["provided"], json!([]));
     assert!(
         !serde_json::to_string(&shown)
             .unwrap()
@@ -353,11 +381,14 @@ fn a_record_that_failed_verification_reaches_a_seat_without_a_body() {
         "truncated": false,
         "verify": {"status": "failed", "scheme": "node_signed_json_digest", "signer": null, "signer_status": null, "reason": "stale_format", "detail": "/home/operator/x", "fresh": null}
     });
+    let failed = record_envelope(failed, "partial", json!("record_unverified"));
     let shaping = call(&standard(), GET, report_request()).unwrap();
     let shown = seat_view("get", &shaping, failed).unwrap();
-    assert_eq!(shown["verify"]["status"], "failed");
-    assert_eq!(shown["verify"]["reason"], "stale_format");
-    assert!(shown.get("body").is_none());
+    assert_eq!(shown["record"]["verify"]["status"], "failed");
+    assert_eq!(shown["record"]["verify"]["reason"], "stale_format");
+    assert_eq!(shown["coverage"]["state"], "partial");
+    assert_eq!(shown["coverage"]["reason"], "record_unverified");
+    assert!(shown["record"].get("body").is_none());
     assert!(
         !serde_json::to_string(&shown)
             .unwrap()
@@ -367,17 +398,28 @@ fn a_record_that_failed_verification_reaches_a_seat_without_a_body() {
 
 #[test]
 fn the_kinds_read_hides_a_load_error_from_a_seat() {
-    let kinds = json!({"kinds": [
+    let rows = json!([
         {"record_kind": "capability_report", "usable": true, "reason": null, "storage": "node_file", "verifier": "node_signed_json_digest", "key": "singleton", "holder": null, "freshness": "node_policy_generation", "max_bytes": 1048576},
         {"record_kind": "broken", "usable": false, "reason": "the declaration did not load: /home/operator/.ai/x"}
-    ]});
+    ]);
+    let kinds = json!({
+        "schema": "ryeos.read.records.kinds/v1",
+        "as_of": "2026-11-23T00:00:00Z",
+        "revision": "rev1:abc",
+        "coverage": {"state": "complete", "reason": null},
+        "rows": rows,
+        "page": {"next_cursor": null, "total": 2, "total_basis": "exact"},
+        "signers": {}
+    });
     let shaping = call(&standard(), KINDS, json!({})).unwrap();
     let shown = seat_view("kinds", &shaping, kinds).unwrap();
-    assert_eq!(shown["kinds"][0]["record_kind"], "capability_report");
-    assert_eq!(shown["kinds"][0]["usable"], true);
-    assert_eq!(shown["kinds"][1]["record_kind"], "broken");
-    assert_eq!(shown["kinds"][1]["usable"], false);
-    for row in shown["kinds"].as_array().unwrap() {
+    assert_eq!(shown["schema"], "ryeos.read.records.kinds/v1");
+    assert_eq!(shown["coverage"]["state"], "complete");
+    assert_eq!(shown["rows"][0]["record_kind"], "capability_report");
+    assert_eq!(shown["rows"][0]["usable"], true);
+    assert_eq!(shown["rows"][1]["record_kind"], "broken");
+    assert_eq!(shown["rows"][1]["usable"], false);
+    for row in shown["rows"].as_array().unwrap() {
         assert!(row.get("reason").is_none());
     }
     let text = serde_json::to_string(&shown).unwrap();

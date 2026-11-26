@@ -14,6 +14,7 @@
 //! unless the caller holds the capability to inspect unverified records and
 //! asks for them.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::read_envelope::{
+    Coverage, CoverageState, Page, ReadEnvelope, SignerEntry, TotalBasis, authorization_digest,
+    filter_digest, key_id, not_modified, revision_of, signers_table,
+};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
@@ -36,6 +41,9 @@ pub(crate) const INCLUDE_UNVERIFIED_CAP: &str = "ryeos.read.records.unverified";
 const SINGLETON_KEY: &str = "singleton";
 const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_LIST_LIMIT: usize = 200;
+const GET_SCHEMA: &str = "ryeos.read.records.get/v1";
+const LIST_SCHEMA: &str = "ryeos.read.records.list/v1";
+const KINDS_SCHEMA: &str = "ryeos.read.records.kinds/v1";
 
 /// Where a record is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -663,6 +671,8 @@ pub struct GetRequest {
     pub holder: Option<String>,
     #[serde(default)]
     pub include_unverified: bool,
+    #[serde(default)]
+    pub if_revision: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -675,11 +685,15 @@ pub struct ListRequest {
     pub limit: Option<usize>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub if_revision: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct KindsRequest {}
+pub struct KindsRequest {
+    pub if_revision: Option<String>,
+}
 
 fn holds_unverified_cap(ctx: &HandlerContext, state: &AppState) -> bool {
     state
@@ -703,6 +717,45 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| HandlerError::Internal(format!("records read task failed: {error}")))?
 }
 
+/// The signers side table for the signers an answer names. A value that is
+/// not a key fingerprint is left out: the table refuses such values, and the
+/// answer's own `verify.signer` still states it.
+fn signers_for(signers: &[&str], state: &AppState) -> HandlerResult<BTreeMap<String, SignerEntry>> {
+    let valid: Vec<&str> = signers
+        .iter()
+        .copied()
+        .filter(|signer| key_id(signer).is_ok())
+        .collect();
+    if valid.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let view = ryeos_node::trust_registry::load_view(&state.config.app_root)
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
+    signers_table(valid, &view, state.identity.fingerprint())
+}
+
+/// The not-modified answer, when the caller's token is the current revision.
+fn unchanged(if_revision: Option<&str>, revision: &str) -> HandlerResult<Option<Value>> {
+    not_modified(if_revision, revision)
+        .map(|unchanged| {
+            serde_json::to_value(unchanged)
+                .map_err(|error| HandlerError::Internal(error.to_string()))
+        })
+        .transpose()
+}
+
+fn envelope_json(envelope: ReadEnvelope<Value>) -> HandlerResult<Value> {
+    serde_json::to_value(envelope).map_err(|error| HandlerError::Internal(error.to_string()))
+}
+
+fn authorization_of(ctx: &HandlerContext, state: &AppState) -> String {
+    authorization_digest(
+        &ctx.fingerprint,
+        &ctx.scopes,
+        state.node_policy.generation_digest(),
+    )
+}
+
 pub async fn get(
     req: GetRequest,
     ctx: HandlerContext,
@@ -710,12 +763,37 @@ pub async fn get(
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
     require_unverified_authority(req.include_unverified, holds_unverified_cap(&ctx, &state))?;
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let loaded = find_kind(&kinds, &req.record_kind)?;
+        let filter = filter_digest(&json!({
+            "record_kind": req.record_kind,
+            "key": req.key,
+            "hash": req.hash,
+            "holder": req.holder,
+            "include_unverified": req.include_unverified,
+        }))?;
         let kind = match &loaded.usable {
             Ok(kind) => kind,
-            Err(reason) => return Ok(unverified_kind_answer(&loaded.name, reason)),
+            Err(reason) => {
+                let revision = revision_of(
+                    "records_get",
+                    &authorization,
+                    &[("unverified_kind", reason.as_str())],
+                    &filter,
+                );
+                if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+                    return Ok(value);
+                }
+                return envelope_json(ReadEnvelope::record(
+                    GET_SCHEMA,
+                    revision,
+                    Coverage::with_reason(CoverageState::Unavailable, "unverified_kind"),
+                    unverified_kind_answer(&loaded.name, reason),
+                    BTreeMap::new(),
+                ));
+            }
         };
         refuse_unsupported_holder(kind, req.holder.as_deref())?;
         let found = read_record(kind, &state.config.app_root, &policy_generation(&state));
@@ -725,10 +803,30 @@ pub async fn get(
         {
             return Err(HandlerError::NotFound);
         }
+        let revision = revision_of(
+            "records_get",
+            &authorization,
+            &[("record", digest_of(&found).unwrap_or("absent"))],
+            &filter,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
         let unverified = (req.include_unverified && matches!(found, Found::Failed { .. }))
             .then(|| unverified_body(kind, &state.config.app_root))
             .flatten();
-        Ok(record_answer(kind, &found, unverified))
+        let coverage = match found {
+            Found::Verified { .. } => Coverage::observed(),
+            _ => Coverage::with_reason(CoverageState::Partial, "record_unverified"),
+        };
+        let signers = signers_for(&signer_of(&found).into_iter().collect::<Vec<_>>(), &state)?;
+        envelope_json(ReadEnvelope::record(
+            GET_SCHEMA,
+            revision,
+            coverage,
+            record_answer(kind, &found, unverified),
+            signers,
+        ))
     })
     .await
 }
@@ -753,15 +851,51 @@ pub async fn list(
             )
         })?,
     };
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let loaded = find_kind(&kinds, &req.record_kind)?;
+        let filter = filter_digest(&json!({
+            "record_kind": req.record_kind,
+            "holder": req.holder,
+        }))?;
         let kind = match &loaded.usable {
             Ok(kind) => kind,
-            Err(reason) => return Ok(unverified_kind_answer(&loaded.name, reason)),
+            Err(reason) => {
+                let revision = revision_of(
+                    "records_list",
+                    &authorization,
+                    &[("unverified_kind", reason.as_str())],
+                    &filter,
+                );
+                if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+                    return Ok(value);
+                }
+                return envelope_json(ReadEnvelope::rows(
+                    LIST_SCHEMA,
+                    revision,
+                    Coverage::with_reason(CoverageState::Unavailable, "unverified_kind"),
+                    Vec::new(),
+                    Page {
+                        next_cursor: None,
+                        total: Some(0),
+                        total_basis: TotalBasis::Exact,
+                    },
+                    BTreeMap::new(),
+                ));
+            }
         };
         refuse_unsupported_holder(kind, req.holder.as_deref())?;
         let found = read_record(kind, &state.config.app_root, &policy_generation(&state));
+        let revision = revision_of(
+            "records_list",
+            &authorization,
+            &[("record", digest_of(&found).unwrap_or("absent"))],
+            &filter,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
         // A kind with a singleton key has at most one record.
         let mut records = Vec::new();
         if !matches!(found, Found::Absent) && holder_matches(kind, req.holder.as_deref(), &found) {
@@ -770,6 +904,7 @@ pub async fn list(
                 _ => Value::Null,
             };
             records.push(json!({
+                "record_kind": kind.decl.record_kind,
                 "key": SINGLETON_KEY,
                 "hash": digest_of(&found),
                 "summary": summary,
@@ -779,21 +914,34 @@ pub async fn list(
         let total = records.len();
         let page: Vec<Value> = records.into_iter().skip(offset).take(limit).collect();
         let next = offset.saturating_add(page.len());
-        Ok(json!({
-            "record_kind": kind.decl.record_kind,
-            "records": page,
-            "next_cursor": if next < total { json!(next.to_string()) } else { Value::Null },
-        }))
+        let named: Vec<&str> = page
+            .iter()
+            .filter_map(|row| row["verify"]["signer"].as_str())
+            .collect();
+        let signers = signers_for(&named, &state)?;
+        envelope_json(ReadEnvelope::rows(
+            LIST_SCHEMA,
+            revision,
+            Coverage::observed(),
+            page,
+            Page {
+                next_cursor: (next < total).then(|| next.to_string()),
+                total: Some(total as u64),
+                total_basis: TotalBasis::Exact,
+            },
+            signers,
+        ))
     })
     .await
 }
 
 pub async fn kinds(
-    _req: KindsRequest,
+    req: KindsRequest,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let rows: Vec<Value> = kinds
@@ -817,7 +965,29 @@ pub async fn kinds(
                 }),
             })
             .collect();
-        Ok(json!({ "kinds": rows }))
+        let rows_digest = filter_digest(&rows)?;
+        let revision = revision_of(
+            "records_kinds",
+            &authorization,
+            &[("kinds", rows_digest.as_str())],
+            &filter_digest(&json!({}))?,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
+        let total = rows.len() as u64;
+        envelope_json(ReadEnvelope::rows(
+            KINDS_SCHEMA,
+            revision,
+            Coverage::complete(),
+            rows,
+            Page {
+                next_cursor: None,
+                total: Some(total),
+                total_basis: TotalBasis::Exact,
+            },
+            BTreeMap::new(),
+        ))
     })
     .await
 }

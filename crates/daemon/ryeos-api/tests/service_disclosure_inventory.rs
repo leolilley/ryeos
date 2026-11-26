@@ -860,3 +860,41 @@ fn services_that_list_attachment_leaves_include_the_seat_project() {
         }
     }
 }
+
+/// The three records reads return the shared read envelope, so a principal's
+/// tier names the envelope's own leaves: the answer's schema, instant,
+/// revision, coverage and signer standing, plus the page leaves of a listing.
+/// The free-text leaves of the side table (a signer's label and role) stay
+/// withheld.
+#[test]
+fn the_records_reads_tier_the_envelope_leaves() {
+    let all = services();
+    let tier = |service: &str, section: &str| -> Vec<String> {
+        all.iter()
+            .find(|(name, _)| name == service)
+            .unwrap_or_else(|| panic!("{service} is not a service"))
+            .1["disclosure"][section]
+            .as_array()
+            .unwrap_or_else(|| panic!("{service} has no {section} tier"))
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    for service in ["records/get", "records/list", "records/kinds"] {
+        let principal = tier(service, "principal");
+        let free_text = tier(service, "free_text");
+        for leaf in ryeos_api::read_envelope::ENVELOPE_LEAVES {
+            let free = matches!(*leaf, "/signers/*/label" | "/signers/*/role");
+            let listed = if free { &free_text } else { &principal };
+            let paged = leaf.starts_with("/page/");
+            if paged && service == "records/get" {
+                continue;
+            }
+            assert!(
+                listed.iter().any(|entry| entry == leaf),
+                "{service} does not list {leaf} in the right tier"
+            );
+        }
+    }
+}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T18:53:31Z:dd1132b61869b149692f1f097f30ecbf90ac527e96e775fe40d8f2f52943de93:Jta8K6sQvpvWW6dQhWFl0mGscTDQI0bw9+glPUVB6cUz4yB28epXp6rd33NqqT3upt9PgsJnlWkMkb24t7yCCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T02:45:53Z:9120cb5cafa9a642fc40905dfac7faa2e8b5fa80a3c11ddca73f06948a8442f8:cRk5AnjGNT67YO5Yzv4Kc/rO72cly/bzj9r9jVnAGKtgk8OEFNx4jbsxxK73SGdnru94rBFKz70PVXQJWzJMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.kinds
 availability: both
@@ -6,17 +6,30 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.records/kinds"]
-schema: {}
+schema:
+  if_revision: string?
 description: "List the record kinds installed bundles declare, and whether this node can serve each"
 disclosure:
   principal:
-    - "/kinds/*/record_kind"
-    - "/kinds/*/usable"
-    - "/kinds/*/storage"
-    - "/kinds/*/verifier"
-    - "/kinds/*/key"
-    - "/kinds/*/holder"
-    - "/kinds/*/freshness"
-    - "/kinds/*/max_bytes"
+    - "/rows/*/record_kind"
+    - "/rows/*/usable"
+    - "/rows/*/storage"
+    - "/rows/*/verifier"
+    - "/rows/*/key"
+    - "/rows/*/holder"
+    - "/rows/*/freshness"
+    - "/rows/*/max_bytes"
+    - "/schema"
+    - "/as_of"
+    - "/revision"
+    - "/coverage/state"
+    - "/coverage/reason"
+    - "/signers/*/status"
+    - "/not_modified"
+    - "/page/next_cursor"
+    - "/page/total"
+    - "/page/total_basis"
   free_text:
-    - "/kinds/*/reason"
+    - "/rows/*/reason"
+    - "/signers/*/label"
+    - "/signers/*/role"
