@@ -3273,7 +3273,13 @@ mod tests {
             "ryeos.execute.service.ui/*",
         ]);
         let none = compile_under_reads(&authored, &reads_policy(vec![]));
-        assert!(!none.sources["view:test/input"].contains_key("wrapper"));
+        assert!(
+            none.sources
+                .get("view:test/input")
+                .is_none_or(|bound| !bound.contains_key("wrapper")),
+            "{:?}",
+            none.sources
+        );
         assert!(reason_of(&none, "source:view:test/input:wrapper").contains("seat_read_no_entry"));
         let with_entry = compile_under_reads(
             &authored,
