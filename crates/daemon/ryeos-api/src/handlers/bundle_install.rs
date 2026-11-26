@@ -195,6 +195,13 @@ pub fn install(req: &Request, authority: &InstallAuthority<'_>) -> Result<Value>
             target.display()
         );
     }
+    if replaced {
+        ryeos_app::bundle_transaction::refuse_laned_replacement(
+            app_root,
+            authority.node_trust_store,
+            &req.name,
+        )?;
+    }
 
     // Trust comes only from the node's persistent trust store. Admission runs
     // against the completed staging tree below, never the mutable source tree.
@@ -211,6 +218,7 @@ pub fn install(req: &Request, authority: &InstallAuthority<'_>) -> Result<Value>
             authority.node_trust_store,
             authority.prospective_validator,
             Arc::clone(&authority.isolation),
+            None,
         )
     };
     let registration = serde_json::json!({ "kind": "node", "path": target });
@@ -538,9 +546,23 @@ pub(crate) fn admit_completed_staging(
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    lane: Option<&ryeos_engine::trust::BundleLane>,
 ) -> Result<AdmittedStaging> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
+    if lane.is_some() {
+        // A laned bundle carries no kinds, runtime authority, executables or
+        // node extensions; refuse before anything else looks at the tree.
+        let manifest = ryeos_bundle::manifest::parse_manifest(staging, bundle_name)
+            .context("parse laned bundle manifest for lane admission")?;
+        ryeos_bundle::lane::refuse_lane_authority(staging, &manifest).map_err(|refusal| {
+            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                refusal.code(),
+                422,
+                refusal.to_string(),
+            ))
+        })?;
+    }
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and policy-directory collisions are
     // rejected before activation. Command grants come only from the exact
@@ -577,6 +599,7 @@ pub(crate) fn admit_completed_staging(
                 }
                 Ok(ryeos_node_runtime::node_config_source::BundleRecord {
                     name: name.clone(),
+                    lane: lane.cloned(),
                     path: bundle.source.root_path().clone(),
                     source_file: app_root
                         .join(ryeos_engine::AI_DIR)

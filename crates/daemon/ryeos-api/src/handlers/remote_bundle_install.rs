@@ -104,6 +104,7 @@ pub async fn handle(
         &source,
         &entries,
         &format!("remote:{}", req.remote),
+        None,
     )
     .await
 }
@@ -156,6 +157,7 @@ pub(crate) async fn install_entries<S: BlobSource>(
     source: &S,
     entries: &[BundleExportEntry],
     journal_source: &str,
+    lane: Option<ryeos_engine::trust::BundleLane>,
 ) -> Result<Value> {
     let bundles_root = state
         .config
@@ -256,6 +258,7 @@ pub(crate) async fn install_entries<S: BlobSource>(
         &state.engine.node_trust_store,
         &prospective_validator,
         Arc::clone(&state.isolation),
+        lane.as_ref(),
     );
     if let Err(error) = admission {
         // The canonical staging name is shared by transaction recovery. Remove
@@ -268,7 +271,11 @@ pub(crate) async fn install_entries<S: BlobSource>(
     let mut cache_invalidated = false;
     let mut durability_uncertain = false;
     let activation: Result<(PathBuf, PathBuf)> = (|| {
-        let registration = serde_json::json!({ "kind": "node", "path": local_target });
+        let mut registration = serde_json::json!({ "kind": "node", "path": local_target });
+        if let Some(lane) = &lane {
+            registration["lane"] =
+                serde_json::to_value(lane).context("serialize bundle lane marker")?;
+        }
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
             &transaction_staging,

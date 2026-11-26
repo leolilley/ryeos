@@ -55,6 +55,39 @@ pub fn prepare_signed_bundle_registration(
     Ok(lillux::signature::sign_content(&yaml, &key, "#", None).into_bytes())
 }
 
+/// Refuse to replace or re-register a bundle whose current registration
+/// carries a lane marker. A laned bundle can only be removed; the typed refusal
+/// `bundle_lane_not_replaceable` (409) says so. A name with no registration
+/// passes. The registrations are read through the verified bundle bootstrap
+/// loader, so an unsigned or foreign-signed file is an error, not a pass.
+pub fn refuse_laned_replacement(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    name: &str,
+) -> Result<()> {
+    let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store,
+    }
+    .load_bundle_section()
+    .context("load current bundle registrations to check lane markers")?;
+    if let Some(lane) = records
+        .iter()
+        .find(|record| record.name == name)
+        .and_then(|record| record.lane.as_ref())
+    {
+        return Err(anyhow::Error::new(crate::handler_error::typed_refusal(
+            "bundle_lane_not_replaceable",
+            409,
+            format!(
+                "bundle '{name}' is in the {} lane and cannot be replaced or updated in place; remove it and pull the publication again",
+                lane.name
+            ),
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {

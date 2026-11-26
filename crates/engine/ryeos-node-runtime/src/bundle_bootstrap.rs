@@ -19,6 +19,8 @@ pub struct BundleBootstrapLoader<'a> {
 struct RawBundleRecord {
     kind: String,
     path: std::path::PathBuf,
+    #[serde(default)]
+    lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
 pub fn parse_bundle(ctx: &NodeItemContext, body: &Value) -> Result<BundleRecord> {
@@ -40,8 +42,14 @@ pub fn parse_bundle(ctx: &NodeItemContext, body: &Value) -> Result<BundleRecord>
         );
     }
 
+    if let Some(lane) = &raw.lane {
+        lane.validate_shape()
+            .map_err(|error| anyhow::anyhow!("bundle '{}' has an invalid lane: {error}", ctx.id))?;
+    }
+
     Ok(BundleRecord {
         name: ctx.id.clone(),
+        lane: raw.lane,
         path: raw.path,
         source_file: std::path::PathBuf::new(),
     })
@@ -119,5 +127,61 @@ impl<'a> BundleBootstrapLoader<'a> {
         }
 
         Ok(records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn ctx() -> NodeItemContext {
+        NodeItemContext {
+            section: "bundles".to_string(),
+            id: "pulled".to_string(),
+            stem: "pulled".to_string(),
+            rel_path: PathBuf::from("pulled.yaml"),
+            source_file: PathBuf::from("/app/.ai/node/bundles/pulled.yaml"),
+            signer_fingerprint: "f".repeat(64),
+        }
+    }
+
+    fn lane_value() -> Value {
+        serde_json::to_value(ryeos_engine::trust::BundleLane::publication(
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "1.0.0",
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_without_a_lane_parses_with_none() {
+        let record =
+            parse_bundle(&ctx(), &serde_json::json!({"kind": "node", "path": "/b"})).unwrap();
+        assert!(record.lane.is_none());
+    }
+
+    #[test]
+    fn registration_lane_is_carried_into_the_record() {
+        let record = parse_bundle(
+            &ctx(),
+            &serde_json::json!({"kind": "node", "path": "/b", "lane": lane_value()}),
+        )
+        .unwrap();
+        assert_eq!(record.lane.unwrap().name, "publication");
+    }
+
+    #[test]
+    fn registration_with_a_malformed_lane_is_refused() {
+        let mut lane = lane_value();
+        lane["record_hash"] = serde_json::json!("not-hex");
+        let error = parse_bundle(
+            &ctx(),
+            &serde_json::json!({"kind": "node", "path": "/b", "lane": lane}),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("record_hash"), "{error:#}");
     }
 }

@@ -66,6 +66,17 @@ async fn publish_on(a: &DaemonHarness, fixture: &FastFixture) -> Publication {
 }
 
 async fn publish_bundle_on(a: &DaemonHarness, fixture: &FastFixture, bundle: &str) -> Publication {
+    publish_bundle_with_id(a, fixture, bundle, 0x41).await
+}
+
+/// Publish `bundle` under a record id built from `id_byte`, so one node can
+/// hold several publications at once.
+async fn publish_bundle_with_id(
+    a: &DaemonHarness,
+    fixture: &FastFixture,
+    bundle: &str,
+    id_byte: u8,
+) -> Publication {
     let (status, frozen) = service(
         a,
         "service:publication/freeze",
@@ -82,7 +93,7 @@ async fn publish_bundle_on(a: &DaemonHarness, fixture: &FastFixture, bundle: &st
         .max(ryeos_engine::trust::MIN_PUBLICATION_READ_BYTES);
     let now = lillux::time::unix_secs_now();
     let record = PublicationRecord::new(
-        &hex(&[0x41; 16]),
+        &hex(&[id_byte; 16]),
         &hex(&rand::random::<[u8; 16]>()),
         &node_fingerprint,
         result["manifest_hash"].as_str().unwrap(),
@@ -196,9 +207,126 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
         assert_eq!(bytes.len() as u64, entry.size, "{}", entry.path);
     }
 
+    // The registration carries the publication-lane marker with the pins the
+    // pull used.
+    let publisher_fp = manifest
+        .publisher_fingerprint
+        .strip_prefix("fp:")
+        .unwrap_or(&manifest.publisher_fingerprint)
+        .to_owned();
+    let registration = std::fs::read_to_string(
+        b.state_path
+            .join(".ai/node/bundles")
+            .join(format!("{BUNDLE}.yaml")),
+    )
+    .expect("read the registration");
+    for needle in [
+        "lane:",
+        "name: publication",
+        publisher_fp.as_str(),
+        publication.record_hash.as_str(),
+        publication.node_fingerprint.as_str(),
+        manifest.bundle_version.as_str(),
+    ] {
+        assert!(registration.contains(needle), "{needle}: {registration}");
+    }
+
+    // `bundle.list` shows the lane for this bundle only.
+    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    assert_eq!(status, 200, "{listed:#}");
+    let bundles = listed["result"]["bundles"].as_array().expect("bundles");
+    let entry = bundles
+        .iter()
+        .find(|entry| entry["name"] == BUNDLE)
+        .expect("the pulled bundle is listed");
+    assert_eq!(entry["lane"]["name"], "publication", "{entry:#}");
+    assert_eq!(entry["lane"]["publisher_fingerprint"], json!(publisher_fp));
+    assert_eq!(entry["lane"]["record_hash"], json!(publication.record_hash));
+    assert_eq!(
+        entry["lane"]["node_fingerprint"],
+        json!(publication.node_fingerprint)
+    );
+    assert!(
+        bundles
+            .iter()
+            .filter(|entry| entry["name"] != BUNDLE)
+            .all(|entry| entry.get("lane").is_none()),
+        "{listed:#}"
+    );
+
+    // The result carries the receipt, with the real fingerprints.
+    let receipt = result["receipt"].as_str().expect("receipt");
+    assert!(
+        receipt.starts_with("Installed from a publication, not a release. Publisher fp:"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("Publisher fp:{publisher_fp} signed these bytes")),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!(
+            "node fp:{} served them.",
+            publication.node_fingerprint
+        )),
+        "{receipt}"
+    );
+    assert!(
+        receipt.ends_with("nothing authorizes an exact set."),
+        "{receipt}"
+    );
+
     // The bundle is now installed, so a second pull moves nothing.
     let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
-    assert_ne!(status, 200, "{again:#}");
+    assert_eq!(status, 409, "{again:#}");
+    assert_eq!(
+        again["error"]["code"], "bundle_already_installed",
+        "{again:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_never_takes_core_or_a_name_a_native_install_holds() {
+    let (a, a_fixture) = start_publisher().await;
+    let (b, _b_fixture) = start_puller().await;
+
+    // `core` is never pulled.
+    let core = publish_bundle_with_id(&a, &a_fixture, "core", 0x42).await;
+    let (status, refused) = pull(
+        &b,
+        &core.url,
+        &format!("fp:{}", core.node_fingerprint),
+        &core.record_hash,
+    )
+    .await;
+    assert_eq!(status, 422, "{refused:#}");
+    assert_eq!(
+        refused["error"]["code"], "bundle_core_never_pulled",
+        "{refused:#}"
+    );
+
+    // The puller's `knowledge` bundle is a native install; a publication of the
+    // same name does not take it.
+    let knowledge = publish_bundle_with_id(&a, &a_fixture, "knowledge", 0x43).await;
+    let registration = b.state_path.join(".ai/node/bundles/knowledge.yaml");
+    let before = std::fs::read(&registration).expect("native registration");
+    let (status, refused) = pull(
+        &b,
+        &knowledge.url,
+        &format!("fp:{}", knowledge.node_fingerprint),
+        &knowledge.record_hash,
+    )
+    .await;
+    assert_eq!(status, 409, "{refused:#}");
+    assert_eq!(
+        refused["error"]["code"], "bundle_name_held_by_native_lane",
+        "{refused:#}"
+    );
+    assert_eq!(
+        std::fs::read(&registration).expect("native registration"),
+        before,
+        "the refused pull touched the native registration"
+    );
 }
 
 /// The unpinned publisher: A holds a bundle whose manifest is signed by a key

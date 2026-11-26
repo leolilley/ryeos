@@ -166,6 +166,9 @@ fn classify(error: anyhow::Error) -> HandlerError {
     if let Some(mismatch) = error.downcast_ref::<BlobMismatch>() {
         return PullRefusal::BlobMismatch(mismatch.0.clone()).into_handler_error();
     }
+    if let Some(typed) = crate::handler_error::extract_handler_error(&error) {
+        return typed;
+    }
     HandlerError::Structured {
         code: "publication_install_failed".to_owned(),
         status: 422,
@@ -461,14 +464,60 @@ pub(crate) fn verify_publication(
 
 /// Step 4: the manifest's publisher is a signer this node already trusts.
 /// Scope and the rest of admission are left to the install's own preflight.
+/// The publisher's fingerprint as 64 hex digits, without any `fp:` prefix.
+fn publisher_fingerprint(manifest: &PublicationManifest) -> &str {
+    manifest
+        .publisher_fingerprint
+        .strip_prefix("fp:")
+        .unwrap_or(&manifest.publisher_fingerprint)
+}
+
+/// The statement a pull returns about what it installed. It states the
+/// assurance the bundle does not have.
+pub(crate) fn pull_receipt(publisher: &str, node: &str) -> String {
+    format!(
+        "Installed from a publication, not a release. Publisher fp:{publisher} signed these \
+         bytes and this node pinned that key; node fp:{node} served them. No release evidence \
+         chain exists for this bundle: it was not built, qualified or attested by a release \
+         node. It carries no command, kind, executable or runtime authority unless this node's \
+         policy names it. The publisher signed these bytes; nothing authorizes an exact set."
+    )
+}
+
+/// Refuse, before any blob moves, a name a pull may not take: `core`, and a
+/// name this node already holds as a natively installed bundle. A name held by
+/// a laned bundle falls through to the install precheck's own refusal.
+fn precheck_pull_name(bundle_name: &str, state: &AppState) -> HandlerResult<()> {
+    if bundle_name == "core" {
+        return Err(ryeos_app::handler_error::typed_refusal(
+            "bundle_core_never_pulled",
+            422,
+            "the `core` bundle is never installed through a publication pull",
+        ));
+    }
+    if state
+        .node_config
+        .bundles
+        .iter()
+        .any(|record| record.name == bundle_name && record.lane.is_none())
+    {
+        return Err(ryeos_app::handler_error::typed_refusal(
+            "bundle_name_held_by_native_lane",
+            409,
+            format!(
+                "bundle '{bundle_name}' is already installed on this node by a native install; \
+                 a publication pull never takes or replaces a natively installed name"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn check_publisher_pinned(
     trust: &TrustStore,
     manifest: &PublicationManifest,
 ) -> Result<(), PullRefusal> {
-    let fingerprint = manifest
-        .publisher_fingerprint
-        .strip_prefix("fp:")
-        .unwrap_or(&manifest.publisher_fingerprint);
+    let fingerprint = publisher_fingerprint(manifest);
     if trust
         .signers()
         .any(|signer| signer.fingerprint == fingerprint)
@@ -886,6 +935,7 @@ pub async fn handle(
             "the manifest has no files".into(),
         )));
     }
+    precheck_pull_name(&bundle_name, &state)?;
     if let Some(report) = precheck_install(&bundle_name, &state).map_err(classify)? {
         return Ok(report);
     }
@@ -901,6 +951,13 @@ pub async fn handle(
             .map(|entry| (entry.hash.clone(), entry.size))
             .collect(),
     };
+    let publisher = publisher_fingerprint(&verified.manifest).to_owned();
+    let lane = ryeos_engine::trust::BundleLane::publication(
+        publisher.clone(),
+        pins.expect.clone(),
+        pins.node.clone(),
+        verified.manifest.bundle_version.clone(),
+    );
     let mut installed = install_entries(
         &state,
         &ctx.fingerprint,
@@ -908,6 +965,7 @@ pub async fn handle(
         &source,
         &response.entries,
         &format!("publication:{}", target.id),
+        Some(lane),
     )
     .await
     .map_err(classify)?;
@@ -915,6 +973,10 @@ pub async fn handle(
         object.insert("publication_id".to_owned(), json!(target.id));
         object.insert("record_hash".to_owned(), json!(pins.expect));
         object.insert("node_fingerprint".to_owned(), json!(pins.node));
+        object.insert(
+            "receipt".to_owned(),
+            json!(pull_receipt(&publisher, &pins.node)),
+        );
     }
     Ok(installed)
 }

@@ -2466,6 +2466,7 @@ fn prospective_bundle_records(
         .map(
             |(name, bundle)| ryeos_node_runtime::node_config_source::BundleRecord {
                 name: name.clone(),
+                lane: None,
                 path: replacement
                     .filter(|(replacement_name, _)| *replacement_name == name)
                     .map(|(_, path)| path.to_path_buf())

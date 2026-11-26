@@ -16,10 +16,14 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut bundles = Vec::new();
     for record in &state.node_config.bundles {
-        bundles.push(serde_json::json!({
+        let mut entry = serde_json::json!({
             "name": record.name,
             "path": record.path.display().to_string(),
-        }));
+        });
+        if let Some(lane) = &record.lane {
+            entry["lane"] = serde_json::to_value(lane)?;
+        }
+        bundles.push(entry);
     }
     Ok(serde_json::json!({ "bundles": bundles }))
 }

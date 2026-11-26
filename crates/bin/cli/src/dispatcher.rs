@@ -2570,6 +2570,7 @@ mod tests {
             runtime_snapshot_qualification: Vec::new(),
             bundles: vec![ryeos_node_runtime::node_config_source::BundleRecord {
                 name: "core".into(),
+                lane: None,
                 path: core,
                 source_file: root.path().join("core-registration.yaml"),
             }],

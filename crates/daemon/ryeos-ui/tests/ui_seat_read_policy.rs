@@ -44,6 +44,7 @@ fn add_bundles(state: &mut AppState, names: &[&str]) {
     for name in names {
         snapshot.bundles.push(BundleRecord {
             name: (*name).to_owned(),
+            lane: None,
             path: format!("/srv/private/{name}").into(),
             source_file: format!("/srv/private/{name}.yaml").into(),
         });
