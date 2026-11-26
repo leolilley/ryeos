@@ -399,6 +399,15 @@ async fn thread_tail_descriptor_denied_for_non_owner() {
     // A different (but authorized) principal asks for the descriptor of a thread
     // it does not own. The handler's ownership check must deny it before any
     // descriptor is issued — 404, not a leak of existence.
+    // The non-owner reaches the service's own ownership check only through a
+    // checkout registered to its owner: an unregistered live path is refused
+    // before the service runs.
+    h.register_checkout_for_key(
+        &other_sk,
+        std::path::Path::new(&project_path),
+        "thread-tail-project",
+    )
+    .expect("register the non-owner's checkout");
     let body = serde_json::json!({
         "item_ref": "service:threads/tail",
         "ref_bindings": {},

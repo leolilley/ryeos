@@ -109,20 +109,16 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 ))
             })?;
 
+        let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str)
+            .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
+
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
             .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
-        // Judged before any syntactic check on the path, so a key that is not
-        // the operator gets the one refusal for a relative path too.
-        let admitted_project_path = crate::routes::live_path::admit_route_live_path(
-            &ctx.state,
-            ctx.principal.as_ref(),
-            std::path::Path::new(project_path_str),
-        )?;
         let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
             &ctx.state,
             &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
-            &admitted_project_path,
+            project_path.as_path(),
             &principal_id,
             &format!("route-{thread_id}"),
             None,

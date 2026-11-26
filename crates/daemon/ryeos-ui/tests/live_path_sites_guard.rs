@@ -27,13 +27,19 @@ const MUST_ADMIT: &[&str] = &[
     "crates/daemon/ryeos-api/src/handlers/scheduler_register.rs",
     "crates/daemon/ryeos-api/src/handlers/threads_input.rs",
     "crates/daemon/ryeos-api/src/handlers/tool_env_check.rs",
-    "crates/daemon/ryeos-api/src/routes/invokers/dispatch_invocation.rs",
-    "crates/daemon/ryeos-api/src/routes/invokers/launch_invocation.rs",
     "crates/daemon/ryeos-api/src/routes/response_modes/execute_mode.rs",
 ];
 
 /// Files that name a live source without a key-supplied path, with why.
 const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
+    (
+        "crates/daemon/ryeos-api/src/routes/invokers/dispatch_invocation.rs",
+        "route-authored: the project path is in the operator-signed route's own source_config, and only its `${path.*}` captures can vary it; no key names it",
+    ),
+    (
+        "crates/daemon/ryeos-api/src/routes/invokers/launch_invocation.rs",
+        "route-authored, as dispatch_invocation.rs: the path is the signed route's source_config",
+    ),
     (
         "crates/daemon/ryeos-api/src/handlers/bundle_release_execution.rs",
         "runs in a workspace the daemon materialised from a release source generation",
@@ -111,8 +117,8 @@ fn non_test_text(text: &str) -> &str {
 fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     // A new site or a moved exemption changes these counts and so fails here:
     // add the file to the right list, with a reason if it is exempt.
-    assert_eq!(MUST_ADMIT.len(), 9, "the must-admit list changed");
-    assert_eq!(NEEDS_NO_ADMISSION.len(), 12, "the exemption list changed");
+    assert_eq!(MUST_ADMIT.len(), 7, "the must-admit list changed");
+    assert_eq!(NEEDS_NO_ADMISSION.len(), 14, "the exemption list changed");
     let root = ryeos_engine::test_support::workspace_root();
     let mut files = Vec::new();
     workspace_files(&root, &root.join("crates"), &mut files);

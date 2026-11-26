@@ -276,17 +276,6 @@ impl CompiledDispatchInvoker {
                 scopes,
             } => (fingerprint.clone(), scopes.clone(), None),
         };
-        // A caller principal's path is judged against what its key may run
-        // live; a fixed route principal's path was confined to the route's
-        // workspace above.
-        let project_path = match &self.authority {
-            DispatchAuthority::CallerPrincipal => crate::routes::live_path::admit_route_live_path(
-                &ctx.state,
-                ctx.principal.as_ref(),
-                &project_path,
-            )?,
-            DispatchAuthority::FixedPrincipal { .. } => project_path,
-        };
 
         ryeos_executor::execution::launch_preparation::validate_ref_bindings(&config.ref_bindings)
             .map_err(|error| {
