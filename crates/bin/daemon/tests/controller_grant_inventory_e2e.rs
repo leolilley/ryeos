@@ -1011,7 +1011,8 @@ async fn a_forwarded_operator_is_admitted_only_by_speaking_for_the_controllers_o
     assert!(
         !status.is_success()
             && !is_capability_refusal(status, &body)
-            && body.to_string().contains("admitted operator required"),
+            && status == reqwest::StatusCode::FORBIDDEN
+            && body["code"] == "service_refused",
         "a key that does not speak for the controller's owner is not an operator: {status} {body:#}"
     );
 }
