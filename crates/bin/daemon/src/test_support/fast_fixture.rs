@@ -970,7 +970,6 @@ fn register_bundle_record(
         anyhow::bail!("prepared bundle does not exist at {}", bundle.display());
     }
     let abs = bundle.canonicalize()?;
-    set_fixture_bundle_modes(&abs)?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
