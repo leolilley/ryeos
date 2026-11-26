@@ -787,12 +787,36 @@ fn core_is_never_pulled() {
     refuse_core_name("core-extras").unwrap();
 }
 
-#[cfg(not(feature = "unadmitted-lane-test-support"))]
 #[test]
-fn the_pull_installs_nothing_until_lane_admission_exists() {
-    let refusal = refuse_until_lane_admission().unwrap_err();
+fn the_receipt_says_only_what_the_node_enforces() {
+    let default = pull_receipt(
+        &"a".repeat(64),
+        &"b".repeat(64),
+        &ryeos_bundle::lane::LaneGrants::invoked_only(),
+    );
     assert!(
-        format!("{refusal:?}").contains("bundle_lane_admission_unavailable"),
-        "{refusal:?}"
+        default.starts_with("Installed from a publication, not a release. Publisher fp:"),
+        "{default}"
+    );
+    assert!(default.contains(&format!("node fp:{} served them", "b".repeat(64))));
+    assert!(default.contains("items that act only when invoked, under the caller's own grants"));
+    assert!(!default.contains("kinds ["), "{default}");
+    assert!(
+        default.ends_with("nothing authorizes an exact set."),
+        "{default}"
+    );
+
+    let named = pull_receipt(
+        &"a".repeat(64),
+        &"b".repeat(64),
+        &ryeos_bundle::lane::LaneGrants {
+            invoked: true,
+            kinds: vec!["service".to_string()],
+            facets: vec![ryeos_bundle::lane::Facet::BundleEvents],
+        },
+    );
+    assert!(
+        named.contains("kinds [service], facets [bundle_events]"),
+        "{named}"
     );
 }

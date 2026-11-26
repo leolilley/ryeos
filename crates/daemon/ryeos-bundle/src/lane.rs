@@ -265,6 +265,74 @@ fn under(path: &str, dir: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Check an installed laned bundle again, as the node does every time it
+/// loads its registrations: its manifest as parsed from the installed tree,
+/// its whole tree, and what `grants` admit.
+pub fn audit_installed_lane_bundle(
+    root: &Path,
+    name: &str,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+    grants: &LaneGrants,
+) -> Result<(), LaneRefusal> {
+    let manifest =
+        crate::manifest::parse_manifest(root, name).map_err(|error| LaneRefusal::Unreadable {
+            path: root.display().to_string(),
+            detail: format!("{error:#}"),
+        })?;
+    let lookup = |directory: &str| {
+        kinds
+            .kind_in_directory(directory)
+            .map(|(kind, activation)| (kind.to_string(), activation))
+    };
+    refuse_lane_tree(
+        root,
+        &LaneContext {
+            kind_in_directory: &lookup,
+            manifest: &manifest,
+            grants,
+        },
+    )
+}
+
+/// Refuse a file list that has an item directory the manifest does not
+/// declare. The publisher's freeze runs this, so a bundle that no lane would
+/// accept is caught where it is published. A directory no known kind owns is
+/// not this check's concern.
+pub fn refuse_undeclared_kinds<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    kind_in_directory: KindLookup<'_>,
+    manifest: &BundleManifest,
+) -> Result<(), LaneRefusal> {
+    for path in paths {
+        if CONTROL_PATHS.iter().any(|control| under(path, control)) {
+            continue;
+        }
+        let Some(directory) = path
+            .strip_prefix(".ai/")
+            .and_then(|rest| rest.split('/').next())
+            .filter(|directory| !directory.is_empty())
+        else {
+            continue;
+        };
+        let Some((kind, _)) = kind_in_directory(directory) else {
+            continue;
+        };
+        let declared = manifest
+            .uses_kinds
+            .iter()
+            .chain(manifest.requires_kinds.iter())
+            .chain(manifest.provides_kinds.iter())
+            .any(|declared| *declared == kind);
+        if !declared {
+            return Err(LaneRefusal::KindUndeclared {
+                kind,
+                path: path.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// One bundle-relative `/`-separated path against the lane rules, in order:
 /// native executable directories (never), bundle control data, then the item
 /// directories through the kind lookup.
@@ -298,6 +366,7 @@ pub fn refuse_lane_path(path: &str, ctx: &LaneContext<'_>) -> Result<(), LaneRef
         .uses_kinds
         .iter()
         .chain(ctx.manifest.requires_kinds.iter())
+        .chain(ctx.manifest.provides_kinds.iter())
         .any(|declared| *declared == kind);
     if !declared {
         return Err(LaneRefusal::KindUndeclared {
@@ -634,6 +703,25 @@ mod tests {
         let mut undeclared = manifest();
         undeclared.uses_kinds = vec!["tool".to_string()];
         let error = check(tmp.path(), &undeclared, &LaneGrants::invoked_only()).unwrap_err();
+        assert_code(&error, "publication_lane_kind_undeclared");
+    }
+
+    #[test]
+    fn freeze_refuses_an_item_directory_the_manifest_does_not_declare() {
+        let mut manifest = manifest();
+        manifest.uses_kinds = vec!["knowledge".to_string()];
+        refuse_undeclared_kinds(
+            [
+                ".ai/knowledge/a.md",
+                ".ai/manifest.yaml",
+                "README.md",
+                ".ai/other/x",
+            ],
+            &lookup,
+            &manifest,
+        )
+        .unwrap();
+        let error = refuse_undeclared_kinds([".ai/tools/t.yaml"], &lookup, &manifest).unwrap_err();
         assert_code(&error, "publication_lane_kind_undeclared");
     }
 

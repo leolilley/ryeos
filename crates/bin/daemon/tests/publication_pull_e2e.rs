@@ -474,3 +474,109 @@ async fn a_bundle_of_a_tool_and_a_knowledge_item_installs_in_the_lane() {
     assert!(registration.contains("lane:"), "{registration}");
     assert!(registration.contains("publication"), "{registration}");
 }
+
+/// Files of a synthetic bundle: (path, bytes).
+type LaneFiles = &'static [(&'static str, &'static [u8])];
+
+/// Synthetic bundles that each carry one thing a publication-lane bundle may
+/// not: (bundle name, kinds its manifest declares, files, expected typed code).
+const LANE_REFUSALS: &[(&str, &[&str], LaneFiles, &str)] = &[
+    (
+        "lane-service",
+        &["service"],
+        &[(".ai/services/x/s.yaml", b"x")],
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-config",
+        &["config"],
+        &[(".ai/config/x/c.yaml", b"x")],
+        "publication_lane_kind_refused",
+    ),
+    (
+        "lane-bin",
+        &["config"],
+        &[("bin/tool", b"x")],
+        "publication_lane_never_admitted",
+    ),
+    (
+        "lane-stray",
+        &["config"],
+        &[("README.md", b"x")],
+        "publication_lane_stray_file",
+    ),
+    (
+        "lane-elf",
+        &["knowledge"],
+        &[(".ai/knowledge/x/note.md", b"\x7fELF\x02\x01\x01")],
+        "publication_lane_executable_image",
+    ),
+];
+
+async fn start_publisher_with_lane_refusals() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            for (bundle, kinds, files, _) in LANE_REFUSALS {
+                register_config_fixture_bundle(state_path, bundle, fixture, |root| {
+                    for (path, bytes) in *files {
+                        let file = root.join(path);
+                        std::fs::create_dir_all(file.parent().expect("a parent directory"))?;
+                        std::fs::write(file, bytes)?;
+                    }
+                    Ok(())
+                })?;
+                let requires: String = kinds.iter().map(|kind| format!("  - {kind}\n")).collect();
+                let manifest = state_path
+                    .join(".ai/bundles")
+                    .join(bundle)
+                    .join(".ai/manifest.yaml");
+                std::fs::write(
+                    &manifest,
+                    lillux::signature::sign_content_at(
+                        &format!(
+                            "name: {bundle}\nversion: 1.0.0\ndescription: lane refusal\nprovides_kinds: []\nrequires_kinds:\n{requires}uses_kinds: []\n"
+                        ),
+                        &fixture.publisher,
+                        "#",
+                        None,
+                        FAST_FIXTURE_TIME,
+                    ),
+                )?;
+            }
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the publishing node")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_that_carries_more_than_invoked_items_is_refused_with_its_typed_code_and_nothing_is_written()
+ {
+    let (a, a_fixture) = start_publisher_with_lane_refusals().await;
+    let (b, _b_fixture) = start_puller().await;
+    for (index, (bundle, _, _, code)) in LANE_REFUSALS.iter().enumerate() {
+        let publication = publish_bundle_with_id(&a, &a_fixture, bundle, 0x50 + index as u8).await;
+        let (status, refused) = pull(
+            &b,
+            &publication.url,
+            &format!("fp:{}", publication.node_fingerprint),
+            &publication.record_hash,
+        )
+        .await;
+        assert_eq!(status, 422, "{bundle}: {refused:#}");
+        assert_eq!(refused["error"]["code"], *code, "{bundle}: {refused:#}");
+        assert!(
+            !b.state_path.join(".ai/bundles").join(bundle).exists(),
+            "{bundle}: a refused pull left a bundle behind"
+        );
+        assert!(
+            !b.state_path
+                .join(".ai/node/bundles")
+                .join(format!("{bundle}.yaml"))
+                .exists(),
+            "{bundle}: a refused pull left a registration behind"
+        );
+    }
+}

@@ -472,25 +472,131 @@ fn publisher_fingerprint(manifest: &PublicationManifest) -> &str {
         .unwrap_or(&manifest.publisher_fingerprint)
 }
 
-/// Whether this build lets a pull install without lane admission. Only the
-/// end-to-end harness build does.
-fn unadmitted_lane_pull_allowed() -> bool {
-    cfg!(feature = "unadmitted-lane-test-support")
+/// What this node's `publication_lane` policy admits for `bundle_name`.
+fn lane_grants_for(
+    bundle_name: &str,
+    state: &AppState,
+) -> HandlerResult<ryeos_bundle::lane::LaneGrants> {
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::publication_lane::PublicationLanePolicy>()
+        .map_err(|error| {
+            HandlerError::Internal(format!("this node's publication_lane policy: {error:#}"))
+        })?;
+    Ok(policy.grants_for(bundle_name))
 }
 
-/// A pulled bundle sits in the publication lane, and the policy that says what
-/// such a bundle may carry does not exist yet. Until admission lands, the pull
-/// installs nothing.
-fn refuse_until_lane_admission() -> HandlerResult<()> {
-    if unadmitted_lane_pull_allowed() {
-        return Ok(());
+/// A refusal of the lane check, or a pull refusal met while reading the
+/// manifest.
+enum LaneCheckError {
+    Lane(ryeos_bundle::lane::LaneRefusal),
+    Pull(PullRefusal),
+}
+
+fn lane_error(error: LaneCheckError, refuse: fn(PullRefusal) -> HandlerError) -> HandlerError {
+    match error {
+        LaneCheckError::Lane(refusal) => {
+            ryeos_app::handler_error::typed_refusal(refusal.code(), 422, refusal.to_string())
+        }
+        LaneCheckError::Pull(refusal) => refuse(refusal),
     }
-    Err(ryeos_app::handler_error::typed_refusal(
-        "bundle_lane_admission_unavailable",
-        422,
-        "bundle/pull installs into the publication lane, and this build has no lane admission \
-         policy yet, so it installs nothing. Nothing was fetched",
-    ))
+}
+
+/// Fetch and check the bundle's own manifest, then refuse the publication's
+/// file list if the lane rules do: provided kinds, authority this node does
+/// not admit, undeclared or node-loaded kinds, stray files, executables.
+async fn check_lane_before_fetch(
+    source: &PublicBlobSource,
+    entries: &[BundleExportEntry],
+    bundle_name: &str,
+    grants: &ryeos_bundle::lane::LaneGrants,
+    state: &AppState,
+) -> Result<(), LaneCheckError> {
+    const MANIFEST_PATH: &str = ".ai/manifest.yaml";
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == MANIFEST_PATH)
+        .ok_or_else(|| {
+            LaneCheckError::Pull(PullRefusal::ManifestMismatch(
+                "the publication has no .ai/manifest.yaml".into(),
+            ))
+        })?;
+    let mut blobs = source
+        .fetch_batch(std::slice::from_ref(&entry.hash))
+        .await
+        .map_err(|error| {
+            LaneCheckError::Pull(PullRefusal::FetchFailed(format!(
+                "read the bundle manifest: {error:#}"
+            )))
+        })?;
+    let bytes = blobs.remove(&entry.hash).ok_or_else(|| {
+        LaneCheckError::Pull(PullRefusal::BlobMismatch(
+            "the bundle manifest blob was not returned".into(),
+        ))
+    })?;
+    if lillux::sha256_hex(&bytes) != entry.hash {
+        return Err(LaneCheckError::Pull(PullRefusal::BlobMismatch(
+            "the bundle manifest does not hash to its manifest entry".into(),
+        )));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        LaneCheckError::Pull(PullRefusal::Malformed(
+            "the bundle manifest is not UTF-8".into(),
+        ))
+    })?;
+    let manifest = ryeos_bundle::manifest::parse_manifest_text(
+        text,
+        std::path::Path::new(MANIFEST_PATH),
+        bundle_name,
+    )
+    .map_err(|error| {
+        LaneCheckError::Pull(PullRefusal::Malformed(format!(
+            "the bundle manifest: {error:#}"
+        )))
+    })?;
+    ryeos_bundle::lane::refuse_lane_manifest(&manifest, grants).map_err(LaneCheckError::Lane)?;
+    let lookup = |directory: &str| {
+        state
+            .engine
+            .kinds
+            .kind_in_directory(directory)
+            .map(|(kind, activation)| (kind.to_string(), activation))
+    };
+    ryeos_bundle::lane::refuse_lane_paths(
+        entries.iter().map(|entry| entry.path.as_str()),
+        &ryeos_bundle::lane::LaneContext {
+            kind_in_directory: &lookup,
+            manifest: &manifest,
+            grants,
+        },
+    )
+    .map_err(LaneCheckError::Lane)
+}
+
+/// The statement a pull returns about what it installed. It states the
+/// assurance the bundle does not have, and says only what this node enforces.
+pub(crate) fn pull_receipt(
+    publisher: &str,
+    node: &str,
+    grants: &ryeos_bundle::lane::LaneGrants,
+) -> String {
+    let mut receipt = format!(
+        "Installed from a publication, not a release. Publisher fp:{publisher} signed these \
+         bytes and this node pinned that key; node fp:{node} served them. No release evidence \
+         chain exists for this bundle: it was not built, qualified or attested by a release \
+         node. This node admitted it under its publication_lane policy: items that act only \
+         when invoked, under the caller's own grants"
+    );
+    if !grants.kinds.is_empty() || !grants.facets.is_empty() {
+        let facets: Vec<&str> = grants.facets.iter().map(|facet| facet.name()).collect();
+        receipt.push_str(&format!(
+            ", and what the policy names for this bundle: kinds [{}], facets [{}]",
+            grants.kinds.join(", "),
+            facets.join(", ")
+        ));
+    }
+    receipt.push_str(". The publisher signed these bytes; nothing authorizes an exact set.");
+    receipt
 }
 
 /// `core` is never installed through a publication pull.
@@ -901,7 +1007,6 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     super::publication::operator_caller(&ctx, &state)?;
-    refuse_until_lane_admission()?;
     let refuse = PullRefusal::into_handler_error;
 
     let pins = Pins::parse(&req.node, &req.expect).map_err(refuse)?;
@@ -967,6 +1072,13 @@ pub async fn handle(
             .map(|entry| (entry.hash.clone(), entry.size))
             .collect(),
     };
+    // The lane's rules run on the publication's own manifest and file list
+    // before any other blob is fetched: the manifest is the one blob read
+    // first, hashed against its entry, and the paths are compared with it.
+    let grants = lane_grants_for(&bundle_name, &state)?;
+    check_lane_before_fetch(&source, &response.entries, &bundle_name, &grants, &state)
+        .await
+        .map_err(|error| lane_error(error, refuse))?;
     let lane = ryeos_engine::trust::BundleLane::publication(
         publisher_fingerprint(&verified.manifest),
         pins.expect.clone(),
@@ -985,6 +1097,14 @@ pub async fn handle(
     .await
     .map_err(classify)?;
     if let Some(object) = installed.as_object_mut() {
+        object.insert(
+            "receipt".to_owned(),
+            json!(pull_receipt(
+                publisher_fingerprint(&verified.manifest),
+                &pins.node,
+                &grants
+            )),
+        );
         object.insert("publication_id".to_owned(), json!(target.id));
         object.insert("record_hash".to_owned(), json!(pins.expect));
         object.insert("node_fingerprint".to_owned(), json!(pins.node));

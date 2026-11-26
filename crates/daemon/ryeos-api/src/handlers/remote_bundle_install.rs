@@ -250,6 +250,20 @@ pub(crate) async fn install_entries<S: BlobSource>(
         }
     }
 
+    let lane_admission = match lane.as_ref() {
+        Some(marker) => {
+            let policy = state
+                .node_policy
+                .require::<ryeos_node_runtime::node_policy::sections::publication_lane::PublicationLanePolicy>()
+                .context("this node's publication_lane policy")?;
+            Some(crate::handlers::bundle_install::LaneAdmission {
+                marker,
+                kinds: &state.engine.kinds,
+                grants: policy.grants_for(bundle_name),
+            })
+        }
+        None => None,
+    };
     let admission = crate::handlers::bundle_install::admit_completed_staging(
         &state.config.app_root,
         bundle_name,
@@ -258,7 +272,7 @@ pub(crate) async fn install_entries<S: BlobSource>(
         &state.engine.node_trust_store,
         &prospective_validator,
         Arc::clone(&state.isolation),
-        lane.as_ref(),
+        lane_admission.as_ref(),
     );
     if let Err(error) = admission {
         // The canonical staging name is shared by transaction recovery. Remove

@@ -26,6 +26,15 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+/// What admission needs to check a bundle that arrived through a publication
+/// pull: its lane marker, this node's kinds, and what the node's
+/// `publication_lane` policy admits for it.
+pub(crate) struct LaneAdmission<'a> {
+    pub marker: &'a ryeos_engine::trust::BundleLane,
+    pub kinds: &'a ryeos_engine::kind_registry::KindRegistry,
+    pub grants: ryeos_bundle::lane::LaneGrants,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -546,8 +555,25 @@ pub(crate) fn admit_completed_staging(
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
-    lane: Option<&ryeos_engine::trust::BundleLane>,
+    lane: Option<&LaneAdmission<'_>>,
 ) -> Result<AdmittedStaging> {
+    if let Some(admission) = lane {
+        // A laned bundle is checked against this node's kinds and its
+        // publication_lane policy before anything else looks at the tree.
+        ryeos_bundle::lane::audit_installed_lane_bundle(
+            staging,
+            bundle_name,
+            admission.kinds,
+            &admission.grants,
+        )
+        .map_err(|refusal| {
+            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                refusal.code(),
+                422,
+                refusal.to_string(),
+            ))
+        })?;
+    }
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is
@@ -586,7 +612,7 @@ pub(crate) fn admit_completed_staging(
                 }
                 Ok(ryeos_node_runtime::node_config_source::BundleRecord {
                     name: name.clone(),
-                    lane: lane.cloned(),
+                    lane: lane.map(|admission| admission.marker.clone()),
                     path: bundle.source.root_path().clone(),
                     source_file: app_root
                         .join(ryeos_engine::AI_DIR)

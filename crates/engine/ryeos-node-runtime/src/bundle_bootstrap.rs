@@ -55,6 +55,16 @@ pub fn parse_bundle(ctx: &NodeItemContext, body: &Value) -> Result<BundleRecord>
     })
 }
 
+/// A laned bundle the loader left out because it no longer passes what this
+/// node admits from the publication lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedLaneBundle {
+    pub name: String,
+    /// The stable refusal code.
+    pub code: &'static str,
+    pub message: String,
+}
+
 impl<'a> BundleBootstrapLoader<'a> {
     /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
@@ -62,6 +72,18 @@ impl<'a> BundleBootstrapLoader<'a> {
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
 
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
+        self.load_bundle_section_reporting_skipped()
+            .map(|(records, _)| records)
+    }
+
+    /// As [`Self::load_bundle_section`], and also the laned bundles that were
+    /// left out. A laned bundle is checked against the node's kind registry
+    /// (built from the native bundles) and its `publication_lane` policy; one
+    /// that fails is not loaded, is logged at error level and is reported
+    /// here. It never stops the node from loading the others.
+    pub fn load_bundle_section_reporting_skipped(
+        &self,
+    ) -> Result<(Vec<BundleRecord>, Vec<SkippedLaneBundle>)> {
         let mut records: Vec<BundleRecord> = Vec::new();
 
         let node_dir = self
@@ -123,11 +145,86 @@ impl<'a> BundleBootstrapLoader<'a> {
 
         // Collision detection: by canonical path AND by name (fail-closed)
         check_bundle_collisions(&records)?;
+        let (records, skipped) = self.audit_laned_bundles(records);
         if records.is_empty() {
             bail!("node-config section `bundles` violates AtLeastOne cardinality with 0 record(s)");
         }
 
-        Ok(records)
+        Ok((records, skipped))
+    }
+
+    /// Check every laned record; leave out the ones that fail.
+    fn audit_laned_bundles(
+        &self,
+        records: Vec<BundleRecord>,
+    ) -> (Vec<BundleRecord>, Vec<SkippedLaneBundle>) {
+        if records.iter().all(|record| record.lane.is_none()) {
+            return (records, Vec::new());
+        }
+        let schema_roots: Vec<_> = records
+            .iter()
+            .filter(|record| record.lane.is_none())
+            .map(|record| {
+                record
+                    .path
+                    .join(ryeos_engine::AI_DIR)
+                    .join(ryeos_engine::KIND_SCHEMAS_DIR)
+            })
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let context = ryeos_engine::kind_registry::KindRegistry::load_base(
+            &schema_roots,
+            self.trust_store,
+        )
+        .map_err(|error| format!("the native kind schemas could not be loaded: {error}"))
+        .and_then(|kinds| {
+            let table = crate::node_policy::NodePolicyTable::new();
+            crate::node_policy::load_snapshot(self.app_root, self.trust_store, &table)
+                .and_then(|snapshot| {
+                    snapshot
+                        .require::<crate::node_policy::sections::publication_lane::PublicationLanePolicy>()
+                        .cloned()
+                })
+                .map(|policy| (kinds, policy))
+                .map_err(|error| format!("the publication_lane policy is unavailable: {error:#}"))
+        });
+        let mut kept = Vec::with_capacity(records.len());
+        let mut skipped = Vec::new();
+        for record in records {
+            if record.lane.is_none() {
+                kept.push(record);
+                continue;
+            }
+            let (code, message) = match &context {
+                Ok((kinds, policy)) => {
+                    match ryeos_bundle::lane::audit_installed_lane_bundle(
+                        &record.path,
+                        &record.name,
+                        kinds,
+                        &policy.grants_for(&record.name),
+                    ) {
+                        Ok(()) => {
+                            kept.push(record);
+                            continue;
+                        }
+                        Err(refusal) => (refusal.code(), refusal.to_string()),
+                    }
+                }
+                Err(detail) => ("publication_lane_policy_unavailable", detail.clone()),
+            };
+            tracing::error!(
+                bundle = %record.name,
+                code,
+                error = %message,
+                "a publication-lane bundle does not pass what this node admits; it is not loaded"
+            );
+            skipped.push(SkippedLaneBundle {
+                name: record.name.clone(),
+                code,
+                message,
+            });
+        }
+        (kept, skipped)
     }
 }
 
