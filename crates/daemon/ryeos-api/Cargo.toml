@@ -25,7 +25,6 @@ crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"
 [dependencies]
 ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
-arc-swap = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["default", "ws"] }
 base64 = { workspace = true }
