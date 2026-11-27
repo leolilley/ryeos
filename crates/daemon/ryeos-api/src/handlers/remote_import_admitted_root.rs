@@ -156,8 +156,12 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.import-admitted-root-advanced",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/admin"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
+            // The advanced raw-root import acts as the node against a pinned
+            // remote; it is the operator's alone, judged before the request is
+            // read.
+            ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
             let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })

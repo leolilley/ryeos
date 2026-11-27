@@ -17,7 +17,7 @@ mod rust_source_text;
 /// after a test module counts). The seventh is a substring of the third, as the
 /// scan counts text.
 const EXPECTED: &[(&str, usize)] = &[
-    ("require_admitted_operator(", 92),
+    ("require_admitted_operator(", 96),
     ("disclosure_class_for(", 10),
     ("admitted_operator_authority_digest(", 11),
     ("admitted_operator_authority_for_principal(", 10),

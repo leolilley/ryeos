@@ -1,10 +1,9 @@
-# ryeos:signed:2026-11-24T20:26:06Z:121d07bd3cae208ec7991912f33ef733c2179c8c348c97e285640f82139a5b0d:GyozODWLuf+E+7cKV51UAPR0+FiWqyl6ykd+/OlCmf2lcoldvtgyWFqSdEBBXhOJPjMlkTztxKYIp8F+d45NDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T17:45:33Z:b30d47a5c109d02b81db7a8c81d47e9f6689039e22b4222c85f962743c0116e3:fnL8lzHFXcryR52EoHrtw0GDRG4HmPDpaGecGxLsHa6uxmUcdm89eYXyunoRjsANNFd29A1FZqrHUkX6s1b6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-admitted-heads
 required_caps: ["ryeos.execute.service.remote/sync-admitted-heads"]
 schema:
   remote: string?
-  project: string?
   policy: string?
   limit: number?
   max_imports: number?

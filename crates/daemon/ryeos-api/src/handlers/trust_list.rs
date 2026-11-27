@@ -141,8 +141,11 @@ pub const SHOW_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "trust.show",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.trust/show"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
+            // A signer's record and event chain are the operator's to read,
+            // judged before the request is read.
+            ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
             let req: ShowRequest = crate::handler_error::parse_request(params)?;
             handle_show(req, state).await
         })

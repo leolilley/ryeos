@@ -1,10 +1,9 @@
-# ryeos:signed:2026-11-24T20:26:06Z:980a416b044c01238c3a4e2aff3ed279aac35ff6e294080f83bb4519ee78518e:YUzkSbIuvm4nz0W03++tHdqhXpQDDK9kXVhrZaZKI4tQZTH5QAHgKfIVUP1kuDdqDZzomoDF8yFzNTd84wJ6Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T17:45:33Z:0d24f59f39f4f6c0a4f779bce96bb695f305b82abd9d5c9a7640004862c61a11:LkgkR8ARgOWJ1RDoG99kMpUPfa5UmbdXQeo16Utjuc96ZwqoGi2UM38pAgFmIwG4/nSVOpZrWK9VYzFaZUuiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.import-admitted-root-advanced
 required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   remote: string?
-  project: string?
   subject_hash: string
   policy: string?
   expected_attestation_hash: string?

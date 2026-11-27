@@ -1,10 +1,9 @@
-# ryeos:signed:2026-11-24T20:26:06Z:eb16bd16129190994489853df27ec68cdb19203f7f6b179e0ac06bf117226b13:RCDfXXWBlhrRoZibAfH0u9SGP+IJXYVPbbZ+nFpYbJ0Wb5ODy2ODP/ZVNGyMh985fPe/vDVMCfdhsmbT+MGQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T17:45:33Z:aecb63e96eee202a21c5395977b61842fb783cb72dd6ab1db7b662a07f355dfb:C29ErC0qDPhvvNmJi+OOC3WNGKRQq+BiidVngiQ4dKfsJfwsWEj59QBcaB+QXjJCXRhjqkL1OnZzhmtHNmqCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.import-admitted-head
 required_caps: ["ryeos.execute.service.remote/import-admitted-head"]
 schema:
   remote: string?
-  project: string?
   policy: string?
   subject_hash: string?
   limit: number?

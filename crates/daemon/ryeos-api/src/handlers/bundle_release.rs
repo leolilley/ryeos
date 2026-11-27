@@ -2517,11 +2517,14 @@ async fn dispatch(
 
 fn handler<T: DeserializeOwned + Send + 'static>(
     params: Value,
-    _context: HandlerContext,
+    context: HandlerContext,
     state: Arc<AppState>,
     wrap: fn(T) -> BundleReleaseOperation,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // Every operation served here is the operator's alone; judged before
+        // the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request = crate::handler_error::parse_request(params)?;
         dispatch(state, wrap(request)).await
     })

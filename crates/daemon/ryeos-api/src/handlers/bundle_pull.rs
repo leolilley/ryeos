@@ -836,6 +836,11 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
+    // The URL is fetched by the node, so the service is the operator's alone,
+    // judged before the request is read; `operator_caller` then also refuses a
+    // forwarded request, which a publication pull never accepts.
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)
+        .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     super::publication::operator_caller(&ctx, &state)?;
     let refuse = PullRefusal::into_handler_error;
 

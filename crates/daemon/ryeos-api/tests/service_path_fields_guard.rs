@@ -12,6 +12,12 @@
 //!   owner holds, or the caller acts under its own grant.
 //! * `LocalOnly`: the service is `availability: local`, so it has no daemon
 //!   handler at all (see `local_only_services.rs`).
+//! * `StoppedNodeOnly`: the service is `availability: stopped_node`, so it is
+//!   absent or refused while the daemon runs; the test
+//!   `a_stopped_node_service_is_absent_or_refused_while_the_daemon_runs` in
+//!   `local_only_services.rs` proves it, and no handler call is required.
+//! * `NoHostResource`: the field names no host path, directory, URL or other
+//!   principal's data; each such field carries a reason in `NO_HOST_RESOURCE`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,11 +33,14 @@ enum Class {
     OperatorOnly,
     OwnerFiltered,
     LocalOnly,
+    StoppedNodeOnly,
+    NoHostResource,
 }
 
 impl Class {
     /// The call texts a handler file may show as the enforcement of this
-    /// class. `LocalOnly` has no handler, so its only text is the empty one.
+    /// class. `LocalOnly`, `StoppedNodeOnly` and `NoHostResource` need no
+    /// handler call, so their only text is the empty one.
     fn enforcing_calls(self) -> &'static [&'static str] {
         match self {
             Self::Admitted => &["admit_handler_live_path(", "admit_live_project_path("],
@@ -53,7 +62,7 @@ impl Class {
                 "named_remote_client(",
                 "require_authenticated_source_node(",
             ],
-            Self::LocalOnly => &[""],
+            Self::LocalOnly | Self::StoppedNodeOnly | Self::NoHostResource => &[""],
         }
     }
 }
@@ -94,6 +103,20 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         Class::OperatorOnly,
         "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
         "require_local_configured_operator(",
+    ),
+    (
+        "bundle-release/request-authorization",
+        "expected_publisher_fingerprint",
+        Class::OperatorOnly,
+        "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
+        "require_admitted_operator(",
+    ),
+    (
+        "bundle-release/substrate-release-authorization",
+        "expected_publisher_fingerprint",
+        Class::OperatorOnly,
+        "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
+        "require_admitted_operator(",
     ),
     (
         "bundle-release/authority-measure",
@@ -186,6 +209,13 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
         "require_admitted_operator(",
     ),
+    (
+        "bundle/install",
+        "source_path",
+        Class::StoppedNodeOnly,
+        "",
+        "",
+    ),
     ("bundle/profile-sign", "key", Class::LocalOnly, "", ""),
     ("bundle/publish", "owner", Class::LocalOnly, "", ""),
     ("bundle/publish", "registry_root", Class::LocalOnly, "", ""),
@@ -194,7 +224,7 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "url",
         Class::OperatorOnly,
         "crates/daemon/ryeos-api/src/handlers/bundle_pull.rs",
-        "operator_caller(",
+        "require_admitted_operator(",
     ),
     ("bundle/sign", "registry_root", Class::LocalOnly, "", ""),
     (
@@ -453,6 +483,13 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "require_admitted_operator(",
     ),
     (
+        "remote/import-admitted-root-advanced",
+        "expected_signing_key",
+        Class::OperatorOnly,
+        "crates/daemon/ryeos-api/src/handlers/remote_import_admitted_root.rs",
+        "require_admitted_operator(",
+    ),
+    (
         "remote/pull",
         "output_dir",
         Class::OperatorOnly,
@@ -551,27 +588,20 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "owner_principal(",
     ),
     (
-        "threads/set_facet",
-        "key",
-        Class::OwnerFiltered,
-        "crates/daemon/ryeos-api/src/handlers/threads_set_facet.rs",
-        "require_owner(",
-    ),
-    (
         "tool/env-check",
         "project_path",
         Class::Admitted,
         "crates/daemon/ryeos-api/src/handlers/tool_env_check.rs",
         "admit_handler_live_path(",
     ),
-    ("verify", "project_path", Class::LocalOnly, "", ""),
     (
-        "worker-executions/command",
-        "idempotency_key",
-        Class::OwnerFiltered,
-        "crates/daemon/ryeos-api/src/handlers/dedicated_sessions.rs",
-        "require_owner(",
+        "trust/show",
+        "fingerprint",
+        Class::OperatorOnly,
+        "crates/daemon/ryeos-api/src/handlers/trust_list.rs",
+        "require_admitted_operator(",
     ),
+    ("verify", "project_path", Class::LocalOnly, "", ""),
     (
         "worker-placements/preflight",
         "owner_principal",
@@ -594,6 +624,154 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "require_authenticated_source_node(",
     ),
 ];
+
+/// Fields that carry a marked name but name no host resource. Each carries the
+/// reason, which must say what the value is and why it reaches nothing of the
+/// host or of another principal.
+const NO_HOST_RESOURCE: &[(&str, &str, &str)] = &[
+    (
+        "admission/claim",
+        "public_key",
+        "the claiming key's own public key, admitted only under a one-time token and the claim signature",
+    ),
+    (
+        "records/get",
+        "key",
+        "a record key inside the caller's readable records; cross-principal reads by key are covered by the two-person isolation test",
+    ),
+    (
+        "remote/list",
+        "project",
+        "an optional project path the CLI forwards; the handler binds it to a field it never reads, because remote pins are node-level records",
+    ),
+    (
+        "remote/status",
+        "project",
+        "an optional project path the CLI forwards; the handler binds it to a field it never reads, because remote pins are node-level records",
+    ),
+    (
+        "system/routes",
+        "path",
+        "a substring filter over the node's route table, never a host path",
+    ),
+    (
+        "threads/set_facet",
+        "key",
+        "a facet name on a thread the caller owns",
+    ),
+    (
+        "worker-executions/command",
+        "idempotency_key",
+        "an idempotency key is stored and looked up under the placement thread of a session the caller owns (unique per placement and key), so it names nothing outside the caller's own session",
+    ),
+];
+
+/// Order pins: inside the named function of the file's production text, the
+/// `call` must appear before the first `before` text, so the enforcement
+/// precedes the first use of the field's data. (service, field, file,
+/// function, call, before).
+const ORDER_PINS: &[(&str, &str, &str, &str, &str, &str)] = &[
+    (
+        "objects/get",
+        "root",
+        "crates/daemon/ryeos-api/src/handlers/objects_get.rs",
+        "handle",
+        "resolve_scope(",
+        "serve(",
+    ),
+    (
+        "objects/has",
+        "root",
+        "crates/daemon/ryeos-api/src/handlers/objects_has.rs",
+        "handle",
+        "resolve_scope(",
+        "acquire_cas_read(",
+    ),
+    (
+        "objects/closure/describe",
+        "root",
+        "crates/daemon/ryeos-api/src/handlers/objects_closure_describe.rs",
+        "handle",
+        "require_roots_in_scope(",
+        "handle_authorized(",
+    ),
+    (
+        "objects/closure/describe",
+        "root",
+        "crates/daemon/ryeos-api/src/handlers/objects_closure_describe.rs",
+        "require_roots_in_scope",
+        "resolve_scope(",
+        "Ok(())",
+    ),
+    (
+        "objects/closure/get",
+        "root",
+        "crates/daemon/ryeos-api/src/handlers/objects_closure_get.rs",
+        "handle",
+        "require_roots_in_scope(",
+        "handle_authorized(",
+    ),
+    (
+        "objects/get",
+        "root",
+        "crates/daemon/ryeos-api/src/objects_read_scope.rs",
+        "resolve_scope",
+        "require_verified(",
+        "closure_scope(",
+    ),
+    (
+        "objects/get",
+        "root",
+        "crates/daemon/ryeos-api/src/objects_read_scope.rs",
+        "resolve_project_head",
+        "owner_principal(",
+        "head_key(",
+    ),
+    (
+        "worker-executions/command",
+        "idempotency_key",
+        "crates/daemon/ryeos-api/src/handlers/dedicated_sessions.rs",
+        "command",
+        "owned_session(",
+        "idempotency_key",
+    ),
+    (
+        "worker-executions/command",
+        "idempotency_key",
+        "crates/daemon/ryeos-api/src/handlers/dedicated_sessions.rs",
+        "owned_session",
+        "require_owner(",
+        "Ok(session)",
+    ),
+];
+
+/// The text of function `name` in `text`: from `fn <name>(` to its matching
+/// closing brace, counting braces from the first `{` after the signature.
+fn function_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let start = text.find(&format!("fn {name}("))?;
+    let open = start + text[start..].find('{')?;
+    let mut depth = 0_i64;
+    for (offset, byte) in text.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..=open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A source file's text outside its tests.
+fn production_source(file: &str) -> String {
+    let source = std::fs::read_to_string(repo().join(file))
+        .unwrap_or_else(|error| panic!("{file}: {error}"));
+    rust_source_text::production_text(file, &source)
+}
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
@@ -673,17 +851,77 @@ fn every_path_principal_or_key_field_is_classified_and_enforced() {
         }
     }
 
+    for (service, field, _) in NO_HOST_RESOURCE {
+        if !seen.insert((*service, *field)) {
+            problems.push(format!(
+                "{service}.{field}: classified twice (CLASSIFIED and NO_HOST_RESOURCE)"
+            ));
+        }
+    }
     // (a) every marked field has an entry.
     for (name, service) in &services {
         for field in service.fields.iter().filter(|field| is_marked(field)) {
-            if !CLASSIFIED
+            let classified = CLASSIFIED
                 .iter()
                 .any(|(id, f, ..)| *id == name.as_str() && *f == field.as_str())
-            {
+                || NO_HOST_RESOURCE
+                    .iter()
+                    .any(|(id, f, _)| *id == name.as_str() && *f == field.as_str());
+            if !classified {
                 problems.push(format!(
-                    "{name}.{field}: a marked field with no CLASSIFIED entry"
+                    "{name}.{field}: a marked field with no CLASSIFIED or NO_HOST_RESOURCE entry"
                 ));
             }
+        }
+    }
+
+    // NoHostResource rows: a real marked field and a stated reason.
+    for (id, field, reason) in NO_HOST_RESOURCE {
+        // The class needs no handler call, only the stated reason.
+        debug_assert_eq!(Class::NoHostResource.enforcing_calls(), &[""]);
+        match services.get(*id) {
+            None => problems.push(format!("{id}.{field}: no such service")),
+            Some(service) if !service.fields.iter().any(|f| f.as_str() == *field) => {
+                problems.push(format!("{id}.{field}: the service has no such field"));
+            }
+            Some(_) => {}
+        }
+        if !is_marked(field) {
+            problems.push(format!("{id}.{field}: the field is not a marked name"));
+        }
+        if reason.trim().is_empty() {
+            problems.push(format!("{id}.{field}: a NoHostResource row needs a reason"));
+        }
+    }
+
+    // Order pins: the enforcing call precedes the first use of the field's
+    // data inside the named handler function.
+    for (id, field, file, function, call, before) in ORDER_PINS {
+        let known = CLASSIFIED.iter().any(|(i, f, ..)| i == id && f == field)
+            || NO_HOST_RESOURCE
+                .iter()
+                .any(|(i, f, _)| i == id && f == field);
+        if !known {
+            problems.push(format!(
+                "{id}.{field}: an order pin for an unclassified field"
+            ));
+        }
+        let text = production_source(file);
+        let Some(body) = function_body(&text, function) else {
+            problems.push(format!("{id}.{field}: {file} has no function `{function}`"));
+            continue;
+        };
+        match (body.find(call), body.find(before)) {
+            (Some(enforced), Some(used)) if enforced < used => {}
+            (Some(_), Some(_)) => problems.push(format!(
+                "{id}.{field}: in `{function}` of {file}, `{before}` comes before `{call}`"
+            )),
+            (None, _) => problems.push(format!(
+                "{id}.{field}: `{function}` of {file} has no `{call}`"
+            )),
+            (_, None) => problems.push(format!(
+                "{id}.{field}: `{function}` of {file} has no `{before}` to order against"
+            )),
         }
     }
 
@@ -710,6 +948,13 @@ fn every_path_principal_or_key_field_is_classified_and_enforced() {
                 service.availability
             ));
         }
+        let stopped = service.availability == "stopped_node";
+        if stopped != (*class == Class::StoppedNodeOnly) {
+            problems.push(format!(
+                "{id}.{field}: class {class:?} against availability {}",
+                service.availability
+            ));
+        }
         if !class.enforcing_calls().contains(call) {
             problems.push(format!(
                 "{id}.{field}: `{call}` is not an enforcing call of class {class:?}"
@@ -718,6 +963,14 @@ fn every_path_principal_or_key_field_is_classified_and_enforced() {
         if *class == Class::LocalOnly {
             if !file.is_empty() || !call.is_empty() {
                 problems.push(format!("{id}.{field}: a local-only entry names no handler"));
+            }
+            continue;
+        }
+        if *class == Class::StoppedNodeOnly {
+            if !file.is_empty() || !call.is_empty() {
+                problems.push(format!(
+                    "{id}.{field}: a stopped-node entry names no handler"
+                ));
             }
             continue;
         }
