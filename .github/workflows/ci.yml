@@ -887,10 +887,16 @@ jobs:
           RUST_MIN_STACK: 8388608
         run: |
           set -o pipefail
+          # An archive run cannot take -p (nextest refuses the pair); the filter
+          # expression selects the package instead.
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
           log="$(mktemp)"
           ./scripts/gate.sh \
             --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst" \
-            -p ryeos-ui --run-ignored only 2>&1 | tee "$log"
+            -E 'package(ryeos-ui)' --run-ignored only 2>&1 | tee "$log"
           summary="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Summary .* tests run:' | tail -n 1)"
           echo "summary: $summary"
           # nextest leaves a zero count out of its summary, so a clean run has
