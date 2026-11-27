@@ -462,7 +462,9 @@ pub fn install_staged(
         lillux::set_tree_directory_modes(copy).context("set the install copy's directory modes")?;
         verify_copy(copy, ApplyRefusalCode::TreeDigestMismatch)?;
         // slice 3: the publication-lane audit runs here, on this copy, between
-        // the digest check and node admission.
+        // the digest check and node admission. It reads the evidence bytes the
+        // verified stage returned (`stage.evidence`), never the evidence files
+        // again.
         Ok(())
     };
     let activated_check = |target: &Path| -> Result<()> {
@@ -1093,6 +1095,34 @@ where
 #[cfg(test)]
 thread_local! {
     static UNDO_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MARK_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Record that an undo is starting. Test-only fault: fail the record, as a disk
+/// fault would, so the journal stays prepared.
+fn record_abandoning(transaction: &ryeos_app::bundle_transaction::BundleTransaction) -> Result<()> {
+    #[cfg(test)]
+    {
+        if MARK_FAULT.with(std::cell::Cell::get) {
+            anyhow::bail!("injected mark fault");
+        }
+    }
+    transaction.mark_abandoning()
+}
+
+/// What the refusal says when the undo did not finish. When the abandoning
+/// record was written, reconciliation finishes the undo; when it was not, the
+/// journal is still prepared and says nothing about an undo.
+fn undo_incomplete_note(what: &str, recorded: bool, error: &anyhow::Error) -> String {
+    if recorded {
+        format!(
+            "the refused {what} could not be fully undone; its journal records the undo and reconciliation finishes it without installing: {error:#}"
+        )
+    } else {
+        format!(
+            "the refused {what} could not be undone and the undo could not be recorded; its journal is still prepared, and reconciliation at the next start decides from the tree on disk: a changed tree is removed, an unchanged one is completed: {error:#}"
+        )
+    }
 }
 
 fn undo_fault() -> Result<()> {
@@ -1118,8 +1148,10 @@ fn undo_install_activation(
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     refusal: anyhow::Error,
 ) -> anyhow::Error {
+    let recorded = std::cell::Cell::new(false);
     let undone = (|| -> Result<()> {
-        transaction.mark_abandoning()?;
+        record_abandoning(transaction)?;
+        recorded.set(true);
         undo_fault()?;
         match lillux::rename_path_durable(target, staging) {
             Ok(()) => {}
@@ -1139,9 +1171,7 @@ fn undo_install_activation(
     })();
     match undone {
         Ok(()) => refusal,
-        Err(error) => refusal.context(format!(
-            "the refused install could not be fully undone; its journal records the undo and reconciliation finishes it without installing: {error:#}"
-        )),
+        Err(error) => refusal.context(undo_incomplete_note("install", recorded.get(), &error)),
     }
 }
 
@@ -1289,8 +1319,10 @@ fn undo_replace_activation(
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     refusal: anyhow::Error,
 ) -> anyhow::Error {
+    let recorded = std::cell::Cell::new(false);
     let undone = (|| -> Result<()> {
-        transaction.mark_abandoning()?;
+        record_abandoning(transaction)?;
+        recorded.set(true);
         undo_fault()?;
         match lillux::atomic_exchange_paths(target, staging) {
             Ok(()) => {}
@@ -1308,9 +1340,7 @@ fn undo_replace_activation(
     })();
     match undone {
         Ok(()) => refusal,
-        Err(error) => refusal.context(format!(
-            "the refused replacement could not be fully undone; its journal records the undo and reconciliation finishes it without installing: {error:#}"
-        )),
+        Err(error) => refusal.context(undo_incomplete_note("replacement", recorded.get(), &error)),
     }
 }
 
@@ -1929,6 +1959,64 @@ mod tests {
         assert!(target.is_dir());
 
         // Reconciliation finishes the undo and never completes the install.
+        let recovered = transaction.reconcile(&key).unwrap();
+        assert_eq!(
+            recovered,
+            Some(ryeos_app::bundle_transaction::BundleOperation::Install)
+        );
+        assert!(!target.exists());
+        assert!(!bundles.join(".demo.staging").exists());
+        assert!(!tmp.path().join(".ai/node/bundles/demo.yaml").exists());
+        assert_eq!(transaction.reconcile(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn an_unrecorded_undo_says_so_and_reconciles_from_the_tree_on_disk() {
+        // The record of the undo fails, so the journal stays prepared and the
+        // refusal must not claim the journal records an undo. Reconciliation
+        // then decides from the tree on disk: the tree was changed after the
+        // journal took its digest, so the digest differs and the tree is removed
+        // with no registration. (A tree still equal to the journal's digest
+        // would be completed as the install it was prepared as.)
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, bundles, target, key) = atomic_fixture(tmp.path());
+        let expected = digest_tree(&src);
+        let registry_lock =
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = acquire(tmp.path(), &registry_lock);
+
+        MARK_FAULT.with(|fault| fault.set(true));
+        let error = install_dir_atomic(
+            &src,
+            &target,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |_| Ok(()),
+            |moved| {
+                // Changed after the journal's digest was taken.
+                fs::write(moved.join("a.txt"), b"evil!")?;
+                verify_tree_digest(
+                    "demo",
+                    moved,
+                    &expected,
+                    &test_limits(),
+                    ApplyRefusalCode::TreeChangedDuringInstall,
+                )
+            },
+        )
+        .expect_err("the moved tree is refused");
+        MARK_FAULT.with(|fault| fault.set(false));
+        assert_eq!(
+            refusal_code(&error),
+            Some(ApplyRefusalCode::TreeChangedDuringInstall)
+        );
+        let text = format!("{error:#}");
+        assert!(text.contains("the undo could not be recorded"), "{text}");
+        assert!(text.contains("still prepared"), "{text}");
+        assert!(!text.contains("its journal records the undo"), "{text}");
+        // Nothing undid the move: the changed tree stands in the target.
+        assert!(target.is_dir());
+
         let recovered = transaction.reconcile(&key).unwrap();
         assert_eq!(
             recovered,

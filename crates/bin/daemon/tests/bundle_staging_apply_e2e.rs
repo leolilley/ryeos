@@ -752,6 +752,12 @@ fn first_regular_file(root: &Path) -> PathBuf {
 /// profile's generation is written and before initialization is sealed, so the
 /// node loads it through the real policy load.
 async fn start_puller_with_tiny_staging_caps() -> (DaemonHarness, FastFixture) {
+    start_puller_with_staging_caps([1, 1, 1, 1]).await
+}
+
+/// The same, with the four caps stated: node bytes, node stages, key bytes,
+/// key stages.
+async fn start_puller_with_staging_caps(caps: [u64; 4]) -> (DaemonHarness, FastFixture) {
     DaemonHarness::start_fast_core_knowledge_with_node_and_user_keys_and_plant(
         SigningKey::from_bytes(&[0x5d; 32]),
         SigningKey::from_bytes(&[0x5e; 32]),
@@ -760,10 +766,10 @@ async fn start_puller_with_tiny_staging_caps() -> (DaemonHarness, FastFixture) {
             assert!(path.is_file(), "the profile wrote no bundle_staging member");
             let body = serde_yaml::to_string(&json!({
                 "schema": 1,
-                "max_node_bytes": 1,
-                "max_node_stages": 1,
-                "max_key_bytes": 1,
-                "max_key_stages": 1,
+                "max_node_bytes": caps[0],
+                "max_node_stages": caps[1],
+                "max_key_bytes": caps[2],
+                "max_key_stages": caps[3],
             }))?;
             std::fs::write(
                 &path,
@@ -815,6 +821,16 @@ async fn the_caps_a_node_stages_under_are_the_ones_its_signed_policy_states() {
         .unwrap_or_default();
     assert!(held.is_empty(), "a refused stage left {held:?}");
 
+    // The key cap refuses with its own status and code while the node cap has
+    // room: a client sees 429 for its key's limit and 507 for the node's.
+    let (key_capped, _fixture) =
+        start_puller_with_staging_caps([2 * 1024 * 1024 * 1024, 64, 1, 16]).await;
+    let (status, refused) = service(&key_capped, "service:bundle/pull", pull_request.clone()).await;
+    assert_eq!(status, 429, "{refused:#}");
+    assert!(
+        refused.to_string().contains("bundle_stage_key_bytes_cap"),
+        "{refused:#}"
+    );
     // The same stage passes under the shipped caps (2 GiB / 64, 512 MiB / 16).
     let (shipped, _fixture) = start_puller().await;
     let (status, staged) = service(&shipped, "service:bundle/pull", pull_request).await;
