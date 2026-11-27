@@ -214,6 +214,27 @@ fn authorized_keys_dir(state_path: &Path) -> std::path::PathBuf {
         .join("node/auth/authorized_keys")
 }
 
+/// Link `added` to the owner HOSTED's operator key acts for, so HOSTED admits
+/// it as an operator when it arrives as an origin-bound remote principal.
+fn link_to_hosted_operator(state_path: &Path, added: &SigningKey) -> Result<()> {
+    let operator = hosted_operator_key();
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(state_path)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let owner = trust
+        .owner_for(&format!("fp:{}", fingerprint(&operator)))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    ryeos_engine::trust::pin_link_for_tests(
+        state_path,
+        &hosted_node_key(),
+        &operator,
+        added,
+        &owner.principal.to_string(),
+        3600,
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(())
+}
+
 fn scope_strings(scopes: &[&str]) -> Vec<String> {
     scopes.iter().map(|scope| (*scope).to_owned()).collect()
 }
@@ -847,6 +868,7 @@ async fn start_pair() -> Result<Pair> {
                 &origin_site,
                 OPERATOR_SCOPES,
             )?;
+            link_to_hosted_operator(state_path, &origin_operator)?;
             register_config_fixture_bundle(state_path, FIXTURE_BUNDLE, fixture, |bundle_root| {
                 plant_policies(bundle_root, &fixture.publisher, &origin_site)
             })

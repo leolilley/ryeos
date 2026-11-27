@@ -293,6 +293,33 @@ fn authorize_remote_principal(
     Ok(())
 }
 
+/// The controller's own operator is the key that holds its owner; an origin
+/// operator arriving as a remote principal is an operator there only by
+/// speaking for that owner. Pin a link from the controller's operator to
+/// `origin_operator`, before the controller daemon loads its registry.
+fn link_origin_operator(
+    state_path: &Path,
+    fixture: &FastFixture,
+    origin_operator: &SigningKey,
+) -> Result<()> {
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(state_path)?;
+    let owner = trust
+        .owner_for(&format!("fp:{}", fingerprint(&fixture.user)))
+        .map_err(|error| anyhow::anyhow!("controller operator owner: {error}"))?
+        .principal
+        .to_string();
+    ryeos_engine::trust::pin_link_for_tests(
+        state_path,
+        &fixture.node,
+        &fixture.user,
+        origin_operator,
+        &owner,
+        3600,
+    )
+    .map_err(|error| anyhow::anyhow!("pin the origin operator link: {error}"))?;
+    Ok(())
+}
+
 /// POST as the origin's configured-operator client does: the operator signs
 /// the request and the origin node co-signs it as the forwarding authority.
 /// With `delegation`, the origin node is the primary signer, as when it
@@ -406,6 +433,7 @@ impl Controller {
                         origin_node,
                     } => {
                         authorize_forwarding_node(state_path, fixture, origin_node)?;
+                        link_origin_operator(state_path, fixture, operator)?;
                         authorize_remote_principal(
                             state_path,
                             fixture,
@@ -587,14 +615,17 @@ impl Controller {
     }
 
     async fn call_service(&self, service_ref: &str) -> (reqwest::StatusCode, Value) {
-        self.post(json!({
+        self.post(self.service_body(service_ref)).await
+    }
+
+    fn service_body(&self, service_ref: &str) -> Value {
+        json!({
             "item_ref": service_ref,
             "ref_bindings": {},
             "project_path": null,
             "parameters": {},
             "execution_policy": ExecutionPolicy::projectless(ExecutionResponse::Wait),
-        }))
-        .await
+        })
     }
 }
 
@@ -930,5 +961,58 @@ async fn a_delegation_lending_less_than_the_grant_refuses_what_it_omits() {
     assert!(
         !is_capability_refusal(status, &body),
         "a delegation lending the derived list admits the turn: {status} {body:#}"
+    );
+}
+
+/// An origin operator forwarded as a remote principal is an operator on the
+/// controller only because its key is linked to the controller operator's
+/// owner. A different key holding the same grant and origin is a principal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_operator_is_admitted_only_by_speaking_for_the_controllers_owner() {
+    const LIST_SERVICE: &str = "credential-profiles/list";
+    let controller = Controller::start(Lane::forwarded()).await;
+    let mut grant = derived_grant();
+    grant.push(service_cap(LIST_SERVICE));
+    controller.grant(&grant);
+    let service_ref = format!("service:{LIST_SERVICE}");
+
+    let (status, body) = controller.call_service(&service_ref).await;
+    assert!(
+        status.is_success() && body.to_string().contains("next_cursor"),
+        "the linked origin operator must get the operator's unshaped answer: {status} {body:#}"
+    );
+
+    let Lane::Forwarded { origin_node, .. } = &controller.lane else {
+        unreachable!("the controller was started on the forwarded lane");
+    };
+    let stranger = SigningKey::from_bytes(&[73_u8; 32]);
+    let scopes: Vec<&str> = grant.iter().map(String::as_str).collect();
+    authorize_remote_principal(
+        &controller.harness.state_path,
+        &controller.fixture,
+        &stranger,
+        &site_of(origin_node),
+        &scopes,
+    )
+    .expect("grant the unlinked key the same scopes");
+    let mut body = controller.service_body(&service_ref);
+    body["required_origin_site_id"] = Value::String(site_of(origin_node));
+    let (status, body) = post_forwarded(
+        &format!("http://{}", controller.harness.bind),
+        &format!("fp:{}", controller.fixture.node_fp()),
+        &stranger,
+        origin_node,
+        None,
+        "/execute",
+        &body,
+    )
+    .await
+    .expect("post the unlinked key's request");
+    assert!(
+        !status.is_success()
+            && !is_capability_refusal(status, &body)
+            && status == reqwest::StatusCode::FORBIDDEN
+            && body["code"] == "service_refused",
+        "a key that does not speak for the controller's owner is not an operator: {status} {body:#}"
     );
 }

@@ -189,7 +189,7 @@ fn replace_binding_with_remote_owner(
     binding_hash: &str,
 ) -> (String, String) {
     let remote_origin = format!("site:{}", "c".repeat(64));
-    let remote = NodeIdentity::create(&directory.path().join("remote-principal.pem")).unwrap();
+    let remote = NodeIdentity::load(&directory.path().join("remote-principal.pem")).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
@@ -928,7 +928,35 @@ async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() 
 
 #[tokio::test]
 async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
-    let (directory, _store_owner, state, context, original_hash, manifest_hash) = fixture(false);
+    // The remote principal is an operator here only by speaking for the owner
+    // the node's operator acts for, so link its key to that owner before the
+    // state is shared.
+    let (directory, store_owner, mut built_state) = test_state::build_test_state();
+    let remote_key = NodeIdentity::create(&directory.path().join("remote-principal.pem")).unwrap();
+    let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        &built_state.config.app_root,
+    )
+    .unwrap();
+    let operator_owner = built_state
+        .engine
+        .trust_store
+        .owner_for(&operator.principal_id())
+        .unwrap()
+        .principal
+        .to_string();
+    let link = ryeos_engine::trust::pin_link_for_tests(
+        &built_state.config.app_root,
+        built_state.identity.signing_key(),
+        operator.signing_key(),
+        remote_key.signing_key(),
+        &operator_owner,
+        3600,
+    )
+    .unwrap();
+    let engine = Arc::make_mut(&mut built_state.engine);
+    engine.trust_store = engine.trust_store.clone().with_key_links(vec![link]);
+    let (directory, _store_owner, state, context, original_hash, manifest_hash) =
+        fixture_on(false, (directory, store_owner, built_state));
     let (remote_principal, binding_hash) =
         replace_binding_with_remote_owner(&directory, &state, &original_hash);
 

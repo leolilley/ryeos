@@ -29,10 +29,12 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
+mod key_link;
 mod ownership;
 mod publication;
 mod registry;
 pub use endorsement::*;
+pub use key_link::*;
 pub use ownership::*;
 pub use publication::*;
 pub use registry::*;
@@ -511,7 +513,10 @@ impl TrustStore {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
         let chain = load_event_chain(&events_dir(app_root), &node_key)?;
-        let mut store = Self::from_registry(node_key, records)?.with_succession_chain(&chain);
+        let links = KeyLinkLedger::load(app_root, &node_key)?.entries()?;
+        let mut store = Self::from_registry(node_key, records)?
+            .with_succession_chain(&chain)
+            .with_key_links(links);
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, &store)?;
         tracing::debug!(
@@ -663,6 +668,15 @@ impl TrustStore {
         self
     }
 
+    /// This store with the key links in force read into its owner graph. A
+    /// store with no graph (never given a succession chain) is unchanged.
+    pub fn with_key_links(mut self, links: Vec<KeyLinkEntry>) -> Self {
+        if let Some(graph) = self.succession.take() {
+            self.succession = Some(std::sync::Arc::new((*graph).clone().with_links(links)));
+        }
+        self
+    }
+
     /// The node's key-succession graph, when this store holds one.
     pub fn succession(&self) -> Option<&SuccessionGraph> {
         self.succession.as_deref()
@@ -678,6 +692,16 @@ impl TrustStore {
             .as_deref()
             .ok_or(OwnerRefusal::Unavailable)?;
         graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+    }
+
+    /// [`Self::owner_for`] judging key links at `now_secs`, for a writer that
+    /// has the node's clock.
+    pub fn owner_for_at(&self, key: &str, now_secs: u64) -> Result<ResolvedOwner, OwnerRefusal> {
+        let graph = self
+            .succession
+            .as_deref()
+            .ok_or(OwnerRefusal::Unavailable)?;
+        graph.ownership_of_at(key.strip_prefix("fp:").unwrap_or(key), now_secs)
     }
 
     /// The principal a signature by `key` speaks for when verified: its

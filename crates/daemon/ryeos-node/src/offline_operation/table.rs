@@ -992,6 +992,48 @@ static OPERATIONS: &[OperationSpec] = &[
             why: "unregistering a path the record no longer lists, or a record already removed, changes nothing",
         },
     },
+    OperationSpec {
+        id: "node.key.link",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::KeyLinkArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::key_link),
+        recovery: Recovery {
+            record: "the node-signed link document named by its id under the node's trust links directory",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "pinning a link that is already pinned rewrites the same document, and the id is the digest of the body both keys signed",
+        },
+    },
+    OperationSpec {
+        id: "node.key.unlink",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::KeyUnlinkArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::key_unlink),
+        recovery: Recovery {
+            record: "the node-signed tombstone named by the link id under the links revoked directory",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a link that already has a tombstone is reported and not rewritten, so a request that stopped part way finishes the rest",
+        },
+    },
 ];
 
 /// Every operation this binary can apply.
@@ -1097,10 +1139,12 @@ mod tests {
             "node.authoring.rotate",
             "node.project.register",
             "node.project.unregister",
+            "node.key.link",
+            "node.key.unlink",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 34);
+        assert_eq!(operations().len(), 36);
     }
 
     #[test]
@@ -1157,6 +1201,8 @@ mod tests {
                 "node.authoring.rotate",
                 "node.project.register",
                 "node.project.unregister",
+                "node.key.link",
+                "node.key.unlink",
             ]
         );
     }
@@ -1193,11 +1239,23 @@ mod tests {
         );
     }
 
+    /// A link into the node operator's owner can be created only by the
+    /// node's own operator signing the request: a delegated signer's grant is
+    /// not the operator's consent, so neither link operation is delegable.
+    #[test]
+    fn key_link_operations_are_local_signer_only_and_never_delegable() {
+        for id in ["node.key.link", "node.key.unlink"] {
+            let spec = lookup(id).unwrap();
+            assert!(spec.local_signer_only && spec.authority_bearing, "{id}");
+            assert!(spec.preconditions.contains(&FACT_TRUST_REGISTRY), "{id}");
+        }
+    }
+
     #[test]
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 17);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 19);
     }
 
     #[test]
