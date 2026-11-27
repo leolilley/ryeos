@@ -11712,7 +11712,6 @@ mod tests {
     use super::{
         BaseConfigFacts, base_config_testimony, refuse_reserved_base_config, seal_base_config,
     };
-    use serde_json::json;
 
     fn facts(kind: &str, trusted: bool, hash: &str) -> BaseConfigFacts {
         BaseConfigFacts {
