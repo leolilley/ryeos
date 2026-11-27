@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod engine_init;
 pub mod reconcile;
+pub mod route_composition;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_impl;
 #[cfg(feature = "test-support")]
