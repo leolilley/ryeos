@@ -51,8 +51,6 @@ pub struct Request {
     pub invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
 }
 
-/// Refuse a staged bundle generation that strands an installed binding the
-/// operator did not name, as a typed HTTP 409.
 /// A public route that a running node's policy does not name is not served.
 pub(crate) const PUBLIC_ROUTE_NOT_NAMED: &str = "public_route_not_named";
 /// A route signed public must be keyless and static.
@@ -110,6 +108,8 @@ fn refuse_unadmitted_public_routes(
     Ok(())
 }
 
+/// Refuse a staged bundle generation that strands an installed binding the
+/// operator did not name, as a typed HTTP 409.
 fn check_staged_bindings(
     admitted: &AdmittedStaging,
     node_trust_store: &TrustStore,
@@ -669,9 +669,9 @@ pub(crate) fn admit_completed_staging(
         &policy_table,
     )
     .context("prospective bundle set would fail full node-config boot")?;
-    prospective_validator
-        .validate(&snapshot)
-        .context("prospective bundle set would fail composed node-config admission")?;
+    // Public routes are judged first: the composed validator refuses a
+    // keyed or non-static public route without saying which, and a public
+    // route the policy does not name is a typed refusal here, not a boot skip.
     let candidate_root = plan
         .bundles
         .get(bundle_name)
@@ -684,6 +684,9 @@ pub(crate) fn admit_completed_staging(
             ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy,
         >()?,
     )?;
+    prospective_validator
+        .validate(&snapshot)
+        .context("prospective bundle set would fail composed node-config admission")?;
     let prospective_roots: Vec<PathBuf> = plan
         .bundles
         .values()
