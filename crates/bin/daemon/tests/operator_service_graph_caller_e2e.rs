@@ -1,14 +1,14 @@
-//! A release service called as a graph step is judged against the key that
-//! requested the graph run.
+//! An operator-only service called as a graph step is judged against the key
+//! that requested the graph run.
 //!
-//! Every `bundle-release/*` operation served through the generic handler
-//! requires the admitted node operator. When one is the action of a graph
-//! node, the key the check sees must be the requesting key, not the node's
-//! key or a runtime's:
+//! Services that admit only the node operator (the bundle-release operations,
+//! the node-key remote services) check the request's own context first. When
+//! one is the action of a graph node, the key that check sees must be the
+//! requesting key, not the node's key or a runtime's. `remote/descriptor`
+//! stands for them here: it ships in the Standard profile and its check is
+//! the first thing its handler does, as the bundle-release handler's is.
 //!
-//! - the operator's key runs the graph and its step is never refused as a
-//!   non-operator (it may still fail for another reason, such as the node
-//!   having no release authority configured);
+//! - the operator's key runs the graph and its step succeeds;
 //! - a second key that is authorized for the graph, the service and the live
 //!   project, but is not the operator, runs the same graph and its step is
 //!   refused with an operator refusal.
@@ -20,8 +20,7 @@ use std::time::Duration;
 
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_presigned_fixture_bundle, register_workflow_bundles,
-    write_authorized_key_with_scopes,
+    FastFixture, register_workflow_bundles, write_authorized_key_with_scopes,
 };
 use lillux::crypto::SigningKey;
 use ryeos_app::execution_policy::{
@@ -29,8 +28,8 @@ use ryeos_app::execution_policy::{
 };
 use serde_json::{Value, json};
 
-const SERVICE_CAP: &str = "ryeos.execute.service.bundle-release/status";
-const GRAPH_CAP: &str = "ryeos.execute.graph.release_status";
+const SERVICE_CAP: &str = "ryeos.execute.service.remote/descriptor";
+const GRAPH_CAP: &str = "ryeos.execute.graph.operator_service_probe";
 
 /// Every refusal an operator-only handler can answer a non-operator with.
 const OPERATOR_REFUSAL_CODES: &[&str] = &[
@@ -54,8 +53,8 @@ fn second_key() -> SigningKey {
     SigningKey::from_bytes(&[0x37_u8; 32])
 }
 
-/// A graph whose one step calls `service:bundle-release/status`.
-fn plant_release_status_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+/// A graph whose one step calls `service:remote/descriptor`.
+fn plant_probe_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     let body = format!(
@@ -66,14 +65,14 @@ requires:
     declared:
       - {SERVICE_CAP}
 config:
-  start: release_status
+  start: probe
   nodes:
-    release_status:
+    probe:
       action:
-        item_id: "service:bundle-release/status"
+        item_id: "service:remote/descriptor"
         ref_bindings: {{}}
         params:
-          operation_id: "caller-identity-probe"
+          name: "caller-identity-probe"
       next:
         type: unconditional
         to: done
@@ -82,11 +81,11 @@ config:
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
-    std::fs::write(graphs_dir.join("release_status.yaml"), signed)?;
+    std::fs::write(graphs_dir.join("operator_service_probe.yaml"), signed)?;
     Ok(())
 }
 
-/// Start a node with the workflow bundles and the bundle-release bundle, the
+/// Start a node with the workflow bundles, the
 /// second key authorized for the graph, the service and the live project, and
 /// a project holding the graph.
 async fn start_node() -> (DaemonHarness, FastFixture, tempfile::TempDir) {
@@ -94,12 +93,6 @@ async fn start_node() -> (DaemonHarness, FastFixture, tempfile::TempDir) {
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_workflow_bundles(state_path, fixture)?;
-            register_presigned_fixture_bundle(
-                state_path,
-                "bundle-release",
-                &common::workspace_root().join("bundles/bundle-release"),
-                fixture,
-            )?;
             // The graph, the service and the live project, and nothing that
             // makes the key an operator.
             write_authorized_key_with_scopes(
@@ -117,14 +110,17 @@ async fn start_node() -> (DaemonHarness, FastFixture, tempfile::TempDir) {
         };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with the workflow and bundle-release bundles");
+        .expect("start daemon with the workflow bundles");
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_release_status_graph(project.path(), &fixture.publisher)
-        .expect("plant the release status graph");
+    plant_probe_graph(project.path(), &fixture.publisher).expect("plant the probe graph");
     // A key that is not the operator runs a live project only at a checkout
     // registered to its owner.
-    h.register_checkout_for_key(&second_key(), project.path(), "release-caller-project")
-        .expect("register the second key's checkout");
+    h.register_checkout_for_key(
+        &second_key(),
+        project.path(),
+        "operator-service-caller-project",
+    )
+    .expect("register the second key's checkout");
     (h, fixture, project)
 }
 
@@ -154,7 +150,7 @@ async fn post_as(
     (status, value)
 }
 
-/// Run `graph:release_status` in `project` as `key`.
+/// Run `graph:operator_service_probe` in `project` as `key`.
 async fn run_graph_as(
     h: &DaemonHarness,
     key: &SigningKey,
@@ -165,7 +161,7 @@ async fn run_graph_as(
         key,
         "/execute",
         json!({
-            "item_ref": "graph:release_status",
+            "item_ref": "graph:operator_service_probe",
             "ref_bindings": {},
             "project_path": project.to_str().unwrap(),
             "parameters": {},
@@ -225,7 +221,7 @@ fn names_an_operator_refusal(text: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_release_service_step_run_by_the_operator_is_not_refused_as_a_non_operator() {
+async fn an_operator_only_service_step_run_by_the_operator_succeeds() {
     let (h, _fixture, project) = start_node().await;
     let operator_key = h.user_key.clone().expect("fast fixture operator key");
 
@@ -235,25 +231,23 @@ async fn a_release_service_step_run_by_the_operator_is_not_refused_as_a_non_oper
         reqwest::StatusCode::OK,
         "the operator's graph run is admitted: {body:#}"
     );
-    // The step may fail for another reason, such as no release authority
-    // configured on the node; it must not fail as a non-operator.
+    // The step must not fail as a non-operator, whatever else it does.
     let text = step_failure_text(&h, &operator_key, &body).await;
     assert!(
         !names_an_operator_refusal(&text),
-        "the operator's key must reach the release service as the operator: {text}"
+        "the operator's key must reach the service as the operator: {text}"
     );
-    // The step reached the release service past its operator check: either
-    // it succeeded, or it failed at dispatch because this node composes no
-    // release authority. Anything else means the step never got that far.
-    let succeeded = body.pointer("/result/success").and_then(Value::as_bool) == Some(true);
-    assert!(
-        succeeded || text.contains("is unavailable"),
-        "the operator's step must reach the release service's dispatch: {text}"
+    // The step reached the service past its operator check and the service
+    // answered: the node's signed descriptor.
+    assert_eq!(
+        body.pointer("/result/success").and_then(Value::as_bool),
+        Some(true),
+        "the operator's step must succeed: {text}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_release_service_step_run_by_a_non_operator_is_refused_as_a_non_operator() {
+async fn an_operator_only_service_step_run_by_a_non_operator_is_refused_as_a_non_operator() {
     let (h, _fixture, project) = start_node().await;
     let second = second_key();
 
@@ -267,7 +261,7 @@ async fn a_release_service_step_run_by_a_non_operator_is_refused_as_a_non_operat
     assert_eq!(
         body.pointer("/result/success").and_then(Value::as_bool),
         Some(false),
-        "the non-operator's release service step must fail: {body:#}"
+        "the non-operator's operator-only service step must fail: {body:#}"
     );
     let text = step_failure_text(&h, &second, &body).await;
     assert!(

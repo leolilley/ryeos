@@ -283,6 +283,40 @@ async fn bundle_release_path_services_are_the_operators_alone() {
     }
 }
 
+/// Bundle-release operations served by the generic release handler, which
+/// requires the admitted operator before it reads any request.
+const GENERIC_RELEASE_SERVICES: &[&str] = &[
+    "bundle-release.status",
+    "bundle-release.request-authorization",
+    "bundle-release.substrate-release-authorization",
+];
+
+#[tokio::test]
+async fn the_generic_release_handler_refuses_every_key_but_the_operator() {
+    let (_tmp, _owner, state) = test_state::build_test_state();
+    let state = Arc::new(state);
+    for endpoint in GENERIC_RELEASE_SERVICES {
+        for (label, ctx) in [
+            ("another local key", another_local_key()),
+            ("a foreign remote principal", foreign_remote_principal()),
+        ] {
+            let error = call(state.clone(), endpoint, ctx, json!({}))
+                .await
+                .expect_err(endpoint);
+            assert!(
+                is_not_operator_refusal(&error),
+                "{endpoint}, {label}: {error:#}"
+            );
+        }
+        if let Err(error) = call(state.clone(), endpoint, operator(&state), json!({})).await {
+            assert!(
+                !is_not_operator_refusal(&error),
+                "{endpoint}, operator: {error:#}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn remote_pull_is_the_operators_alone_and_touches_no_path_for_anyone_else() {
     let (_tmp, _owner, state) = test_state::build_test_state();
