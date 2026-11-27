@@ -11,6 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
 /// The principal type itself and the resolver: the only producers of a solo
 /// principal.
 const SOLO_PRINCIPAL_PRODUCERS: &[&str] = &[
@@ -53,7 +56,7 @@ const SEAT_AUTHORITY_SPEAKS_FOR_CALLS: usize = 3;
 fn the_thread_read_rule_asks_speaks_for_only_in_its_stated_project_arms() {
     let path = workspace_root().join("crates/daemon/ryeos-app/src/seat_authority.rs");
     let text = std::fs::read_to_string(&path).expect("read seat_authority.rs");
-    let production = production_text(&text);
+    let production = rust_source_text::production_text(&text);
     assert_eq!(
         production.matches(concat!("speaks_", "for(")).count(),
         SEAT_AUTHORITY_SPEAKS_FOR_CALLS,
@@ -154,12 +157,6 @@ const HEAD_ADVANCER_BUILDERS: &[&str] = &[
     "crates/state/ryeos-state/src/gc/compact.rs",
 ];
 
-/// Production code of a source file: everything before its first test
-/// module. Test fixtures may build records directly.
-fn production_text(text: &str) -> &str {
-    text.find("#[cfg(test)]").map_or(text, |end| &text[..end])
-}
-
 #[test]
 fn every_head_advance_gets_its_advancer_from_the_resolver() {
     let root = workspace_root();
@@ -182,7 +179,7 @@ fn every_head_advance_gets_its_advancer_from_the_resolver() {
             continue;
         };
         let needle = concat!("HeadAdvancer", " {");
-        if production_text(&text).contains(needle)
+        if rust_source_text::production_text(&text).contains(needle)
             && !HEAD_ADVANCER_BUILDERS.contains(&relative.as_str())
         {
             violations.push(format!(

@@ -7,6 +7,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
 use ryeos_node_runtime::disclosure::ServiceDisclosure;
 use serde_json::Value;
 
@@ -973,45 +976,12 @@ fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_ba
 /// braced item (`mod tests { .. }`) ends where its braces balance.
 fn ungated_measurement_writes(source: &str) -> Vec<usize> {
     let lines: Vec<&str> = source.lines().collect();
-    let mut skipped = vec![false; lines.len()];
-    let mut index = 0;
-    while index < lines.len() {
-        if lines[index].trim() != "#[cfg(test)]" {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        let mut depth = 0_i64;
-        let mut opened = false;
-        let mut end = index;
-        'item: for (offset, line) in lines[index + 1..].iter().enumerate() {
-            end = index + 1 + offset;
-            if !opened && line.trim_start().starts_with("#[") {
-                continue;
-            }
-            for character in line.chars() {
-                match character {
-                    '{' => {
-                        opened = true;
-                        depth += 1;
-                    }
-                    '}' => depth -= 1,
-                    ';' if !opened => break 'item,
-                    _ => {}
-                }
-                if opened && depth == 0 {
-                    break 'item;
-                }
-            }
-        }
-        for flag in &mut skipped[start..=end] {
-            *flag = true;
-        }
-        index = end + 1;
-    }
+    let production = rust_source_text::production_text(source);
+    let production_lines: Vec<&str> = production.lines().collect();
     let mut ungated = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if skipped[index] || !line.contains("[\"qualification_measurements\"] =") {
+        let needle = "[\"qualification_measurements\"] =";
+        if !line.contains(needle) || !production_lines[index].contains(needle) {
             continue;
         }
         let gated = lines[..index]
