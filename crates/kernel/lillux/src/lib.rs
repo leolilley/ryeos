@@ -85,9 +85,12 @@ pub use sandbox::{
 
 pub use atomic_fs::{
     AtomicMutationError, AtomicMutationResult, atomic_exchange_paths, atomic_write,
-    atomic_write_private, atomic_write_with_mode, remove_dir_all_durable, remove_file_durable,
-    rename_path_durable, rename_path_noreplace_durable, sync_tree_durable,
+    atomic_write_private, atomic_write_with_mode, create_dir_exact_mode, open_append_exact_mode,
+    remove_dir_all_durable, remove_file_durable, rename_path_durable,
+    rename_path_noreplace_durable, sync_tree_durable,
 };
+#[cfg(all(unix, feature = "test-support"))]
+pub use atomic_fs::{permission_mode_for_test, set_process_umask_for_test};
 pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
     atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
