@@ -692,6 +692,33 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         ),
         &fixture.publisher,
     )?;
+    // Finish-check tools: each answers the `finish_check` hook with a verdict.
+    for (name, body) in [
+        (
+            "verdict_once",
+            "print(json.dumps({'verdict': 'reject', 'reason': 'unread'} if n == 1 else {'verdict': 'accept'}))",
+        ),
+        (
+            "verdict_never",
+            "print(json.dumps({'verdict': 'reject', 'reason': 'unread'}))",
+        ),
+        (
+            "verdict_free",
+            "print(json.dumps({'verdict': 'reject', 'reason': 'unread', 'text': 'FREE_TEXT_FROM_A_TOOL'}))",
+        ),
+        (
+            "verdict_unknown",
+            "print(json.dumps({'verdict': 'reject', 'reason': 'invented'}))",
+        ),
+        ("verdict_broken", "import sys\nsys.exit(3)"),
+    ] {
+        plant_python_tool(
+            root,
+            name,
+            &format!("{}{body}", counter_code(aux.path(), name)),
+            &fixture.publisher,
+        )?;
+    }
     if opts.image_tools {
         for (name, variant) in [
             ("shot", "good"),

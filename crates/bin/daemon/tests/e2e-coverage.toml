@@ -158,6 +158,10 @@ paths = ["crates/daemon/ryeos-app/src/item_revised.rs"]
 covers = ["ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-app/src/node_config/**"]
 
+[tests.finish_check_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+paths = ["crates/engine/ryeos-engine/src/hooks.rs"]
+
 [tests.grant_lifecycle_e2e]
 covers = ["ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/operator_authority.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
