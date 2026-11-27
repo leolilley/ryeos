@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:05:40Z:a1be6f1972e7af9845541b493abb1ba4452f77f6ba78a8dda51c15e55a0e7a6c:jdvlbSBLm6JiAgqeZ4pG4ZXsrMYyGUmC2LfQ5RMcMdBHUwgqkQBi8++XsMosQ7/uSIebuHNI94IqTirJO3g2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:52:06Z:40d5c8c7a55482bb5a24cf49d39e6a9e6561e75399bc5f4454cf22406bebde64:FXVF+egJWt8osH9iArsSn12QbdkoHYj+Wz2zbX6GPAmQNl2vocMXZ9q4zroFMLxhyoo3RPl1SvUkw5VaSknHAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -151,7 +151,7 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
-  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  # Bounds on staged bundles, in bytes and in stages, for the whole node and for one requesting key.
   bundle_staging:
     schema: 1
     max_node_bytes: 2147483648

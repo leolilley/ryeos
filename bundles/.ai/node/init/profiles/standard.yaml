@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:05:40Z:4bbaba86d047ae8e89f036956d9411bb6239769f91c4c10e59d2671b568320ad:z4Jw9c15/0BalR1A1IPM+0pvNC5YYjaMyfaYWnZsfjVYJkK9fHiAEPbP0T7RpJnYELADc2rik9RMjewLITJaBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:52:06Z:cb6d3eed042a2b7ef6e610bc691527dc83c55d8c7119025c816d87f5babb7477:ReJTt66nrO5JlcvK2wMNjDom5x1MrWVtpFm0gdoraf4PoLde50/3qEQI6S1ZgXt2/xYKK4dGMY0+rbVxIN3yCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -192,7 +192,7 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
-  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  # Bounds on staged bundles, in bytes and in stages, for the whole node and for one requesting key.
   bundle_staging:
     schema: 1
     max_node_bytes: 2147483648

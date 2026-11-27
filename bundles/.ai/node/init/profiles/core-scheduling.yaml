@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:05:40Z:2a7de3c384d205085ce55510deb647f30eb76d4a2f4ec7749de2e2e2476f2041:i339Wqof39WVcwRYByMomy+mII2MrviyZXdVB94ZKj2RNn8JJ4PUUnk5d7hA9+9WMU0e5v/I0OdRK2fjAzwiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:52:06Z:a695a7027e2b5600ac0fb5f29d0781530c9f8eed46f297fef8c982f29ce9ca2b:QEU21LuBLzofOUJS+nmPuA3u5Ds4ZV1EfTm809GY+h6hMCrlWBftAng9vRbCkZ3mcOA1G2EKLsHh9nGbG5XnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -151,7 +151,7 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
-  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  # Bounds on staged bundles, in bytes and in stages, for the whole node and for one requesting key.
   bundle_staging:
     schema: 1
     max_node_bytes: 2147483648

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:05:40Z:5c930e7c7844a230537b436d1e5cc4a1d15512cbb56d0f3cd8fa5ddae9ec8143:Ksmxw/RcJNDv2SH3MVitcr0vHZnrAXFWmeg0yYPr0bsn+gaCBFYor1IkBxxmbjwijSrAZX463Qp4GcPjRhqVBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:52:06Z:0d0ae46f5a87a208fce4b1c8dbac0f6233ae53934962c8dac496454830080ea1:SUCmC5rAG+5pdoAUTeoG3pzqd+9+k6M9jmc0naMl18+WK0f9AA+wjbBdh/mWxI7IiQ7I/idP5G92TN1F9t8XCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -148,7 +148,7 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
-  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  # Bounds on staged bundles, in bytes and in stages, for the whole node and for one requesting key.
   bundle_staging:
     schema: 1
     max_node_bytes: 2147483648
