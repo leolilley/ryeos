@@ -270,7 +270,7 @@ fn refuse_name_held(name: &str, authority: &InstallAuthority<'_>) -> Result<()> 
         app_root: authority.app_root,
         trust_store: authority.node_trust_store,
     }
-    .load_bundle_section()
+    .load_registrations()
     .context("load current bundle registrations to check the name")?;
     if records
         .iter()

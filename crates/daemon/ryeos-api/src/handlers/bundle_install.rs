@@ -205,6 +205,23 @@ pub struct InstallChecks<'a> {
     pub lane: Option<LaneInstall>,
 }
 
+/// The replacement guard, read from the registrations without the lane
+/// audit: a laned bundle is never replaced, and a laned install never takes a
+/// name a native install holds, so a laned apply with `replace` cannot write a
+/// lane marker over a native registration.
+fn replacement_guard(
+    app_root: &Path,
+    trust_store: &TrustStore,
+    name: &str,
+    laned: bool,
+) -> Result<()> {
+    ryeos_app::bundle_transaction::refuse_laned_replacement(app_root, trust_store, name)?;
+    if laned {
+        ryeos_app::bundle_transaction::refuse_native_holder(app_root, trust_store, name)?;
+    }
+    Ok(())
+}
+
 fn no_check(_: &Path) -> Result<()> {
     Ok(())
 }
@@ -235,9 +252,11 @@ struct InstallEnv<'a> {
     generation_changed: &'a dyn Fn(&str),
     /// Admit the completed staging copy; returns the bindings it invalidates.
     admit: &'a dyn Fn(&Path, bool) -> Result<Vec<ryeos_app::node_config::coherence::BindingRef>>,
-    /// Refuse replacing the named bundle when its registration is in a lane.
-    /// Runs under the registry lock, where the installed set is read.
-    refuse_replace: &'a dyn Fn(&str) -> Result<()>,
+    /// Refuse replacing the named bundle: always when its registration is in
+    /// a lane, and, when the install is itself laned (the flag), also when a
+    /// native install registered it. Runs under the registry lock, where the
+    /// installed set is read.
+    refuse_replace: &'a dyn Fn(&str, bool) -> Result<()>,
     /// Reseal the init completion over the changed registration set.
     seal: &'a dyn Fn() -> Result<()>,
 }
@@ -259,12 +278,8 @@ pub fn install_with_checks(
         kinds: authority.kinds,
         grants: lane.grants.clone(),
     });
-    let refuse_replace = |name: &str| {
-        ryeos_app::bundle_transaction::refuse_laned_replacement(
-            authority.app_root,
-            authority.node_trust_store,
-            name,
-        )
+    let refuse_replace = |name: &str, laned: bool| {
+        replacement_guard(authority.app_root, authority.node_trust_store, name, laned)
     };
     let admit = |staging: &Path, replace: bool| {
         let admitted = admit_completed_staging(
@@ -378,7 +393,7 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
     }
 
     if replaced {
-        (env.refuse_replace)(&req.name)?;
+        (env.refuse_replace)(&req.name, checks.lane.is_some())?;
     }
 
     // Trust comes only from the node's persistent trust store. Admission runs
@@ -603,7 +618,8 @@ pub fn install_staged(
             None => match ryeos_app::handler_error::extract_handler_error(&error) {
                 // A laned bundle is only removed, never replaced.
                 Some(crate::handler_error::HandlerError::Structured { code, .. })
-                    if code == "bundle_lane_not_replaceable" =>
+                    if code == "bundle_lane_not_replaceable"
+                        || code == "bundle_name_held_by_native_lane" =>
                 {
                     anyhow::Error::new(ApplyRefusal::new(
                         ApplyRefusalCode::LaneNameRefused,
@@ -2295,7 +2311,7 @@ mod tests {
                 node_signing_key: &key,
                 generation_changed: &|_| {},
                 admit: &no_admission,
-                refuse_replace: &|_| Ok(()),
+                refuse_replace: &|_, _| Ok(()),
                 seal: &seal,
             },
             &InstallChecks::none(),
@@ -2339,7 +2355,7 @@ mod tests {
                 node_signing_key: key,
                 generation_changed: &|_| {},
                 admit: &no_admission,
-                refuse_replace: &|_| Ok(()),
+                refuse_replace: &|_, _| Ok(()),
                 seal: &seal,
             },
             &InstallChecks {
@@ -2348,6 +2364,95 @@ mod tests {
             },
         );
         (outcome, seals.get())
+    }
+
+    /// A node identity, a trust store that holds it, and a native
+    /// registration of `demo` whose installed tree holds `old.txt`.
+    fn node_with_a_native_demo(
+        tmp: &Path,
+        target: &Path,
+    ) -> (ryeos_node_runtime::identity::NodeIdentity, TrustStore) {
+        fs::create_dir_all(tmp.join(".ai/node/identity")).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &tmp.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let trust = TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: identity.fingerprint().to_owned(),
+            verifying_key: identity.signing_key().verifying_key(),
+            label: None,
+        }]);
+        fs::create_dir_all(target).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        let yaml =
+            serde_yaml::to_string(&serde_json::json!({ "kind": "node", "path": target })).unwrap();
+        fs::write(
+            tmp.join(".ai/node/bundles/demo.yaml"),
+            lillux::signature::sign_content(&yaml, identity.signing_key(), "#", None),
+        )
+        .unwrap();
+        (identity, trust)
+    }
+
+    fn lane_install() -> LaneInstall {
+        LaneInstall {
+            marker: ryeos_engine::trust::BundleLane::publication(
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                "1.0.0",
+            ),
+            grants: ryeos_bundle::lane::LaneGrants::invoked_only(),
+        }
+    }
+
+    #[test]
+    fn a_laned_install_with_replace_never_takes_a_native_registration() {
+        // The name looked free when the lane was prepared; a native install
+        // took it before this install holds the registry lock. The guard under
+        // the lock refuses, before any byte moves and before admission.
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _bundles, target, _key) = atomic_fixture(tmp.path());
+        let (identity, trust) = node_with_a_native_demo(tmp.path(), &target);
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("new.txt"), b"new").unwrap();
+        let guard = |name: &str, laned: bool| replacement_guard(tmp.path(), &trust, name, laned);
+        let seal = || Ok(());
+
+        let error = install_core(
+            &Request {
+                replace: true,
+                ..recovery_request(&src)
+            },
+            &InstallEnv {
+                app_root: tmp.path(),
+                node_signing_key: identity.signing_key(),
+                generation_changed: &|_| {},
+                admit: &no_admission,
+                refuse_replace: &guard,
+                seal: &seal,
+            },
+            &InstallChecks {
+                lane: Some(lane_install()),
+                ..InstallChecks::none()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            ryeos_app::handler_error::extract_handler_error(&error).map(|error| match error {
+                crate::handler_error::HandlerError::Structured { code, .. } => code,
+                _ => String::new(),
+            }),
+            Some("bundle_name_held_by_native_lane".to_owned()),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
+        assert!(!target.join("new.txt").exists());
+        let registration =
+            fs::read_to_string(tmp.path().join(".ai/node/bundles/demo.yaml")).unwrap();
+        assert!(!registration.contains("lane"), "{registration}");
+        // A native replacement of the same name is not the lane's concern.
+        guard("demo", false).unwrap();
     }
 
     #[test]

@@ -83,6 +83,22 @@ impl<'a> BundleBootstrapLoader<'a> {
     pub fn load_bundle_section_reporting_skipped(
         &self,
     ) -> Result<(Vec<BundleRecord>, Vec<SkippedLaneBundle>)> {
+        let records = self.load_registrations()?;
+        let (records, skipped) = self.audit_laned_bundles(records);
+        if records.is_empty() {
+            bail!("node-config section `bundles` violates AtLeastOne cardinality with 0 record(s)");
+        }
+
+        Ok((records, skipped))
+    }
+
+    /// Every verified registration, laned ones included, with no lane audit.
+    ///
+    /// This is the read for a question about what a name is registered as: a
+    /// laned bundle that no longer passes its audit is not loaded by the node,
+    /// but it is still registered, still holds its name, and is still laned.
+    /// Replacement and name guards read here, never through the audit.
+    pub fn load_registrations(&self) -> Result<Vec<BundleRecord>> {
         let mut records: Vec<BundleRecord> = Vec::new();
 
         let node_dir = self
@@ -144,12 +160,7 @@ impl<'a> BundleBootstrapLoader<'a> {
 
         // Collision detection: by canonical path AND by name (fail-closed)
         check_bundle_collisions(&records)?;
-        let (records, skipped) = self.audit_laned_bundles(records);
-        if records.is_empty() {
-            bail!("node-config section `bundles` violates AtLeastOne cardinality with 0 record(s)");
-        }
-
-        Ok((records, skipped))
+        Ok(records)
     }
 
     /// Check every laned record; leave out the ones that fail.
