@@ -159,7 +159,7 @@ pub async fn handle(
     let principal = if retained_current_head {
         OutboundPrincipal::Delegated
     } else {
-        OutboundPrincipal::resolve(req.outbound_principal, &state, &ctx)
+        OutboundPrincipal::resolve_admitted(req.outbound_principal, &state, &ctx)?
     };
     let client = principal.client(&state, &remote_cfg, &ctx)?;
     let accepted =

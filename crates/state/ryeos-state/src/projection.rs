@@ -265,6 +265,7 @@ mod tests {
             application_id: 7,
             tables: &[sqlite_schema::TableSpec {
                 name: "t",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[sqlite_schema::ColumnSpec {
                     name: "a",
                     col_type: "TEXT",
