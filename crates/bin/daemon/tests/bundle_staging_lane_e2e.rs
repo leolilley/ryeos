@@ -23,9 +23,7 @@ use ryeosd::test_support as common;
 use std::path::{Path, PathBuf};
 
 use common::DaemonHarness;
-use common::fast_fixture::{
-    FAST_FIXTURE_TIME, FastFixture, register_config_fixture_bundle, register_workflow_bundles,
-};
+use common::fast_fixture::{FAST_FIXTURE_TIME, FastFixture, register_config_fixture_bundle};
 use lillux::crypto::SigningKey;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_engine::trust::PublicationRecord;
