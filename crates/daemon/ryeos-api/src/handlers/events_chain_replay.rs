@@ -4,8 +4,12 @@
 //! prevents the V5.1 chain-events bug from recurring.
 //!
 //! Ownership check: callers can only replay chain events
-//! rooted at a thread they own.
+//! rooted at a thread they own. A chain can hold descendant threads requested
+//! by other principals; a caller who is not the node's admitted operator
+//! receives only the events of threads they own. The operator sees the whole
+//! chain.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -68,8 +72,38 @@ pub async fn handle(
         })
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
+    // Each event belongs to the thread that wrote it. Only the admitted
+    // operator reads other principals' threads; everyone else keeps the events
+    // of threads they own. `next_cursor` comes from the unfiltered page, so the
+    // cursor advances over events the caller may not see.
+    let events = if ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok() {
+        result.events
+    } else {
+        let mut visible: HashMap<String, bool> = HashMap::new();
+        let mut kept = Vec::with_capacity(result.events.len());
+        for event in result.events {
+            let owned = match visible.get(&event.thread_id) {
+                Some(owned) => *owned,
+                None => {
+                    let thread = state
+                        .state_store
+                        .get_thread(&event.thread_id)
+                        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+                    let owned =
+                        thread.is_some_and(|detail| ctx.is_owner(detail.requested_by.as_deref()));
+                    visible.insert(event.thread_id.clone(), owned);
+                    owned
+                }
+            };
+            if owned {
+                kept.push(event);
+            }
+        }
+        kept
+    };
+
     Ok(serde_json::json!({
-        "events": result.events,
+        "events": events,
         "next_cursor": result.next_cursor,
         "summary": {
             "status": status,
