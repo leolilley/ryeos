@@ -164,6 +164,13 @@ jobs:
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
 
+      # The helper's failure path (exit 1 after four attempts) and removal path
+      # (a packages.microsoft.com source is deleted) cannot be forced on a
+      # runner, so they run here against a stub apt-get and a temporary
+      # sources directory.
+      - name: Check the apt-update helper's failure and removal paths
+        run: ./.ai/tools/ryeos/development/runner-host/lib/test-apt-update.sh
+
       - name: Check signed files match their signed content hash
         # Mirrors lillux::signature::content_hash_after_signature
         # (crates/kernel/lillux/src/signature.rs): sha256 of the whole file
