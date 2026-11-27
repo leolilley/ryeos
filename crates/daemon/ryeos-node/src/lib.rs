@@ -13,6 +13,7 @@ pub mod host_runtime;
 pub mod init;
 pub mod init_check;
 pub mod journal_view;
+pub mod key_link;
 pub mod key_rotation;
 pub mod lifecycle_marker;
 pub mod lifecycle_wire;

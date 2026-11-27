@@ -88,7 +88,10 @@ struct Pair {
     http: reqwest::Client,
 }
 
-async fn start_pair() -> Result<Pair> {
+/// `link_origin_operator`: HOSTED's operator vouches for U1, as a real
+/// deployment does before ORIGIN's operator can act on HOSTED. Without the
+/// link U1 is a principal there, not an operator.
+async fn start_pair(link_origin_operator: bool) -> Result<Pair> {
     let origin_node = common::fast_fixture::node_signing_key();
     let u1 = common::fast_fixture::user_signing_key();
     let origin_site = format!("site:{}", fingerprint(&origin_node));
@@ -124,6 +127,23 @@ async fn start_pair() -> Result<Pair> {
                 Some(&origin_site),
                 false,
             )?;
+            if link_origin_operator {
+                let trust = ryeos_engine::trust::TrustStore::load_node_registry(state_path)?;
+                let owner = trust
+                    .owner_for(&format!("fp:{}", fingerprint(&fixture.user)))
+                    .map_err(|error| anyhow::anyhow!("hosted operator owner: {error}"))?
+                    .principal
+                    .to_string();
+                ryeos_engine::trust::pin_link_for_tests(
+                    state_path,
+                    &fixture.node,
+                    &fixture.user,
+                    &u1,
+                    &owner,
+                    3600,
+                )
+                .map_err(|error| anyhow::anyhow!("pin the origin operator link: {error}"))?;
+            }
             Ok(())
         },
         |_| {},
@@ -332,7 +352,7 @@ impl Pair {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_origin_operator_delivers_an_offline_operation_through_its_node() -> Result<()> {
-    let mut pair = start_pair().await?;
+    let mut pair = start_pair(true).await?;
     let u1_principal = format!(
         "fp:{}",
         fingerprint(&common::fast_fixture::user_signing_key())
@@ -431,5 +451,38 @@ async fn an_origin_operator_delivers_an_offline_operation_through_its_node() -> 
         .context("receipts")?;
     assert_eq!(receipts.len(), 1, "{report}");
     assert_eq!(receipts[0]["request_digest"], request_digest.as_str());
+    Ok(())
+}
+
+/// An origin operator whose key HOSTED's operator never linked is a principal
+/// on HOSTED, not an operator. Delivery itself is gated by the key's own
+/// offline-operation grant, which it holds, so what the missing link changes
+/// is disclosure: HOSTED's refusal of a bad request keeps its code but
+/// withholds the reason that an operator is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_origin_operator_that_hosted_never_linked_is_refused_without_the_reason() -> Result<()> {
+    let pair = start_pair(false).await?;
+    pair.delegate(&[SUBMIT_CAP, FACTS_CAP, STATUS_CAP]).await?;
+    let (status, facts) = pair
+        .origin_service(
+            "service:remote/offline-operations-facts",
+            json!({"remote": HOSTED_REMOTE}),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "facts through origin: {status} {facts}"
+    );
+    let delivery = pair.sign(&facts["result"])?;
+    let mut forged = delivery.clone();
+    forged.request.body.arguments = json!({ "tampered": true });
+    let (status, body) = pair.submit(HOSTED_REMOTE, &forged, false).await?;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("remote_offline_operation_refused"), "{text}");
+    assert!(
+        !text.contains("bad_signature"),
+        "a non-operator is not told why: {text}"
+    );
     Ok(())
 }

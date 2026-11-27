@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use ryeos_state::principal_id::PrincipalId;
 use serde::{Deserialize, Serialize};
 
+use super::key_link::KeyLinkEntry;
 use super::registry::{SignerRecord, SignerRole, SignerStatus, TrustEvent, TrustEventKind};
 
 /// One key in the succession graph.
@@ -51,6 +52,9 @@ pub struct SuccessionGraph {
     nodes: BTreeMap<String, SuccessionNode>,
     /// Successor fingerprints per predecessor, in event-chain order.
     successors: BTreeMap<String, Vec<String>>,
+    /// Key links in force, by the added key's bare fingerprint. A second
+    /// owner source read after succession ([`Self::with_links`]).
+    links: BTreeMap<String, Vec<KeyLinkEntry>>,
 }
 
 /// How a key's owner was resolved. Evidence only: nothing decides on it.
@@ -61,6 +65,8 @@ pub enum OwnerVia {
     Solo,
     /// The key descends by recorded succession from `root`.
     Lineage { root: String },
+    /// The key was joined to the principal by the node-pinned key link `id`.
+    Linked { id: String },
 }
 
 /// A key's owning principal on this node.
@@ -84,6 +90,9 @@ pub enum OwnerRefusal {
     /// The succession chain loops through these keys. Valid operations
     /// cannot produce a cycle, so the registry is damaged.
     ChainCorrupt { keys: Vec<String> },
+    /// Two live key links join the key to different principals. A key has
+    /// one owner, so it has none until one link is revoked.
+    LinkConflict { key: String },
 }
 
 impl OwnerRefusal {
@@ -93,6 +102,7 @@ impl OwnerRefusal {
             Self::NotAFingerprint(_) => "owner_not_a_key_fingerprint",
             Self::Unavailable => "owner_resolution_unavailable",
             Self::ChainCorrupt { .. } => "owner_chain_corrupt",
+            Self::LinkConflict { .. } => "owner_link_conflict",
         }
     }
 }
@@ -110,6 +120,11 @@ impl std::fmt::Display for OwnerRefusal {
             }
             Self::Unavailable => formatter.write_str(
                 "owner_resolution_unavailable: this trust store holds no node registry to resolve a project owner",
+            ),
+            Self::LinkConflict { key } => write!(
+                formatter,
+                "owner_link_conflict: key {key} is joined to two different principals by \
+                 live key links; revoke one with `ryeos node key unlink`"
             ),
             Self::ChainCorrupt { keys } => write!(
                 formatter,
@@ -163,7 +178,27 @@ impl SuccessionGraph {
                 .or_default()
                 .push(event.signer.clone());
         }
-        Self { nodes, successors }
+        Self {
+            nodes,
+            successors,
+            links: BTreeMap::new(),
+        }
+    }
+
+    /// This graph with the key links in force. A link joins only a key that
+    /// has no succession lineage; whether it applies is judged when an owner
+    /// is resolved, so expiry needs no rebuild.
+    pub fn with_links(mut self, links: Vec<KeyLinkEntry>) -> Self {
+        self.links.clear();
+        for link in links {
+            self.links.entry(link.key.clone()).or_default().push(link);
+        }
+        self
+    }
+
+    /// Every key link recorded in this graph, for doctor.
+    pub fn links(&self) -> impl Iterator<Item = &KeyLinkEntry> {
+        self.links.values().flatten()
     }
 
     /// The key's node, when the registry holds a record for it.
@@ -203,17 +238,24 @@ impl SuccessionGraph {
     }
 
     /// The ownership policy. `fingerprint` is `fp:<64 lowercase hex>`
-    /// without the prefix (the registry's spelling).
+    /// without the prefix (the registry's spelling). Key links are judged at
+    /// the current time.
     pub fn ownership_of(&self, fingerprint: &str) -> Result<ResolvedOwner, OwnerRefusal> {
+        self.ownership_of_at(fingerprint, lillux::time::unix_secs_now())
+    }
+
+    /// [`Self::ownership_of`] judging key links at `now_secs`.
+    pub fn ownership_of_at(
+        &self,
+        fingerprint: &str,
+        now_secs: u64,
+    ) -> Result<ResolvedOwner, OwnerRefusal> {
         let solo = |key: &str| {
             PrincipalId::solo(&format!("fp:{key}"))
                 .map_err(|error| OwnerRefusal::NotAFingerprint(format!("{error:#}")))
         };
         let Some(node) = self.nodes.get(fingerprint) else {
-            return Ok(ResolvedOwner {
-                principal: solo(fingerprint)?,
-                via: OwnerVia::Solo,
-            });
+            return self.linked_or_solo(fingerprint, now_secs);
         };
         if node.status != SignerStatus::Active {
             return Err(OwnerRefusal::KeyNotActive {
@@ -221,14 +263,54 @@ impl SuccessionGraph {
             });
         }
         let root = self.root_of(fingerprint)?;
-        let via = if root == fingerprint {
-            OwnerVia::Solo
-        } else {
-            OwnerVia::Lineage { root: root.clone() }
-        };
+        if root != fingerprint {
+            // Lineage wins: a key with a predecessor takes no link.
+            return Ok(ResolvedOwner {
+                principal: solo(&root)?,
+                via: OwnerVia::Lineage { root },
+            });
+        }
+        if self.successors.contains_key(fingerprint) {
+            // The root of a lineage is its own principal, and takes no link.
+            return Ok(ResolvedOwner {
+                principal: solo(&root)?,
+                via: OwnerVia::Solo,
+            });
+        }
+        self.linked_or_solo(fingerprint, now_secs)
+    }
+
+    /// The principal a live key link joins `fingerprint` to, or its own solo
+    /// principal when it has none. Two live links to different principals
+    /// leave the key with no owner.
+    fn linked_or_solo(
+        &self,
+        fingerprint: &str,
+        now_secs: u64,
+    ) -> Result<ResolvedOwner, OwnerRefusal> {
+        let mut live = self
+            .links
+            .get(fingerprint)
+            .into_iter()
+            .flatten()
+            .filter(|link| link.not_after_secs > now_secs && link.created_at_secs <= now_secs);
+        if let Some(first) = live.next() {
+            if live.any(|other| other.principal != first.principal) {
+                return Err(OwnerRefusal::LinkConflict {
+                    key: fingerprint.to_owned(),
+                });
+            }
+            return Ok(ResolvedOwner {
+                principal: first.principal.clone(),
+                via: OwnerVia::Linked {
+                    id: first.id.clone(),
+                },
+            });
+        }
         Ok(ResolvedOwner {
-            principal: solo(&root)?,
-            via,
+            principal: PrincipalId::solo(&format!("fp:{fingerprint}"))
+                .map_err(|error| OwnerRefusal::NotAFingerprint(format!("{error:#}")))?,
+            via: OwnerVia::Solo,
         })
     }
 
@@ -476,5 +558,83 @@ mod tests {
         let operator = principals.iter().find(|p| p.root_key == fp(1)).unwrap();
         assert_eq!(operator.principal, solo(1));
         assert_eq!(operator.current_keys, [fp(2)]);
+    }
+
+    fn link(id: &str, key: u8, principal: u8, not_after: u64) -> KeyLinkEntry {
+        KeyLinkEntry {
+            id: id.to_owned(),
+            principal: solo(principal),
+            key: fp(key),
+            linked_by: fp(principal),
+            created_at_secs: 1_000,
+            not_after_secs: not_after,
+        }
+    }
+
+    #[test]
+    fn a_linked_key_speaks_for_the_principal_it_was_joined_to_until_the_link_ends() {
+        let records = [record(1, SignerRole::Operator, SignerStatus::Active)];
+        let graph = SuccessionGraph::build(&records, &[]).with_links(vec![link("l1", 7, 1, 5_000)]);
+        let owner = graph.ownership_of_at(&fp(7), 2_000).unwrap();
+        assert_eq!(owner.principal, solo(1));
+        assert_eq!(owner.via, OwnerVia::Linked { id: "l1".into() });
+        // Before it starts and after it ends the key is its own principal.
+        for now in [500, 5_000, 9_000] {
+            let owner = graph.ownership_of_at(&fp(7), now).unwrap();
+            assert_eq!(owner.principal, solo(7), "at {now}");
+            assert_eq!(owner.via, OwnerVia::Solo);
+        }
+        // The operator's own key is unaffected.
+        assert_eq!(
+            graph.ownership_of_at(&fp(1), 2_000).unwrap().principal,
+            solo(1)
+        );
+    }
+
+    #[test]
+    fn a_key_with_a_lineage_takes_no_link() {
+        let records = [
+            record(1, SignerRole::Operator, SignerStatus::Retired),
+            record(2, SignerRole::Operator, SignerStatus::Active),
+            record(3, SignerRole::Operator, SignerStatus::Active),
+        ];
+        let graph = SuccessionGraph::build(&records, &[succeeded(1, 2, 1)])
+            .with_links(vec![link("l1", 2, 3, 5_000), link("l2", 1, 3, 5_000)]);
+        // The successor keeps its lineage's principal; the link is ignored.
+        let owner = graph.ownership_of_at(&fp(2), 2_000).unwrap();
+        assert_eq!(owner.principal, solo(1));
+        assert_eq!(owner.via, OwnerVia::Lineage { root: fp(1) });
+        // The retired root owns nothing, linked or not.
+        assert!(graph.ownership_of_at(&fp(1), 2_000).is_err());
+    }
+
+    #[test]
+    fn a_retired_or_revoked_key_owns_nothing_even_with_a_live_link() {
+        for status in [SignerStatus::Retired, SignerStatus::Revoked] {
+            let records = [record(4, SignerRole::Operator, status)];
+            let graph =
+                SuccessionGraph::build(&records, &[]).with_links(vec![link("l1", 4, 1, 5_000)]);
+            assert_eq!(
+                graph.ownership_of_at(&fp(4), 2_000).unwrap_err().code(),
+                "owner_key_not_active"
+            );
+        }
+    }
+
+    #[test]
+    fn two_live_links_to_different_principals_leave_the_key_with_no_owner() {
+        let graph = SuccessionGraph::build(&[], &[])
+            .with_links(vec![link("l1", 7, 1, 5_000), link("l2", 7, 2, 5_000)]);
+        assert_eq!(
+            graph.ownership_of_at(&fp(7), 2_000).unwrap_err().code(),
+            "owner_link_conflict"
+        );
+        // Two links to the same principal are not a conflict.
+        let graph = SuccessionGraph::build(&[], &[])
+            .with_links(vec![link("l1", 7, 1, 5_000), link("l2", 7, 1, 6_000)]);
+        assert_eq!(
+            graph.ownership_of_at(&fp(7), 2_000).unwrap().principal,
+            solo(1)
+        );
     }
 }

@@ -181,6 +181,13 @@ pub enum TrustError {
          endorsement again with `ryeos endorse`"
     )]
     EndorsementRecordInvalid { path: PathBuf, reason: String },
+
+    #[error(
+        "key_link_record_invalid: {path} {reason}. Key-link documents are node-signed and \
+         named by their id; remove the file with the node stopped and link the key again \
+         with `ryeos node key link`"
+    )]
+    KeyLinkRecordInvalid { path: PathBuf, reason: String },
 }
 
 impl TrustError {
@@ -199,6 +206,7 @@ impl TrustError {
             TrustError::Unreadable { .. } => "trust_registry_unreadable",
             TrustError::AuthoringScopeRetired { .. } => "trust_authoring_scope_retired",
             TrustError::EndorsementRecordInvalid { .. } => "endorsement_record_invalid",
+            TrustError::KeyLinkRecordInvalid { .. } => "key_link_record_invalid",
         }
     }
 }

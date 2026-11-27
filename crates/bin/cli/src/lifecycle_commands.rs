@@ -311,6 +311,26 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["key", "link-body"],
+        summary: "Build the body of a key link from the two public keys",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "link-sign"],
+        summary: "Sign a key-link body with one private key",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "link"],
+        summary: "Pin a signed key link on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "unlink"],
+        summary: "Withdraw a key link, or every link one key signed, on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["project", "register"],
         summary: "Register a live checkout under its project name on a stopped node",
         category: "maintenance",
@@ -563,6 +583,10 @@ pub async fn try_dispatch(
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
             crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("key", Some(verb @ ("link-body" | "link-sign" | "link" | "unlink"))) => {
+            crate::lifecycle_key_link::run(verb, &argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("project", Some(verb @ ("register" | "unregister"))) => {
@@ -5322,6 +5346,7 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
             }),
         )
     });
+    rows.push(key_link_row(app_root, &node_key, &graph));
     let public_successions: Vec<serde_json::Value> = chain
         .iter()
         .filter(|event| {
@@ -5701,6 +5726,80 @@ fn bundle_state_checks(
         ),
     });
     checks
+}
+
+/// The `key_links` doctor row: every pinned key link grouped by the key that
+/// signed it, with its state. A link into an owner stops working when it
+/// expires, so one that ends within 30 days or already has is a warning.
+fn key_link_row(
+    app_root: &Path,
+    node_key: &lillux::crypto::VerifyingKey,
+    graph: &ryeos_engine::trust::SuccessionGraph,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let ledger = match ryeos_engine::trust::KeyLinkLedger::load(app_root, node_key) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            return check(
+                "key_links",
+                FAIL,
+                serde_json::json!({ "error": error.to_string() }),
+            );
+        }
+    };
+    let now = lillux::time::unix_secs_now();
+    let mut by_signer: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    let mut attention = 0_usize;
+    for stored in &ledger.links {
+        let body = &stored.link.body;
+        let (created, not_after) = body.times().unwrap_or((0, 0));
+        let revoked = ledger.is_revoked(&stored.id);
+        let lineage = body.key_fingerprint().ok().is_some_and(|key| {
+            graph.node(key).is_some_and(|node| {
+                node.predecessor.is_some() || graph.successors(key).next().is_some()
+            })
+        });
+        let state = if revoked {
+            "revoked"
+        } else if lineage {
+            "ignored_lineage_wins"
+        } else if not_after <= now {
+            "expired"
+        } else if created > now {
+            "not_yet_valid"
+        } else if not_after - now <= ryeos_engine::trust::LINK_EXPIRY_WARNING_SECS {
+            "expires_within_30_days"
+        } else {
+            "active"
+        };
+        if matches!(
+            state,
+            "expired" | "expires_within_30_days" | "ignored_lineage_wins"
+        ) {
+            attention += 1;
+        }
+        by_signer
+            .entry(body.linked_by.clone())
+            .or_default()
+            .push(serde_json::json!({
+                "id": stored.id,
+                "key": body.key,
+                "principal": body.principal,
+                "not_after": body.not_after,
+                "state": state,
+            }));
+    }
+    let detail = serde_json::json!({
+        "links_by_signer": by_signer,
+        "tombstones": ledger.tombstones.len(),
+        "note": "a link joins a key to a principal's owner; renew one before it expires with `ryeos key link-body`, `link-sign` and `link`, and withdraw a compromised signer's links with `ryeos key unlink --signed-by`",
+    });
+    if attention == 0 {
+        check("key_links", OK, detail)
+    } else {
+        check("key_links", WARN, detail)
+    }
 }
 
 fn check(

@@ -130,6 +130,27 @@ fn build_fixture(
     remote_owner: bool,
     large_object: LargeObjectState,
 ) -> Fixture {
+    build_fixture_linking(
+        large_tier,
+        import_ceiling,
+        publish,
+        remote_owner,
+        large_object,
+        true,
+    )
+}
+
+/// As [`build_fixture`]; `link_remote_owner` decides whether the remote
+/// owner's key is linked to the local operator's owner. An unlinked remote
+/// key acts for its own principal and is no operator.
+fn build_fixture_linking(
+    large_tier: bool,
+    import_ceiling: u64,
+    publish: bool,
+    remote_owner: bool,
+    large_object: LargeObjectState,
+    link_remote_owner: bool,
+) -> Fixture {
     assert!(large_tier || large_object == LargeObjectState::None);
     let (directory, store_owner, mut state) = test_state::build_test_state();
     let closure = state
@@ -169,6 +190,27 @@ fn build_fixture(
     };
     if remote_owner {
         assert_ne!(operator.fingerprint(), local_operator.fingerprint());
+        if link_remote_owner {
+            let operator_owner = state
+                .engine
+                .trust_store
+                .owner_for(&local_operator.principal_id())
+                .unwrap()
+                .principal
+                .to_string();
+            let link = ryeos_engine::trust::pin_link_for_tests(
+                &state.config.app_root,
+                state.identity.signing_key(),
+                local_operator.signing_key(),
+                operator.signing_key(),
+                &operator_owner,
+                3600,
+            )
+            .unwrap();
+            let mut engine = (*state.engine).clone();
+            engine.trust_store = engine.trust_store.with_key_links(vec![link]);
+            state.engine = Arc::new(engine);
+        }
     }
     let scopes = vec![
         "ryeos.execute.service.external-content/capture-product".to_owned(),
@@ -1319,6 +1361,20 @@ fn acceptance_core_refuses_a_principal_that_does_not_own_the_witness() {
     let error = accept_for(&fixture, &stranger, &admission).unwrap_err();
     assert!(
         format!("{error:#}").contains("same configured operator"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn an_unlinked_remote_owner_is_refused_as_not_speaking_for_the_operator_owner() {
+    let fixture = build_fixture_linking(false, 4096, true, true, LargeObjectState::None, false);
+    let error = ryeos_app::operator_authority::admitted_operator_authority_for_principal(
+        &fixture.state,
+        &fixture.context.fingerprint,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("operator_owner_not_spoken_for"),
         "{error:#}"
     );
 }
