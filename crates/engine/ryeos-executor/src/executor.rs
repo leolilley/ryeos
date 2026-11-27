@@ -1471,7 +1471,7 @@ pub async fn execute_service_verified(
             .clone();
         let result = handler(params, hctx, Arc::new(state.clone())).await;
         drop(handler);
-        disclose_node_service_result(&state, disclosure_class, disclosure.as_ref(), result)
+        disclose_node_service_result(state, disclosure_class, disclosure.as_ref(), result)
     };
 
     let value = dispatch_result.map_err(|e| {
