@@ -22,8 +22,8 @@ mod runtime_qualification;
 mod runtime_qualification_fixture;
 
 use qualification_fixture_node::{
-    RuntimeBinaries, install_large_runtime_content, install_runtime_files, private_directory,
-    run_on_test_node,
+    RuntimeBinaries, install_large_runtime_content, install_runtime_files, link_remote_operator,
+    private_directory, run_on_test_node,
 };
 use qualification_node::{
     bind_manifests_to_tool, manifest_hash, operator_context, predict_large_manifest,
@@ -202,6 +202,7 @@ struct Origin {
     node_key: lillux::crypto::VerifyingKey,
     operator_principal: String,
     operator_key: String,
+    operator_signing_key: lillux::crypto::SigningKey,
     site_id: String,
     coordinate_id: String,
     attestation_hash: String,
@@ -444,6 +445,7 @@ fn run_origin(release: Arc<Release>, session_tree: PathBuf) -> Origin {
                     &base64::engine::general_purpose::STANDARD,
                     operator.verifying_key().as_bytes(),
                 ),
+                operator_signing_key: operator.signing_key().clone(),
                 site_id: state.threads.site_id().to_owned(),
                 coordinate_id: qualification.coordinate_id,
                 attestation_hash: qualification.attestation_hash,
@@ -493,6 +495,7 @@ fn run_receiver(
             // The receiver's operator trusts the origin's operator as a remote
             // operator of its site, and the origin's node as a remote node of it.
             let now = lillux::time::iso8601_now();
+            link_remote_operator(&mut state, &origin.operator_signing_key);
             let operator_fingerprint = origin.operator_principal.strip_prefix("fp:").unwrap();
             ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
                 &state.config.authorized_keys_dir,

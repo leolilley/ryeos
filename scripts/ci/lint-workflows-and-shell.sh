@@ -42,6 +42,7 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/gate.sh \
     tests/e2e/configured-remote/qualify.sh \
     tests/e2e/configured-remote/test_qualification.sh \
+    .ai/tools/ryeos/development/runner-host/lib/apt-update.sh \
     .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh \
     .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh \
     tests/e2e/execute-stream/smoke.sh \
