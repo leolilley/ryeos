@@ -956,4 +956,53 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    fn a_placement_read_of_a_secret_bearing_thread_record_is_refused_to_the_peer() {
+        const SECRET: &str = "sk-live-0123456789";
+        let peer = caller("fp:peer");
+        let hash = "ab".repeat(32);
+        let never_asked = |_: &str| -> Result<Option<String>, HandlerError> {
+            panic!("a placement read is not owner-checked")
+        };
+        let under_placement = || {
+            let mut gate = ThreadRecordGate::with_floor(
+                ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]),
+            );
+            gate.placement_admitted = true;
+            gate
+        };
+
+        // Another principal's thread, clean: the placement's admission is
+        // enough, so it passes.
+        under_placement()
+            .admit_with(&peer, &hash, &event("T-other", "fine"), never_asked)
+            .unwrap();
+
+        // The same record carrying a node secret is refused whole, and the
+        // refusal names nothing.
+        let HandlerError::Structured { code, body, .. } = under_placement()
+            .admit_with(
+                &peer,
+                &hash,
+                &event("T-other", &format!("echo {SECRET}")),
+                never_asked,
+            )
+            .unwrap_err()
+        else {
+            panic!("expected a typed refusal");
+        };
+        assert_eq!(code, "secret_floor_withheld");
+        assert!(!body.to_string().contains(SECRET));
+
+        // The operator receives the secret-bearing record unchanged.
+        ThreadRecordGate::operator()
+            .admit_with(
+                &caller("fp:operator"),
+                &hash,
+                &event("T-other", &format!("echo {SECRET}")),
+                never_asked,
+            )
+            .unwrap();
+    }
 }
