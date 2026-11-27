@@ -1859,6 +1859,62 @@ jobs:
   # binding in a delegated cgroup subtree (see test_support/process_scopes.rs),
   # an unqualified host fails the test, and every suite must pass an exact
   # nonzero number of tests with none skipped.
+
+      # G-11: three native probes pass as "skipped" on a host that cannot run
+      # them and are never enabled by anything else. Here the host qualifies
+      # (unprivileged namespaces above, root for the overlay probe), their
+      # variable is set, and a skip line or a non-zero exit fails the step.
+      - name: Write the probe runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/run-probe" <<'RUN'
+          #!/bin/bash
+          # run-probe LABEL CMD...: run a native probe; fail on a non-zero exit
+          # or on any output line that says it skipped, so a probe that did not
+          # run is never a pass.
+          set -uo pipefail
+          label="$1"; shift
+          log="$(mktemp)"
+          "$@" 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          [[ "$status" == 0 ]] || { echo "FAIL: $label exited $status" >&2; exit 1; }
+          if grep -qi 'skipped' "$log"; then
+            echo "FAIL: $label printed a skip, so the proof did not run" >&2; exit 1
+          fi
+          echo "PROBE-RAN: $label"
+          RUN
+          chmod 755 "$RUNNER_TEMP/run-probe"
+
+      - name: Native probe - guest occurrence owner (unprivileged namespaces)
+        env:
+          RYEOS_GUEST_OCCURRENCE_NATIVE: "1"
+        run: |
+          "$RUNNER_TEMP/run-probe" guest_occurrence_owner_native \
+            cargo test -p ryeos-external-execution --locked --test guest_occurrence_owner_native
+
+      - name: Native probe - private source owner (unprivileged namespaces)
+        env:
+          LILLUX_PRIVATE_SOURCE_NATIVE: "1"
+        run: |
+          "$RUNNER_TEMP/run-probe" private_source_owner \
+            cargo test -p lillux --locked --test private_source_owner
+
+      - name: Native probe - root overlay (root)
+        env:
+          LILLUX_ROOT_OVERLAY_NATIVE: "1"
+        run: |
+          build_json="$RUNNER_TEMP/build-root-overlay.jsonl"
+          if ! cargo test -p lillux --locked --test root_overlay_native --no-run --message-format=json > "$build_json"; then
+            echo "::error::building the root overlay probe failed; the compiler's messages follow" >&2
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.rendered' "$build_json" >&2 || true
+            exit 1
+          fi
+          bin="$(jq -r 'select(.profile.test == true and .executable != null) | .executable' "$build_json")"
+          [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one root overlay probe executable, got: $bin" >&2; exit 1; }
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_ROOT_OVERLAY_NATIVE=1 \
+            "$RUNNER_TEMP/run-probe" root_overlay_native "$bin"
+
+
   process-scope-e2e:
     name: Process-scope e2e (real isolation)
     needs: [bundles]
