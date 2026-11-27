@@ -59,6 +59,12 @@ pub struct ResumeState {
     /// Empty replies in a row, ending at the newest recorded one that the run
     /// has not yet moved past: the position its correction names.
     pub trailing_empty_replies: u32,
+    /// Finishes a signed finish check rejected so far in this thread: the
+    /// number of finish-check inputs the thread recorded. A total for the
+    /// run, never reset.
+    pub finish_check_rejections: u32,
+    /// Signed reminders given so far in this thread.
+    pub notices_given: u32,
     /// Whether the newest final turn of this exact native thread ended at a
     /// normal stop finish.
     pub last_final_stopped: bool,
@@ -362,6 +368,12 @@ pub async fn load_resume_state(
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let trailing_malformed_replies = trailing_malformed_replies(&events[own_start..])?;
     let trailing_empty_replies = trailing_empty_replies(&events[own_start..])?;
+    let finish_check_rejections = count_inputs(&events[own_start..], |kind| {
+        ryeos_runtime::cognition::finish_check_of_kind(kind).is_some()
+    });
+    let notices_given = count_inputs(&events[own_start..], |kind| {
+        ryeos_runtime::cognition::notice_of_kind(kind).is_some()
+    });
     let last_final_stopped = last_final_stopped(&events[own_start..])?;
     let frame = latest_frame(&events)?;
     let (messages, wrap_up_delivered, loop_warned, start_over_ceiling, guard_prefix, guard_history) =
@@ -481,6 +493,8 @@ pub async fn load_resume_state(
         trailing_length_turns,
         trailing_malformed_replies,
         trailing_empty_replies,
+        finish_check_rejections,
+        notices_given,
         last_final_stopped,
         frame,
         wrap_up_delivered,
@@ -1109,6 +1123,22 @@ fn trailing_corrections(
         }
     }
     Ok(0)
+}
+
+/// How many `cognition_in` events carry a kind `is_kind` accepts.
+fn count_inputs(events: &[ReplayedEventRecord], is_kind: impl Fn(&str) -> bool) -> u32 {
+    let count = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "cognition_in"
+                && event
+                    .payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(&is_kind)
+        })
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// Whether the newest final turn ended at a normal stop finish.
@@ -4945,6 +4975,38 @@ mod tests {
             }),
             chain_seq: 0,
         }
+    }
+
+    fn input_of_kind(kind: String) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({
+                "origin": "harness",
+                "kind": kind,
+                "parts": text_parts("signed text"),
+            }),
+            chain_seq: 0,
+        }
+    }
+
+    #[test]
+    fn finish_check_rejections_and_notices_are_counted_from_the_record_and_never_reset() {
+        use ryeos_runtime::cognition::{
+            finish_check_kind, finish_check_of_kind, notice_kind, notice_of_kind,
+        };
+        let events = [
+            input_of_kind(finish_check_kind(1, 1)),
+            reasoning_only(2, "stop"),
+            input_of_kind(notice_kind(2, 1)),
+            input_of_kind(finish_check_kind(3, 2)),
+            empty_correction(4, 1),
+        ];
+        assert_eq!(
+            count_inputs(&events, |k| finish_check_of_kind(k).is_some()),
+            2
+        );
+        assert_eq!(count_inputs(&events, |k| notice_of_kind(k).is_some()), 1);
+        assert_eq!(count_inputs(&[], |k| finish_check_of_kind(k).is_some()), 0);
     }
 
     /// A reply holding only reasoning, ending as `finish`.

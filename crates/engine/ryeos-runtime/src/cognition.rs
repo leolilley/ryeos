@@ -128,6 +128,61 @@ fn correction_position(rest: &str) -> Option<(u32, u32)> {
     Some((turn, streak))
 }
 
+/// Prefix of the kind of the harness input that rejects a finish: a reply
+/// with no tool call that a signed finish check did not accept. The kind names
+/// the turn whose reply was rejected and the rejection's position in the run:
+/// `finish_check_turn_<turn>_attempt_<n>`. Unlike a reply correction the
+/// rejected reply stays in the conversation.
+pub const KIND_FINISH_CHECK_PREFIX: &str = "finish_check_turn_";
+
+const FINISH_CHECK_ATTEMPT_SEPARATOR: &str = "_attempt_";
+
+/// The kind of the input that rejects the finish of `turn`, the `attempt`th
+/// rejection in the run (counting from 1).
+pub fn finish_check_kind(turn: u32, attempt: u32) -> String {
+    format!("{KIND_FINISH_CHECK_PREFIX}{turn}{FINISH_CHECK_ATTEMPT_SEPARATOR}{attempt}")
+}
+
+/// The turn a finish-check kind rejects and its position in the run, or `None`
+/// for any other kind.
+pub fn finish_check_of_kind(kind: &str) -> Option<(u32, u32)> {
+    position_after(
+        kind.strip_prefix(KIND_FINISH_CHECK_PREFIX)?,
+        FINISH_CHECK_ATTEMPT_SEPARATOR,
+    )
+}
+
+/// Prefix of the kind of the harness input that carries a signed reminder:
+/// `notice_turn_<turn>_seq_<n>`.
+pub const KIND_NOTICE_PREFIX: &str = "notice_turn_";
+
+const NOTICE_SEQUENCE_SEPARATOR: &str = "_seq_";
+
+/// The kind of the reminder given before `turn`, the `seq`th in the run
+/// (counting from 1).
+pub fn notice_kind(turn: u32, seq: u32) -> String {
+    format!("{KIND_NOTICE_PREFIX}{turn}{NOTICE_SEQUENCE_SEPARATOR}{seq}")
+}
+
+/// The turn a notice kind names and its position in the run, or `None` for any
+/// other kind.
+pub fn notice_of_kind(kind: &str) -> Option<(u32, u32)> {
+    position_after(
+        kind.strip_prefix(KIND_NOTICE_PREFIX)?,
+        NOTICE_SEQUENCE_SEPARATOR,
+    )
+}
+
+fn position_after(rest: &str, separator: &str) -> Option<(u32, u32)> {
+    let (turn, position) = rest.split_once(separator)?;
+    let turn = turn.parse::<u32>().ok().filter(|turn| *turn > 0)?;
+    let position = position
+        .parse::<u32>()
+        .ok()
+        .filter(|position| *position > 0)?;
+    Some((turn, position))
+}
+
 /// The closed set of reply corrections. Each has its own kind prefix, its own
 /// policy and its own streak; the prefixes are matched exactly, so a kind of
 /// one never reads as the other.
@@ -1041,6 +1096,41 @@ mod tests {
         ] {
             assert_eq!(empty_reply_of_kind(other), None, "{other}");
             assert_eq!(reply_correction_of_kind(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn finish_check_and_notice_kinds_name_turn_and_position_and_read_as_nothing_else() {
+        let kind = finish_check_kind(7, 2);
+        assert_eq!(kind, "finish_check_turn_7_attempt_2");
+        validate_token("kind", &kind).unwrap();
+        assert_eq!(finish_check_of_kind(&kind), Some((7, 2)));
+        assert_eq!(reply_correction_of_kind(&kind), None);
+        assert_eq!(notice_of_kind(&kind), None);
+        let notice = notice_kind(4, 1);
+        assert_eq!(notice, "notice_turn_4_seq_1");
+        validate_token("kind", &notice).unwrap();
+        assert_eq!(notice_of_kind(&notice), Some((4, 1)));
+        assert_eq!(finish_check_of_kind(&notice), None);
+        for other in [
+            "finish_check_turn_0_attempt_1",
+            "finish_check_turn_3_attempt_0",
+            "finish_check_turn_x_attempt_1",
+            "finish_check_turn_3",
+            "xfinish_check_turn_3_attempt_1",
+            "finish_check_turn_3_streak_1",
+            "empty_reply_turn_3_streak_1",
+            "nudge",
+        ] {
+            assert_eq!(finish_check_of_kind(other), None, "{other}");
+        }
+        for other in [
+            "notice_turn_0_seq_1",
+            "notice_turn_3_seq_0",
+            "notice_turn_3",
+            "nudge",
+        ] {
+            assert_eq!(notice_of_kind(other), None, "{other}");
         }
     }
 

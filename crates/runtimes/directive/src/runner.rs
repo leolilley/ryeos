@@ -914,6 +914,10 @@ pub struct Runner {
     /// Empty replies in a row that were corrected. Derived from the record on
     /// resume.
     consecutive_empty_replies: u32,
+    /// Finishes a signed finish check has rejected in this run (a total).
+    finish_check_rejections: u32,
+    /// Signed reminders given in this run.
+    notices_given: u32,
     /// Whether the latest recorded reply ended at a normal stop finish. The
     /// empty-reply correction applies only then: a content-filter, unknown or
     /// output-limit finish is a different condition and is never nudged past.
@@ -2091,6 +2095,8 @@ impl Runner {
             consecutive_length_turns: 0,
             consecutive_malformed_replies: 0,
             consecutive_empty_replies: 0,
+            finish_check_rejections: 0,
+            notices_given: 0,
             last_reply_stopped: false,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
@@ -2167,6 +2173,8 @@ impl Runner {
         let trailing_length_turns = resume.trailing_length_turns;
         let trailing_malformed_replies = resume.trailing_malformed_replies;
         let trailing_empty_replies = resume.trailing_empty_replies;
+        let finish_check_rejections = resume.finish_check_rejections;
+        let notices_given = resume.notices_given;
         let last_final_stopped = resume.last_final_stopped;
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
@@ -2280,6 +2288,8 @@ impl Runner {
         runner.resume_summary_trigger = resume_summary_trigger;
         runner.consecutive_malformed_replies = trailing_malformed_replies;
         runner.consecutive_empty_replies = trailing_empty_replies;
+        runner.finish_check_rejections = finish_check_rejections;
+        runner.notices_given = notices_given;
         runner.last_reply_stopped = last_final_stopped;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
