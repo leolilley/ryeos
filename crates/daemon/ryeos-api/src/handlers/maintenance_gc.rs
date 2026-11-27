@@ -21,8 +21,9 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "maintenance.gc",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.maintenance/gc"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
+            ryeos_app::operator_authority::require_admitted_operator_or_this_node(&state, &ctx)?;
             let req: Request = if params.is_null() {
                 Request::default()
             } else {

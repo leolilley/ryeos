@@ -4154,6 +4154,7 @@ fn submit_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request = crate::handler_error::parse_request(params)?;
         dispatch_release_graph(request, context, state).await
     })
