@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T13:50:08Z:e4dd049a9d4ee2ea4ea921711ca08955851a26e9d9e6fee68f4d12553e1c9dc3:8UDkS6AmAZKqTKaLgodzbVLq0ZXFuoeuoCfYezmiW8CkdgCq0N8Ip0a/Wl2TuvSJPX6L6tiwkG9DJi0RqQBBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T19:46:00Z:5041b6893bb7ec933c2156c6ba92613303640c9d9cf8c97ad0ba6efbadcc6159:aQ758j/0YL5/M8KjbGnRVBVC+acyJbHFi7PypGIM2Q31oa32WgaiQ6FDK53ckGbJB9sVL1RQgMgfUoIJsPa/Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: health.status
 record_thread: false
@@ -14,6 +14,3 @@ disclosure:
     - "/missing_services"
   public:
     - /status
-    - /operational_services
-    - /thread_projection/status
-    - /thread_projection/generation

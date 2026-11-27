@@ -319,6 +319,41 @@ async fn admission_claim_refuses_explicitly_disabled_policy_before_token_use() {
     );
 }
 
+/// An unknown, a spent and an expired token are refused with the same status
+/// and the same body, so a refusal does not say whether a token ever existed.
+#[tokio::test]
+async fn unknown_spent_and_expired_tokens_get_the_same_refusal() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    write_admission_token_file(&state, "spent-token", PUSH_SCOPES, None, 600);
+    write_admission_token_file_with_issued_at(
+        &state,
+        "expired-token",
+        PUSH_SCOPES,
+        None,
+        now_unix() - 1000,
+        600,
+    );
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let state = Arc::new(state);
+    let spent_claim = signed_claim_request(&state, "spent-token", &claimant, PUSH_SCOPES, None);
+    admission_claim::handle(spent_claim, state.clone())
+        .await
+        .unwrap();
+
+    let other = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let mut refusals = Vec::new();
+    for token in ["never-minted", "spent-token", "expired-token"] {
+        let req = signed_claim_request(&state, token, &other, PUSH_SCOPES, None);
+        let error = admission_claim::handle(req, state.clone())
+            .await
+            .expect_err("the token is not redeemable");
+        assert!(matches!(error, HandlerError::Forbidden(_)), "{token}");
+        refusals.push(error.to_string());
+    }
+    assert_eq!(refusals[0], refusals[1]);
+    assert_eq!(refusals[0], refusals[2]);
+}
+
 fn write_admission_token_file(
     state: &ryeos_app::state::AppState,
     token: &str,

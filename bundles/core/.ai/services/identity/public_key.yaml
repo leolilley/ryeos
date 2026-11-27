@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T00:50:54Z:54df129ca419b64c47f8527d4a206db0976a007886074ee5a45603ccb825821e:s7bcMEQCmxE73ixfBgwpnxbN9mMhuCAnMKReoI30dgbvxJEgehAncYPs0Yxl3Aru+PBiar8q2q/pG4aabId6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T19:46:00Z:d5c95dfc3ecf0a1185f749d2a8aac8ae76408eb08c636e0ce3e6ccd337d7abc1:TQrVH5TqxJbgy/A6PsBrEF6wIuFboFNb9J2mncy4IBJEaz0Um74wVdvwXI/lnSF1wo0dl1UsiEfbVshDiNizBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.public_key
 required_caps: []
@@ -17,5 +17,4 @@ disclosure:
     - /fingerprint
     - /signing_key
     - /site_id
-    - /version
     - /vault_fingerprint

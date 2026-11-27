@@ -148,23 +148,26 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             "origin_site_id must use the canonical `site:<name>` form".to_string(),
         ));
     }
-    let maximum_token_ttl_secs = hosted_admission_token_ttl_secs(&state)?;
     let token_hash = token_hash(&req.token);
     let token_path = admission_token_path(&state.config.app_root, &token_hash);
     let token = read_token_file(&token_path)?;
 
-    if token.token_hash != token_hash {
-        return Err(HandlerError::BadRequest(
-            "admission token hash mismatch".to_string(),
-        ));
+    // The file is found by the hash of the presented token; the stored hash
+    // must agree, compared in constant time.
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(
+        token.token_hash.as_bytes(),
+        token_hash.as_bytes(),
+    )) {
+        return Err(invalid_token_refusal());
     }
 
+    // An expired token is refused exactly as an unknown or spent one is, so
+    // the refusal does not say that the token once existed.
     let now = now_unix();
     if token.expires_at_unix < now {
-        return Err(HandlerError::Forbidden(
-            "admission token expired".to_string(),
-        ));
+        return Err(invalid_token_refusal());
     }
+    let maximum_token_ttl_secs = hosted_admission_token_ttl_secs(&state)?;
     enforce_hosted_policy_token_ttl(maximum_token_ttl_secs, &token, now)?;
     let origin_site_id = check_claim_matches_token(&req, &token)?;
     if now.abs_diff(req.signed_at) > CLAIM_MAX_AGE_SECS {
@@ -311,9 +314,7 @@ fn admission_token_path(app_root: &Path, token_hash: &str) -> PathBuf {
 }
 
 fn read_token_file(path: &Path) -> HandlerResult<AdmissionTokenFile> {
-    let raw = std::fs::read_to_string(path).map_err(|_| {
-        HandlerError::Forbidden("invalid or already-used admission token".to_string())
-    })?;
+    let raw = std::fs::read_to_string(path).map_err(|_| invalid_token_refusal())?;
     let stored: AdmissionTokenVersion = toml::from_str(&raw)
         .map_err(|e| HandlerError::BadRequest(format!("invalid token file: {e}")))?;
     if stored.version != ADMISSION_TOKEN_FORMAT_VERSION {
@@ -395,11 +396,9 @@ fn check_claim_matches_token<'a>(
                 return Err(refusal(
                     "admission_origin_site_mismatch",
                     403,
-                    format!(
-                        "this token is bound to origin site {bound}, but the claim names {}; \
-                         claim through a node of {bound}, or mint a token for the claimant's site",
-                        req.origin_site_id.as_deref().unwrap_or("no origin site"),
-                    ),
+                    "the claim's origin site is not the site this token is bound to; claim \
+                     through a node of the site the token was minted for"
+                        .to_string(),
                 ));
             }
             Ok(Some(bound))
@@ -461,11 +460,10 @@ fn verify_origin_cosignature(
         return Err(refusal(
             "admission_cosignature_missing",
             403,
-            format!(
-                "a remote_principal claim must carry the co-signature of an admitted node of \
-                 {origin_site_id}; have that node co-sign the claim (forwarding_key_id and \
-                 forwarding_signature) and claim again"
-            ),
+            "a remote_principal claim must carry the co-signature of an admitted node of \
+             its origin site; have that node co-sign the claim (forwarding_key_id and \
+             forwarding_signature) and claim again"
+                .to_string(),
         ));
     };
     let content_hash = cosignature_content_hash(
@@ -487,23 +485,28 @@ fn verify_origin_cosignature(
     )
     .map(|_| ())
     .map_err(|reason| {
+        tracing::debug!(%reason, "admission origin co-signature refused");
         refusal(
             "admission_cosignature_invalid",
             403,
-            format!(
-                "the origin-node co-signature is refused: {reason}; the co-signing node must be \
-                 admitted here as a remote_node of {origin_site_id} holding the \
-                 forwarded-operator attestation scope"
-            ),
+            "the origin-node co-signature is refused; the co-signing node must be admitted \
+             here as a remote_node of the claim's origin site holding the forwarded-operator \
+             attestation scope"
+                .to_string(),
         )
     })
+}
+
+/// The one refusal an unknown, spent or expired token receives.
+fn invalid_token_refusal() -> HandlerError {
+    HandlerError::Forbidden("invalid or already-used admission token".to_string())
 }
 
 fn consume_token_file(path: &Path) -> HandlerResult<()> {
     let claimed = path.with_extension("claimed");
     std::fs::rename(path, &claimed).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            HandlerError::Forbidden("invalid or already-used admission token".to_string())
+            invalid_token_refusal()
         } else {
             HandlerError::Internal(format!("failed to consume admission token: {e}"))
         }
