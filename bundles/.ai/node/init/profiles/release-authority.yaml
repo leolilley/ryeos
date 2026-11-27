@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:fa17fad373a156c53e223f95fd338868de362d654b3e6cff969e8fe5e522d122:rRAWzbwJCBLYQKvwVf/IJJjdTmRPWlO+Sm6IXXdMPzjJvs1Ga7bJ1mnyKR23aGASTsB5NIqJrERUnyUb3af7Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:03:24Z:a739bc975806b51c99da9957739f1a60c86dce03354edcfe6a15cf4b3e170815:53Z239GZiK+jZheskdu03xbjtd5v7bPlfvrZeNKwBHMM1E6xhAYiqT0jtw684esg2TSJlE2ospcNpiAGWLztBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -329,6 +329,13 @@ policies:
     admission_enabled: true
     admission_token_ttl_secs: 600
     allow_loopback_http: true
+  membership:
+    schema: 1
+    classes: {}
+  client_address:
+    schema: 1
+    trusted_proxies: []
+    header: forwarded
   isolation:
     schema: 1
     policy:

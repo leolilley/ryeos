@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:6ea3b927c9493e17ae144afd60cc2ecb74d9a1a9eca7c5bd0054cfcad1c5edce:OgTv4EuZ7cg/bFf8bOHmuih2KbjcYg5mhrW9jqTqWMJn5TYbtdtQLCRVmYXy2Vn67Dz9Um/mmISQ1Rm6Qz5VBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:03:24Z:e3774d8e6c771b7f372d5a67aa1afc5885501105cca23a76f9c2fea179cc0365:rp3gYzW7wvulsSB0IKcDzqDZLiNMUEF7DuU+0DCMhPEbSd5WEhe/RwtIarL3OfVYKzXyDKhR8FA8WYCVeLo2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -248,6 +248,13 @@ policies:
     admission_enabled: false
     admission_token_ttl_secs: null
     allow_loopback_http: true
+  membership:
+    schema: 1
+    classes: {}
+  client_address:
+    schema: 1
+    trusted_proxies: []
+    header: forwarded
   isolation:
     schema: 1
     policy:

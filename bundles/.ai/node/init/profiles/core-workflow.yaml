@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:26442eb13983cbd4b826eaf8fe0a8f3d2b112f182bfb3abb91b02a580791fa7a:80EPmk4akijh80hNLgC5Kt8dufvoQor9rdL8Mqa1AMg1E+xJEgvbDnozv1Ci6m6z7wvrwBPcnp8N/saY6psbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:03:24Z:3da31989da78c4cc7e4b6cbf3e91bcc055e95916882dfb309cce17f5fa51e638:3tyVc2amNsXKY/X0zLv6e2WwFERZNWdE8wXCiwX/9soxvxfRKTimEjD5tPtKOu8QC0l5DMeagwwuGmu1t68kDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -248,6 +248,13 @@ policies:
     admission_enabled: false
     admission_token_ttl_secs: null
     allow_loopback_http: true
+  membership:
+    schema: 1
+    classes: {}
+  client_address:
+    schema: 1
+    trusted_proxies: []
+    header: forwarded
   isolation:
     schema: 1
     policy:

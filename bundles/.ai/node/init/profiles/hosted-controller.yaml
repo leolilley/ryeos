@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:09a5d26d49d7331c7b1190b024515db2ccccdab9275469e89e766c1f6116f3ae:QW9eClh+MkwPsY4yJv0V5B7ine/Mlekkp2Ig+5ACkNx/gvoHfrXTsNAfgCo4o2di4wHw0t89maXEY75jgrD1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:03:24Z:56c155ac5f20809edad149f7200bff2f790c4ad2af66d5cbfd2e3399d4f26bd2:6X2rlzTWyjjP/P6kH0MC9K1iM3zTrb0zr7X+TrSsFeQ4Ze4vl2uS6wOmEq5YDxFzr71ttDdI5DNusuuNUt3bAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -287,6 +287,13 @@ policies:
     admission_enabled: false
     admission_token_ttl_secs: null
     allow_loopback_http: true
+  membership:
+    schema: 1
+    classes: {}
+  client_address:
+    schema: 1
+    trusted_proxies: []
+    header: forwarded
   isolation:
     schema: 1
     policy:

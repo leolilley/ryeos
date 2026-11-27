@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:b1ad0f225de69ce69b5dcae9ae40a59090be241d711bbd9b744533d5612c3f19:GhFtKX2DUomrfv9GIPFGfsi5X2+LEVORpqXA/8dpQp8JYMczQJ+7oqJjlXxkRqpfAGk6UmMv4tpxxz6D9530Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:03:24Z:896fd1edede3bee8862efcb44666a05a0efc05be89591912739cf48b269a7c51:RudvcW3sA03LOxX1u9PeEI6UinlkwyvhaHgXCYjveNyBmyqUKVHOTla0DQdkKIVvmZiUKNC7p0pI+iQBL57TBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -247,6 +247,13 @@ policies:
     admission_enabled: false
     admission_token_ttl_secs: null
     allow_loopback_http: true
+  membership:
+    schema: 1
+    classes: {}
+  client_address:
+    schema: 1
+    trusted_proxies: []
+    header: forwarded
   isolation:
     schema: 1
     policy:
