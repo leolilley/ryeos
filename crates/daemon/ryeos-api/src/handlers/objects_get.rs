@@ -21,8 +21,8 @@ use base64::Engine as _;
 use serde_json::Value;
 
 use crate::objects_read_scope::{
-    ReadRoot, require_blobs_in_scope, require_large_object_in_scope, require_objects_in_scope,
-    resolve_scope, root_required,
+    ReadRoot, ThreadRecordGate, require_blobs_in_scope, require_large_object_in_scope,
+    require_objects_in_scope, resolve_scope, root_required,
 };
 use crate::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
@@ -89,7 +89,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     if let Some(chunk) = &req.large_object_chunk {
         require_large_object_in_scope(&scope, &root, &chunk.hash)?;
     }
-    serve(req, state).await
+    // A thread or event record is served only to its owner and only without a
+    // node secret; the operator reads through `handle_any`. The gate runs on
+    // the answer, after the store's read guard is released.
+    let mut gate = ThreadRecordGate::for_caller_under(&state, &ctx, Some(&root))?;
+    let answer = serve(req, state.clone()).await?;
+    gate.admit_entries(&state, &ctx, &answer)?;
+    Ok(answer)
 }
 
 /// Unscoped read for the node operator. The configured operator already

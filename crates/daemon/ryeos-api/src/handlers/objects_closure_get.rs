@@ -11,6 +11,7 @@ use crate::handlers::objects_closure_describe::{
     Request, admit_request, closure_summary_json, collect_limited_closure_with_cas,
     enforce_serialized_response_limit, require_roots_in_scope,
 };
+use crate::objects_read_scope::ThreadRecordGate;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
@@ -18,7 +19,13 @@ use ryeos_executor::executor::ServiceAvailability;
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     require_roots_in_scope(&req, &ctx, &state, "objects/closure/get")?;
-    handle_authorized(req, state).await
+    // A thread or event record in the closure is served only to its owner and
+    // only without a node secret; the operator's closure is unchanged. The
+    // gate runs on the answer, after the store's read guards are released.
+    let mut gate = ThreadRecordGate::for_caller_under(&state, &ctx, req.root.as_ref())?;
+    let answer = handle_authorized(req, state.clone()).await?;
+    gate.admit_entries(&state, &ctx, &answer)?;
+    Ok(answer)
 }
 
 /// Fetch the closure of roots a caller has already been authorized to read.

@@ -164,6 +164,7 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
             &session,
             serde_json::json!({ SESSION_ID_PARAM: session_id }),
             &BTreeMap::from([(SESSION_ID_PARAM.to_owned(), "string".to_owned())]),
+            ctx.principal.as_ref(),
         )?;
         if admitted
             .params

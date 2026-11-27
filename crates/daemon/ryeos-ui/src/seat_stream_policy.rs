@@ -6,11 +6,18 @@
 //! entry that admitted the open. An event that cannot be shaped under the
 //! entry's bounds ends the stream with a refusal. Nothing is dropped or cut
 //! silently, and no event reaches the seat unshaped.
+//!
+//! A seat is never the node's operator, so every shaped event is also matched
+//! against the node's secret values, whole and after shaping, and each secret
+//! is replaced by the fixed marker before the event is framed. The floor is
+//! built once, when the open is admitted.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use ryeos_api::route_error::RouteDispatchError;
+use ryeos_api::routes::invocation::RoutePrincipal;
+use ryeos_api::routes::secret_floor_gate::{CallerFloor, caller_floor, mask_envelope};
 use ryeos_app::state::AppState;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
 use ryeos_node_runtime::node_policy::sections::read_disclosure::{
@@ -44,6 +51,9 @@ pub(crate) struct AdmittedStream {
     pub params: serde_json::Map<String, Value>,
     pub shaping: DetachedShaping,
     pub target: String,
+    /// The caller's secret floor, built once for the stream. `None` only for
+    /// an admitted operator.
+    pub floor: CallerFloor,
 }
 
 /// The policy target of a stream route: the route's own id.
@@ -59,7 +69,9 @@ pub(crate) fn admit_open(
     session: &BrowserSession,
     params: Value,
     parameter_schema: &BTreeMap<String, String>,
+    principal: Option<&RoutePrincipal>,
 ) -> Result<AdmittedStream, RouteDispatchError> {
+    let floor = caller_floor(state, principal)?;
     let policy = state
         .node_policy
         .require::<ReadDisclosurePolicy>()
@@ -87,6 +99,7 @@ pub(crate) fn admit_open(
         params,
         shaping: shaping.detach(),
         target,
+        floor,
     })
 }
 
@@ -102,12 +115,15 @@ pub(crate) fn shape_events(
     mode: FrameMode,
 ) -> EnvelopeStream {
     let AdmittedStream {
-        shaping, target, ..
+        shaping,
+        target,
+        floor,
+        ..
     } = admitted;
     Box::pin(async_stream::stream! {
         while let Some(Ok(envelope)) = events.next().await {
             match shape_event(&shaping, &target, mode, envelope) {
-                Ok(shaped) => yield Ok(shaped),
+                Ok(shaped) => yield Ok(mask_envelope(floor.as_deref(), shaped)),
                 Err(refusal) => {
                     yield Ok(refusal_envelope(&refusal, mode));
                     return;
@@ -212,6 +228,7 @@ mod tests {
             params: Default::default(),
             shaping,
             target: "route:test/stream".to_owned(),
+            floor: None,
         };
         shape_events(stream_of(events), admitted, mode)
             .map(|item| item.unwrap())
@@ -242,6 +259,48 @@ mod tests {
             out[1].payload,
             json!({"event_type": "y", "payload": {"a": 3}})
         );
+    }
+
+    #[tokio::test]
+    async fn a_seat_event_is_masked_after_shaping_and_an_operator_event_is_not() {
+        const SECRET: &str = "sk-live-0123456789";
+        let marker = ryeos_runtime::workload_client::SECRET_FLOOR_MARKER;
+        let events = || {
+            vec![
+                RouteStreamEnvelope::with_id(
+                    "1",
+                    "x",
+                    json!({"a": format!("v {SECRET}"), "dropped": SECRET}),
+                ),
+                RouteStreamEnvelope::new("x", json!({"a": "clean"})),
+            ]
+        };
+        let run_with = |floor: CallerFloor, mode: FrameMode| {
+            let admitted = AdmittedStream {
+                params: Default::default(),
+                shaping: shaping(json!(["/event_type", "/payload/a"]), 1024),
+                target: "route:test/stream".to_owned(),
+                floor,
+            };
+            shape_events(stream_of(events()), admitted, mode)
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let floor = Some(std::sync::Arc::new(
+            ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]),
+        ));
+
+        for mode in [FrameMode::WrapAsMessage, FrameMode::KeepEventName] {
+            let seat = run_with(floor.clone(), mode).await;
+            assert_eq!(seat.len(), 2);
+            let text = serde_json::to_string(&seat[0]).unwrap();
+            assert!(!text.contains(SECRET), "{text}");
+            assert!(text.contains(marker), "{text}");
+            assert_eq!(seat[0].id.as_deref(), Some("1"));
+            assert_eq!(seat[1], run_with(None, mode).await[1]);
+        }
+        let operator = run_with(None, FrameMode::KeepEventName).await;
+        assert_eq!(operator[0].payload, json!({"a": format!("v {SECRET}")}));
     }
 
     #[tokio::test]

@@ -52,7 +52,9 @@ use crate::routes::invokers::dispatch_invocation::{
     CompiledDispatchInvoker, DispatchAuthority, FIXED_PRINCIPAL_REFUSAL, FixedPrincipalConfinement,
     PinnedDispatchSubject,
 };
+use crate::routes::secret_floor_gate::{caller_floor, withhold_answer};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_app::secret_floor::SecretFloor;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
@@ -393,6 +395,12 @@ impl CompiledHandlerMode {
         })?;
         let pinned_subject = anchored.subject;
 
+        // The caller's secret floor, built once before anything runs: whoever
+        // sent the request, the response is served to them, so a caller that is
+        // not the operator receives it only when it holds none of the node's
+        // secrets.
+        let floor = caller_floor(&ctx.state, Some(&ctx.principal))?;
+
         let envelope = build_route_envelope(
             compiled,
             &ctx,
@@ -500,6 +508,7 @@ impl CompiledHandlerMode {
 
         match result {
             RouteInvocationResult::Json { value, thread_id } => {
+                let value = withhold_answer(floor.as_deref(), value)?;
                 let handler_value = handler_output_value(&value);
                 let response_value = handler_value
                     .get(&self.result_config.envelope_field)
@@ -516,8 +525,11 @@ impl CompiledHandlerMode {
                             self.source_ref
                         ))
                     })?;
-                let mut response =
-                    envelope_to_response(envelope, self.result_config.response_bytes_max)?;
+                let mut response = envelope_to_response(
+                    envelope,
+                    self.result_config.response_bytes_max,
+                    floor.as_deref(),
+                )?;
                 attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
                 Ok(response)
             }
@@ -947,9 +959,13 @@ fn query_params_to_json(query: Option<&str>) -> Value {
     Value::Object(map)
 }
 
+/// The HTTP response a handler's envelope describes. `floor` is the caller's
+/// secret floor (`None` for the operator): a base64 body is judged decoded,
+/// since its encoded text cannot show a secret.
 fn envelope_to_response(
     envelope: HttpResponseEnvelope,
     response_bytes_max: usize,
+    floor: Option<&SecretFloor>,
 ) -> Result<Response, RouteDispatchError> {
     let status_raw = envelope.status.unwrap_or(200);
     if !(200..=599).contains(&status_raw) {
@@ -1040,6 +1056,10 @@ fn envelope_to_response(
                 ))
             })?;
         validate_response_size(body.len(), response_bytes_max)?;
+        withhold_answer(
+            floor,
+            Value::String(String::from_utf8_lossy(&body).into_owned()),
+        )?;
         Body::from(body)
     } else {
         Body::empty()
@@ -1485,6 +1505,7 @@ mod tests {
                 json: None,
             },
             default_response_bytes_max(),
+            None,
         )
         .unwrap();
 
@@ -1507,6 +1528,7 @@ mod tests {
                 json: None,
             },
             default_response_bytes_max(),
+            None,
         )
         .unwrap();
 
@@ -1533,6 +1555,7 @@ mod tests {
                 json: None,
             },
             default_response_bytes_max(),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1575,6 +1598,7 @@ mod tests {
                 json: Some(json!({"ok": true})),
             },
             default_response_bytes_max(),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1597,10 +1621,50 @@ mod tests {
                 json: None,
             },
             4,
+            None,
         )
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("exceeding response_bytes_max"), "got: {err}");
+    }
+
+    #[test]
+    fn a_decoded_body_holding_a_secret_is_refused_to_a_non_operator_only() {
+        use base64::Engine as _;
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let envelope = || HttpResponseEnvelope {
+            status: Some(200),
+            headers: BTreeMap::new(),
+            content_type: Some("text/plain".into()),
+            body: None,
+            body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(format!("token {SECRET}")),
+            ),
+            json: None,
+        };
+        let refused = envelope_to_response(envelope(), default_response_bytes_max(), Some(&floor))
+            .unwrap_err();
+        match refused {
+            RouteDispatchError::Structured { code, body, .. } => {
+                assert_eq!(code, "secret_floor_withheld");
+                assert!(!body.to_string().contains(SECRET));
+            }
+            other => panic!("not the typed refusal: {other}"),
+        }
+        assert!(envelope_to_response(envelope(), default_response_bytes_max(), None).is_ok());
+    }
+
+    #[test]
+    fn a_handler_answer_with_a_secret_is_refused_to_a_non_operator_whole() {
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let answer = json!({"result": {"response": {"json": {"k": format!("v {SECRET}")}}}});
+        assert!(matches!(
+            withhold_answer(Some(&floor), answer.clone()),
+            Err(RouteDispatchError::Structured { code, .. }) if code == "secret_floor_withheld"
+        ));
+        assert_eq!(withhold_answer(None, answer.clone()).unwrap(), answer);
     }
 }

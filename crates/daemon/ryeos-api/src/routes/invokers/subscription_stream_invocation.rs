@@ -13,6 +13,7 @@ use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
 use super::stream_helpers::*;
+use crate::routes::secret_floor_gate::{caller_floor, mask_envelope};
 
 pub struct CompiledSubscriptionStreamInvocation {
     pub keep_alive_secs: u64,
@@ -66,6 +67,9 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
             return Err(RouteDispatchError::NotFound);
         }
 
+        // Built once for the stream; every record below passes it.
+        let floor = caller_floor(&ctx.state, ctx.principal.as_ref())?;
+
         let hub = ctx.state.event_streams.clone();
 
         let last_seen = last_event_id;
@@ -107,7 +111,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
 
                     for ev in &result.events {
                         max_seq = max_seq.max(ev.chain_seq);
-                        yield Ok(envelope_for_persisted(ev));
+                        yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                         yielded_any_replay_event = true;
                         if is_terminal(&ev.event_type) {
                             saw_terminal = true;
@@ -136,7 +140,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 }
                                 for ev in &page_result.events {
                                     max_seq = max_seq.max(ev.chain_seq);
-                                    yield Ok(envelope_for_persisted(ev));
+                                    yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                                     yielded_any_replay_event = true;
                                     if is_terminal(&ev.event_type) {
                                         return;
@@ -145,7 +149,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 cursor = page_result.next_cursor;
                             }
                             Err(e) => {
-                                yield Ok(error_envelope("replay_paging_failed", &format!("replay paging failed: {e:#}")));
+                                yield Ok(mask_envelope(floor.as_deref(), error_envelope("replay_paging_failed", &format!("replay paging failed: {e:#}"))));
                                 return;
                             }
                         }
@@ -163,14 +167,14 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                         match sub.recv().await {
                             Ok(ev) => {
                                 if is_ephemeral(&ev) {
-                                    yield Ok(envelope_for_persisted(&ev));
+                                    yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                     continue;
                                 }
                                 if ev.chain_seq <= current_max {
                                     continue;
                                 }
                                 current_max = ev.chain_seq;
-                                yield Ok(envelope_for_persisted(&ev));
+                                yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                 if is_terminal(&ev.event_type) {
                                     return;
                                 }
@@ -202,7 +206,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                             for ev in &page.events {
                                                 lag_max = lag_max.max(ev.chain_seq);
                                                 if ev.chain_seq > current_max {
-                                                    yield Ok(envelope_for_persisted(ev));
+                                                    yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                                                     if is_terminal(&ev.event_type) {
                                                         return;
                                                     }
@@ -226,7 +230,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                     {
                                         return;
                                     }
-                                    yield Ok(error_envelope("replay_failed", &err_msg));
+                                    yield Ok(mask_envelope(floor.as_deref(), error_envelope("replay_failed", &err_msg)));
                                     return;
                                 }
 
@@ -245,7 +249,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                     }
                 }
                 Err(e) => {
-                    yield Ok(error_envelope("initial_replay_failed", &format!("replay failed: {e}")));
+                    yield Ok(mask_envelope(floor.as_deref(), error_envelope("initial_replay_failed", &format!("replay failed: {e}"))));
                     return;
                 }
             }

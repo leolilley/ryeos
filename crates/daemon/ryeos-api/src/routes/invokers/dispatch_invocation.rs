@@ -20,6 +20,8 @@ use crate::routes::invocation::{
     CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult,
 };
+use crate::routes::secret_floor_gate::{caller_floor, withhold_answer, withhold_error};
+use ryeos_app::secret_floor::SecretFloor;
 
 /// Typed input shape for engine-dispatched route sources.
 ///
@@ -167,7 +169,27 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
         &self,
         ctx: RouteInvocationContext,
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
-        self.invoke_with(ctx, None).await
+        // The answer goes to whoever sent the request: a caller that is not
+        // the operator receives it only when it holds none of the node's
+        // secrets, and a floor that cannot be built refuses before the run.
+        let floor = caller_floor(&ctx.state, ctx.principal.as_ref())?;
+        floor_dispatch_result(floor.as_deref(), self.invoke_with(ctx, None).await)
+    }
+}
+
+/// What the caller receives of a dispatch outcome: a Json answer or a failure
+/// that holds one of the node's secrets never reaches a caller whose `floor`
+/// is set (any caller but the operator).
+fn floor_dispatch_result(
+    floor: Option<&SecretFloor>,
+    result: Result<RouteInvocationResult, RouteDispatchError>,
+) -> Result<RouteInvocationResult, RouteDispatchError> {
+    match result.map_err(|error| withhold_error(floor, error))? {
+        RouteInvocationResult::Json { value, thread_id } => Ok(RouteInvocationResult::Json {
+            value: withhold_answer(floor, value)?,
+            thread_id,
+        }),
+        other => Ok(other),
     }
 }
 
@@ -747,6 +769,38 @@ mod tests {
             content_hash: "content".to_string(),
             raw_content_digest: "raw".to_string(),
         }
+    }
+
+    #[test]
+    fn a_dispatch_answer_with_a_secret_is_refused_to_a_non_operator_and_served_to_the_operator() {
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let answer = || {
+            Ok(RouteInvocationResult::Json {
+                value: serde_json::json!({"result": {"stdout": format!("token {SECRET}")}}),
+                thread_id: Some("T-1".to_owned()),
+            })
+        };
+
+        match floor_dispatch_result(Some(&floor), answer()) {
+            Err(RouteDispatchError::Structured { code, body, .. }) => {
+                assert_eq!(code, "secret_floor_withheld");
+                assert!(!body.to_string().contains(SECRET));
+            }
+            other => panic!("secret answer was served: {}", other.is_ok()),
+        }
+        match floor_dispatch_result(None, answer()) {
+            Ok(RouteInvocationResult::Json { value, thread_id }) => {
+                assert!(value.to_string().contains(SECRET));
+                assert_eq!(thread_id.as_deref(), Some("T-1"));
+            }
+            _ => panic!("the operator's answer must pass whole"),
+        }
+        let clean = Ok(RouteInvocationResult::Json {
+            value: serde_json::json!({"result": "ok"}),
+            thread_id: None,
+        });
+        assert!(floor_dispatch_result(Some(&floor), clean).is_ok());
     }
 
     #[test]

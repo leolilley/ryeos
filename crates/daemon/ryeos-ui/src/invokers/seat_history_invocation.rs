@@ -13,6 +13,7 @@ use ryeos_api::routes::invocation::{
 use ryeos_api::routes::response_modes::event_stream_mode::{
     EventStreamStrategy, StreamSourceCompiler,
 };
+use ryeos_api::routes::secret_floor_gate::{CallerFloor, caller_floor, mask_envelope};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::PersistedEventRecord;
@@ -71,6 +72,20 @@ fn replay_event_chunks<T: serde::Serialize>(
         chunks.push(&events[start..]);
     }
     Ok(chunks)
+}
+
+/// Every frame of the stream as the seat receives it. Each whole frame, a
+/// proof or an interval of verified records, is matched against the node's
+/// secrets before it is framed; `floor` is `None` only for the operator.
+fn floored_frames(
+    mut receiver: tokio::sync::mpsc::Receiver<RouteStreamEnvelope>,
+    floor: CallerFloor,
+) -> impl tokio_stream::Stream<Item = Result<RouteStreamEnvelope, std::convert::Infallible>> {
+    async_stream::stream! {
+        while let Some(frame) = receiver.recv().await {
+            yield Ok::<_, std::convert::Infallible>(mask_envelope(floor.as_deref(), frame));
+        }
+    }
 }
 
 /// Disconnect cancels future page scheduling. A blocking page already in
@@ -154,6 +169,9 @@ impl CompiledRouteInvocation for CompiledSeatHistoryInvocation {
         let request: HistoryRequest = serde_json::from_value(ctx.input).map_err(|error| {
             RouteDispatchError::BadRequest(format!("invalid seat history request: {error}"))
         })?;
+        // A seat is never the node's operator. Its secret floor is built once
+        // for the stream, before any history is read.
+        let floor = caller_floor(&ctx.state, ctx.principal.as_ref())?;
         let principal = ctx.principal.ok_or(RouteDispatchError::Unauthorized)?;
         let session_id = principal
             .id
@@ -200,12 +218,7 @@ impl CompiledRouteInvocation for CompiledSeatHistoryInvocation {
         tokio::spawn(async move {
             stream.run(anchor, live).await;
         });
-        let events = Box::pin(async_stream::stream! {
-            let mut receiver = receiver;
-            while let Some(frame) = receiver.recv().await {
-                yield Ok::<_, std::convert::Infallible>(frame);
-            }
-        });
+        let events = Box::pin(floored_frames(receiver, floor));
         Ok(RouteInvocationResult::Stream(RouteEventStream {
             events,
             keep_alive_secs: 15,
@@ -741,6 +754,47 @@ fn send_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_seat_history_frame_is_masked_whole_and_the_operators_is_not() {
+        use tokio_stream::StreamExt as _;
+        const SECRET: &str = "sk-live-0123456789";
+        let marker = ryeos_runtime::workload_client::SECRET_FLOOR_MARKER;
+        let frames = || {
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            sender
+                .try_send(RouteStreamEnvelope::with_id(
+                    "9",
+                    "ui_seat.replay.provisional.v1",
+                    json!({"events": [{"payload": {"text": format!("a {SECRET}")}}]}),
+                ))
+                .unwrap();
+            receiver
+        };
+        let floor: CallerFloor = Some(Arc::new(ryeos_app::secret_floor::SecretFloor::from_values(
+            vec![SECRET.to_owned()],
+        )));
+
+        let seat: Vec<_> = floored_frames(frames(), floor)
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        assert_eq!(seat.len(), 1);
+        let text = serde_json::to_string(&seat[0]).unwrap();
+        assert!(!text.contains(SECRET), "{text}");
+        assert!(text.contains(marker), "{text}");
+        assert_eq!(seat[0].id.as_deref(), Some("9"));
+
+        let operator: Vec<_> = floored_frames(frames(), None)
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        assert!(
+            serde_json::to_string(&operator[0])
+                .unwrap()
+                .contains(SECRET)
+        );
+    }
 
     #[tokio::test]
     async fn closed_receiver_prevents_paired_read_polling() {

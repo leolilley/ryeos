@@ -19,6 +19,12 @@ pub const SECRET_FLOOR_WITHHELD: &str = "secret_floor_withheld";
 
 const WITHHELD_SENTENCE: &str = "the answer was withheld from this caller";
 
+/// The typed refusal of an answer the floor withheld. It names neither a
+/// value nor a place.
+pub fn withheld_refusal() -> HandlerError {
+    typed_refusal(SECRET_FLOOR_WITHHELD, 403, WITHHELD_SENTENCE)
+}
+
 /// The secret values the node holds, for one floor decision.
 pub struct SecretFloor {
     values: Vec<Zeroizing<String>>,
@@ -43,10 +49,15 @@ impl SecretFloor {
     /// The value itself when it holds none of the floor's secrets, otherwise
     /// the typed refusal. The refusal names no value and no place.
     pub fn withhold(&self, value: Value) -> Result<Value, HandlerError> {
-        if ryeos_runtime::workload_client::value_contains_secret(&value, &self.values) {
-            return Err(typed_refusal(SECRET_FLOOR_WITHHELD, 403, WITHHELD_SENTENCE));
+        if self.carries_secret(&value) {
+            return Err(withheld_refusal());
         }
         Ok(value)
+    }
+
+    /// Whether `value` holds a floor secret, byte for byte.
+    pub fn carries_secret(&self, value: &Value) -> bool {
+        ryeos_runtime::workload_client::value_contains_secret(value, &self.values)
     }
 
     /// Replace every occurrence of a floor secret in `value` with the fixed

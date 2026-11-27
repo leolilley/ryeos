@@ -141,6 +141,7 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
             &session,
             serde_json::json!({ CHAIN_ROOT_PARAM: requested }),
             &BTreeMap::from([(CHAIN_ROOT_PARAM.to_owned(), "string".to_owned())]),
+            Some(&*principal),
         )?;
         let chain_root_id = admitted
             .params
@@ -175,7 +176,10 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
         let upstream = CompiledChainTailInvocation {
             keep_alive_secs: self.keep_alive_secs,
         };
-        let RouteInvocationResult::Stream(stream) = upstream.invoke(ctx).await? else {
+        let RouteInvocationResult::Stream(stream) = upstream
+            .invoke_with_floor(ctx, admitted.floor.clone())
+            .await?
+        else {
             return Err(RouteDispatchError::Internal(
                 "chain-tail adapter received a non-stream result".into(),
             ));

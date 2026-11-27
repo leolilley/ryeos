@@ -557,6 +557,184 @@ fn closure_scope(resolved: ResolvedRoot, state: &AppState) -> Result<Arc<ReadSco
     Ok(Arc::new(scope))
 }
 
+// ── thread and event records ───────────────────────────────────────────────
+
+/// The `kind` an object's canonical JSON carries when it is a thread's own
+/// record: an event of its chain or the snapshot of its state. Both name their
+/// thread in a top-level `thread_id`. Attachment objects name no thread and
+/// carry bytes only through blobs, so they are not records here.
+const THREAD_RECORD_OBJECT_KINDS: [&str; 2] = ["thread_event", "thread_snapshot"];
+
+/// How a served object relates to the thread records: `None` when it is not
+/// one, otherwise the thread it records (`Some(None)` when a record names no
+/// thread, which no caller owns). An object's kind is its top-level string
+/// `kind` field, the same field its typed decoder checks.
+fn thread_record_of(object: &Value) -> Option<Option<&str>> {
+    let kind = object.get("kind")?.as_str()?;
+    THREAD_RECORD_OBJECT_KINDS
+        .contains(&kind)
+        .then(|| object.get("thread_id").and_then(Value::as_str))
+}
+
+/// What a CAS read may serve of the objects that are thread or event records.
+/// They carry run output and error text, so a caller that is not the operator
+/// reads one only when it owns the thread it records, and then only when it
+/// holds none of the node's secrets. The operator's reads are unchanged. Built
+/// once per read.
+pub struct ThreadRecordGate {
+    /// `None` for the operator.
+    floor: Option<ryeos_app::secret_floor::SecretFloor>,
+    owned: std::collections::HashMap<String, bool>,
+    /// The read is under a placement root, whose admission already decided
+    /// that this caller may read the placement's records: only the secret
+    /// match applies.
+    placement_admitted: bool,
+}
+
+impl ThreadRecordGate {
+    /// The gate for `ctx`. A floor that cannot be read refuses the caller.
+    pub fn for_caller(state: &AppState, ctx: &HandlerContext) -> Result<Self, HandlerError> {
+        if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
+            return Ok(Self::operator());
+        }
+        match ryeos_app::secret_floor::SecretFloor::for_node(state) {
+            Ok(floor) => Ok(Self::with_floor(floor)),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "secret floor unavailable; thread records withheld from a non-operator reader"
+                );
+                Err(ryeos_app::secret_floor::withheld_refusal())
+            }
+        }
+    }
+
+    /// The gate for a read under `root`: a placement root's records are the
+    /// placement's, admitted with the root, so only the secret match applies.
+    pub fn for_caller_under(
+        state: &AppState,
+        ctx: &HandlerContext,
+        root: Option<&ReadRoot>,
+    ) -> Result<Self, HandlerError> {
+        let mut gate = Self::for_caller(state, ctx)?;
+        gate.placement_admitted = matches!(root, Some(ReadRoot::Placement { .. }));
+        Ok(gate)
+    }
+
+    fn operator() -> Self {
+        Self {
+            floor: None,
+            owned: Default::default(),
+            placement_admitted: false,
+        }
+    }
+
+    fn with_floor(floor: ryeos_app::secret_floor::SecretFloor) -> Self {
+        Self {
+            floor: Some(floor),
+            owned: Default::default(),
+            placement_admitted: false,
+        }
+    }
+
+    /// Admit one object about to be served. An object that is not a thread
+    /// record always passes; a record passes only for its thread's owner and
+    /// only without a node secret.
+    pub fn admit(
+        &mut self,
+        state: &AppState,
+        ctx: &HandlerContext,
+        hash: &str,
+        object: &Value,
+    ) -> Result<(), HandlerError> {
+        self.admit_with(ctx, hash, object, |thread_id| {
+            Ok(state
+                .state_store
+                .get_thread(thread_id)
+                .map_err(internal)?
+                .and_then(|thread| thread.requested_by))
+        })
+    }
+
+    /// Admit every object entry of a read's answer, `{entries: [{hash, kind:
+    /// "object", value}]}`, the shape `objects/get` and `objects/closure/get`
+    /// share. Any refused record refuses the whole answer.
+    pub fn admit_entries(
+        &mut self,
+        state: &AppState,
+        ctx: &HandlerContext,
+        answer: &Value,
+    ) -> Result<(), HandlerError> {
+        self.admit_entries_with(ctx, answer, |thread_id| {
+            Ok(state
+                .state_store
+                .get_thread(thread_id)
+                .map_err(internal)?
+                .and_then(|thread| thread.requested_by))
+        })
+    }
+
+    fn admit_entries_with(
+        &mut self,
+        ctx: &HandlerContext,
+        answer: &Value,
+        mut requested_by: impl FnMut(&str) -> Result<Option<String>, HandlerError>,
+    ) -> Result<(), HandlerError> {
+        let entries = answer
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for entry in entries {
+            if entry.get("kind").and_then(Value::as_str) != Some("object") {
+                continue;
+            }
+            let (Some(hash), Some(value)) = (
+                entry.get("hash").and_then(Value::as_str),
+                entry.get("value"),
+            ) else {
+                continue;
+            };
+            self.admit_with(ctx, hash, value, &mut requested_by)?;
+        }
+        Ok(())
+    }
+
+    fn admit_with(
+        &mut self,
+        ctx: &HandlerContext,
+        hash: &str,
+        object: &Value,
+        requested_by: impl FnOnce(&str) -> Result<Option<String>, HandlerError>,
+    ) -> Result<(), HandlerError> {
+        let Some(floor) = self.floor.as_ref() else {
+            return Ok(());
+        };
+        let Some(thread_id) = thread_record_of(object) else {
+            return Ok(());
+        };
+        let owned = match thread_id {
+            _ if self.placement_admitted => true,
+            None => false,
+            Some(thread_id) => match self.owned.get(thread_id) {
+                Some(owned) => *owned,
+                None => {
+                    let owned = ctx.is_owner(requested_by(thread_id)?.as_deref());
+                    self.owned.insert(thread_id.to_owned(), owned);
+                    owned
+                }
+            },
+        };
+        if !owned {
+            return Err(not_in_scope(&format!("object {hash} is not readable")));
+        }
+        if floor.carries_secret(object) {
+            return Err(ryeos_app::secret_floor::withheld_refusal());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +816,144 @@ mod tests {
         let mut out = BTreeSet::new();
         collect_hashes(&value, &mut out);
         assert_eq!(out, BTreeSet::from([hash]));
+    }
+
+    fn caller(fingerprint: &str) -> HandlerContext {
+        HandlerContext::new_with_authority(fingerprint.to_owned(), Vec::new(), true, None, None)
+    }
+
+    fn event(thread_id: &str, text: &str) -> Value {
+        serde_json::json!({
+            "schema": 1, "kind": "thread_event", "thread_id": thread_id,
+            "payload": {"text": text}
+        })
+    }
+
+    #[test]
+    fn a_thread_record_is_told_by_its_kind_field() {
+        assert_eq!(thread_record_of(&event("T-1", "x")), Some(Some("T-1")));
+        assert_eq!(
+            thread_record_of(&serde_json::json!({"kind": "thread_snapshot", "thread_id": "T-2"})),
+            Some(Some("T-2"))
+        );
+        assert_eq!(
+            thread_record_of(&serde_json::json!({"kind": "thread_event"})),
+            Some(None)
+        );
+        assert_eq!(
+            thread_record_of(&serde_json::json!({"kind": "project_snapshot", "thread_id": "T-1"})),
+            None
+        );
+        assert_eq!(
+            thread_record_of(&serde_json::json!({"thread_id": "T-1"})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_non_operator_reads_only_its_own_clean_thread_records() {
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let mut gate = ThreadRecordGate::with_floor(floor);
+        let me = caller("fp:me");
+        let owner_is_me = |_: &str| Ok(Some("fp:me".to_owned()));
+        let owner_is_other = |_: &str| Ok(Some("fp:other".to_owned()));
+        let hash = "ab".repeat(32);
+
+        // Owned and clean: served.
+        gate.admit_with(&me, &hash, &event("T-1", "fine"), owner_is_me)
+            .unwrap();
+        // Owned but carrying a secret: refused whole, naming nothing.
+        let HandlerError::Structured { code, body, .. } = gate
+            .admit_with(
+                &me,
+                &hash,
+                &event("T-1", &format!("k {SECRET}")),
+                owner_is_me,
+            )
+            .unwrap_err()
+        else {
+            panic!("expected a typed refusal");
+        };
+        assert_eq!(code, "secret_floor_withheld");
+        assert!(!body.to_string().contains(SECRET));
+        // Another caller's thread: not readable, secret or not.
+        let HandlerError::Structured { code, .. } = gate
+            .admit_with(&me, &hash, &event("T-9", "fine"), owner_is_other)
+            .unwrap_err()
+        else {
+            panic!("expected a typed refusal");
+        };
+        assert_eq!(code, OBJECT_NOT_IN_SCOPE);
+        // An object that is not a thread record is not this gate's concern.
+        gate.admit_with(
+            &me,
+            &hash,
+            &serde_json::json!({"kind": "project_snapshot", "note": SECRET}),
+            |_| panic!("ownership is asked only of thread records"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn one_foreign_or_secret_record_entry_refuses_the_whole_answer() {
+        const SECRET: &str = "sk-live-0123456789";
+        let answer = |extra: Value| {
+            serde_json::json!({"entries": [
+                {"hash": "ab".repeat(32), "kind": "object", "value": event("T-1", "fine")},
+                {"hash": "cd".repeat(32), "kind": "blob", "data": "AAAA"},
+                {"hash": "ef".repeat(32), "kind": "missing_object"},
+                extra,
+            ]})
+        };
+        let fresh = || {
+            ThreadRecordGate::with_floor(ryeos_app::secret_floor::SecretFloor::from_values(vec![
+                SECRET.to_owned(),
+            ]))
+        };
+        let owners = |thread: &str| -> Result<Option<String>, HandlerError> {
+            Ok(Some(
+                if thread == "T-1" { "fp:me" } else { "fp:other" }.to_owned(),
+            ))
+        };
+        let me = caller("fp:me");
+        let entry = |value: Value| serde_json::json!({"hash": "01".repeat(32), "kind": "object", "value": value});
+
+        fresh()
+            .admit_entries_with(&me, &answer(entry(event("T-1", "also fine"))), owners)
+            .unwrap();
+        assert!(
+            fresh()
+                .admit_entries_with(&me, &answer(entry(event("T-2", "fine"))), owners)
+                .is_err()
+        );
+        let HandlerError::Structured { code, .. } = fresh()
+            .admit_entries_with(
+                &me,
+                &answer(entry(event("T-1", &format!("k {SECRET}")))),
+                owners,
+            )
+            .unwrap_err()
+        else {
+            panic!("expected a typed refusal");
+        };
+        assert_eq!(code, "secret_floor_withheld");
+        let mut operator = ThreadRecordGate::operator();
+        operator
+            .admit_entries_with(&me, &answer(entry(event("T-2", SECRET))), owners)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_operator_reads_every_thread_record_unchanged() {
+        const SECRET: &str = "sk-live-0123456789";
+        let mut gate = ThreadRecordGate::operator();
+        gate.admit_with(
+            &caller("fp:operator"),
+            &"cd".repeat(32),
+            &event("T-9", &format!("k {SECRET}")),
+            |_| panic!("the operator is never asked about ownership"),
+        )
+        .unwrap();
     }
 }

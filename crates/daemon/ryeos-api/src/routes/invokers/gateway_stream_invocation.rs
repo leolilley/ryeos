@@ -25,6 +25,8 @@ use ryeos_app::stream_envelope::RouteStreamEnvelope;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use super::stream_helpers::*;
+use crate::routes::secret_floor_gate::{caller_floor, mask_envelope};
+use ryeos_app::secret_floor::SecretFloor;
 
 pub struct CompiledGatewayStreamInvocation {
     pub keep_alive_secs: u64,
@@ -104,8 +106,9 @@ fn handoff_error_envelope(
 fn pre_spawn_dispatch_error(
     keep_alive_secs: u64,
     error: ryeos_executor::dispatch_error::DispatchError,
+    floor: Option<&SecretFloor>,
 ) -> RouteInvocationResult {
-    let envelope = dispatch_error_envelope(&error);
+    let envelope = mask_envelope(floor, dispatch_error_envelope(&error));
     let stream = async_stream::stream! {
         yield Ok(envelope);
     };
@@ -234,6 +237,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             ));
         }
 
+        // The caller's secret floor, built once before anything launches: a
+        // caller that cannot be given one is refused before it costs a run.
+        let floor = caller_floor(&ctx.state, ctx.principal.as_ref())?;
+
         // Parse launch request from input (mode prepares it from body).
         let mut req: LaunchRequest = serde_json::from_value(ctx.input.clone())
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
@@ -260,7 +267,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings);
         drop(ref_binding_validation_timer);
         if let Err(error) = ref_binding_validation {
-            return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
+            return Ok(pre_spawn_dispatch_error(
+                self.keep_alive_secs,
+                error,
+                floor.as_deref(),
+            ));
         }
         req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
             .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
@@ -482,6 +493,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 return Ok(pre_spawn_dispatch_error(
                     self.keep_alive_secs,
                     map_project_source_error(error),
+                    floor.as_deref(),
                 ));
             }
         };
@@ -688,7 +700,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                     if let Some(timings) = launch_timings.as_ref() {
                         timings.emit("gateway_stream_launch_failed");
                     }
-                    yield Ok(envelope);
+                    yield Ok(mask_envelope(floor.as_deref(), envelope));
                     return;
                 }
             };
@@ -728,12 +740,12 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                             Ok(ev) => {
                                 let event_type = ev.event_type.clone();
                                 if is_ephemeral(&ev) {
-                                    yield Ok(envelope_for_persisted(&ev));
+                                    yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                     continue;
                                 }
                                 if ev.chain_seq > current_max {
                                     current_max = ev.chain_seq;
-                                    yield Ok(envelope_for_persisted(&ev));
+                                    yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                 }
                                 if is_terminal(&event_type) {
                                     return;
@@ -760,7 +772,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             for ev in &page_result.events {
                                                 if ev.chain_seq > lag_max {
                                                     lag_max = ev.chain_seq;
-                                                    yield Ok(envelope_for_persisted(ev));
+                                                    yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                                                     if is_terminal(&ev.event_type) {
                                                         return;
                                                     }
@@ -785,7 +797,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                     {
                                         return;
                                     }
-                                    yield Ok(error_envelope("replay_failed", &err_msg));
+                                    yield Ok(mask_envelope(floor.as_deref(), error_envelope("replay_failed", &err_msg)));
                                     return;
                                 }
 
@@ -809,12 +821,12 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                     match sub.try_recv() {
                                         Ok(ev) => {
                                             if is_ephemeral(&ev) {
-                                                yield Ok(envelope_for_persisted(&ev));
+                                                yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                                 continue;
                                             }
                                             if ev.chain_seq > current_max {
                                                 current_max = ev.chain_seq;
-                                                yield Ok(envelope_for_persisted(&ev));
+                                                yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                             }
                                             if is_terminal(&ev.event_type) {
                                                 return;
@@ -847,7 +859,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             for ev in &page_result.events {
                                                 if ev.chain_seq > current_max {
                                                     current_max = ev.chain_seq;
-                                                    yield Ok(envelope_for_persisted(ev));
+                                                    yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                                                     if is_terminal(&ev.event_type) {
                                                         saw_terminal = true;
                                                         break;
@@ -863,7 +875,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(current_max);
                                         }
                                         Err(e) => {
-                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e:#}")));
+                                            yield Ok(mask_envelope(floor.as_deref(), error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e:#}"))));
                                             return;
                                         }
                                     }
@@ -887,7 +899,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         &format!("launch failed: {e}"),
                                     ),
                                 };
-                                yield Ok(envelope);
+                                yield Ok(mask_envelope(floor.as_deref(), envelope));
                                 return;
                             }
                             Err(_) => {

@@ -22,6 +22,7 @@ use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
 use super::stream_helpers::*;
 use super::subscription_stream_invocation::parse_last_event_id;
+use crate::routes::secret_floor_gate::{CallerFloor, caller_floor, mask_envelope};
 
 pub struct CompiledChainTailInvocation {
     pub keep_alive_secs: u64,
@@ -43,6 +44,19 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
     async fn invoke(
         &self,
         ctx: RouteInvocationContext,
+    ) -> Result<RouteInvocationResult, RouteDispatchError> {
+        let floor = caller_floor(&ctx.state, ctx.principal.as_ref())?;
+        self.invoke_with_floor(ctx, floor).await
+    }
+}
+
+impl CompiledChainTailInvocation {
+    /// Tail the chain for a caller whose secret floor the caller of this
+    /// function already built, so a wrapping stream builds it once.
+    pub async fn invoke_with_floor(
+        &self,
+        ctx: RouteInvocationContext,
+        floor: CallerFloor,
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
         let chain_root_id = ctx
             .input
@@ -124,16 +138,19 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
                                     head_thread = ev.thread_id.clone();
                                     sub.follow(&head_thread);
                                 }
-                                yield Ok(envelope_for_persisted(ev));
+                                yield Ok(envelope_for_persisted_floored(ev, floor.as_deref()));
                             }
                             if page.next_cursor.is_none() {
                                 drained = true;
                             }
                         }
                         Err(e) => {
-                            yield Ok(error_envelope(
-                                "replay_failed",
-                                &format!("chain replay failed: {e:#}"),
+                            yield Ok(mask_envelope(
+                                floor.as_deref(),
+                                error_envelope(
+                                    "replay_failed",
+                                    &format!("chain replay failed: {e:#}"),
+                                ),
                             ));
                             return;
                         }
@@ -152,14 +169,14 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
                     match received {
                         Ok(Ok(ev)) => {
                             if is_ephemeral(&ev) {
-                                yield Ok(envelope_for_persisted(&ev));
+                                yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                                 continue;
                             }
                             if ev.chain_seq <= cursor {
                                 continue;
                             }
                             cursor = ev.chain_seq;
-                            yield Ok(envelope_for_persisted(&ev));
+                            yield Ok(envelope_for_persisted_floored(&ev, floor.as_deref()));
                             if is_terminal(&ev.event_type) {
                                 // Thread settled; chain may continue —
                                 // fall back to replay-discovery.

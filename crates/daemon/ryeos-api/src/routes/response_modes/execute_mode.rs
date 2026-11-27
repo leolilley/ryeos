@@ -28,6 +28,7 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
+use crate::routes::secret_floor_gate::caller_floor;
 use ryeos_app::execution_policy::{
     ExecutionEnvironmentPolicy, ExecutionPolicy, ExecutionResponse, ExecutionTarget,
     PinnedRealization, PinnedSource, ProjectExecutionPolicy, TerminalPublication,
@@ -1319,7 +1320,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
         let identity = ctx.state.identity.clone();
-        let mut outcome = admit_execution_with_publication(
+        // The answer goes to whoever sent the request. Its secret floor is
+        // built once, before the run: a caller that is not the operator
+        // receives the outcome only when it holds none of the node's secrets.
+        let floor = caller_floor(&ctx.state, Some(&ctx.principal))?;
+        let outcome = admit_execution_with_publication(
             request,
             ctx.principal.handler_context(),
             ctx.state,
@@ -1328,6 +1333,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ctx.publication,
         )
         .await?;
+        let mut outcome = floor_outcome(floor.as_deref(), outcome)?;
         if let Some((request_digest, item_ref)) = attestation_binding
             && outcome.status.is_success()
         {
@@ -1343,6 +1349,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
         Ok((outcome.status, axum::Json(outcome.body)).into_response())
     }
+}
+
+/// What the caller receives of an execution outcome: the body whole for the
+/// operator (`floor` is `None`), otherwise only a body that holds none of the
+/// node's secrets.
+fn floor_outcome(
+    floor: Option<&ryeos_app::secret_floor::SecretFloor>,
+    outcome: AdmissionOutcome,
+) -> Result<AdmissionOutcome, RouteDispatchError> {
+    Ok(AdmissionOutcome {
+        status: outcome.status,
+        body: crate::routes::secret_floor_gate::withhold_answer(floor, outcome.body)?,
+    })
 }
 
 /// Typed execution result shared by HTTP and command-service callers. Errors
@@ -2923,6 +2942,32 @@ mod tests {
             },
             ..ExecutionPolicy::projectless(ExecutionResponse::Wait)
         }
+    }
+
+    #[test]
+    fn an_execution_outcome_with_a_secret_is_refused_to_a_non_operator_whole() {
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let outcome = || AdmissionOutcome {
+            status: StatusCode::OK,
+            body: json!({"result": {"stdout": format!("key {SECRET}")}}),
+        };
+        match floor_outcome(Some(&floor), outcome()) {
+            Err(RouteDispatchError::Structured {
+                code, status, body, ..
+            }) => {
+                assert_eq!((code.as_str(), status), ("secret_floor_withheld", 403));
+                assert!(!body.to_string().contains(SECRET));
+            }
+            _ => panic!("a secret-bearing outcome was served"),
+        }
+        let served = floor_outcome(None, outcome()).unwrap();
+        assert!(served.body.to_string().contains(SECRET));
+        let clean = AdmissionOutcome {
+            status: StatusCode::OK,
+            body: json!({"result": "ok"}),
+        };
+        assert!(floor_outcome(Some(&floor), clean).is_ok());
     }
 
     #[test]

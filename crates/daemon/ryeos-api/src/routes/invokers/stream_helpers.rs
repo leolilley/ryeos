@@ -4,6 +4,8 @@
 //! terminal event detection, and envelope formatting. Those live here
 //! to avoid duplication.
 
+use crate::routes::secret_floor_gate::mask_envelope;
+use ryeos_app::secret_floor::SecretFloor;
 use ryeos_app::state_store::PersistedEventRecord;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
@@ -89,7 +91,18 @@ pub fn error_envelope_with(
     RouteStreamEnvelope::new("stream_error", serde_json::Value::Object(payload))
 }
 
-pub fn envelope_for_persisted(ev: &PersistedEventRecord) -> RouteStreamEnvelope {
+/// One persisted record as a stream envelope for a caller. `floor` is the
+/// caller's secret floor, built once for the stream: `None` is the operator,
+/// whose records are unchanged; otherwise every node secret in the whole
+/// record is replaced by the fixed marker before it is framed.
+pub fn envelope_for_persisted_floored(
+    ev: &PersistedEventRecord,
+    floor: Option<&SecretFloor>,
+) -> RouteStreamEnvelope {
+    mask_envelope(floor, envelope_for_persisted(ev))
+}
+
+fn envelope_for_persisted(ev: &PersistedEventRecord) -> RouteStreamEnvelope {
     let payload = serde_json::to_value(ev).expect("PersistedEventRecord serializes");
     if ev.storage_class == "ephemeral" {
         RouteStreamEnvelope::new(ev.event_type.clone(), payload)
@@ -126,14 +139,34 @@ mod tests {
 
     #[test]
     fn ephemeral_envelope_has_no_replay_id() {
-        let env = envelope_for_persisted(&record("ephemeral", 0));
+        let env = envelope_for_persisted_floored(&record("ephemeral", 0), None);
         assert_eq!(env.event_type, "cognition_out");
         assert!(env.id.is_none());
     }
 
     #[test]
+    fn a_non_operator_record_is_masked_whole_and_the_operator_record_is_unchanged() {
+        const SECRET: &str = "sk-live-0123456789";
+        let marker = ryeos_runtime::workload_client::SECRET_FLOOR_MARKER;
+        let mut ev = record("indexed", 5);
+        ev.payload = json!({"delta": format!("a {SECRET} b"), "nested": [format!("{SECRET}")]});
+        let floor = SecretFloor::from_values(vec![SECRET.to_owned()]);
+
+        let masked = envelope_for_persisted_floored(&ev, Some(&floor));
+        assert_eq!(masked.id.as_deref(), Some("5"));
+        let text = masked.payload.to_string();
+        assert!(!text.contains(SECRET), "{text}");
+        assert!(text.contains(marker), "{text}");
+        assert_eq!(masked.payload["payload"]["delta"], format!("a {marker} b"));
+
+        let operator = envelope_for_persisted_floored(&ev, None);
+        assert_eq!(operator, envelope_for_persisted(&ev));
+        assert!(operator.payload.to_string().contains(SECRET));
+    }
+
+    #[test]
     fn durable_envelope_has_chain_seq_id() {
-        let env = envelope_for_persisted(&record("indexed", 42));
+        let env = envelope_for_persisted_floored(&record("indexed", 42), None);
         assert_eq!(env.id.as_deref(), Some("42"));
     }
 

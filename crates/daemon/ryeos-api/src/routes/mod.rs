@@ -10,6 +10,7 @@ pub mod matcher;
 pub mod parsed_ref;
 pub mod response_modes;
 pub mod route_authority;
+pub mod secret_floor_gate;
 pub mod stream_envelope;
 pub mod webhook_dedupe;
 use std::collections::HashMap;
