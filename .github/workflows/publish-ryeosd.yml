@@ -22,9 +22,9 @@ on:
         default: ""
         type: string
       dry_run:
-        description: "Rehearse the release without publishing: build every artifact and image, run every build-time check, publish nothing. `version` must equal the branch's workspace version."
+        description: "Rehearse the release without publishing: build every artifact and image, run every build-time check, publish nothing. `version` must equal the branch's workspace version. Defaults to true, so a dispatch publishes only when it passes dry_run=false; a pushed tag carries no inputs and publishes."
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
