@@ -617,6 +617,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
         tables: &[
             sqlite_schema::TableSpec {
                 name: "budget_account",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("account_id", "TEXT", true, true),
                     col("budget_authority_site_id", "TEXT", false, true),
@@ -636,6 +637,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_attempt_reservation",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("attempt_id", "TEXT", true, true),
                     col("attempt_key", "TEXT", false, true),
@@ -675,6 +677,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_attempt_debit",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("attempt_id", "TEXT", true, true),
                     col("account_id", "TEXT", true, true),
@@ -684,6 +687,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_operation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("attempt_id", "TEXT", true, true),
                     col("operation_kind", "TEXT", true, true),
@@ -695,6 +699,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_accounting_authority_health",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("authority_digest", "TEXT", true, true),
                     col("state", "TEXT", false, true),
@@ -705,6 +710,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_audit_outbox",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("outbox_seq", "INTEGER", true, true),
                     col("operation_id", "TEXT", false, true),
@@ -722,6 +728,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_operational_fact",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("fact_id", "TEXT", true, true),
                     col("fact_kind", "TEXT", false, true),
@@ -737,6 +744,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "ledger_financial_sequence",
+                class: sqlite_schema::StoreClass::Identity,
                 columns: &[
                     col("budget_authority_site_id", "TEXT", true, true),
                     col("ledger_epoch", "INTEGER", true, true),
@@ -749,6 +757,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "financial_transition_commitment",
+                class: sqlite_schema::StoreClass::Identity,
                 columns: &[
                     col("budget_authority_site_id", "TEXT", true, true),
                     col("ledger_epoch", "INTEGER", true, true),
@@ -763,6 +772,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "launch_accounting_gate",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("thread_id", "TEXT", true, true),
                     col("launch_generation", "TEXT", true, true),
@@ -779,6 +789,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "launch_accounting_scope_binding",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("thread_id", "TEXT", true, true),
                     col("launch_generation", "TEXT", true, true),
@@ -787,6 +798,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_handoff_transfer",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("request_digest", "TEXT", false, true),
@@ -804,6 +816,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_handoff_debit",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("account_id", "TEXT", true, true),
@@ -814,6 +827,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "accounting_handoff_import",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("request_digest", "TEXT", false, true),
@@ -831,6 +845,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "execution_resource_budget",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("execution_budget_id", "TEXT", true, true),
                     col("root_chain_id", "TEXT", false, true),
@@ -847,6 +862,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "execution_resource_claim",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("execution_budget_id", "TEXT", true, true),
                     col("dimension", "TEXT", true, true),
@@ -859,6 +875,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_owner_accounting_gate",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     col("owner_gate_id", "TEXT", true, true),
                     col("owner_incarnation", "TEXT", false, false),
@@ -880,6 +897,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_financial_operation",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("request_digest", "TEXT", false, true),
@@ -908,6 +926,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_financial_debit",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("account_id", "TEXT", true, true),
@@ -917,6 +936,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_request_attribution",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("attribution_id", "TEXT", true, true),
                     col("operation_id", "TEXT", false, true),
@@ -930,6 +950,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_usage_partition_page",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("page_index", "INTEGER", true, true),
@@ -938,6 +959,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_usage_partition",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     col("operation_id", "TEXT", true, true),
                     col("partition_json", "TEXT", false, true),

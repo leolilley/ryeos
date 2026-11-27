@@ -10,6 +10,7 @@ const LIVE_MARKERS: &[&str] = &[
     "ProjectSource::LiveFs",
     "ProjectSource::CaptureLiveFullProject",
     "SubjectResolutionAuthority::LiveFs",
+    "for_live_project_root(",
 ];
 
 /// What counts as calling the admission function.
@@ -24,6 +25,7 @@ const MUST_ADMIT: &[&str] = &[
     "crates/bin/daemon/src/scheduler_impl.rs",
     "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
     "crates/daemon/ryeos-api/src/handlers/bundle_smoke.rs",
+    "crates/daemon/ryeos-api/src/handlers/items_effective.rs",
     "crates/daemon/ryeos-api/src/handlers/scheduler_register.rs",
     "crates/daemon/ryeos-api/src/handlers/threads_input.rs",
     "crates/daemon/ryeos-api/src/handlers/tool_env_check.rs",
@@ -107,6 +109,38 @@ const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
     (
         "crates/tools/core-tools/src/actions/inspect/verify.rs",
         "tool subprocess; see doctor.rs",
+    ),
+    (
+        "crates/daemon/ryeos-api/src/surface_views.rs",
+        "embeds a surface's views under a root its caller already holds; its only non-test callers are items_effective.rs (admitted) and ui_launch_mint.rs (operator-only), pinned below",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_field_project.rs",
+        "the request has no project parameter; the root is the retained project of the admitted UI session, or none",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_items.rs",
+        "a seat bound to a project reads that project; only the admitted operator's own seat may name one, and any other seat naming a path is refused (pinned below)",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs",
+        "its project root comes from authorize_launch_project, which admits only the node's operator (project_seat_operator_only for any other key); revalidation reuses the stored binding's root (pinned below)",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/themes.rs",
+        "loads installed themes with no project: the root is None",
+    ),
+    (
+        "crates/bin/cli/src/effective_metadata.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
+    ),
+    (
+        "crates/bin/cli/src/lifecycle_host_access.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
+    ),
+    (
+        "crates/bin/cli/src/offline_dispatch.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
     ),
 ];
 
@@ -280,8 +314,8 @@ fn non_test_text(text: &str) -> &str {
 fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     // A new site or a moved exemption changes these counts and so fails here:
     // add the file to the right list, with a reason if it is exempt.
-    assert_eq!(MUST_ADMIT.len(), 7, "the must-admit list changed");
-    assert_eq!(NEEDS_NO_ADMISSION.len(), 19, "the exemption list changed");
+    assert_eq!(MUST_ADMIT.len(), 8, "the must-admit list changed");
+    assert_eq!(NEEDS_NO_ADMISSION.len(), 27, "the exemption list changed");
     let root = ryeos_engine::test_support::workspace_root();
     let mut files = Vec::new();
     workspace_files(&root, &root.join("crates"), &mut files);
@@ -453,4 +487,114 @@ fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// `items.effective` resolves items from the request's `project_path` through
+/// `SubjectResolutionAuthority::for_live_project_root`, a spelling the marker
+/// scan above does not see, so its admission is pinned here by the call chain:
+/// the path reaches the engine only as the admitted canonical root, and the
+/// handler never builds a path from the request text itself.
+#[test]
+fn items_effective_resolves_only_from_an_admitted_project_path() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let text = std::fs::read_to_string(
+        root.join("crates/daemon/ryeos-api/src/handlers/items_effective.rs"),
+    )
+    .unwrap();
+    let body = non_test_text(&text);
+    let admit = body
+        .find("ryeos_app::live_project_path::admit_handler_live_path(")
+        .expect("items.effective admits its project path with admit_handler_live_path");
+    let first_use = body
+        .find("for_live_project_root(")
+        .expect("items.effective builds the live authority from the project root");
+    assert!(admit < first_use, "the path is admitted before it is used");
+    assert!(
+        body[admit..first_use].contains(".canonical"),
+        "the root the engine receives is the admitted canonical path"
+    );
+    assert_eq!(
+        body.matches("req.project_path").count(),
+        1,
+        "the request's project_path is read once, to be admitted"
+    );
+    for forbidden in ["PathBuf::from(", "std::fs::canonicalize("] {
+        assert!(
+            !body.contains(forbidden),
+            "items.effective must not build or canonicalise a path from the request: `{forbidden}`"
+        );
+    }
+}
+
+/// The exempt daemon sites that hand a root on or take it from a seat, pinned
+/// by call chain: who may reach `surface_views`, how `ui.launch.mint` gets its
+/// root, and how `ui.items` decides which project a seat reads.
+#[test]
+fn the_exempt_daemon_sites_get_their_roots_only_from_admission() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let mut files = Vec::new();
+    workspace_files(&root, &root.join("crates"), &mut files);
+    let mut callers = std::collections::BTreeSet::new();
+    for file in &files {
+        let name = file.to_string_lossy().replace('\\', "/");
+        if name == "crates/daemon/ryeos-api/src/surface_views.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        if non_test_text(&text).contains("surface_views::embed_") {
+            callers.insert(name);
+        }
+    }
+    assert_eq!(
+        callers.into_iter().collect::<Vec<_>>(),
+        [
+            "crates/daemon/ryeos-api/src/handlers/items_effective.rs",
+            "crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs",
+        ],
+        "a new caller of surface_views must be admitted or operator-only, and named here"
+    );
+
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    let mint = read("crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs");
+    let mint = non_test_text(&mint);
+    assert!(
+        mint.contains("ui_projects::authorize_launch_project("),
+        "ui.launch.mint takes its project from authorize_launch_project"
+    );
+    // rustfmt may split `req.project_path` across lines, so count it with the
+    // whitespace removed.
+    let compact: String = mint.chars().filter(|c| !c.is_whitespace()).collect();
+    assert_eq!(
+        compact.matches("req.project_path").count(),
+        1,
+        "the request's project_path is read once, to be authorized"
+    );
+    let projects = read("crates/daemon/ryeos-ui/src/handlers/ui_projects.rs");
+    let projects = non_test_text(&projects);
+    let start = projects
+        .find("fn authorize_launch_project(")
+        .expect("authorize_launch_project exists");
+    let end = projects[start..].find("\n}\n").expect("the function ends") + start;
+    let body = &projects[start..end];
+    assert!(
+        body.contains("require_admitted_operator(") && body.contains("project_seat_operator_only"),
+        "authorize_launch_project admits only the operator and refuses every other key"
+    );
+
+    let items = read("crates/daemon/ryeos-ui/src/handlers/ui_items.rs");
+    let items = non_test_text(&items);
+    assert_eq!(
+        items.matches("seat_project_path(&caller").count(),
+        2,
+        "items.list and item.inspect both choose their project with seat_project_path"
+    );
+    assert_eq!(
+        items.matches("get(\"project_path\")").count(),
+        1,
+        "the request's project_path is read only in seat_project_path"
+    );
+    assert!(
+        items.contains("SeatCaller::Operator { .. }, named)"),
+        "only the operator's seat may name a project"
+    );
 }
