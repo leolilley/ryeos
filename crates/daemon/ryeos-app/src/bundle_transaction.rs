@@ -287,6 +287,11 @@ impl BundleTransaction {
                             "prepared replacement matches neither generation: the target differs from the journal and its staging path is missing"
                         );
                     }
+                    // Stated limit: the journal holds no digest of the previous
+                    // generation, so a copy at the staging path that another
+                    // process of the node user altered would be swapped in; that
+                    // needs a writer in the bundles directory, which is already
+                    // full node-user trust. A journal schema change should add it.
                     if tree_digest(staging)? != expected {
                         // The exchange was made: put the previous generation
                         // back; the changed tree then sits at the staging path
