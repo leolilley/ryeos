@@ -76,6 +76,7 @@ fn refusal_error(refusal: Refusal) -> HandlerError {
         | RefusalReason::GrantConstraintViolated
         | RefusalReason::SignerBoundArgumentMismatch
         | RefusalReason::GrantUsesExhausted
+        | RefusalReason::GrantCeilingUnavailable
         | RefusalReason::KeyLinkGrantNotOperatorIssued => 403,
         RefusalReason::Expired
         | RefusalReason::FromTheFuture
@@ -289,6 +290,7 @@ mod tests {
             403
         );
         assert_eq!(refusal_status(RefusalReason::GrantUsesExhausted), 403);
+        assert_eq!(refusal_status(RefusalReason::GrantCeilingUnavailable), 403);
         assert_eq!(
             refusal_status(RefusalReason::KeyLinkGrantNotOperatorIssued),
             403

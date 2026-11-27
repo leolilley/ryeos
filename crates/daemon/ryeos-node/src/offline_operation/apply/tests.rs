@@ -238,6 +238,45 @@ impl Fixture {
         )?))
     }
 
+    /// A grant constrained for `node.key.link` to the key's own fingerprint,
+    /// recorded as asked for by `issuer` (a bare fingerprint).
+    fn write_constrained_link_grant(&self, key: &SigningKey, issuer: &str) -> String {
+        let fp = fingerprint(key);
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
+        let directory = authorized_keys_dir(self.path());
+        let terms = ryeos_node_runtime::identity::GrantTerms {
+            authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                issuer, None,
+            ),
+            offline_constraints: vec![ryeos_node_runtime::identity::OfflineConstraint {
+                scope: LINK_SCOPE.to_owned(),
+                argument: "/link/body/key".to_owned(),
+                equals: format!("fp:{fp}"),
+                max_uses: 1,
+                not_after: Some(4_000_000_000),
+            }],
+            ..ryeos_node_runtime::identity::GrantTerms::for_tests()
+        };
+        reconcile_authorized_key_toml_scopes(
+            &directory,
+            &fp,
+            &encoded,
+            &[LINK_SCOPE.to_owned()],
+            "remote operator",
+            "test",
+            "2026-01-01T00:00:00Z",
+            &terms,
+            &self.node,
+            WildcardPolicy::Reject,
+            false,
+            Some(SITE),
+            true,
+        )
+        .unwrap();
+        lillux::sha256_hex(&std::fs::read(directory.join(format!("{fp}.toml"))).unwrap())
+    }
+
     fn remote_body(
         &self,
         key: &SigningKey,
@@ -2116,6 +2155,20 @@ fn a_grant_made_for_one_node_is_refused_by_another() {
     // The same request is refused by node A as being for another node.
     let refusal = check_at(&node_a, &request).unwrap_err();
     assert_eq!(refusal.reason, RefusalReason::WrongNode);
+}
+
+#[test]
+fn a_constrained_link_grant_not_issued_by_the_operators_side_is_refused() {
+    let fx = fixture();
+    let key = lillux::crypto::generate_signing_key();
+    let stranger = lillux::crypto::generate_signing_key();
+    // The grant is well formed and bound to the key's own fingerprint, but
+    // it was asked for by a key that does not speak for the operator's owner.
+    let digest = fx.write_constrained_link_grant(&key, &fingerprint(&stranger));
+    let mut body = fx.remote_body(&key, &digest, SITE, "node.key.link");
+    body.arguments = json!({ "link": { "body": { "key": format!("fp:{}", fingerprint(&key)) } } });
+    let refusal = check_at(&fx, &SignedRequest::sign(body, &key).unwrap()).unwrap_err();
+    assert_eq!(refusal.reason, RefusalReason::KeyLinkGrantNotOperatorIssued);
 }
 
 #[test]

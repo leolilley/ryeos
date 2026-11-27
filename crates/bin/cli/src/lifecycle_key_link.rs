@@ -75,7 +75,7 @@ struct SignArgs {
 #[command(
     name = "ryeos key link",
     about = "Pin a signed key link on a stopped node",
-    long_about = "Applies the body and both signatures as the signed offline operation `node.key.link`. Only the node's own operator may apply it. The node must be stopped; the link takes effect at the next start.",
+    long_about = "Applies the body and both signatures as the signed offline operation `node.key.link`. Only the node's own operator, or a key holding a single-use grant that the operator's side issued for exactly that key, may apply it. The node must be stopped; the link takes effect at the next start.",
     no_binary_name = true
 )]
 struct LinkArgs {

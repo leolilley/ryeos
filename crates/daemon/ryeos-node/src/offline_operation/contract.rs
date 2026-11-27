@@ -403,6 +403,9 @@ pub enum RefusalReason {
     SignerBoundArgumentMismatch,
     /// The grant has no uses left.
     GrantUsesExhausted,
+    /// A single-use grant is presented while the node carries no ceiling on
+    /// how long such a grant may last.
+    GrantCeilingUnavailable,
     /// The grant was not issued by an active key of the principal that owns
     /// the node's operator key.
     KeyLinkGrantNotOperatorIssued,
@@ -445,6 +448,7 @@ impl RefusalReason {
             Self::GrantConstraintViolated => "grant_constraint_violated",
             Self::SignerBoundArgumentMismatch => "signer_bound_argument_mismatch",
             Self::GrantUsesExhausted => "grant_uses_exhausted",
+            Self::GrantCeilingUnavailable => "grant_ceiling_unavailable",
             Self::KeyLinkGrantNotOperatorIssued => "key_link_grant_not_operator_issued",
             Self::Expired => "expired",
             Self::FromTheFuture => "from_the_future",

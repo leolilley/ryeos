@@ -155,7 +155,15 @@ fn check_grant_constraints(
                     ),
                 );
             };
-            if not_after_ceiling.is_some_and(|ceiling| not_after > ceiling) {
+            let Some(ceiling) = not_after_ceiling else {
+                return refuse(
+                    RefusalReason::GrantCeilingUnavailable,
+                    format!(
+                        "`{scope}` takes only a single-use grant, and this node's signed policy carries no limit on how long one may last"
+                    ),
+                );
+            };
+            if not_after > ceiling {
                 return refuse(
                     RefusalReason::GrantConstraintViolated,
                     format!(
@@ -285,6 +293,9 @@ impl Envelope<'_> {
                     format!("`{}` may be signed only by the local operator", spec.id),
                 );
             }
+            if spec.operator_issued_grant {
+                self.check_issued_by_operator_owner(grant)?;
+            }
             check_grant_constraints(
                 spec,
                 &grant.offline_constraints,
@@ -293,9 +304,6 @@ impl Envelope<'_> {
                 self.now,
                 self.grant_not_after_ceiling(),
             )?;
-            if spec.operator_issued_grant {
-                self.check_issued_by_operator_owner(grant)?;
-            }
             if spec.authority_bearing {
                 match delegated_remote_operations(self.app_root) {
                     Ok(delegated) if delegated.contains(spec.id) => {}
@@ -628,7 +636,7 @@ mod tests {
             arguments,
             &signer(),
             now,
-            None,
+            Some(u64::MAX),
         )
     }
 
@@ -725,6 +733,23 @@ mod tests {
         assert_eq!(
             reason(check(&[constraint(&signer_key(), None)], &arguments, 10)),
             RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn a_single_use_grant_is_refused_while_the_node_has_no_ceiling() {
+        let arguments = arguments_for(&signer_key());
+        let constraints = [constraint(&signer_key(), Some(100))];
+        assert_eq!(
+            reason(check_grant_constraints(
+                lookup("node.key.link").unwrap(),
+                &constraints,
+                &arguments,
+                &signer(),
+                10,
+                None,
+            )),
+            RefusalReason::GrantCeilingUnavailable
         );
     }
 
