@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:09a5d26d49d7331c7b1190b024515db2ccccdab9275469e89e766c1f6116f3ae:QW9eClh+MkwPsY4yJv0V5B7ine/Mlekkp2Ig+5ACkNx/gvoHfrXTsNAfgCo4o2di4wHw0t89maXEY75jgrD1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T07:30:01Z:b01a3b45c10b0b938e1cef5cecfb49a38e5244c9b142f56927f119cace4f2b2d:jmR0koSw1u2ELEHO1b4RBHx3Y5IvomL1l1Hc/nGuK3SDIekicQgKWjvSKHacsVh9LoHSCJsXCL5iNYuNfGGpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -189,6 +189,13 @@ policies:
     # `refuse` is final. A class not listed is refused, so no class is accepted
     # until it is listed `allow` here.
     classes: {}
+  public_routes:
+    schema: 1
+    # The keyless routes of the public page this node serves, by route id,
+    # with the bytes each may send in a day and the requests it may work on
+    # at once. A route not named here is not served. Empty on every node but
+    # the public node.
+    routes: {}
   publication:
     schema: 1
     # What this node publishes to strangers. daily_bytes caps the bytes the

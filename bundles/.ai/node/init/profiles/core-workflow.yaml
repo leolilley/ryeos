@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:26442eb13983cbd4b826eaf8fe0a8f3d2b112f182bfb3abb91b02a580791fa7a:80EPmk4akijh80hNLgC5Kt8dufvoQor9rdL8Mqa1AMg1E+xJEgvbDnozv1Ci6m6z7wvrwBPcnp8N/saY6psbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T07:30:01Z:17699e31a081e69c2ef8bca8f0f03fb48b7c81e479a2700183b8ac9e6003b2b4:XHiGFi1qLSuw0gvoDqjqyuBYRa+eAUhvHTj1q/Q/4JfmBMGZoX0DwZOUrBTC08j98/unAHvhEtQsti284mRRBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -163,6 +163,13 @@ policies:
     # `refuse` is final. A class not listed is refused, so no class is accepted
     # until it is listed `allow` here.
     classes: {}
+  public_routes:
+    schema: 1
+    # The keyless routes of the public page this node serves, by route id,
+    # with the bytes each may send in a day and the requests it may work on
+    # at once. A route not named here is not served. Empty on every node but
+    # the public node.
+    routes: {}
   publication:
     schema: 1
     # What this node publishes to strangers. daily_bytes caps the bytes the
