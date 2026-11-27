@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:43:27Z:e2dc6a5ffe5b19d9cec4f0a8931d84615ddfaaff5270fff0dd54d3d8dc0f981e:ExD8z+mXCzNHdIjag5ZmAeipXGLTSGYG41yL/Phl7xkCE1Pk/02CVPo+soiBMnhAQmQ9MCViuL6lYfXJszaIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:15:03Z:45f56e497e8e2f977921064832be4d126094b1fe744e1c7cb1ce03e1e499461a:jDXZIuGvNX+Iph/rDYLoaf/uwfOMiLaDjEqirhLbPKUuX2cQXmkGbB58tErJqsINDDSZ2QG+fkOhWEKB85NNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -12,6 +12,10 @@
 #     --processes M      task ceiling for `host setup` (default 512)
 #     --scopes yes|no    whether the host class requires process scopes, so one root
 #                        `host setup` runs (required; G-4's table says which)
+#     --throwaway        the caller asserts G-4's row for this track is marked throwaway
+#                        (holds no one else's state, reachable by no one else); only then
+#                        is a build whose manifest says build_profile other than release
+#                        (a test build carries the Claude Code stub driver) installed
 #     --bundle-trust     also pass each staged bundle's PUBLISHER_TRUST.toml that
 #                        names the development key's fingerprint and nothing else
 #
@@ -31,13 +35,14 @@ set -euo pipefail
 usage() { sed -n '/^#   rm-node-up.sh/,/^# class needs/p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [[ $# -ge 5 ]] || usage
 track=$1 profile=$2 class=$3 run=$4 bind=$5; shift 5
-memory=1073741824 processes=512 bundle_trust=0 scopes=
+memory=1073741824 processes=512 bundle_trust=0 throwaway=0 scopes=
 while [[ $# -gt 0 ]]; do
     case $1 in
         --memory-bytes) memory=${2:?}; shift 2 ;;
         --processes) processes=${2:?}; shift 2 ;;
         --scopes) scopes=${2:?}; shift 2 ;;
         --bundle-trust) bundle_trust=1; shift ;;
+        --throwaway) throwaway=1; shift ;;
         *) usage ;;
     esac
 done
@@ -88,6 +93,23 @@ if ! done_step staged && ! done_step installed; then
     "$fetch" "$run" "$stage_id"
     mark staged
 fi
+# A build whose manifest names a profile other than release (a test build carries
+# the Claude Code stub driver) runs only on a track the caller asserts is
+# throwaway; an absent field reads as release. Read from the stage before the
+# install, or from the installed copy when the stage is already gone.
+if ! done_step installed; then
+    manifest="/var/tmp/ryeos-rm/stage/$stage_id/BUILD-SOURCE.json"
+else
+    manifest="$prefix/BUILD-SOURCE.json"
+fi
+[[ -r $manifest ]] || { echo "rm-node-up: cannot read the build manifest $manifest" >&2; exit 1; }
+build_profile="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("build_profile","release"))' "$manifest")"
+[[ $build_profile =~ ^[a-z][a-z-]*$ ]] || { echo "rm-node-up: bad build_profile in $manifest" >&2; exit 1; }
+if [[ $build_profile != release && $throwaway != 1 ]]; then
+    echo "rm-node-up: run $run is a '$build_profile' build; a non-release build installs only on a track whose G-4 row is throwaway, asserted with --throwaway" >&2
+    exit 2
+fi
+done_step "profile-$build_profile" || mark "profile-$build_profile"
 if ! done_step installed; then
     sudo -n /usr/local/sbin/ryeos-rm-node install "$track" "$stage_id" </dev/null
     rm -rf "/var/tmp/ryeos-rm/stage/$stage_id"
