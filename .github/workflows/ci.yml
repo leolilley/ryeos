@@ -403,6 +403,13 @@ jobs:
       - name: Check the browser renderer lock agrees with the root lock
         run: python3 -I .ai/tools/ryeos/development/repository-validation/rune-lock.py --check --project-path "$PWD"
 
+      # While the release products pin the exact root Cargo.lock, a lock change has to edit
+      # Cargo.lock.freeze in the same change (a re-pin) or delete it (a thaw).
+      - name: Check Cargo.lock against the freeze
+        run: |
+          python3 -I .ai/tools/ryeos/development/repository-validation/cargo-lock-freeze.py --check --project-path "$PWD"
+          python3 -I .ai/tools/ryeos/development/repository-validation/cargo-lock-freeze.py --self-test
+
   rust-policy:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest
