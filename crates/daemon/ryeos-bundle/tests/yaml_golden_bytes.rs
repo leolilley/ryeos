@@ -70,7 +70,7 @@ fn emitted_cases() -> Vec<(&'static str, Value, &'static str)> {
              section:\n  named_bundles: {}\n  schema: 1\n",
         ),
         (
-            "strings that would read back as another scalar are quoted",
+            "strings that would read back as another scalar are quoted; `yes` is not (a YAML 1.1 reader would read it as true)",
             json!({
                 "a_true": "true",
                 "b_null": "null",
@@ -89,7 +89,7 @@ fn emitted_cases() -> Vec<(&'static str, Value, &'static str)> {
              e_float: '1e5'\n\
              f_digits_digest: '000123'\n\
              g_hex: '0x1F'\n\
-             h_yes: 'yes'\n\
+             h_yes: yes\n\
              i_empty: ''\n",
         ),
         (
@@ -162,12 +162,12 @@ fn parsed_values_are_pinned() {
         ("null", Value::Null),
         ("", Value::Null),
         ("0o17", json!(15)),
-        ("017", json!(17)),
+        ("017", json!("017")),
         ("0x1F", json!(31)),
         ("+12", json!(12)),
         ("1_000", json!("1_000")),
         ("12e3", json!(12000.0)),
-        ("000123", json!(123)),
+        ("000123", json!("000123")),
         ("2026-11-27", json!("2026-11-27")),
         ("2026-11-27T04:25:49Z", json!("2026-11-27T04:25:49Z")),
         ("fp:abc", json!("fp:abc")),
