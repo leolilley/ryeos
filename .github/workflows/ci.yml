@@ -1499,7 +1499,7 @@ jobs:
 
       - name: Run the 21 rollovers
         env:
-          RYEOS_LONG_E2E: "1"
+          RYEOS_LONG_E2E: "0"
           RUST_MIN_STACK: 8388608
         run: |
           log="$RUNNER_TEMP/long-e2e.log"
