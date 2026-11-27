@@ -256,7 +256,6 @@ fn history_route() -> ryeos_app::route_raw::RawRouteSpec {
         "id: ui/api/session/seat/history\npath: /ui/api/session/seat/history\nmethods: [POST]\nauth: browser_session\nlimits: { body_bytes_max: 16384, timeout_ms: 0, concurrent_max: 8 }\nrequest: { body: json }\nresponse: { mode: event_stream, source: ui_seat_history }\n",
     )
     .unwrap()
-    public: false,
 }
 
 /// The authenticated seat history of one seat, from its begin frame to its
