@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:26442eb13983cbd4b826eaf8fe0a8f3d2b112f182bfb3abb91b02a580791fa7a:80EPmk4akijh80hNLgC5Kt8dufvoQor9rdL8Mqa1AMg1E+xJEgvbDnozv1Ci6m6z7wvrwBPcnp8N/saY6psbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:05:40Z:a1be6f1972e7af9845541b493abb1ba4452f77f6ba78a8dda51c15e55a0e7a6c:jdvlbSBLm6JiAgqeZ4pG4ZXsrMYyGUmC2LfQ5RMcMdBHUwgqkQBi8++XsMosQ7/uSIebuHNI94IqTirJO3g2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -151,6 +151,13 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
+  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  bundle_staging:
+    schema: 1
+    max_node_bytes: 2147483648
+    max_node_stages: 64
+    max_key_bytes: 536870912
+    max_key_stages: 16
   thread_history:
     schema: 1
     default_retention: durable

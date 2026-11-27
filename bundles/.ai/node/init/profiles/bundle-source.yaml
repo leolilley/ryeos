@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:f772f62a012134f88cb36677a6705f5400d173b8c6f11b745ed04a2c6f8900ff:i99LkibM6qle5GIRs1+XDratNX0Ha5v7xL1vCv43Z2LIV+kT5mFGc/E1+wMOAc4gmRuYJ1LxIF+cFGi0XCT1Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:05:40Z:a0d2fb86a04e103f475476b64de2c05e39545ed708f718925dfd6a17e3194274:H2eg5CP5EPi4zV4I9BdIeVnOOxCGLIQYGctDgWlkFrkKohn9kr7OTBhcRCui7CgyCm6GHjv6bUWTyWkzfoanDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -155,6 +155,13 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
+  # Bounds on staged bundles: bytes and stages the node holds in all, and one requesting key may hold.
+  bundle_staging:
+    schema: 1
+    max_node_bytes: 2147483648
+    max_node_stages: 64
+    max_key_bytes: 536870912
+    max_key_stages: 16
   thread_history:
     schema: 1
     default_retention: durable
