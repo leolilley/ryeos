@@ -454,3 +454,40 @@ fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+/// `items.effective` resolves items from the request's `project_path` through
+/// `SubjectResolutionAuthority::for_live_project_root`, a spelling the marker
+/// scan above does not see, so its admission is pinned here by the call chain:
+/// the path reaches the engine only as the admitted canonical root, and the
+/// handler never builds a path from the request text itself.
+#[test]
+fn items_effective_resolves_only_from_an_admitted_project_path() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let text = std::fs::read_to_string(
+        root.join("crates/daemon/ryeos-api/src/handlers/items_effective.rs"),
+    )
+    .unwrap();
+    let body = non_test_text(&text);
+    let admit = body
+        .find("ryeos_app::live_project_path::admit_handler_live_path(")
+        .expect("items.effective admits its project path with admit_handler_live_path");
+    let first_use = body
+        .find("for_live_project_root(")
+        .expect("items.effective builds the live authority from the project root");
+    assert!(admit < first_use, "the path is admitted before it is used");
+    assert!(
+        body[admit..first_use].contains(".canonical"),
+        "the root the engine receives is the admitted canonical path"
+    );
+    assert_eq!(
+        body.matches("req.project_path").count(),
+        1,
+        "the request's project_path is read once, to be admitted"
+    );
+    for forbidden in ["PathBuf::from(", "std::fs::canonicalize("] {
+        assert!(
+            !body.contains(forbidden),
+            "items.effective must not build or canonicalise a path from the request: `{forbidden}`"
+        );
+    }
+}
