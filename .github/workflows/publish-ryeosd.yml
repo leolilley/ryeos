@@ -322,7 +322,6 @@ jobs:
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
       - name: Assert publisher key secret exists
-        if: ${{ !inputs.dry_run }}
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
