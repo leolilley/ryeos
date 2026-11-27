@@ -2247,6 +2247,26 @@ pub struct KindSchema {
     /// not: a standing endorsement trusts everything the authoring key signs
     /// of the kind, which is safe only for kinds that never execute or act.
     pub standing_endorsement: StandingEndorsement,
+    /// Whether an item of this kind only ever runs when a caller invokes it
+    /// under that caller's own grants, or is something the node loads into
+    /// itself. Absent means the node loads it: a kind that says nothing is the
+    /// more privileged answer, so it is never admitted where only invoked
+    /// items are.
+    pub activation: Activation,
+}
+
+/// The signed, kind-owned answer to how an item of the kind comes to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Activation {
+    /// The node loads items of this kind into itself (a service, a route, a
+    /// config, a view, a handler, a kind): the item acts without anyone
+    /// invoking it.
+    #[default]
+    NodeLoaded,
+    /// An item of this kind acts only when a caller invokes it, under that
+    /// caller's own grants.
+    Invoked,
 }
 
 /// The signed, kind-owned answer to whether a standing endorsement may name
@@ -2631,6 +2651,15 @@ impl KindRegistry {
             .filter(|(_, schema)| schema.standing_endorsement == StandingEndorsement::Allowed)
             .map(|(kind, _)| kind.clone())
             .collect()
+    }
+
+    /// The kind whose items live in `directory`, with its activation. The
+    /// answer comes only from this registry.
+    pub fn kind_in_directory(&self, directory: &str) -> Option<(&str, Activation)> {
+        self.schemas
+            .iter()
+            .find(|(_, schema)| schema.directory == directory)
+            .map(|(kind, schema)| (kind.as_str(), schema.activation))
     }
 
     /// All registered kind names.
@@ -3062,6 +3091,13 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
         _ => StandingEndorsement::default(),
     };
+    let activation = match data.get("activation") {
+        Some(value) if !value.is_null() => serde_yaml::from_value::<Activation>(value.clone())
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `activation`: {error}"),
+            })?,
+        _ => Activation::default(),
+    };
     let root_executable = execution
         .as_ref()
         .and_then(|execution| execution.thread_profile.as_ref())
@@ -3108,6 +3144,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         project_shadowing,
         runtime_authoring,
         standing_endorsement,
+        activation,
     })
 }
 
@@ -3179,6 +3216,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "runtime_authoring",
     "standing_endorsement",
     "thread_profile",
+    "activation",
 ];
 
 fn refuse_unknown_kind_schema_keys(
@@ -5647,6 +5685,41 @@ formats:
             error.to_string().contains("standing_endorsement"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn activation_defaults_to_node_loaded_and_a_kind_can_say_invoked() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let invoked = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nactivation: invoked\n";
+        sign_and_write_schema(&tmp, "note", invoked, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry.get("directive").unwrap().activation,
+            Activation::NodeLoaded
+        );
+        assert_eq!(
+            registry.get("note").unwrap().activation,
+            Activation::Invoked
+        );
+        assert_eq!(
+            registry.kind_in_directory("notes"),
+            Some(("note", Activation::Invoked))
+        );
+        assert_eq!(registry.kind_in_directory("nowhere"), None);
+    }
+
+    #[test]
+    fn activation_with_an_unknown_value_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let bad = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nactivation: sometimes\n";
+        sign_and_write_schema(&tmp, "note", bad, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(error.to_string().contains("activation"), "{error}");
     }
 
     #[test]

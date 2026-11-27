@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T07:30:02Z:f4d5bd35885318c61846322c51d69088a2a208fb0a8e33796f615d692fc05830:v9mWBaAsUukJKJhF0u+34az0c3c+GFf4ZAEFx9K20dYi5uN9dDDeDZDUIfu5mINmyv5/ewSiYJGA6rEO4A/jDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T22:28:39Z:75726f66460dabf100404d238cd8170fe7917cd9ecc269aeee520c21dbaf6d0e:fx9qaLoWky5VGlstJVKpg/szodZMFuHaE23PB+Tj516m/6jc7YSqMs/OeP2s3w7x7SaGn2L+EesQkxm90IbyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -192,6 +192,13 @@ policies:
     max_total_blob_bytes: 134217728
     max_response_bytes: 268435456
     max_links_per_object: 100000
+  # Bounds on staged bundles, in bytes and in stages, for the whole node and for one requesting key.
+  bundle_staging:
+    schema: 1
+    max_node_bytes: 2147483648
+    max_node_stages: 64
+    max_key_bytes: 536870912
+    max_key_stages: 16
   thread_history:
     schema: 1
     default_retention: durable
@@ -223,6 +230,25 @@ policies:
     # Most /published requests worked at once, node-wide; one past it is
     # answered publication_busy before any read.
     max_in_flight: 16
+  publication_lane:
+    schema: 1
+    # What a bundle pulled from a publication may carry. admit_activations
+    # accepts only `invoked`, meaning items that act only when a caller invokes
+    # them, under that caller's own grants. named_bundles lifts more for one
+    # bundle by name, namely `kinds` (exact node-loaded kinds) and `facets`
+    # (manifest declarations a policy can lift). Nothing else can be lifted.
+    admit_activations: [invoked]
+    # The manifest facets an operator may lift for a named bundle. Only these
+    # five exist to lift; provided kinds, the operator vault, state homes,
+    # route capabilities, isolation backends, external providers and adapters,
+    # bin trees and executors can never be listed.
+    liftable_facets:
+      - bundle_events
+      - item_authoring
+      - owns_namespaces
+      - project_snapshots
+      - runtime_vault
+    named_bundles: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304

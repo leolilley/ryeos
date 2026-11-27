@@ -1,13 +1,15 @@
-# ryeos:signed:2026-11-24T11:27:27Z:183fb63fd8c79a94034f2ba0c5f63a7177ec85b889e5f95a8f9829e56639f1df:OXEUtkUl0Qi0H66osNltLpDCg3/uHJv/q1l5lFSCkzqKBg3MyNCqyobwE1srvR/qG51WoKJBte9QhDP03co3Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:14:34Z:3f3fc1d01206a5a019720fe1308199db038a343fa171500288e050bd5e5588da:pnPL2lkQvqinAI1NQDYPmzf6JogcfDKvzLxkXjQmaxkceQTfNZxCaGXmfWl3yehTvRK5jZ4D6cx/qPudbwfkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: []
-description: "List installed bundles"
+description: "List installed bundles, and bundles staged for a later start (status staged; operators see the stage detail, and apply_refused with the closed refusal code once a signed apply of the stage was refused; principals see the name and plain staged only; the operator removes stages with bundle/stage-clear)"
 disclosure:
   principal:
     - "/bundles/*/name"
+    - "/staged/*/name"
+    - "/staged/*/status"
   max_items: 512
   max_result_bytes: 65536

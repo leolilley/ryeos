@@ -16,6 +16,7 @@ pub mod error;
 pub mod exec_stream;
 pub mod exit;
 pub mod help;
+mod lifecycle_bundle_staging;
 mod lifecycle_bundle_state;
 pub mod lifecycle_commands;
 mod lifecycle_external_compose;
