@@ -57,29 +57,71 @@ async fn valid_token_consumed_and_session_returned() {
 }
 
 #[tokio::test]
-async fn committed_activation_replays_the_same_session() {
+async fn a_second_use_of_a_valid_token_is_refused() {
     let (_tmp, _state_owner, state) = build_test_state();
+    let (_session_id, token) = mint_launch(&state, test_context());
+    let state = Arc::new(state);
 
-    let (session_id, token) = mint_launch(&state, test_context());
-
-    // First consume succeeds.
-    let result1 = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
+    let first = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token.clone() }),
         HandlerContext::anonymous(),
-        Arc::new(state.clone()),
+        state.clone(),
     )
     .await;
-    assert!(result1.is_ok(), "first consume should succeed");
+    assert!(first.is_ok(), "first use should succeed");
 
-    // A response-loss retry returns the exact same committed session.
-    let result2 = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
+    let second = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token }),
         HandlerContext::anonymous(),
-        Arc::new(state),
+        state,
     )
     .await;
-    let replay = result2.expect("activation replay should recover committed result");
-    assert_eq!(replay["session_id"], session_id);
+    assert!(second.is_err(), "a spent token must be refused");
+}
+
+#[tokio::test]
+async fn unknown_spent_and_expired_tokens_get_the_same_refusal() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let state = Arc::new(state);
+
+    let refusal = |token: String| {
+        let state = state.clone();
+        async move {
+            let error = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
+                serde_json::json!({ "token": token }),
+                HandlerContext::anonymous(),
+                state,
+            )
+            .await
+            .expect_err("refused");
+            format!("{error:#}")
+        }
+    };
+
+    let unknown = refusal("not-a-token".to_string()).await;
+
+    let (_, spent_token) = mint_launch(&state, test_context());
+    (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
+        serde_json::json!({ "token": spent_token.clone() }),
+        HandlerContext::anonymous(),
+        state.clone(),
+    )
+    .await
+    .expect("first use succeeds");
+    let spent = refusal(spent_token).await;
+
+    let mut short = test_context();
+    short.timing = ryeos_ui::SessionTiming::new(
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+    );
+    let (_, expired_token) = mint_launch(&state, short);
+    std::thread::sleep(Duration::from_millis(10));
+    let expired = refusal(expired_token).await;
+
+    assert_eq!(unknown, spent);
+    assert_eq!(unknown, expired);
 }
 
 #[tokio::test]

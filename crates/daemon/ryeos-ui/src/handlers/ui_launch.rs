@@ -35,8 +35,8 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
     let req: Request = serde_json::from_value(input)
         .map_err(|e| anyhow::anyhow!("invalid ui.launch request: {e}"))?;
 
-    // Activation is idempotent until token expiry so delivery loss can replay
-    // the same transition without creating another successor.
+    // A token activates once. An unknown, spent or expired token gets one
+    // refusal that names nothing about it.
     let ui_state = get_ui_state(&state).expect("UiState not set");
     let _transition = ui_state
         .lock_seat_transition()
@@ -44,7 +44,11 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
     let activation = ui_state
         .browser_sessions
         .activate_launch_token(&req.token)
-        .ok_or_else(|| anyhow::anyhow!("invalid or expired launch token"))?;
+        .ok_or_else(|| {
+            ryeos_app::handler_error::HandlerError::Forbidden(
+                "invalid or already-used launch token".to_string(),
+            )
+        })?;
     let session_id = activation.session_id;
     let secure = session_cookie_secure(&state)?;
 

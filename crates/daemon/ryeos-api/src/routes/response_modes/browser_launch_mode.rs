@@ -145,34 +145,49 @@ impl CompiledResponseMode for CompiledBrowserLaunchMode {
             unreachable!("invoke_checked enforces Json")
         };
 
-        let redirect = value
-            .get("redirect")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                RouteDispatchError::Internal("browser_launch response missing redirect".to_string())
-            })?;
-        let cookie = value.get("cookie").ok_or_else(|| {
-            RouteDispatchError::Internal("browser_launch response missing cookie".to_string())
-        })?;
-        let cookie_header = cookie_header(cookie)?;
-
-        let mut response = StatusCode::SEE_OTHER.into_response();
-        let headers = response.headers_mut();
-        headers.insert(
-            header::LOCATION,
-            HeaderValue::from_str(redirect).map_err(|e| {
-                RouteDispatchError::Internal(format!("invalid browser_launch redirect: {e}"))
-            })?,
-        );
-        headers.insert(
-            header::SET_COOKIE,
-            HeaderValue::from_str(&cookie_header).map_err(|e| {
-                RouteDispatchError::Internal(format!("invalid browser_launch cookie: {e}"))
-            })?,
-        );
+        let mut response = launch_response(&value)?;
         attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
         Ok(response)
     }
+}
+
+/// The redirect that carries the session cookie. The launch URL holds the
+/// token, so the answer tells the browser never to send it on as a referrer and
+/// never to keep the answer.
+fn launch_response(
+    value: &serde_json::Value,
+) -> Result<axum::response::Response, RouteDispatchError> {
+    let redirect = value
+        .get("redirect")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            RouteDispatchError::Internal("browser_launch response missing redirect".to_string())
+        })?;
+    let cookie = value.get("cookie").ok_or_else(|| {
+        RouteDispatchError::Internal("browser_launch response missing cookie".to_string())
+    })?;
+    let cookie_header = cookie_header(cookie)?;
+
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(redirect).map_err(|e| {
+            RouteDispatchError::Internal(format!("invalid browser_launch redirect: {e}"))
+        })?,
+    );
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie_header).map_err(|e| {
+            RouteDispatchError::Internal(format!("invalid browser_launch cookie: {e}"))
+        })?,
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 fn cookie_header(cookie: &serde_json::Value) -> Result<String, RouteDispatchError> {
@@ -237,6 +252,33 @@ fn extract_path_captures(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_launch_answer_forbids_referrers_and_caching_and_hides_the_token() {
+        let token = "0123456789abcdef-launch-token";
+        // The service answer never holds the token, so the redirect cannot.
+        let response = launch_response(&serde_json::json!({
+            "session_id": "s",
+            "redirect": "/ui",
+            "cookie": {
+                "name": "ryeos_session",
+                "value": "session-value",
+                "path": "/ui",
+                "same_site": "Strict",
+                "http_only": true,
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let headers = response.headers();
+        assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::LOCATION], "/ui");
+        assert!(!headers[header::LOCATION].to_str().unwrap().contains(token));
+        // The session cookie is the only cookie the answer sets.
+        assert_eq!(headers.get_all(header::SET_COOKIE).iter().count(), 1);
+    }
 
     #[test]
     fn cookie_header_clears_a_cookie_with_zero_max_age() {

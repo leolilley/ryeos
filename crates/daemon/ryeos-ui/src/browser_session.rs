@@ -768,12 +768,28 @@ pub enum ArtGrantRefusal {
     SetFull,
 }
 
-/// Short-lived, idempotent activation token for a pending session.
+/// Short-lived, single-use activation token for a pending session. The store
+/// keeps only the hash of the token it handed out.
 #[derive(Debug)]
 struct LaunchToken {
     session: BrowserSession,
-    activated: bool,
     expires_at: Instant,
+}
+
+/// The hash a launch token is stored under.
+fn launch_token_hash(token: &str) -> String {
+    lillux::cas::sha256_hex(token.as_bytes())
+}
+
+/// Equality that takes the same time wherever two byte strings differ.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
 }
 
 /// In-memory browser session store.
@@ -878,48 +894,48 @@ impl BrowserSessionStore {
         let token_hex = lillux::cas::sha256_hex(&token_bytes);
         let launch_token = LaunchToken {
             session,
-            activated: false,
             expires_at: now + timing.launch_token_ttl,
         };
 
         self.launch_tokens
             .lock()
             .unwrap()
-            .insert(token_hex.clone(), launch_token);
+            .insert(launch_token_hash(&token_hex), launch_token);
 
         Ok((session_id, token_hex, attachment))
     }
 
-    /// Activate a pending session and return its ID. Successful activation is
-    /// replayable until token expiry so a committed-but-lost HTTP response can
-    /// be recovered without minting a sibling.
+    /// Activate a pending session and return its ID. A token activates once:
+    /// the first presentation removes it under the same lock that checks it, so
+    /// a spent, expired or unknown token all answer `None`.
     pub fn consume_launch_token(&self, token: &str) -> Option<String> {
         self.activate_launch_token(token)
             .map(|activation| activation.session_id)
     }
 
     pub fn activate_launch_token(&self, token: &str) -> Option<LaunchActivation> {
+        let presented = launch_token_hash(token);
         let mut tokens = self.launch_tokens.lock().unwrap();
-        let launch = tokens.get(token)?;
+        // Every stored hash is compared, so the time taken does not depend on
+        // which one matched.
+        let mut matched: Option<String> = None;
+        for stored in tokens.keys() {
+            if constant_time_eq(stored.as_bytes(), presented.as_bytes()) {
+                matched = Some(stored.clone());
+            }
+        }
+        let launch = tokens.remove(&matched?)?;
         if launch.expires_at < Instant::now() {
-            tokens.remove(token);
             return None;
         }
-        if launch.activated {
-            return Some(LaunchActivation {
-                session_id: launch.session.session_id.clone(),
-            });
-        }
 
-        let mut successor = launch.session.clone();
+        let mut successor = launch.session;
         successor.touch(Instant::now());
         let successor_id = successor.session_id.clone();
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.insert(successor_id.clone(), successor);
-        tokens
-            .get_mut(token)
-            .expect("activation token retained")
-            .activated = true;
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(successor_id.clone(), successor);
         Some(LaunchActivation {
             session_id: successor_id,
         })
@@ -2486,7 +2502,7 @@ impl BrowserSessionStore {
         };
         launch_tokens
             .values()
-            .any(|launch| !launch.activated && retains_project(&launch.session))
+            .any(|launch| retains_project(&launch.session))
             || sessions.values().any(retains_project)
     }
 
@@ -5332,18 +5348,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn activated_launch_token_replays_same_session() {
+    fn a_launch_token_activates_once() {
         let store = BrowserSessionStore::new();
         let (_, token) = mint(&store, test_context());
 
-        let first = store.consume_launch_token(&token);
-        assert!(first.is_some());
-
-        let second = store.consume_launch_token(&token);
-        assert_eq!(
-            second, first,
-            "activation replay must recover one successor"
+        assert!(store.consume_launch_token(&token).is_some());
+        assert!(
+            store.consume_launch_token(&token).is_none(),
+            "a spent token must not activate again"
         );
+    }
+
+    #[test]
+    fn the_store_keeps_only_a_hash_of_the_token() {
+        let store = BrowserSessionStore::new();
+        let (_, token) = mint(&store, test_context());
+        let tokens = store.launch_tokens.lock().unwrap();
+        assert!(!tokens.contains_key(&token));
+        assert!(tokens.contains_key(&launch_token_hash(&token)));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_ordinary_equality() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
     }
 
     #[test]

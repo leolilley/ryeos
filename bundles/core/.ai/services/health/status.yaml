@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T19:46:00Z:5041b6893bb7ec933c2156c6ba92613303640c9d9cf8c97ad0ba6efbadcc6159:aQ758j/0YL5/M8KjbGnRVBVC+acyJbHFi7PypGIM2Q31oa32WgaiQ6FDK53ckGbJB9sVL1RQgMgfUoIJsPa/Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T19:52:04Z:71a729d3acd0e92306dae5e6c8884b7e656a81bcd2b9667df29c73bfad8fda25:2wiILUaMfKsULg+zZJddazS/9USPtZGJSivzX2QJh29lwCM0R0D1WY7YsrJ8AhxJeMvWg+yy99cAXOm22MZLBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: health.status
 record_thread: false
@@ -6,6 +6,7 @@ required_caps: []
 description: "Daemon health: liveness check and catalog status"
 disclosure:
   principal:
+    - "/liveness"
     - "/status"
     - "/operational_services"
     - "/thread_projection/status"
@@ -13,4 +14,4 @@ disclosure:
   free_text:
     - "/missing_services"
   public:
-    - /status
+    - /liveness

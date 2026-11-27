@@ -279,7 +279,10 @@ impl CompiledResponseMode for CompiledJsonMode {
                         tracing::debug!(
                             route_id = %compiled.id,
                             method = %request_method,
-                            uri = %request_uri,
+                            uri = %crate::routes::redaction::redact_secret_segments(
+                                &compiled.path_pattern,
+                                request_uri.path(),
+                            ),
                             source = %self.source_ref,
                             "json route source returned null; mapping to HTTP 404"
                         );
@@ -294,7 +297,10 @@ impl CompiledResponseMode for CompiledJsonMode {
                         tracing::error!(
                             route_id = %compiled.id,
                             method = %request_method,
-                            uri = %request_uri,
+                            uri = %crate::routes::redaction::redact_secret_segments(
+                                &compiled.path_pattern,
+                                request_uri.path(),
+                            ),
                             source = %self.source_ref,
                             "json route source returned null for a non-GET (mutation) route; returning HTTP 500"
                         );

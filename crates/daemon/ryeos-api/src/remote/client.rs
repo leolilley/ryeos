@@ -645,19 +645,11 @@ impl RemoteClient {
         read_json_checked("GET", &url, resp).await
     }
 
-    /// GET /ingest-ignore (no auth required).
+    /// GET /ingest-ignore (authenticated).
     ///
     /// Returns the remote node's ingest ignore config as a typed struct.
     pub async fn get_ingest_ignore(&self) -> Result<IgnoreConfig> {
-        let url = format!("{}/ingest-ignore", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .timeout(CONTROL_PLANE_TIMEOUT)
-            .send()
-            .await
-            .with_context(|| format!("failed to connect to {}", url))?;
-        let body = read_json_checked("GET", &url, resp).await?;
+        let body = self.signed_get("/ingest-ignore").await?;
         // Server returns the IgnoreConfig as JSON (with `patterns` field)
         let config: IgnoreConfig = serde_json::from_value(body)
             .context("failed to parse /ingest-ignore response as IgnoreConfig")?;

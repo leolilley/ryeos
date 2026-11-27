@@ -26,6 +26,9 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
         "degraded"
     };
     Ok(serde_json::json!({
+        // Fixed: the one field a caller with no key is given. It says the node
+        // answered and never varies with the node's state.
+        "liveness": "alive",
         "status": status,
         "operational_services": state.catalog_health.status,
         "missing_services": state.catalog_health.missing_services,

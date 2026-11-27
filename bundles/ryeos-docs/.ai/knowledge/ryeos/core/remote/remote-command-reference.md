@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T00:05:35Z:0751040d7a8e033bde17c40f48a83fe955a06712fb1b979f5c4ba818f1cc4b5a:EMSotmHuQz5ziZ7/Nt5zY7+tN0A51NJsICBYXKGxLwXoNDmknjuKaLNc2YWkxqEOLhrJJmZxrVR0aGg85aaLAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T19:52:45Z:c653345fd7e229b0313d18ce2e6893c2d666fe58ffded5a5b298a13f6f98fe92:TG7KvXCieVgfJ12vRGfkJqgLlfdreRvsHT0m1ptOcGmVltv7DaxBdWGf7kFTPiQ8GmXFeM6OFJKrBhsU/5NvDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -42,7 +42,7 @@ call made by the node itself is signed by the node key alone.
 
 | Command | Local service cap | Remote scopes on target | Remote routes used |
 |---|---|---|---|
-| `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key`, `GET /ingest-ignore` |
+| `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key` (ingest-ignore rules come from the pinned descriptor) |
 | `ryeos remote pin` | `ryeos.execute.service.remote/pin` | none | none |
 | `ryeos remote-descriptor` | daemon service (read-only) | `ryeos.execute.service.remote/descriptor` | none |
 | `ryeos admission-token` | local tool execution | none | none |
@@ -73,8 +73,11 @@ call made by the node itself is signed by the node key alone.
 
 Notes:
 
-- `GET /health`, `GET /public-key`, and `GET /ingest-ignore` are
-  intentionally unauthenticated discovery endpoints.
+- `GET /health` (it answers only that the node is alive) and
+  `GET /public-key` (the node's own public key material) are the
+  unauthenticated discovery endpoints. `GET /ingest-ignore` requires a
+  signed request; `remote configure` takes the rules from the signed
+  descriptor it pins.
 - `remote execute` must also satisfy the capabilities required by the
   executed item once the remote daemon dispatches `/execute`.
 - `remote execute` and `remote run` default to
@@ -203,7 +206,7 @@ Failure modes:
 - fails if the URL contains credentials or non-base components, is not
   canonical in a signed descriptor, uses non-loopback HTTP, or redirects
 - fails if the remote cannot be reached
-- fails if `/public-key` or `/ingest-ignore` returns invalid data
+- fails if `/public-key` returns invalid data
 - refuses with `remote_key_unpinned` (nothing written) when neither
   `--descriptor` nor `--expect-fingerprint` is given; the refusal names the
   fingerprint seen

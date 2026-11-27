@@ -251,9 +251,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         &pubkey.fingerprint,
     )?;
 
-    // Fetch the remote's ingest-ignore rules — required for push to work
-    // correctly. Fail hard if unavailable.
-    let ingest_ignore = client.get_ingest_ignore().await?;
+    // The remote's ingest-ignore rules come from the signed descriptor this
+    // pin was checked against: the endpoint that serves them needs a key, and
+    // this node holds none for the remote until it is pinned. A pin made
+    // without a descriptor carries no rules and pushes nothing until it is
+    // re-made from one.
+    let ingest_ignore = descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.ingest_ignore.clone());
 
     let app_root = state.config.runtime_root();
     let existing_project_bindings = config::load_remotes_report(app_root.as_path())?
@@ -271,7 +276,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         signing_key: pubkey.signing_key,
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
-        ingest_ignore: Some(ingest_ignore),
+        ingest_ignore,
         project_bindings: existing_project_bindings,
     };
     let record_path = config::write_remote_pin(

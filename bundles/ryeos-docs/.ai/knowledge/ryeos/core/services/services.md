@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T08:39:15Z:ab249c0ff7f1bcb76b467f44500e335fb09b6ab9b80a4fc57f44b1c3a4c96de1:F7g4yIWXXsM0r2amCU/cy7jWZQwisIygOZVo+DMpRiDtC4zY875PZ8tGy0TCI6xB4epd1o63oWDMAsg29J1wDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T19:52:45Z:568669970582613e1decd514dbd85c7d9b7404d17490d6d91911620e78a6f2fc:6IupglBC5bPEKUHWMDk1DWIGYDt+01ULUTO41TmH7HLk7CFCo6gnaBTFdN7thya7B8Cz2Baf82nJF2VMAdXSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -63,8 +63,9 @@ a receipt; it refuses with `settle_inventory_refused` unless the receipt is
 fresh, complete, for the allocation's provider account and lists no unknown
 running sandbox created inside the allocation's contact window.
 
-`health/status`, `identity/public_key`, and `system/ingest-ignore` back
-unauthenticated discovery routes. Mutating routes such as
+`health/status` (a fixed "alive") and `identity/public_key` (the node's
+own public key material) back unauthenticated discovery routes;
+`system/ingest-ignore` requires signed auth. Mutating routes such as
 `identity/authorize-key` and `system/push-head` require signed auth plus
 the listed capability.
 

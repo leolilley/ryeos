@@ -96,7 +96,10 @@ pub async fn handle_remotes_probe(
     let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
 
     let health = match tokio::time::timeout(REMOTE_PROBE_TIMEOUT, client.get_health()).await {
-        Ok(Ok(health)) => health,
+        // A remote answers a caller with no key only that it is alive.
+        Ok(Ok(health)) => serde_json::json!({
+            "status": health.get("liveness").cloned().unwrap_or(serde_json::json!("error")),
+        }),
         Ok(Err(e)) => serde_json::json!({ "status": "error", "detail": format!("{e:#}") }),
         Err(_) => serde_json::json!({
             "status": "error",

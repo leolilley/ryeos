@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T12:56:58Z:e6aa50110920da4877a19fefc8b3fe9ee1437810e640758194e4c6d95a244e85:fHxVgoyiM5C36j3X0ginjYMmU5k4Ku4j7MifnFY3E/P6bghhRuJobZlXESRz+gzh/NUYiTsQXgHtzpTOoBTECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T19:52:12Z:955f986cd9f50d6ced3787b38544bc54d0306d81c0a7dc74872e29d9db54f5f3:H5MnQRx33zr2nbJaKNW6FNgledbLwQg1f4quSKS7u3i/nSF/scWYLbIzPl+Mv273Chxl4RIF5W3mhCVLANWICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -133,7 +133,7 @@ Return the daemon node public identity. No auth required.
 
 ### `GET /ingest-ignore`
 
-Return the node ingest-ignore rules. No auth required.
+Return the node ingest-ignore rules. Requires a signed request.
 
 - **Source:** `service:system/ingest-ignore`
 - **Used by:** `ryeos remote configure`, `remote push`, and

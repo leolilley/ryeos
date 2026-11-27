@@ -13,14 +13,12 @@ use ryeos_node_runtime::disclosure::{DisclosureClass, ServiceDisclosure, shape_r
 use serde_json::Value;
 
 /// Every service that still declares a `public` tier. Each is keyless on
-/// purpose: liveness, the node's public identity, the ingest rules a pusher
-/// reads before it is admitted, the token-gated admission claim, and the
-/// one-time browser launch link.
+/// purpose: liveness, the node's public identity, the token-gated admission
+/// claim, and the one-time browser launch link.
 const KEYLESS: &[&str] = &[
     "admission/claim",
     "health/status",
     "identity/public_key",
-    "system/ingest-ignore",
     "ui/launch",
 ];
 
@@ -112,21 +110,25 @@ fn the_keyless_health_answer_is_liveness_alone() {
     )
     .unwrap();
     let keys: Vec<&String> = shaped.as_object().expect("an object").keys().collect();
-    assert_eq!(keys, vec!["status"], "{shaped}");
-    assert!(shaped["status"].is_string());
+    assert_eq!(keys, vec!["liveness"], "{shaped}");
+    assert_eq!(shaped["liveness"], "alive");
     // The handler answers more; a keyless caller gets none of it.
     assert!(full.get("operational_services").is_some());
+    assert!(full.get("status").is_some());
 }
 
 #[test]
-fn the_keyless_public_key_answer_carries_no_version_or_operator_detail() {
-    let (_tmp, _owner, state) = test_state::build_test_state();
+fn the_keyless_public_key_answer_is_exactly_the_nodes_own_five_fields() {
+    let (_tmp, _owner, mut state) = test_state::build_test_state();
+    state.vault_fingerprint = Some("vault-fingerprint-of-this-node".to_owned());
+    let node_principal = state.identity.principal_id();
+    let state = Arc::new(state);
     let full = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
         .block_on(identity_public_key::handle(
             identity_public_key::Request::default(),
-            Arc::new(state),
+            state,
         ))
         .unwrap();
     let disclosure = disclosure_of("identity/public_key");
@@ -143,17 +145,73 @@ fn the_keyless_public_key_answer_carries_no_version_or_operator_detail() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert!(keys.contains("signing_key") && keys.contains("fingerprint"));
-    assert!(!keys.contains("version"), "{shaped}");
-    let allowed: BTreeSet<&str> = [
-        "principal_id",
-        "fingerprint",
+    let expected: BTreeSet<&str> = [
         "signing_key",
+        "fingerprint",
+        "principal_id",
         "site_id",
         "vault_fingerprint",
     ]
     .into_iter()
     .collect();
-    assert!(keys.is_subset(&allowed), "{shaped}");
+    assert_eq!(keys, expected, "{shaped}");
+    // The one principal id in the answer is the node's own.
+    assert_eq!(shaped["principal_id"], serde_json::json!(node_principal));
+    assert_eq!(
+        shaped["vault_fingerprint"],
+        "vault-fingerprint-of-this-node"
+    );
     assert!(full.get("version").is_some());
+}
+
+#[test]
+fn ingest_ignore_needs_a_key_on_the_service_and_the_route() {
+    let declared = services()
+        .into_iter()
+        .find(|(name, _)| name == "system/ingest-ignore")
+        .expect("service")
+        .1;
+    assert!(
+        declared["disclosure"].get("public").is_none(),
+        "ingest-ignore must have no public tier"
+    );
+    let route: Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo().join("bundles/core/.ai/node/routes/ingest-ignore.yaml"))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    assert_eq!(route["auth"], "ryeos_signed");
+}
+
+#[tokio::test]
+async fn an_unsigned_request_to_ingest_ignore_is_refused() {
+    use axum::http::{HeaderMap, Method};
+    use ryeos_api::route_error::RouteDispatchError;
+    use ryeos_api::routes::invocation::{CompiledRouteInvocation, RouteInvocationContext};
+    use ryeos_api::routes::invokers::ryeos_signed_invocation::CompiledRyeosSignedVerifier;
+    use ryeos_api::routes::webhook_dedupe::WebhookDedupeStore;
+
+    let (_tmp, _owner, state) = test_state::build_test_state();
+    let result = CompiledRyeosSignedVerifier
+        .invoke(RouteInvocationContext {
+            route_id: "core/ingest-ignore".into(),
+            method: Method::GET,
+            uri: "/ingest-ignore".parse().unwrap(),
+            captures: Default::default(),
+            headers: HeaderMap::new(),
+            body_raw: Vec::new(),
+            input: Value::Null,
+            principal: None,
+            workspace_lifeline: None,
+            launch_timings: None,
+            state,
+            publication: None,
+            webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
+        })
+        .await;
+    assert!(matches!(result, Err(RouteDispatchError::Unauthorized)));
 }
