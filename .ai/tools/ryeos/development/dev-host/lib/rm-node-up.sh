@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T16:15:03Z:45f56e497e8e2f977921064832be4d126094b1fe744e1c7cb1ce03e1e499461a:jDXZIuGvNX+Iph/rDYLoaf/uwfOMiLaDjEqirhLbPKUuX2cQXmkGbB58tErJqsINDDSZ2QG+fkOhWEKB85NNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:16:04Z:dda3458e3dd2ad9e5570f710b2c88441866658f6a044d9b90688ff9ee5690798:Yi5QkPBOG50Atxoj/pXU8v3yWDTKTIyyyX+M+CMRywJh41Gahrn3NqOYwOAylJJatAJxijrQXSeElE9thsiyCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -12,10 +12,11 @@
 #     --processes M      task ceiling for `host setup` (default 512)
 #     --scopes yes|no    whether the host class requires process scopes, so one root
 #                        `host setup` runs (required; G-4's table says which)
-#     --throwaway        the caller asserts G-4's row for this track is marked throwaway
-#                        (holds no one else's state, reachable by no one else); only then
-#                        is a build whose manifest says build_profile other than release
-#                        (a test build carries the Claude Code stub driver) installed
+#     --throwaway        confirms, never replaces, the G-4 check: a build whose manifest
+#                        says build_profile other than release (a test build carries the
+#                        Claude Code stub driver) installs only when the track's own G-4
+#                        row exists, is marked throwaway and names that profile in its
+#                        Build profile cell, and this flag is also given
 #     --bundle-trust     also pass each staged bundle's PUBLISHER_TRUST.toml that
 #                        names the development key's fingerprint and nothing else
 #
@@ -105,9 +106,17 @@ fi
 [[ -r $manifest ]] || { echo "rm-node-up: cannot read the build manifest $manifest" >&2; exit 1; }
 build_profile="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("build_profile","release"))' "$manifest")"
 [[ $build_profile =~ ^[a-z][a-z-]*$ ]] || { echo "rm-node-up: bad build_profile in $manifest" >&2; exit 1; }
-if [[ $build_profile != release && $throwaway != 1 ]]; then
-    echo "rm-node-up: run $run is a '$build_profile' build; a non-release build installs only on a track whose G-4 row is throwaway, asserted with --throwaway" >&2
-    exit 2
+if [[ $build_profile != release ]]; then
+    # The track's own G-4 row decides, as data: it must exist, be marked
+    # throwaway, and name this build profile in its Build profile cell (the last
+    # cell). --throwaway is a second confirmation, never the only check.
+    table="${RM_NODE_G4_TABLE:-/home/leo/projects/ryeos-next/.tmp/ryeos-full-public-20261126/10-running-unattended.md}"
+    row="$(grep -F "| \`$track\` |" "$table" | head -1 || true)"
+    [[ -n $row ]] || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and track $track has no row in G-4's table ($table)" >&2; exit 3; }
+    [[ $row == *throwaway* ]] || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and the G-4 row for $track is not marked throwaway" >&2; exit 3; }
+    row_profile="$(printf '%s' "$row" | awk -F'|' '{gsub(/^ +| +$/, "", $(NF-1)); print $(NF-1)}')"
+    [[ $row_profile == "$build_profile" ]] || { echo "rm-node-up: refusing: the G-4 row for $track says build profile '$row_profile', the build is '$build_profile'" >&2; exit 3; }
+    [[ $throwaway == 1 ]] || { echo "rm-node-up: a '$build_profile' build also needs --throwaway as the caller's confirmation" >&2; exit 2; }
 fi
 done_step "profile-$build_profile" || mark "profile-$build_profile"
 if ! done_step installed; then
