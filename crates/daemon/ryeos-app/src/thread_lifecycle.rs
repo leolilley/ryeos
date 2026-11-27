@@ -4744,8 +4744,8 @@ fn recorded_service_thread_record(admitted: &ThreadCreateParams) -> NewThreadRec
         usage_subject: admitted.usage_subject.clone(),
         usage_subject_asserted_by: admitted.usage_subject_asserted_by.clone(),
         captured_history_policy: admitted.captured_history_policy.clone(),
+        owner: None,
     }
-    owner: None,
 }
 
 /// The `thread_started` successor committed with a recorded service birth,

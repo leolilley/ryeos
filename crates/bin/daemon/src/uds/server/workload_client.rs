@@ -1794,8 +1794,8 @@ mod tests {
                         ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
+            owner: None,
         }
-        owner: None,
     }
 
     /// Real: the StateStore with its runtime and state databases, the child

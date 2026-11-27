@@ -11763,8 +11763,8 @@ mod tests {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
+            owner: None,
         }
-        owner: None,
     }
 
     /// Birth `child_id` as an inline in-process child of the root

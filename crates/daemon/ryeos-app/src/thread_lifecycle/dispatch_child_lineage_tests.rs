@@ -34,8 +34,8 @@ fn thread_record(thread_id: &str) -> NewThreadRecord {
                 ),
             },
         }),
+        owner: None,
     }
-    owner: None,
 }
 
 fn spawned_events(state: &crate::state::AppState, parent: &str) -> Vec<Value> {

@@ -2626,8 +2626,8 @@ pub(crate) mod tests {
                         ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
+            owner: None,
         }
-        owner: None,
     }
 
     #[cfg(target_os = "linux")]

@@ -3819,8 +3819,8 @@ mod tests {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
+            owner: None,
         }
-        owner: None,
     }
 
     /// Build a running parent "P" with a captured ResumeContext, then its REAL

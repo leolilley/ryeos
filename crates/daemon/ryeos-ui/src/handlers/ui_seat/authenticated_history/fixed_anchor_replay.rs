@@ -911,8 +911,8 @@ mod tests {
                         ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
+            owner: None,
         }
-        owner: None,
     }
 
     fn initialization() -> UiPresentationInitialization {
