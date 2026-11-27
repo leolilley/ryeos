@@ -373,6 +373,7 @@ jobs:
         run: python3 .ai/tools/ryeos/development/repository-validation/cli-presentation.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check shell terminal presentation
+        timeout-minutes: 3
         run: ./scripts/pkg/test-ryeos-terminal.sh
 
       - name: Check configured-remote qualification contract
