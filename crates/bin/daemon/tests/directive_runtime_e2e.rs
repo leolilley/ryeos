@@ -2185,6 +2185,374 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     drop(mock);
 }
 
+// ── Hard budget: a fan-out shares the root's limit ─────────────────────
+
+/// A directive with no limits of its own and no inputs: whatever allowance it
+/// has comes from the run that launched it.
+fn plant_fanout_child_directive(
+    root: &Path,
+    name: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let dir = root.join(".ai/directives");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"---
+name: {name}
+category: ""
+description: "fan-out budget e2e child"
+model:
+  tier: general
+---
+Do the work.
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(dir.join(format!("{name}.md")), signed)?;
+    Ok(())
+}
+
+/// A graph whose one node follows a directive child per item, all launched
+/// at once, under an authored hard spend limit. The graph runtime does not
+/// pay providers itself; its paid descendants charge the graph run's budget.
+fn plant_fanout_graph(
+    root: &Path,
+    graph: &str,
+    child: &str,
+    spend_usd: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let dir = root.join(".ai/graphs");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.{child}
+limits:
+  spend_usd: "{spend_usd}"
+config:
+  start: fan
+  max_steps: 100
+  on_error: continue
+  config_schema:
+    type: object
+    required: [items]
+    properties:
+      items: {{type: array}}
+  nodes:
+    fan:
+      node_type: action
+      over: "${{inputs.items}}"
+      as: item
+      parallel: true
+      max_concurrency: 4
+      follow: true
+      action:
+        item_id: "directive:{child}"
+        ref_bindings:
+          model: "directive:{child}"
+        params: {{}}
+      collect: results
+      collect_threads: result_threads
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join(format!("{graph}.yaml")), signed)?;
+    Ok(())
+}
+
+/// One provider attempt in the accounting ledger.
+#[derive(Debug, Clone)]
+struct LedgerAttempt {
+    thread_id: String,
+    execution_budget_id: String,
+    state: String,
+    reserved_nanos: i64,
+    charge_nanos: Option<i64>,
+}
+
+/// One budget account row: `(account_kind, execution_budget_id, limit, committed, held)`.
+type LedgerAccount = (String, String, Option<i64>, i64, i64);
+
+fn read_fanout_ledger(h: &DaemonHarness) -> (Vec<LedgerAttempt>, Vec<LedgerAccount>) {
+    let db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
+    ryeos_app::test_support::read_existing_accounting(&db, |connection| {
+        let mut attempts = connection.prepare(
+            "SELECT thread_id, execution_budget_id, state, reserved_usd_nanos, \
+             budget_charge_usd_nanos FROM provider_attempt_reservation \
+             ORDER BY created_at_ms",
+        )?;
+        let attempts = attempts
+            .query_map([], |row| {
+                Ok(LedgerAttempt {
+                    thread_id: row.get(0)?,
+                    execution_budget_id: row.get(1)?,
+                    state: row.get(2)?,
+                    reserved_nanos: row.get(3)?,
+                    charge_nanos: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut accounts = connection.prepare(
+            "SELECT account_kind, execution_budget_id, limit_usd_nanos, \
+             committed_usd_nanos, held_usd_nanos FROM budget_account",
+        )?;
+        let accounts = accounts
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((attempts, accounts))
+    })
+}
+
+/// A run with a finite hard spend limit fans out four model-thread children.
+/// The children share the root's allowance: together they never reserve or
+/// charge past it, the ones that cannot reserve are refused before any
+/// provider contact, and every attempt is booked to the root's one execution
+/// budget rather than a fresh one per child.
+///
+/// Per attempt the route's worst case is the input tariff over the 200_000
+/// token context window plus the output tariff over the 32_768 token default
+/// output ceiling: 0.4 + 0.32768 = $0.72768 (727_680_000 nanos). A $1 limit
+/// holds one such reservation and not two, so while the first child's
+/// attempt is in flight the other three cannot reserve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fan_out_shares_the_roots_spend_limit() {
+    const RESERVATION_NANOS: i64 = 727_680_000;
+    const LIMIT_NANOS: i64 = 1_000_000_000;
+    const CHILDREN: usize = 4;
+
+    // The provider holds every response until released, so the first child's
+    // reservation stays open while its siblings try to reserve.
+    let mock = MockProvider::start_blocked(vec![
+        MockResponse::Text("child answer one".into()),
+        MockResponse::Text("child answer two".into()),
+        MockResponse::Text("child answer three".into()),
+        MockResponse::Text("child answer four".into()),
+        MockResponse::Text("spare answer".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-fanout-budget-model-config",
+            fixture,
+            |bundle_root| {
+                plant_hard_budget_mock_provider(bundle_root, &mock_url, &fixture.publisher)
+            },
+        )
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with hard-budget mock provider");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_fanout_child_directive(project.path(), "fanout_child", &fixture.publisher)
+        .expect("plant child directive");
+    plant_fanout_graph(
+        project.path(),
+        "fanout_root",
+        "fanout_child",
+        "1",
+        &fixture.publisher,
+    )
+    .expect("plant fan-out graph");
+
+    let post_fut = h.post_execute(
+        "graph:fanout_root",
+        project.path().to_str().unwrap(),
+        serde_json::json!({"items": ["a", "b", "c", "d"]}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(60), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("fan-out graph launch timed out\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+
+    let terminal = |status: &str| {
+        matches!(
+            status,
+            "completed" | "failed" | "cancelled" | "killed" | "timed_out"
+        )
+    };
+    let children = |h: &DaemonHarness| {
+        let h = h.list_threads(200);
+        async move {
+            h.await
+                .expect("list threads")
+                .into_iter()
+                .filter(|thread| thread.item_ref.contains("fanout_child"))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // While the first attempt is held in flight, the siblings that cannot
+    // reserve fail without contacting the provider.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let listed = children(&h).await;
+        let settled = listed.iter().filter(|t| terminal(&t.status)).count();
+        let contacts = mock.captured_bodies().await.len();
+        if (listed.len() == CHILDREN && settled >= CHILDREN - 1) || contacts >= CHILDREN {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "children never reached the held state: {listed:#?}, {contacts} provider \
+                 contacts\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        mock.captured_bodies().await.len(),
+        1,
+        "only the child holding the reservation may contact the provider"
+    );
+    let (in_flight, accounts) = read_fanout_ledger(&h);
+    let held: i64 = in_flight
+        .iter()
+        .filter(|a| matches!(a.state.as_str(), "reserved" | "issued"))
+        .map(|a| a.reserved_nanos)
+        .sum();
+    assert_eq!(
+        held, RESERVATION_NANOS,
+        "exactly one reservation is open while the first attempt is held: {in_flight:#?}"
+    );
+    assert!(
+        held <= LIMIT_NANOS,
+        "open reservations exceed the root's limit: {in_flight:#?}"
+    );
+    for (kind, _, limit, committed, account_held) in &accounts {
+        if kind == "execution" {
+            assert_eq!(*limit, Some(LIMIT_NANOS), "{accounts:#?}");
+            assert!(committed + account_held <= LIMIT_NANOS, "{accounts:#?}");
+        }
+    }
+
+    // Let the held attempt answer and wait for every child to settle.
+    mock.release_responses();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let listed = loop {
+        let listed = children(&h).await;
+        if listed.len() == CHILDREN && listed.iter().all(|t| terminal(&t.status)) {
+            break listed;
+        }
+        if std::time::Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("children never settled: {listed:#?}\n--- daemon stderr ---\n{stderr}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    let completed = listed.iter().filter(|t| t.status == "completed").count();
+    assert!(
+        completed < CHILDREN,
+        "at least one child must be refused its reservation instead of running: {listed:#?}"
+    );
+
+    let (attempts, accounts) = read_fanout_ledger(&h);
+
+    // (1) What the run charged plus what is still reserved never exceeds the
+    // root's limit.
+    let charged: i64 = attempts.iter().filter_map(|a| a.charge_nanos).sum();
+    let still_reserved: i64 = attempts
+        .iter()
+        .filter(|a| matches!(a.state.as_str(), "reserved" | "issued"))
+        .map(|a| a.reserved_nanos)
+        .sum();
+    assert!(
+        charged + still_reserved <= LIMIT_NANOS,
+        "the fan-out spent past the root's limit: charged {charged}, still reserved \
+         {still_reserved}: {attempts:#?}"
+    );
+    assert!(
+        charged > 0,
+        "the admitted child settled a charge: {attempts:#?}"
+    );
+
+    // (2) A child that could not reserve is refused durably, not run.
+    let denied = attempts
+        .iter()
+        .filter(|a| a.state == "reservation_denied")
+        .count();
+    assert!(
+        denied >= 1,
+        "at least one child must carry a denied reservation: {attempts:#?}"
+    );
+    assert_eq!(
+        mock.captured_bodies().await.len(),
+        CHILDREN - denied,
+        "a denied reservation never contacts the provider: {attempts:#?}"
+    );
+
+    // (3) Every attempt of every child is booked to the root's one execution
+    // budget; the ledger holds exactly one execution account, carrying the
+    // root's limit, and no per-child fresh allowance.
+    let execution_accounts: Vec<&LedgerAccount> = accounts
+        .iter()
+        .filter(|(kind, ..)| kind == "execution")
+        .collect();
+    assert_eq!(
+        execution_accounts.len(),
+        1,
+        "the fan-out must charge one execution budget, not one per child: {accounts:#?}"
+    );
+    assert_eq!(execution_accounts[0].2, Some(LIMIT_NANOS), "{accounts:#?}");
+    let budgets: std::collections::BTreeSet<&str> = attempts
+        .iter()
+        .map(|a| a.execution_budget_id.as_str())
+        .collect();
+    assert_eq!(
+        budgets,
+        std::collections::BTreeSet::from([execution_accounts[0].1.as_str()]),
+        "every child's attempts are booked to the root's execution budget: {attempts:#?}"
+    );
+    let child_ids: std::collections::BTreeSet<&str> =
+        listed.iter().map(|t| t.thread_id.as_str()).collect();
+    assert!(
+        attempts
+            .iter()
+            .all(|a| child_ids.contains(a.thread_id.as_str())),
+        "every ledger attempt belongs to a fan-out child: {attempts:#?}"
+    );
+
+    drop(project);
+    drop(mock);
+}
+
 // -- Concurrent intra-turn tool dispatch (execution.tool_concurrency) --
 //
 // One assistant message carries THREE tool calls to three sleepy tools.
