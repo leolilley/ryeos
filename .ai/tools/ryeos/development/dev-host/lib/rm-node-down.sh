@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:31:30Z:2af3269a84df47c14075c665bd8d9846ba9aec2a3cd3ce7f026685ad7c4f37c0:K9Qn+JK17HNqf+hh8gTk+dXMydj65+2bSWpaqNc93vtTuiWxiJ7LyLd80Yj0CPbXNootYH/AEzFUOfdIN/7CDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:42:51Z:4e4083b522a231f4469783740653e481345e85aed9591b3bdaf48ea2dc366608:x82RqPRjuXMajRwz5wFEjcUsqpiQJvqwECzO4CL4zFmaxVBMUrPkFK0dNhAR5s4pmUlzq/R+qwH/spFA0peyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -66,8 +66,8 @@ fi
 
 "$ryeos" stop --app-root "$app_root" </dev/null || echo "rm-node-down[$track]: stop reported a failure (already stopped?); continuing only if the node is down" >&2
 status_first_line="$("$ryeos" node status --app-root "$app_root" </dev/null 2>&1 | head -1 || true)"
-if [[ $status_first_line != stopped ]]; then
-    echo "rm-node-down: the node's status line is '$status_first_line', not 'stopped'; not retiring or removing" >&2
+if [[ $status_first_line != "initialized, stopped"* ]]; then
+    echo "rm-node-down: the node's status line is '$status_first_line', not 'initialized, stopped'; not retiring or removing" >&2
     exit 1
 fi
 mark stopped
