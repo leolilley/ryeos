@@ -2,6 +2,7 @@ pub mod accounting;
 pub mod approval_ceiling;
 pub mod authorization;
 pub mod bundle_publication;
+pub mod bundle_staging;
 pub mod command_registration;
 pub mod event_storage;
 pub mod execution;

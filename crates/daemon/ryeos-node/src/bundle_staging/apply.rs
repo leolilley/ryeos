@@ -343,7 +343,7 @@ mod tests {
             temp,
             record,
             &[("note.json".to_owned(), b"{}".to_vec())],
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             node,
         )
         .unwrap();
@@ -413,7 +413,7 @@ mod tests {
             temp,
             record,
             &[(REFUSAL_FILE.to_owned(), b"{}".to_vec())],
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             &node,
         );
         assert!(matches!(refused, Err(StagingRefusal::Invalid(_))));

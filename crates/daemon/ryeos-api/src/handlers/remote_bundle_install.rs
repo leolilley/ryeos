@@ -254,7 +254,7 @@ pub(crate) async fn stage_entries<S: BlobSource>(
 
     let node_key = state.identity.signing_key();
     let verifying = node_key.verifying_key();
-    let caps = staging::StagingCaps::DEFAULTS;
+    let caps = staging::StagingCaps::TEST_GENEROUS;
     let requested_by = actor.strip_prefix("fp:").unwrap_or(actor).to_owned();
     let declared_bytes = entries
         .iter()

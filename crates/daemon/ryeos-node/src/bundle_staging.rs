@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lillux::crypto::{SigningKey, VerifyingKey};
+use ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -75,20 +76,11 @@ const MAX_EVIDENCE_FILES: usize = 8;
 const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SWEEP_REMOVE_LIMIT: usize = 8;
 
-/// Default bound on all stages held by the node, in bytes.
-pub const DEFAULT_MAX_NODE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-/// Default bound on the number of stages the node holds.
-pub const DEFAULT_MAX_NODE_STAGES: usize = 64;
-/// Default bound on the bytes staged on behalf of one requesting key.
-pub const DEFAULT_MAX_KEY_BYTES: u64 = 512 * 1024 * 1024;
-/// Default bound on the number of stages one requesting key holds.
-pub const DEFAULT_MAX_KEY_STAGES: usize = 16;
-
 /// The byte and count bounds on staging, per node and per requesting key.
 ///
-/// The defaults are named constants: the node policy has no section for them
-/// yet. Callers take the value from here so that a policy section can feed it
-/// without changing the stage code.
+/// The values come from the node's signed `bundle_staging` policy section and
+/// from nowhere else: there is no default, so a node whose policy generation
+/// lacks the section never reaches a stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StagingCaps {
     pub max_node_bytes: u64,
@@ -98,18 +90,25 @@ pub struct StagingCaps {
 }
 
 impl StagingCaps {
-    pub const DEFAULTS: Self = Self {
-        max_node_bytes: DEFAULT_MAX_NODE_BYTES,
-        max_node_stages: DEFAULT_MAX_NODE_STAGES,
-        max_key_bytes: DEFAULT_MAX_KEY_BYTES,
-        max_key_stages: DEFAULT_MAX_KEY_STAGES,
-    };
-}
-
-impl Default for StagingCaps {
-    fn default() -> Self {
-        Self::DEFAULTS
+    /// The caps a validated `bundle_staging` policy section states.
+    pub fn from_policy(policy: &BundleStagingPolicy) -> Self {
+        Self {
+            max_node_bytes: policy.max_node_bytes,
+            max_node_stages: usize::try_from(policy.max_node_stages).unwrap_or(usize::MAX),
+            max_key_bytes: policy.max_key_bytes,
+            max_key_stages: usize::try_from(policy.max_key_stages).unwrap_or(usize::MAX),
+        }
     }
+
+    /// Bounds far above anything a unit test stages, for tests that are not
+    /// about the caps.
+    #[cfg(test)]
+    pub(crate) const TEST_GENEROUS: Self = Self {
+        max_node_bytes: 2 * 1024 * 1024 * 1024,
+        max_node_stages: 64,
+        max_key_bytes: 512 * 1024 * 1024,
+        max_key_stages: 16,
+    };
 }
 
 /// Why a stage was refused. Every refusal has a stable code, and none of them
@@ -947,14 +946,23 @@ mod tests {
     }
 
     #[test]
-    fn default_caps_are_the_documented_values() {
-        let caps = StagingCaps::default();
-        assert_eq!(caps.max_node_bytes, 2 * 1024 * 1024 * 1024);
-        assert_eq!(caps.max_node_stages, 64);
-        assert_eq!(caps.max_key_bytes, 512 * 1024 * 1024);
-        assert_eq!(caps.max_key_stages, 16);
-        assert!(caps.max_key_bytes <= caps.max_node_bytes);
-        assert!(caps.max_key_stages <= caps.max_node_stages);
+    fn caps_come_from_the_policy_section() {
+        let policy = BundleStagingPolicy {
+            schema: 1,
+            max_node_bytes: 100,
+            max_node_stages: 5,
+            max_key_bytes: 40,
+            max_key_stages: 2,
+        };
+        assert_eq!(
+            StagingCaps::from_policy(&policy),
+            StagingCaps {
+                max_node_bytes: 100,
+                max_node_stages: 5,
+                max_key_bytes: 40,
+                max_key_stages: 2,
+            }
+        );
     }
 
     #[test]
@@ -965,7 +973,7 @@ mod tests {
         let committed = stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
@@ -987,14 +995,14 @@ mod tests {
         stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
         let again = stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
@@ -1015,7 +1023,7 @@ mod tests {
         let committed = stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
@@ -1041,7 +1049,7 @@ mod tests {
         let committed = stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
@@ -1067,7 +1075,7 @@ mod tests {
         stage(
             &area,
             &node,
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             record("demo", "aa", 10),
         )
         .unwrap();
@@ -1129,7 +1137,7 @@ mod tests {
         let node = key(1);
         let caps = StagingCaps {
             max_key_stages: 2,
-            ..StagingCaps::DEFAULTS
+            ..StagingCaps::TEST_GENEROUS
         };
         stage(&area, &node, &caps, record("one", "aa", 1)).unwrap();
         stage(&area, &node, &caps, record("two", "aa", 2)).unwrap();
@@ -1147,7 +1155,7 @@ mod tests {
         let node = key(1);
         let caps = StagingCaps {
             max_node_bytes: 10,
-            ..StagingCaps::DEFAULTS
+            ..StagingCaps::TEST_GENEROUS
         };
         let refused = area
             .check_admission(&caps, "aa", 11, &node.verifying_key())
@@ -1379,7 +1387,7 @@ mod tests {
                 temp,
                 record("demo", "aa", 10),
                 &[("note.json".to_owned(), b"{}".to_vec())],
-                &StagingCaps::DEFAULTS,
+                &StagingCaps::TEST_GENEROUS,
                 &node,
             )
             .unwrap();

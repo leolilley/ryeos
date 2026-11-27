@@ -68,6 +68,7 @@ impl NodePolicyTable {
             Box::new(sections::approval_ceiling::ApprovalCeilingPolicySection),
             Box::new(sections::authorization::NodeAuthorizationPolicySection),
             Box::new(sections::bundle_publication::BundlePublicationPolicySection),
+            Box::new(sections::bundle_staging::BundleStagingPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
             Box::new(sections::event_storage::EventStoragePolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
@@ -214,6 +215,19 @@ pub fn shipped_event_storage_record() -> Arc<dyn ErasedNodePolicy> {
 #[cfg(any(test, feature = "test-support"))]
 pub fn shipped_approval_ceiling_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::approval_ceiling::ApprovalCeilingPolicy::as_shipped())
+}
+
+/// The shipped `bundle_staging` policy record, with the bounds the shipped
+/// profiles state. Test snapshots include it wherever a bundle is staged.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shipped_bundle_staging_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::bundle_staging::BundleStagingPolicy {
+        schema: sections::bundle_staging::CURRENT_SCHEMA,
+        max_node_bytes: 2 * 1024 * 1024 * 1024,
+        max_node_stages: 64,
+        max_key_bytes: 512 * 1024 * 1024,
+        max_key_stages: 16,
+    })
 }
 
 /// The shipped `thread_attachments` policy record. Exact test snapshots

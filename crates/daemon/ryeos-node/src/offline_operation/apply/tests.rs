@@ -2198,7 +2198,7 @@ mod apply_staged {
             temp,
             record,
             &[("note.json".to_owned(), b"{}".to_vec())],
-            &StagingCaps::DEFAULTS,
+            &StagingCaps::TEST_GENEROUS,
             fx.node.signing_key(),
         )
         .unwrap();
