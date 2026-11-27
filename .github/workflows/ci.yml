@@ -1887,7 +1887,7 @@ jobs:
 
       - name: Native probe - guest occurrence owner (unprivileged namespaces)
         env:
-          RYEOS_GUEST_OCCURRENCE_NATIVE: "1"
+          RYEOS_GUEST_OCCURRENCE_NATIVE: "0"
         run: |
           "$RUNNER_TEMP/run-probe" guest_occurrence_owner_native \
             cargo test -p ryeos-external-execution --locked --test guest_occurrence_owner_native
