@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-25T05:41:27Z:d84d5d5c2b57b7d008fa7b01fc5195a5d34edeb7ac7f9f396c9208a299ed4be4:Aq9o2ZxxP6S4+If+x9xAG2g1fhvG8LlyzFpJqoZD6+HryAhAiYx2eojkqCfiHZWCm8h1FLLLAHCH1aZh9H5TBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:12:07Z:46c1a73bf8fa2658d4354e8b2d285be8282ab40fa47b328e9b6ae57f4bcc462d:Kd1Yzu6TaaZp1EYty7JrZz4wNDTh4MVIF+9qwWkhwNr2MSbBbkhArlSaaJFvoLIB0l7PQLbCvZwbJO6PmN3WAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -64,12 +64,25 @@ execution:
         context_contract:
           schema: ryeos.hooks.context.v1
           allowed_roots: [turn]
-        allowed_results: [discard, observation, control]
+        allowed_results: [discard, observation, control, notice]
       continuation:
         context_contract:
           schema: ryeos.hooks.context.v1
           allowed_roots: [event]
-        allowed_results: [discard, observation, control]
+        allowed_results: [discard, observation, control, notice]
+      # Fired when the model replies with no tool call and the run would
+      # finish. The only result is `verdict`: the hook's action returns
+      # `{verdict: accept}` or `{verdict: reject, reason: <key>}`, the key
+      # naming one of the hook's signed `steer` texts. A rejection appends that
+      # text and takes another turn, within the hook's signed per-run limit;
+      # past it the run ends failed (`finish_check_retries_exhausted`), never
+      # as a success. The event root carries `turn`, `attempt` and
+      # `rejections_left`, never the reply.
+      finish_check:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [verdict]
       # Fired when the provider refused a request and the provider entry
       # names the refusal with a code (its `request_rejections` rows). The
       # event root carries `code`, `status`, `turn` and `retryable`. Observation

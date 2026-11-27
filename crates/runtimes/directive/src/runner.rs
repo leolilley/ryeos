@@ -369,6 +369,16 @@ const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
 /// Code that starts the failure text of a run whose empty replies the
 /// provider's signed policy could not correct.
 const EMPTY_REPLY_ERROR_CODE: &str = "empty_reply_retries_exhausted";
+/// The run ended because a signed finish check rejected the finish and its
+/// bound was spent.
+const FINISH_CHECK_EXHAUSTED_CODE: &str = "finish_check_retries_exhausted";
+/// The run ended because a signed finish check could not run.
+const FINISH_CHECK_FAILED_CODE: &str = "finish_check_failed";
+/// The run ended because a signed finish check answered outside its one shape
+/// or named text it did not sign.
+const FINISH_CHECK_INVALID_CODE: &str = "finish_check_invalid";
+/// The hook event that decides whether a finish is accepted.
+const FINISH_CHECK_EVENT: &str = "finish_check";
 
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
@@ -2478,6 +2488,107 @@ impl Runner {
             json!({"event": event}),
         )
         .await;
+    }
+
+    /// Ask the signed finish checks whether a reply with no tool call may end
+    /// the run. `None`: no check rejected it, so the run finishes. `Some(state)`:
+    /// the state to go to instead, which is the next turn after a rejection
+    /// (its text is a signed text of the rejecting hook, appended as a durable
+    /// harness input) or a failed run with a typed code. A rejection never
+    /// extends the run's limits: the reply stays in the conversation and the
+    /// limit check that follows ends the run with its own code when no turn,
+    /// time or spend is left.
+    async fn check_finish(&mut self, turn: u32) -> Option<State> {
+        let limit = self
+            .hooks
+            .iter()
+            .filter(|hook| {
+                hook.event() == FINISH_CHECK_EVENT
+                    && hook.result_mode() == ryeos_runtime::hooks_loader::HookResultMode::Verdict
+            })
+            .filter_map(|hook| hook.steer().map(|steer| steer.limit))
+            .min()?;
+        let attempt = self.finish_check_rejections.saturating_add(1);
+        let remaining = limit.saturating_sub(self.finish_check_rejections);
+        let context = json!({"event": {
+            "name": FINISH_CHECK_EVENT,
+            "turn": turn,
+            "attempt": attempt,
+            "rejections_left": remaining,
+        }});
+        let occurrence = ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "directive",
+            FINISH_CHECK_EVENT,
+            self.definition_ref.clone(),
+            self.root_raw_content_digest.clone(),
+            self.effective_definition_digest.clone(),
+        )
+        .with_counter_coordinate("turn", turn)
+        .with_counter_coordinate("attempt", attempt);
+        let dispatcher = self.hook_dispatcher();
+        let hook_run = ryeos_runtime::hooks_eval::run_hooks(
+            occurrence,
+            &context,
+            &self.hooks,
+            "",
+            &dispatcher,
+        )
+        .await;
+        let cost = match &hook_run {
+            Ok(result) => result.cost.as_ref(),
+            Err(error) => error.cost.as_ref(),
+        };
+        if let Some(cost) = cost
+            && let Err(error) = self.budget.accumulate(cost)
+        {
+            return Some(State::Errored {
+                error: format!(
+                    "{FINISH_CHECK_FAILED_CODE}: the finish check's cost violates accounting bounds: {error}"
+                ),
+            });
+        }
+        let result = match hook_run {
+            Ok(result) => result,
+            Err(error) => {
+                let code = if error.kind == ryeos_runtime::hooks_eval::HookRunErrorKind::Steer {
+                    FINISH_CHECK_INVALID_CODE
+                } else {
+                    FINISH_CHECK_FAILED_CODE
+                };
+                return Some(State::Errored {
+                    error: format!("{code}: {error}"),
+                });
+            }
+        };
+        let rejection = result.steers.iter().find(|steer| {
+            steer.mode == ryeos_runtime::hooks_loader::HookResultMode::Verdict && steer.reject
+        })?;
+        if self.finish_check_rejections >= limit {
+            return Some(State::Errored {
+                error: format!(
+                    "{FINISH_CHECK_EXHAUSTED_CODE}: the finish check rejected the finish and no rejection was left (allowed in a run: {limit})"
+                ),
+            });
+        }
+        let key = rejection.key.as_deref().unwrap_or_default();
+        let Some(text) = rejection
+            .steer
+            .render(key, turn, attempt, limit.saturating_sub(attempt))
+        else {
+            return Some(State::Errored {
+                error: format!("{FINISH_CHECK_INVALID_CODE}: no signed text named `{key}`"),
+            });
+        };
+        let input = ryeos_runtime::CognitionInput::text("harness", &text)
+            .with_kind(ryeos_runtime::cognition::finish_check_kind(turn, attempt));
+        if let Err(e) = self.callback.emit_cognition_input(&input).await {
+            return Some(State::RecoveryRequired {
+                error: format!("resume-critical finish_check input append failed: {e}"),
+            });
+        }
+        self.messages.push(ProviderMessage::user(text));
+        self.finish_check_rejections = attempt;
+        Some(State::CheckingLimits)
     }
 
     /// Run the hooks declared for an observation-only event, inline. Nothing a
@@ -5168,14 +5279,28 @@ impl Runner {
                                 // the late input stays queued (cleared at finalize)
                                 // and the operator resubmits as a settled
                                 // continuation.
-                                if self.can_start_another_turn() {
+                                //
+                                // Then a signed finish check, when the
+                                // directive declares one, may reject the
+                                // finish. It runs after operator steering,
+                                // which still wins, and when no turn is left,
+                                // where a rejection ends the run by the limit's
+                                // own code instead of finishing it.
+                                let steered = if self.can_start_another_turn() {
                                     match self.poll_pending_input().await {
-                                        Ok(true) => State::CheckingLimits,
-                                        Ok(false) => State::Finalizing { result: content },
-                                        Err(e) => State::RecoveryRequired { error: e },
+                                        Ok(true) => Some(State::CheckingLimits),
+                                        Ok(false) => None,
+                                        Err(e) => Some(State::RecoveryRequired { error: e }),
                                     }
                                 } else {
-                                    State::Finalizing { result: content }
+                                    None
+                                };
+                                match steered {
+                                    Some(state) => state,
+                                    None => match self.check_finish(turn).await {
+                                        Some(state) => state,
+                                        None => State::Finalizing { result: content },
+                                    },
                                 }
                             } else {
                                 self.consecutive_empty_replies = 0;
@@ -5842,6 +5967,7 @@ impl Runner {
                         None
                     };
                     let dispatcher = self.hook_dispatcher();
+                    let notice_turn = occurrence.counter_coordinate("turn").unwrap_or(1).max(1);
 
                     let hook_run = ryeos_runtime::hooks_eval::run_hooks(
                         occurrence,
@@ -5897,6 +6023,60 @@ impl Runner {
                                     )
                                     .await,
                             );
+
+                            // A `notice` hook names a signed reminder: it is
+                            // appended as a durable harness input and shown to
+                            // the model in the next request, within the hook's
+                            // signed budget for the run. It is advice: a notice
+                            // past the budget is dropped with a warning and
+                            // never changes how the run ends.
+                            let mut notice_failure = None;
+                            for steer in hook_run.steers.iter().filter(|steer| {
+                                steer.mode == ryeos_runtime::hooks_loader::HookResultMode::Notice
+                            }) {
+                                if self.notices_given >= steer.steer.limit {
+                                    tracing::warn!(
+                                        hook = %steer.hook_id,
+                                        limit = steer.steer.limit,
+                                        "notice budget is spent; the reminder is dropped"
+                                    );
+                                    continue;
+                                }
+                                let seq = self.notices_given.saturating_add(1);
+                                let key = steer.key.as_deref().unwrap_or_default();
+                                let Some(text) = steer.steer.render(
+                                    key,
+                                    notice_turn,
+                                    seq,
+                                    steer.steer.limit.saturating_sub(seq),
+                                ) else {
+                                    notice_failure = Some(State::Errored {
+                                        error: format!(
+                                            "{FINISH_CHECK_INVALID_CODE}: no signed text named `{key}`"
+                                        ),
+                                    });
+                                    break;
+                                };
+                                let input = ryeos_runtime::CognitionInput::text("harness", &text)
+                                    .with_kind(ryeos_runtime::cognition::notice_kind(
+                                        notice_turn,
+                                        seq,
+                                    ));
+                                if let Err(e) = self.callback.emit_cognition_input(&input).await {
+                                    notice_failure = Some(State::RecoveryRequired {
+                                        error: format!(
+                                            "resume-critical notice input append failed: {e}"
+                                        ),
+                                    });
+                                    break;
+                                }
+                                self.messages.push(ProviderMessage::user(text));
+                                self.notices_given = seq;
+                            }
+                            if let Some(failed) = notice_failure {
+                                state = failed;
+                                continue;
+                            }
 
                             match hook_result.as_ref().map(HookAction::from_value) {
                                 Some(Ok(action)) => match action {

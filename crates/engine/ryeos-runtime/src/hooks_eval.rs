@@ -107,6 +107,9 @@ pub enum HookRunErrorKind {
     Dispatch,
     Accounting,
     Integrity,
+    /// A `verdict` or `notice` hook's action returned something other than
+    /// one of the hook's signed keys in the one allowed shape.
+    Steer,
 }
 
 impl HookRunError {
@@ -285,7 +288,7 @@ pub async fn run_hooks(
                 let (reject, key) = read_steer_result(hook.result_mode(), &dispatched.value, steer)
                     .map_err(|error| {
                         HookRunError::new(
-                            HookRunErrorKind::Integrity,
+                            HookRunErrorKind::Steer,
                             format!(
                                 "hook[{idx}] (id={}): {} result rejected: {error}",
                                 hook.id(),
