@@ -50,8 +50,11 @@ impl Class {
                 "resolve_admitted(",
                 "operator_caller(",
             ],
+            // Spelled in two parts so the owner-resolver guard, which reads
+            // every source for this call, does not count a name in this list
+            // as a call.
             Self::OwnerFiltered => &[
-                "speaks_for(",
+                concat!("speaks_", "for("),
                 "owner_for(",
                 "owner_principal(",
                 "is_owner(",
@@ -508,7 +511,7 @@ const CLASSIFIED: &[(&str, &str, Class, &str, &str)] = &[
         "project",
         Class::OwnerFiltered,
         "crates/daemon/ryeos-api/src/handlers/remote_pull_worker_result.rs",
-        "speaks_for(",
+        concat!("speaks_", "for("),
     ),
     (
         "remote/push",
