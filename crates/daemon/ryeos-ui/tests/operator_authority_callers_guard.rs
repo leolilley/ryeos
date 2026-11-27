@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// scan counts text.
 const EXPECTED: &[(&str, usize)] = &[
     ("require_admitted_operator(", 76),
-    ("disclosure_class_for(", 10),
+    ("disclosure_class_for(", 11),
     ("admitted_operator_authority_digest(", 11),
     ("admitted_operator_authority_for_principal(", 10),
     ("admitted_binding_owner_authority_for_principal(", 1),
