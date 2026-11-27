@@ -126,10 +126,7 @@ impl AuthorizeClientRequest {
                     serde_json::from_str(text).context(
                         "offline_bind must be a JSON array of {scope, argument, equals, max_uses, not_after?}",
                     )?;
-                ryeos_node_runtime::identity::validate_offline_constraints(
-                    &constraints,
-                    &scopes,
-                )?;
+                ryeos_node_runtime::identity::validate_offline_constraints(&constraints, &scopes)?;
                 constraints
             }
         };
