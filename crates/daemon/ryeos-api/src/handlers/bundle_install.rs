@@ -1088,8 +1088,8 @@ where
     })()
 }
 
-/// Test-only fault: make the step that moves a refused tree back fail, as a
-/// disk fault would.
+// Test-only fault: make the step that moves a refused tree back fail, as a
+// disk fault would.
 #[cfg(test)]
 thread_local! {
     static UNDO_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
