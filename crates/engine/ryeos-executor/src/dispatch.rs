@@ -9437,6 +9437,56 @@ requires:
         );
     }
 
+    #[test]
+    fn a_tool_permissions_block_never_becomes_callback_caps() {
+        let bundle = tempdir().join("example-bundle");
+        let ctx = test_execution_context(bundle.clone());
+        // `permissions` is not a tool field: whatever a tool item carries
+        // under it is not runtime authority and mints no callback cap, for
+        // the operator's key or any other.
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            std::collections::HashMap::from([(
+                "permissions".to_string(),
+                serde_json::json!({"execute": ["ryeos.*"], "fetch": ["ryeos.*"]}),
+            )]),
+        );
+        for project_mint in [
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
+            ryeos_app::runtime_capability_admission::ProjectMint::NoProjectMint,
+        ] {
+            assert!(
+                derive_manifest_runtime_caps(
+                    &resolved.resolved_item,
+                    fixture_trust(&resolved.resolved_item),
+                    &resolved.item_ref,
+                    &ctx,
+                    project_mint,
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+    }
+
+    /// The tool kind's runtime block parser refuses a block it does not
+    /// list, so a tool cannot declare `permissions` at all; `required_caps`
+    /// and `requires` are listed, and only `requires` reaches the minter.
+    #[test]
+    fn the_tool_kind_lists_no_permissions_block() {
+        let schema = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"),
+        )
+        .unwrap();
+        let schema: serde_yaml::Value = serde_yaml::from_str(&schema).unwrap();
+        let text = serde_yaml::to_string(&schema).unwrap();
+        assert!(!text.contains("permissions"), "{text}");
+        assert!(text.contains("required_caps"));
+        assert!(text.contains("requires"));
+    }
+
     // P1.4: tests for `lookup_runtime_for_dispatch` were removed when
     // that helper was deleted. The dispatch loop now attaches the
     // verified runtime to the hop via `RuntimeRegistry::lookup_by_ref`
