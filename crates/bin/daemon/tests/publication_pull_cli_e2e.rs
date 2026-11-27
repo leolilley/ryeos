@@ -25,11 +25,11 @@ use serde_json::{Value, json};
 const BUNDLE: &str = "ryeos-docs";
 
 fn ryeos(h: &DaemonHarness, args: &[&str]) -> Output {
+    // The node is named by RYEOS_APP_ROOT alone: a flag after the verb of a
+    // command that binds its flags as parameters is sent as a parameter.
     std::process::Command::new(common::ryeos_binary())
         .args(args)
         .arg("--json")
-        .arg("--app-root")
-        .arg(&h.state_path)
         .env("RYEOS_APP_ROOT", &h.state_path)
         .env("RYEOSD_BIN", common::ryeosd_binary())
         .env("HOME", h.user_space.path())
