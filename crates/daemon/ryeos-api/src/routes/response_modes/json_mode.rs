@@ -145,6 +145,11 @@ impl ResponseMode for JsonMode {
                     });
                 }
                 Some(obj) => {
+                    interpolation::require_literal_project_path(
+                        &raw.response.source_config,
+                        &raw.id,
+                        "json",
+                    )?;
                     if !obj.contains_key("project_path") {
                         return Err(RouteConfigError::InvalidSourceConfig {
                             id: raw.id.clone(),

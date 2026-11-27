@@ -22,7 +22,6 @@ use ryeos_client_base::surface::view_sets::{
     validate_saved_view_set_templates,
 };
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
 
 use crate::browser_session::admission::{
     ParticularSurfaceAdmission, RegisteredProjectSurfaceAdmission, SavedSurfaceAdmission,
@@ -332,7 +331,6 @@ fn compile_saved_surface_context(
         &context,
         state,
         authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     let proof = match (&project, &canonical, &authority) {
         (Some(project), Some(path), Some(authority)) => Some(RegisteredProjectSurfaceAdmission {
@@ -897,7 +895,6 @@ pub async fn handle_projects_open(
         &compile_context,
         &state,
         Some(project_authority.as_ref()),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     // Registry -> seat-transition -> session-store is the one publication order.
     // Retain the registry gate through the atomic membership/attachment commit.
@@ -1218,7 +1215,6 @@ pub async fn handle_particular_view_set_resume(
         &compile_context,
         &state,
         project_authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     if resume.relationships.iter().any(|relationship| {
         matches!(
@@ -2046,14 +2042,16 @@ pub(crate) fn authorize_launch_project(
         return Ok((authority, registered_project_id));
     }
 
-    // A non-operator seat has no project identity until the identity cut
-    // lands; the request path is never project authority, so refuse.
+    // Only the node's operator names a project root for a seat. A path in a
+    // request is never project authority, and registering a project is the
+    // operator's act, so a non-operator key has no registered project to
+    // launch into: refuse, whatever path it names.
     Err(HandlerError::Structured {
-        code: "project_seat_requires_identity_cut".into(),
+        code: "project_seat_operator_only".into(),
         status: 403,
         body: serde_json::json!({
-            "code": "project_seat_requires_identity_cut",
-            "error": "project roots are not available to this seat until project identity is cut over",
+            "code": "project_seat_operator_only",
+            "error": "a project root can be named for a seat only by the node's operator; this key has no registered project",
         }),
     }
     .into())
