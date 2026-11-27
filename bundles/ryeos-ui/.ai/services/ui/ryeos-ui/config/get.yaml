@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:35acba79510e23a0cc5b08ac4d34ba159617411f84448cf4f1dc241585f94b03:W/w2FkzHfefPANZdLvI/2cbFpf6HvYSNb83zCxOZXaqEJVA83KlUJ/7HHLZEt+q5kvOCAGjviczQNNYtVqywAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:db2fcabcae9abbca13486ab45b3dc09789316c16a76bc6716d2c39f763a48ff7:CARIaSdNkiUnL35lB2eDK6lTtgMfHZ7Cj9u3xYAJjnfwSqkt2hdKtD7TqWuexSGs859oUuh6zwMQmqk2205bAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/config/get
 version: "1.0.0"
@@ -8,3 +8,21 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/version"
+    - "/theme"
+    - "/landing_view"
+    - "/view_set_library_revision"
+    - "/particular_view_set_library_revision"
+    - "/reusable_surface_library_revision"
+    - "/particular_surface_library_revision"
+  interim_free_text:
+    - "/saved_view_sets"  # removed by: m4
+    - "/particular_view_sets"  # removed by: m4
+    - "/reusable_surfaces"  # removed by: m4
+    - "/particular_surfaces"  # removed by: m4
+    - "/view_set_save_context"  # removed by: m4
+    - "/particular_view_set_save_context"  # removed by: m4
+    - "/reusable_surface_save_context"  # removed by: m4
+    - "/particular_surface_save_context"  # removed by: m4

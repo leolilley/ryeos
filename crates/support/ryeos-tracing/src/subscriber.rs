@@ -15,6 +15,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use tracing_subscriber::filter::{FilterExt as _, filter_fn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
@@ -23,7 +24,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 // were lost this way, including crash detection after SIGKILL) still reaches
 // the operator. The info entries name the first-party crates whose routine
 // lines belong in the daemon log.
-const DAEMON_DEFAULT_FILTER: &str = "warn,ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos_node=info,ryeos_node_runtime=info,ryeos_scheduler=info,ryeos_scheduler_service=info,ryeos_api=info,lillux=info,ryeos.metrics=info";
+const DAEMON_DEFAULT_FILTER: &str = "warn,ryeosd=info,ryeos_engine=info,ryeos_engine::authority::trust=warn,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos_node=info,ryeos_node_runtime=info,ryeos_scheduler=info,ryeos_scheduler_service=info,ryeos_api=info,lillux=info,ryeos.metrics=info";
 
 /// Configuration for the tracing subscriber.
 #[derive(Debug)]
@@ -70,6 +71,13 @@ impl SubscriberConfig {
     /// past [`TRACE_ROTATE_BYTES`] it rotates to `trace-events.ndjson.1`
     /// (replacing the previous generation), bounding disk usage at ~2× the
     /// cap regardless of daemon lifetime.
+    ///
+    /// The file sink deliberately ignores `RUST_LOG` for trust-verification
+    /// spans: [`keeps_in_file_sink`] drops everything below `warn` from
+    /// [`TRUST_TARGET`] however the filter is set. A signature check runs
+    /// about 1,900 times per tool call, so recording each one filled a small
+    /// disk in hours. An operator who wants them reads stderr, which still
+    /// follows `RUST_LOG`.
     pub fn for_daemon_with_file_sink(state_dir: &Path) -> Self {
         // Ensure the .ai/state/ directory exists before opening the file.
         let state_dir_path = state_dir.join(".ai").join("state");
@@ -114,7 +122,7 @@ impl SubscriberConfig {
             .with_target(true)
             .with_filter(filter.clone());
 
-        let file_layer = file_layer.with_filter(filter);
+        let file_layer = file_layer.with_filter(filter.and(filter_fn(keeps_in_file_sink)));
 
         let _ = tracing_subscriber::registry()
             .with(stderr_layer)
@@ -152,8 +160,19 @@ impl SubscriberConfig {
     }
 }
 
-/// Rotate the trace sink once the file passes this many bytes.
-pub const TRACE_ROTATE_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+/// Rotate the trace sink once the file passes this many bytes. With the one
+/// rotated copy the sink holds at most twice this: 64 MiB.
+pub const TRACE_ROTATE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
+
+/// The target of the signature-verification spans, which are far too frequent
+/// for the on-disk sink.
+pub const TRUST_TARGET: &str = "ryeos_engine::authority::trust";
+
+/// Whether an event or span may reach the file sink, whatever `RUST_LOG`
+/// says: trust-verification output below `warn` never does.
+pub fn keeps_in_file_sink(metadata: &tracing::Metadata<'_>) -> bool {
+    !(metadata.target() == TRUST_TARGET && *metadata.level() > tracing::Level::WARN)
+}
 
 /// A size-capped `MakeWriter` sharing one appending `File` across all tracing
 /// writes. Each write acquires the mutex, appends a line, and releases. Once

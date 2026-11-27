@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T13:27:47Z:d4698e729e90bc6069aac7936743fbd92bddd569a6340b52ba933132c3c106cc:s7chG076UJMqYGh0i8/YKS2kax0QLECjVHWHzNUozzBeQb2+Spn8dXNThbhstDsE0nA19lNxgYMvE3Pl9NcIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:d3b4c19c1eebf2ead84da9dd5790d2c3f4a7643cecc76342e6c804494182e942:uHThI1ARytr72uk7NTb6yWUoGapy3ZDyIcCyf7qBmZQKEsGmxl0KSprfcf9SpSg9aZTEif7cG9dCcj40wVShDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.import
 required_caps: ["ryeos.execute.service.external-content/import"]
@@ -19,3 +19,5 @@ schema:
   expected_file_sha256: string?
   hold: string?
 description: "Stage bounded content from an admitted filesystem root, exact retained execution result, active operator binding, or explicitly sourced product witness; source-specific fields are validated by the closed typed handler"
+# Imports content from operator-admitted roots and retained results; operator-only.
+disclosure: {}

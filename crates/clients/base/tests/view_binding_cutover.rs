@@ -219,7 +219,7 @@ fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
         "binding_attachment_id":"cutover-shared-root", "binding_generation":1,
         "binding_digest":"shared-fixture-binding", "root_ref":"config:fixture/cutover",
         "root_generation":"shared-fixture-generation", "project_path":null,
-        "subject":{"kind":"projectless"}, "posture":"observation_only",
+        "subject":{"kind":"projectless"}, "posture":"observation_only","seat_project":{"state":"projectless"},
         "named_items": [], "binding_request_bounds":attachment.binding_request_bounds,
         "presentation":{"definition":{"kind":"shared_presentation","config":{
             "category":"ui", "shared_presentation":{"schema":2,"title":"Cutover",
@@ -292,6 +292,19 @@ fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
         ..Default::default()
     };
     let mut core = RyeOsCore::new(session, PRESENTATION, BrowserViewport::default(), 0);
+    // The signed row bound arrives with the coverage wording; rows are drawn
+    // only once it has.
+    core.data.coverage_wording = Some(ryeos_client_base::ui::dto::RyeOsCoverageWordingDto {
+        fallback: ryeos_client_base::ui::dto::RyeOsWordingEntry {
+            label: "This page's coverage is not known.".into(),
+            tone: "none".into(),
+        },
+        states: Default::default(),
+        reasons: Default::default(),
+        limits: ryeos_client_base::ui::dto::RyeOsCoverageLimitsDto {
+            source_rows: Some(500),
+        },
+    });
     let event = SeatEvent {
         producer_engine_seq: None,
         seq: 1,
@@ -811,6 +824,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
             project_path: Some("/fixture/project".into()),
             subject: ryeos_client_base::ui::UiBindingSubject::UnregisteredProject,
             posture: Default::default(),
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             binding_request_bounds: UiBindingRequestBounds {
                 max_request_bytes: 64 * 1024,
                 max_input_bytes: 16 * 1024,

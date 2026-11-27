@@ -727,7 +727,67 @@ impl RyeOsCore {
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     let mut data = data;
-                    if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                    let request_params = match &request.payload {
+                        crate::ui::binding::UiBindingPayload::SourceParameters { params } => {
+                            Some(params)
+                        }
+                        _ => None,
+                    };
+                    if result_id >= floor
+                        && stored.is_none_or(|s| result_id >= s)
+                        && crate::ui::read_envelope::is_not_modified(&data)
+                    {
+                        // The server says the revision this client sent is
+                        // still current. That keeps the stored answer only
+                        // for the request that asked: one that sent the held
+                        // answer's revision, with the parameters the answer
+                        // was fetched with. Any other `not_modified` is
+                        // unexpected, and the rows held are left as they are,
+                        // not refreshed.
+                        let asked_for_it = request_params.is_some_and(|params| {
+                            let sent = params.get("if_revision").and_then(|v| v.as_str());
+                            let held = self
+                                .data
+                                .sources
+                                .get(tile_id)
+                                .and_then(crate::ui::read_envelope::stored_revision);
+                            sent.is_some()
+                                && sent == held
+                                && self.data.source_stored_params.get(tile_id)
+                                    == Some(&crate::ui::model::without_if_revision(params))
+                        });
+                        if !asked_for_it {
+                            self.data.source_errors.insert(
+                                tile_id.clone(),
+                                crate::ui::effect::RyeOsUiError::definite(
+                                    "unexpected_not_modified",
+                                    "The source reported no change to a request that did not ask for it"
+                                        .to_owned(),
+                                ),
+                            );
+                        } else if self.data.sources.contains_key(tile_id) {
+                            self.data.source_errors.remove(tile_id);
+                            self.data
+                                .source_stored_epoch
+                                .insert(tile_id.clone(), result_id);
+                        } else {
+                            self.data.source_errors.insert(
+                                tile_id.clone(),
+                                crate::ui::effect::RyeOsUiError::definite(
+                                    "not_modified_without_rows",
+                                    "The source reported no change but this view holds no rows to keep"
+                                        .to_owned(),
+                                ),
+                            );
+                        }
+                    } else if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                        // A response of another contract than the source
+                        // declares reads as a failed answer with no rows.
+                        if let Some(answer) = self.source_contract(request).and_then(|contract| {
+                            crate::ui::read_envelope::contract_mismatch_answer(contract, &data)
+                        }) {
+                            data = answer;
+                        }
                         // A timeline response of another contract version is
                         // refused whole; there is no reader for it.
                         if let Some(message) = self.timeline_refusal(tile_id, &data) {
@@ -759,6 +819,17 @@ impl RyeOsCore {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        match request_params {
+                            Some(params) => {
+                                self.data.source_stored_params.insert(
+                                    tile_id.clone(),
+                                    crate::ui::model::without_if_revision(params),
+                                );
+                            }
+                            None => {
+                                self.data.source_stored_params.remove(tile_id);
+                            }
+                        }
                         self.rebuild_field_source_cache(tile_id);
                         self.data.source_errors.remove(tile_id);
                         self.data
@@ -786,6 +857,23 @@ impl RyeOsCore {
 
         self.bump_generation();
         raw_followup
+    }
+
+    /// The result contract the request's signed source declares, if any.
+    fn source_contract(&self, request: &crate::ui::binding::UiBindingRequest) -> Option<&str> {
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let context = self
+            .binding_attachments
+            .get(&request.binding_attachment_id)?;
+        (context.descriptor.root_ref == *view_ref)
+            .then(|| context.surface_sources.get(channel))
+            .flatten()
+            .or_else(|| context.views.get(view_ref)?.sources.get(channel))
+            .and_then(|source| source.contract.as_deref())
     }
 
     /// Why a response to a signed `attention` source is not one this client can
@@ -890,13 +978,29 @@ impl RyeOsCore {
             // Surface may supply it. An unreadable response clears it, and
             // every coverage line then reads as unknown.
             // The preference is the principal's, so any admitted Surface may
-            // supply it. A value outside the allowed list clears it, and the
+            // supply it. A value that names no installed theme clears it, and the
             // presentation then follows the platform.
             Some("theme_preference") => {
+                // The stored value is judged against the catalogue it arrives
+                // with; without a readable catalogue no value is applied.
+                self.data.theme_catalogue = data
+                    .get("theme_catalogue")
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::theme_preference::ThemeCatalogue>(
+                            value.clone(),
+                        )
+                        .ok()
+                    })
+                    .filter(|catalogue| catalogue.validate().is_ok());
                 self.data.theme_preference = data
                     .get("theme")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|stored| crate::theme_preference::ALLOWED.contains(stored))
+                    .filter(|stored| {
+                        self.data
+                            .theme_catalogue
+                            .as_ref()
+                            .is_some_and(|catalogue| catalogue.allows(stored))
+                    })
                     .map(str::to_owned);
             }
             Some("coverage_wording") => {
@@ -1622,6 +1726,194 @@ mod tests {
     }
 
     #[test]
+    fn a_source_reads_only_the_contract_it_declares() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "rows": {
+                "ref": "service:test/rows",
+                "contract": "ryeos.read.test.rows/v2"
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find_map(|effect| match &effect.kind {
+                    RyeOsEffectKind::FetchSource { request, .. }
+                        if matches!(
+                            &request.coordinate,
+                            crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                if channel == "rows"
+                        ) =>
+                    {
+                        Some(effect.id)
+                    }
+                    _ => None,
+                })
+                .expect("surface source fetch")
+        };
+        let envelope = |schema: &str| {
+            serde_json::json!({
+                "schema": schema, "as_of": "t", "revision": "rev1:a",
+                "coverage": {"state": "complete"},
+                "rows": [{"id": "one"}],
+            })
+        };
+        let store = |core: &mut RyeOsCore, data: serde_json::Value| {
+            let id = fetch(&core.initial_effects());
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+        };
+        let stored = |core: &RyeOsCore| {
+            core.data
+                .sources
+                .values()
+                .find_map(crate::ui::read_envelope::read_envelope)
+                .map(|read| {
+                    (
+                        read.state,
+                        read.reason.map(str::to_owned),
+                        read.records().len(),
+                    )
+                })
+        };
+
+        // Another version of the read: no rows, a failed source with its reason.
+        store(&mut core, envelope("ryeos.read.test.rows/v1"));
+        assert_eq!(
+            stored(&core),
+            Some((
+                crate::ui::read_envelope::EnvelopeCoverageState::Failed,
+                Some("contract_mismatch".to_owned()),
+                0
+            ))
+        );
+        // The declared contract is read as itself.
+        store(&mut core, envelope("ryeos.read.test.rows/v2"));
+        assert_eq!(
+            stored(&core),
+            Some((
+                crate::ui::read_envelope::EnvelopeCoverageState::Complete,
+                None,
+                1
+            ))
+        );
+    }
+
+    #[test]
+    fn a_not_modified_reply_keeps_rows_only_for_the_request_that_asked() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "rows": {
+                "ref": "service:test/rows",
+                "params": {"page": "one", "if_revision": ""},
+                "dynamic_parameters": ["if_revision"]
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let fetch = |core: &mut RyeOsCore| {
+            core.initial_effects()
+                .into_iter()
+                .find_map(|effect| match &effect.kind {
+                    RyeOsEffectKind::FetchSource { request, .. }
+                        if matches!(
+                            &request.coordinate,
+                            crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                if channel == "rows"
+                        ) =>
+                    {
+                        let sent = match &request.payload {
+                            crate::ui::binding::UiBindingPayload::SourceParameters { params } => {
+                                params
+                                    .get("if_revision")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            }
+                            _ => None,
+                        };
+                        Some((effect.id, sent))
+                    }
+                    _ => None,
+                })
+                .expect("surface source fetch")
+        };
+        let answer = |core: &mut RyeOsCore, id: u64, data: serde_json::Value| {
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+        };
+        let not_modified = serde_json::json!({"not_modified": true, "revision": "rev1:a"});
+        let refused = |core: &RyeOsCore| {
+            core.data
+                .source_errors
+                .values()
+                .any(|error| error.code == "unexpected_not_modified")
+        };
+
+        // Nothing held: the first fetch asks for no revision, and a
+        // not_modified to it is refused.
+        let (id, sent) = fetch(&mut core);
+        assert!(sent.is_none() || sent.as_deref() == Some(""));
+        answer(&mut core, id, not_modified.clone());
+        assert!(refused(&core));
+        assert!(core.data.sources.is_empty());
+
+        // A full answer is held; the next fetch asks with its revision, and a
+        // not_modified to that request keeps the rows and is not an error.
+        let (id, _) = fetch(&mut core);
+        answer(
+            &mut core,
+            id,
+            serde_json::json!({
+                "schema": "ryeos.read.test.rows/v1", "as_of": "t", "revision": "rev1:a",
+                "coverage": {"state": "complete"}, "rows": [{"id": "one"}],
+            }),
+        );
+        assert!(!refused(&core));
+        let (id, sent) = fetch(&mut core);
+        assert_eq!(sent.as_deref(), Some("rev1:a"));
+        answer(&mut core, id, not_modified.clone());
+        assert!(!refused(&core));
+        assert_eq!(core.data.sources.len(), 1);
+
+        // The held answer is of other parameters: no revision is sent, and a
+        // not_modified is refused with the rows left as held.
+        for params in core.data.source_stored_params.values_mut() {
+            *params = serde_json::json!({"page": "two"});
+        }
+        let (id, sent) = fetch(&mut core);
+        assert!(sent.is_none() || sent.as_deref() == Some(""));
+        answer(&mut core, id, not_modified);
+        assert!(refused(&core));
+        assert_eq!(core.data.sources.len(), 1);
+    }
+
+    #[test]
     fn the_coverage_wording_source_is_stored_and_a_bad_response_clears_it() {
         let mut session = writable_session();
         let crate::presentation::UiCompositionDefinition::Surface { surface } =
@@ -1664,6 +1956,8 @@ mod tests {
                 },
             });
         };
+        // The unit-test default wording is cleared: this test starts unloaded.
+        core.data.coverage_wording = None;
         let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
         assert!(core.data.coverage_wording.is_none());
         send(
@@ -1738,26 +2032,98 @@ mod tests {
                 .theme
                 .id
         };
+        let preference = |stored: &str| {
+            let palette = serde_json::json!({
+                "bg": "#000000", "ink": "#ffffff", "accent": "#ff8000",
+                "good": "#00ff00", "warn": "#ffff00", "danger": "#ff0000"
+            });
+            let theme = |id: &str| {
+                serde_json::json!({
+                    "ref": format!("theme:ryeos/{id}"), "id": id, "title": id,
+                    "palette": palette
+                })
+            };
+            serde_json::json!({
+                "theme": stored,
+                "theme_catalogue": {
+                    "schema_version": crate::theme_preference::THEME_CATALOGUE_CONTRACT,
+                    "themes": [theme("night"), theme("paper"), theme("gruvbox")],
+                    "system": {"dark": "theme:ryeos/night", "light": "theme:ryeos/paper"},
+                    "default": "theme:ryeos/night"
+                }
+            })
+        };
         // Before the preference is read the presentation follows the platform.
         assert_eq!(theme_id(&core), "system");
         let id = preference_fetch(&core.initial_effects()).expect("opening reads the preference");
-        send(&mut core, id, serde_json::json!({"theme": "gruvbox"}));
-        assert_eq!(core.data.theme_preference.as_deref(), Some("gruvbox"));
-        assert_eq!(theme_id(&core), "gruvbox");
+        send(&mut core, id, preference("theme:ryeos/gruvbox"));
+        assert_eq!(
+            core.data.theme_preference.as_deref(),
+            Some("theme:ryeos/gruvbox")
+        );
+        assert_eq!(theme_id(&core), "theme:ryeos/gruvbox");
 
         // A service success reaches the `service` hint, so a changed
         // preference is read again and applied without reopening the seat.
         let id = preference_fetch(&core.effects_for_hint("service"))
             .expect("a service hint reads the preference again");
-        send(&mut core, id, serde_json::json!({"theme": "paper"}));
-        assert_eq!(theme_id(&core), "paper");
+        send(&mut core, id, preference("theme:ryeos/paper"));
+        assert_eq!(theme_id(&core), "theme:ryeos/paper");
 
-        // A value outside the allowed list (the earlier light/dark values
-        // included) is not applied; the presentation follows the platform.
+        // A value that names no installed theme (the earlier palette ids and
+        // light/dark values included) is not applied; the presentation
+        // follows the platform.
+        for refused in ["dark", "night", "theme:ryeos/neon"] {
+            let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
+            send(&mut core, id, preference(refused));
+            assert_eq!(core.data.theme_preference, None, "{refused}");
+            assert_eq!(theme_id(&core), "system");
+        }
+        // The active Surface's ground arrives per theme and reaches the
+        // presentation by theme ref; a failed binding stays an unavailable
+        // entry rather than vanishing.
+        let root_ref = core
+            .active_surface_attachment()
+            .expect("an active Surface")
+            .root_ref
+            .clone();
         let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
-        send(&mut core, id, serde_json::json!({"theme": "dark"}));
+        let mut with_grounds = preference("system");
+        let ground = |value: serde_json::Value| {
+            let mut grounds = serde_json::Map::new();
+            grounds.insert(root_ref.clone(), value);
+            serde_json::Value::Object(grounds)
+        };
+        with_grounds["theme_catalogue"]["themes"][0]["surface_grounds"] = ground(
+            serde_json::json!({"picture": {"sha256": "a".repeat(64), "media_type": "image/webp"}}),
+        );
+        with_grounds["theme_catalogue"]["themes"][1]["surface_grounds"] =
+            ground(serde_json::json!({"picture_state": "unavailable"}));
+        send(&mut core, id, with_grounds);
+        let grounds = crate::ui::view_model::build_view_model(&core)
+            .presentation
+            .theme
+            .grounds;
+        assert_eq!(grounds.len(), 2);
+        assert_eq!(
+            grounds["theme:ryeos/night"]
+                .picture
+                .as_ref()
+                .unwrap()
+                .sha256,
+            "a".repeat(64)
+        );
+        assert_eq!(grounds["theme:ryeos/night"].origin, "theme");
+        assert!(grounds["theme:ryeos/paper"].picture.is_none());
+        assert_eq!(
+            grounds["theme:ryeos/paper"].picture_state.as_deref(),
+            Some("unavailable")
+        );
+        // A response with no readable catalogue applies nothing either.
+        let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
+        send(&mut core, id, serde_json::json!({"theme": "system"}));
         assert_eq!(core.data.theme_preference, None);
-        assert_eq!(theme_id(&core), "system");
+        assert!(core.data.theme_catalogue.is_none());
     }
 
     #[test]

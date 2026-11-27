@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:9bf8198f5dd499e6a37087705dc5a070ca849143df2767321b0354c01a5b4927:FKldZXrcmJRe4PeU5GitFVazRPGfGuSE8zGwOZZSMjl+fBQUWuUPx1DcE8rYY5q8VjrysO0hxDBiB2VgXOy1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:99a09deb72649ef19e4d45bb6f5f501b323575bc45d08e4a597fdd49f7bf21ab:yfE192HSBZx6sA/WlsjigL54ohGZ/OmaRiksmy0VVWoRZTftmdD2q+m2TS9x6kgWD1IFCxDbvSkPy2rAc1X1Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.projects/add"]
 name: projects/add
@@ -7,3 +7,15 @@ description: Add or update a canonical local project root in the project registr
 endpoint: projects.add
 availability: daemon_only
 ui_dispatch: session_local
+disclosure:
+  principal:
+    - "/created"
+    - "/project/local_id"
+    - "/project/added_at"
+    - "/project/exists"
+    - "/project/current"
+    - "/project/registered"
+  free_text:
+    - "/project/name"
+    - "/project/root"
+    - "/project/tags"

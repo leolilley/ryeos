@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:312def4a4d55041bf4b8b71d8933a353ff23997512305749beb472e5ea2db1a1:RBDYIRJhDYeHjwR2LoO7SNxdoJEDW6HAFvIQfOW86V+tN2FrE3x5IZEWL1hkJA47G5XMLx3S9eZAaNdBGu0zAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:acd1ed7a49297e3ee7bc5f83f701a69a0912528d48f9bba622b749fb37516841:DUACxjzvA74RqDipEXXN31vwKDr/C97xHpdyF5uEoUmfkfODCN2pdnQB3i9/VM7ODz6G2tO39vyuM+m3xK2/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-replay
 version: "1.0.0"
@@ -10,3 +10,30 @@ ui_read_only: true
 ui_dispatch: verified
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - "/receipt_status"
+    - "/receipt/producer_incarnation"
+    - "/receipt/operation_id"
+    - "/receipt/first_engine_seq"
+    - "/receipt/last_engine_seq"
+    - "/receipt/event_count"
+    - "/receipt/payload_digest"
+    - "/receipt/appended"
+    - "/receipt/chain_seq"
+    - "/receipt/receipt_thread_seq"
+    - "/receipt/receipt_event_hash"
+    - "/receipt/events_authority"
+    - "/receipt/events/*/event_hash"
+    - "/receipt/events/*/chain_root_id"
+    - "/receipt/events/*/chain_seq"
+    - "/receipt/events/*/thread_id"
+    - "/receipt/events/*/thread_seq"
+    - "/receipt/events/*/event_type"
+    - "/receipt/events/*/durability"
+    - "/receipt/events/*/ts"
+    - "/receipt/events/*/prev_chain_event_hash"
+    - "/receipt/events/*/prev_thread_event_hash"
+  interim_free_text:
+    - "/receipt/events/*/payload"  # removed by: m4
+  max_result_bytes: 1048576

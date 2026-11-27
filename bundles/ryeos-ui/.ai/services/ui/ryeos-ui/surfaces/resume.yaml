@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:9b52ac20146c9a6b791fa8ba7f83f1738d7b1b6ee38df5232e49cd5406d6804d:m4tXvsASXIhqimZr8H3a1hD/+81TYdF7xXgN6hBsFuuETRH3qqeHExt5MKO99yYrhM+tAC5SX4VXG0h8ihknBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T03:51:26Z:24709db81365c4d71b5e6d9f808a29eb6ca5e7802d89994db66b1e109cbffa83:cBYk5EzLsbvzWapgY/HN8jiZ7cMu+Maus5ZNqXrMOMUWsL7svA6VfjEfjIs3QQoBymHVpQkpj0GDKIKaSzobAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 required_caps: ["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 name: ryeos-ui/surfaces/resume
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: Resume one principal-owned saved Surface with its explicit authored origin and all ordered particular tabs under fresh admission.
 endpoint: ui.ryeos.surfaces.resume
 availability: daemon_only
+record_thread: false
 ui_dispatch: session_local
 ui_result_effect: resume_particular_surface
 schema:
@@ -13,3 +14,15 @@ schema:
   expected_revision: integer
   view_set_expected_revision: integer
   creation_request_id: string
+disclosure:
+  principal:
+    - /ui_transition/kind
+    - /ui_transition/presentation_id
+    - /ui_transition/creation_request_id
+  interim_free_text:
+    - /particular_surface  # removed by: m4
+    - /particular_selection  # removed by: m4
+    - /ui_transition/surface  # removed by: m4
+    - /ui_transition/attachment  # removed by: m4
+    - /ui_transition/tab_attachments  # removed by: m4
+    - /ui_transition/opening  # removed by: m4

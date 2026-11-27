@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_engine::scheduled_fire_context::ScheduleFireLimits;
 use ryeos_executor::executor::ServiceAvailability;
@@ -19,8 +20,19 @@ use ryeos_scheduler::types::{ScheduleManagedBy, ScheduleSourceRecord};
 use ryeos_scheduler_contract::{
     ScheduleAutoPauseReason, ScheduleExecution, ScheduleExecutionAuthority, parse_iso_ts,
     parse_misfire_policy, parse_overlap_policy, validate_expression, validate_schedule_bounds,
-    validate_schedule_id, validate_timezone,
+    validate_timezone,
 };
+
+/// A refusal of a request field the caller sent: 400 with the field's code and
+/// the validator's own message.
+fn invalid_request(code: &str, error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(typed_refusal(code, 400, format!("{error:#}")))
+}
+
+fn validate_schedule_id(id: &str) -> Result<()> {
+    ryeos_scheduler_contract::validate_schedule_id(id)
+        .map_err(|e| invalid_request("schedule_id_invalid", e))
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,58 +69,99 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
-    ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ctx.require_verified()?;
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())?;
     let _mutation_guard = scheduler.acquire_mutation().await?;
     let scheduler_db = scheduler.scheduler_db();
 
     // Validate
     validate_schedule_id(&req.schedule_id)?;
-    ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
-        .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
+    ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
+        typed_refusal(
+            "item_ref_invalid",
+            400,
+            format!("invalid item_ref: {}: {e:#}", req.item_ref),
+        )
+    })?;
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)?;
-    validate_expression(&req.schedule_type, &req.expression)?;
+    validate_expression(&req.schedule_type, &req.expression)
+        .map_err(|e| invalid_request("schedule_expression_invalid", e))?;
 
-    validate_timezone(&req.timezone)?;
+    validate_timezone(&req.timezone).map_err(|e| invalid_request("timezone_invalid", e))?;
 
     // All overlap policies ship day 1: allow, skip, cancel_previous.
-    parse_overlap_policy(&req.overlap_policy)?;
+    parse_overlap_policy(&req.overlap_policy)
+        .map_err(|e| invalid_request("overlap_policy_invalid", e))?;
     // All misfire policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S.
-    parse_misfire_policy(&req.misfire_policy)?;
+    parse_misfire_policy(&req.misfire_policy)
+        .map_err(|e| invalid_request("misfire_policy_invalid", e))?;
     if req.lateness_grace_secs <= 0 {
-        bail!(
-            "lateness_grace_secs must be positive, got: {}",
-            req.lateness_grace_secs
-        );
+        return Err(typed_refusal(
+            "lateness_grace_invalid",
+            400,
+            format!(
+                "lateness_grace_secs must be positive, got: {}",
+                req.lateness_grace_secs
+            ),
+        )
+        .into());
     }
     if !req.params.is_object() {
-        bail!("params must be a JSON object");
+        return Err(typed_refusal("params_invalid", 400, "params must be a JSON object").into());
     }
     if req
         .project_root
         .as_deref()
         .is_some_and(|project_root| project_root.trim().is_empty())
     {
-        bail!("project_root must be non-empty when present");
+        return Err(typed_refusal(
+            "project_root_invalid",
+            400,
+            "project_root must be non-empty when present",
+        )
+        .into());
     }
+    // A live schedule stores the path it will run in. The registering key must
+    // be allowed to run a live project there now, and is judged again at every
+    // fire, so a stored path never outlives the right to use it.
+    let admitted_project_root = match (&req.execution_policy.project, req.project_root.as_deref()) {
+        (
+            ryeos_engine::execution_contract::ProjectExecutionPolicy::LiveDirect { .. },
+            Some(root),
+        ) => {
+            let admitted = ryeos_app::live_project_path::admit_handler_live_path(
+                &state,
+                &ctx,
+                std::path::Path::new(root),
+            )?;
+            Some(admitted.canonical.display().to_string())
+        }
+        _ => None,
+    };
 
     if req.schedule_type == "at"
         && ryeos_scheduler::crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
     {
-        bail!("at schedule timestamp is in the past");
+        return Err(typed_refusal(
+            "schedule_timestamp_past",
+            400,
+            "at schedule timestamp is in the past",
+        )
+        .into());
     }
     validate_schedule_bounds(
         req.limits.as_ref(),
         req.max_fires,
         req.expires_at.as_deref(),
-    )?;
+    )
+    .map_err(|e| invalid_request("schedule_bounds_invalid", e))?;
     if req
         .expires_at
         .as_deref()
         .and_then(parse_iso_ts)
         .is_some_and(|expires_at| expires_at <= lillux::time::timestamp_millis())
     {
-        bail!("expires_at is in the past");
+        return Err(typed_refusal("expires_at_past", 400, "expires_at is in the past").into());
     }
 
     // Check if schedule already exists (for preserving registered_at on update)
@@ -135,13 +188,18 @@ pub async fn handle(
     if existing_spec.is_none() {
         match std::fs::symlink_metadata(&fires_dir) {
             Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
-                bail!(
-                    "schedule_id '{}' reuse not allowed: fire history exists at {} — \
+                return Err(typed_refusal(
+                    "schedule_id_reuse_refused",
+                    409,
+                    format!(
+                        "schedule_id '{}' reuse not allowed: fire history exists at {} — \
                          deregister with purge_history=true to clear it (scheduler/deregister), \
                          or use a different ID",
-                    req.schedule_id,
-                    fires_dir.display()
-                );
+                        req.schedule_id,
+                        fires_dir.display()
+                    ),
+                )
+                .into());
             }
             Ok(_) => bail!(
                 "schedule history path must be a real directory: {}",
@@ -159,17 +217,27 @@ pub async fn handle(
     )?;
     let existing_source = source_mutation.verified.as_ref();
     if existing_spec.is_none() && existing_source.is_some() {
-        bail!(
-            "schedule_id '{}' has signed node YAML but no scheduler projection; rebuild the projection or remove the node item before registering",
-            req.schedule_id
-        );
+        return Err(typed_refusal(
+            "schedule_projection_missing",
+            409,
+            format!(
+                "schedule_id '{}' has signed node YAML but no scheduler projection; rebuild the projection or remove the node item before registering",
+                req.schedule_id
+            ),
+        )
+        .into());
     }
     let existing_record = existing_source.map(|source| &source.record);
     if existing_record.is_some_and(is_project_managed_schedule) {
-        bail!(
-            "schedule_id '{}' is project-managed; update it through project sync or deregister first",
-            req.schedule_id
-        );
+        return Err(typed_refusal(
+            "schedule_project_managed",
+            409,
+            format!(
+                "schedule_id '{}' is project-managed; update it through project sync or deregister first",
+                req.schedule_id
+            ),
+        )
+        .into());
     }
 
     // Build YAML body — preserve registered_at on updates for deterministic first-fire.
@@ -213,9 +281,15 @@ pub async fn handle(
                 &ctx.scopes,
                 &ryeos_runtime::authorizer::AuthorizationPolicy::require(capability),
             )
-            .map_err(|_| anyhow::anyhow!(
-                "scheduler capability {capability:?} is not covered by the authenticated caller grant"
-            ))?;
+            .map_err(|_| {
+                typed_refusal(
+                    "scheduler_capability_not_covered",
+                    403,
+                    format!(
+                        "scheduler capability {capability:?} is not covered by the authenticated caller grant"
+                    ),
+                )
+            })?;
     }
 
     refuse_uncovered_item_declarations(state.as_ref(), &req, &ctx.fingerprint, &capabilities)?;
@@ -242,7 +316,7 @@ pub async fn handle(
         overlap_policy: req.overlap_policy.clone(),
         lateness_grace_secs: req.lateness_grace_secs,
         enabled: req.enabled,
-        project_root: req.project_root.clone(),
+        project_root: admitted_project_root.or_else(|| req.project_root.clone()),
         registered_at,
         execution: ScheduleExecution {
             authority,
@@ -255,7 +329,9 @@ pub async fn handle(
         managed_by: None,
         paused_reason: None,
     };
-    source_record.validate(Some(&req.schedule_id))?;
+    source_record
+        .validate(Some(&req.schedule_id))
+        .map_err(|e| invalid_request("schedule_invalid", e))?;
     refuse_authority_that_cannot_hold_at_fire(
         &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
             state.as_ref(),
@@ -355,8 +431,14 @@ fn refuse_uncovered_item_declarations(
         scheduled_fire: None,
         validate_only: true,
     };
-    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
-        .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
+    let item_ref =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
+            typed_refusal(
+                "item_ref_invalid",
+                400,
+                format!("invalid item_ref: {}: {e:#}", req.item_ref),
+            )
+        })?;
     let declared = match ryeos_executor::execution::launch::composed_declared_caps(
         &state.engine,
         &plan_context,
@@ -436,12 +518,15 @@ pub(super) fn load_existing_schedule_source(
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
-        bail!(
-            "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
-            schedule_id,
-            expected,
-            verified.spec_hash,
-        );
+        return Err(typed_refusal(
+            "schedule_source_diverged",
+            409,
+            format!(
+                "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
+                schedule_id, expected, verified.spec_hash,
+            ),
+        )
+        .into());
     }
     Ok(Some(verified))
 }
@@ -488,12 +573,15 @@ impl<'a> ScheduleSourceMutation<'a> {
         };
         if let (Some(expected), Some(verified)) = (expected_spec_hash, verified.as_ref()) {
             if verified.spec_hash != expected {
-                bail!(
-                    "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
-                    schedule_id,
-                    expected,
-                    verified.spec_hash,
-                );
+                return Err(typed_refusal(
+                    "schedule_source_diverged",
+                    409,
+                    format!(
+                        "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
+                        schedule_id, expected, verified.spec_hash,
+                    ),
+                )
+                .into());
             }
         } else if expected_spec_hash.is_some() && verified.is_none() {
             bail!("existing schedule projection has no signed source file");
@@ -619,10 +707,15 @@ pub(super) fn rewrite_schedule_authority(
     })?;
     let mut record = source.record.clone();
     if record.execution.principal_id() != authority.principal_id() {
-        bail!(
-            "schedule {} authority cannot change principal on reauthorization",
-            current.schedule_id
-        );
+        return Err(typed_refusal(
+            "schedule_principal_change_refused",
+            409,
+            format!(
+                "schedule {} authority cannot change principal on reauthorization",
+                current.schedule_id
+            ),
+        )
+        .into());
     }
     record.execution.authority = authority;
     record.validate(Some(&current.schedule_id))?;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:35:29Z:4a5dc5ad62b9770a9089f0d439288eb86a4d70637e201ecf0dd679d48f8ed6c3:4UEOhiLWJ64CCyup3kQYfbUutQQhzlDRwuvbmI8/XVCDtBFXooGmcXJSX0TYhbOt+WzVl/q/supmGv8/X7w6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-24T03:32:53Z:a047df5de5ccb16b99744e8a472bae76783df78f5a3478e0bd7414880bd558b0:aaDzXccNS7Rvfc0ltqvYUZkxDysjzIWIC4i9eZ6+Fer96C22Mb6XZCFcc4o0zqMsu4cLii1qBFB9PU6Jyg2mDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -21,7 +21,7 @@ Every executable item must be signed before the daemon will run it.
 |-----|---------|----------|
 | **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/node/operator/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
-| **Authoring key** | Items the runtime authors; machine drafts, no kind admitted until the operator widens its scope | `<system>/.ai/node/authoring/signing/private_key.pem` |
+| **Authoring key** | Items the runtime authors; machine drafts, untrusted until an operator endorsement covers them (see [Endorsements](#endorsements)) | `<system>/.ai/node/authoring/signing/private_key.pem` |
 | **Publisher key** | Bundle author identity — signs items in published bundles | Signer record in `<system>/.ai/node/trust/signers/` |
 
 The operator, authoring and node keys are generated at `ryeos init` time.
@@ -398,12 +398,12 @@ were.
 | Form | Names | Covers |
 |---|---|---|
 | per-change | the exact items: ref, kind and the digest of the signed bytes after the signature line | those bytes only; one changed byte returns the item to `untrusted_project` |
-| standing | kinds within one project (`pid:v1:<owner>/<name>`), optionally until a time | whatever the authoring key signs of those kinds where that identity is established |
+| standing | kinds within one project (`pid:v1:<owner>/<name>`), until a time at most 30 days after it is made | whatever the authoring key signs of those kinds where that identity is established, until it ends |
 
 ```bash
 ryeos --project . endorse --item view:acme/home --item surface:acme/main
 ryeos --project . endorse --standing --kind knowledge --lifetime-secs 604800
-ryeos endorse list
+ryeos endorse list                # shows `in_force`, and `inert` with a code for one that covers nothing
 ryeos endorse revoke --endorsement <digest> --reason "no longer wanted"
 ```
 
@@ -433,6 +433,27 @@ Endorsement is narrow-only: it chooses `trusted_project` over `untrusted_project
 and nothing else. It never applies to another role's key, cannot make an
 unpinned or revoked key trusted, and cannot lift a revocation. A running node
 follows a new or revoked endorsement without a restart.
+
+A standing endorsement trusts everything the authoring key signs of a kind from
+then on, including what an agent writes later. That is safe only for kinds whose
+items never run or invoke anything, so each kind says whether it allows one in
+its signed kind schema (`standing_endorsement: allowed`; the default is refused).
+Today `knowledge`, `picture` and `view_set` allow it. The executing kinds
+(directive, graph, tool, config, service, runtime and the rest), and `view` and
+`surface`, whose actions and tiles invoke refs, do not: endorse those one change
+at a time, by digest, after reviewing the change. Rules:
+
+- `ryeos endorse --standing --kind <kind>` for a kind that does not allow it is
+  refused with `endorsement_kind_not_standing`, before anything is signed.
+- A standing endorsement must end: `--lifetime-secs` is required, at most 30 days
+  (2592000 seconds), and the expiry is printed before signing
+  (`endorsement_standing_lifetime_required`, `endorsement_standing_lifetime_too_long`).
+- The node judges kinds by its own installed, verified kind registry, never by
+  anything in a project. A stored standing endorsement whose kind does not allow
+  one, or that has no bounded life, covers nothing (it fails closed) and is
+  listed with `inert`; so does every standing endorsement until the node has
+  paired its trust store with its registry. When you make a standing endorsement
+  again after an upgrade, give it a lifetime and an allowed kind.
 
 A launch carries the endorsements its request froze in its signer list: each
 authoring-role signer's entry holds a snapshot of the live endorsements of the

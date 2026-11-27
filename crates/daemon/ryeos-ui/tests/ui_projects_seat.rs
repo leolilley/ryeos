@@ -54,10 +54,10 @@ async fn a_non_operator_seat_cannot_launch_into_a_project_root() {
     };
     match ryeos_app::handler_error::extract_handler_error(&error) {
         Some(ryeos_app::handler_error::HandlerError::Structured { code, status, .. }) => {
-            assert_eq!(code, "project_seat_requires_identity_cut");
+            assert_eq!(code, "project_seat_operator_only");
             assert_eq!(status, 403);
         }
-        other => panic!("expected the typed identity-cut refusal, got {other:?}: {error:#}"),
+        other => panic!("expected the typed operator-only refusal, got {other:?}: {error:#}"),
     }
     let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
     assert!(

@@ -624,6 +624,12 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "publish_bundle" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "publish.yaml")?;
+            crate::client_handlers::publish_bundle(app_root, console, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
@@ -1150,6 +1156,9 @@ fn command_compilation_error(
     match error {
         CommandProjectPolicyError::Invalid(detail) => CliError::ProjectResolution(detail),
         CommandProjectPolicyError::ProjectRequired(detail) => CliError::ProjectRequired(detail),
+        refusal @ CommandProjectPolicyError::ItemKindMismatch { .. } => CliError::Local {
+            detail: refusal.to_string(),
+        },
     }
 }
 
@@ -1282,13 +1291,20 @@ pub(crate) fn apply_project_policy(
     let cwd =
         std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
     ryeos_app::command_invocation::apply_project_policy(command, parameters, default_project, &cwd)
-        .map_err(|error| match error {
+        .map_err(|error| {
+            match error {
             ryeos_app::command_invocation::CommandProjectPolicyError::Invalid(detail) => {
                 CliError::ProjectResolution(detail)
             }
             ryeos_app::command_invocation::CommandProjectPolicyError::ProjectRequired(detail) => {
                 CliError::ProjectRequired(detail)
             }
+            refusal @ ryeos_app::command_invocation::CommandProjectPolicyError::ItemKindMismatch {
+                ..
+            } => CliError::Local {
+                detail: refusal.to_string(),
+            },
+        }
         })
 }
 
@@ -2145,6 +2161,93 @@ mod tests {
         assert_eq!(out.parameters, serde_json::json!({}));
     }
 
+    /// A shipped core command item, read the way the CLI reads it.
+    fn shipped_core_command(name: &str) -> CommandDef {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/node/commands")
+            .join(format!("{name}.yaml"));
+        let text = std::fs::read_to_string(&path).expect("a shipped command item");
+        let mut command: CommandDef = serde_yaml::from_str(&text).expect("a command item");
+        command.name = name.to_owned();
+        command
+    }
+
+    #[test]
+    fn worker_session_evaluate_binds_its_four_slots_and_the_json_object() {
+        let hash = |c: char| c.to_string().repeat(64);
+        let rest = s(&[
+            "worker",
+            "session",
+            "evaluate",
+            "T-1",
+            &hash('a'),
+            &hash('b'),
+            "tool:ryeos/core/evaluate/unchecked",
+            "--input",
+            r#"{"launch_id":"L-0123456789abcdef0123456789abcdef","evaluator_parameters":{"accept_unchecked":true}}"#,
+        ]);
+        let resolved = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[shipped_core_command("worker-session-evaluate")],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("the four positional slots and the JSON object bind");
+        assert_eq!(
+            resolved.item_ref,
+            "service:worker-executions/start-candidate-evaluation"
+        );
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({
+                "chain_root_id": "T-1",
+                "candidate_snapshot_hash": hash('a'),
+                "candidate_validation_hash": hash('b'),
+                "evaluator_item_ref": "tool:ryeos/core/evaluate/unchecked",
+                "launch_id": "L-0123456789abcdef0123456789abcdef",
+                "evaluator_parameters": {"accept_unchecked": true},
+            })
+        );
+    }
+
+    #[test]
+    fn worker_session_qualify_binds_its_six_slots() {
+        let hash = |c: char| c.to_string().repeat(64);
+        let rest = s(&[
+            "worker",
+            "session",
+            "qualify",
+            "T-1",
+            &hash('a'),
+            &hash('b'),
+            "T-eval",
+            "T-eval",
+            "tool:ryeos/core/evaluate/unchecked",
+        ]);
+        let resolved = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[shipped_core_command("worker-session-qualify")],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("the six positional slots bind");
+        assert_eq!(
+            resolved.item_ref,
+            "service:worker-executions/qualify-candidate"
+        );
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({
+                "chain_root_id": "T-1",
+                "candidate_snapshot_hash": hash('a'),
+                "candidate_validation_hash": hash('b'),
+                "evaluator_chain_root_id": "T-eval",
+                "evaluator_terminal_thread_id": "T-eval",
+                "evaluator_item_ref": "tool:ryeos/core/evaluate/unchecked",
+            })
+        );
+    }
+
     #[test]
     fn projectless_form_consumes_global_no_project_before_service_payload() {
         let mut cmd = command(
@@ -2412,13 +2515,13 @@ mod tests {
         let mut tail = s(&[
             "profile",
             "--environment",
-            "config:codex/environments/default",
+            "config:example/environments/default",
         ]);
         let flags = strip_declared_control_flags(&mut tail, &controls).unwrap();
         assert_eq!(tail, s(&["profile"]));
         assert_eq!(
             flags.ref_bindings.get("environment").map(String::as_str),
-            Some("config:codex/environments/default")
+            Some("config:example/environments/default")
         );
     }
 
@@ -2456,6 +2559,7 @@ mod tests {
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                 item_ref_arg: "item_ref".into(),
+                item_kinds: None,
                 validate_only: false,
                 availability: ryeos_runtime::CommandAvailability::Both,
             },
@@ -2499,6 +2603,25 @@ mod tests {
             authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_shipped_publication_commands_dispatch_to_the_handler_and_service_the_arms_name() {
+        let commands = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/node/commands");
+        let load = |file: &str| -> serde_yaml::Value {
+            let text = std::fs::read_to_string(commands.join(file)).unwrap();
+            serde_yaml::from_str(&text).unwrap()
+        };
+        // The `publish_bundle` arm authorizes exactly `publish.yaml`; that
+        // file must name the same handler.
+        let publish = load("publish.yaml");
+        assert_eq!(publish["dispatch"]["kind"], "local_handler");
+        assert_eq!(publish["dispatch"]["handler"], "publish_bundle");
+        // The pull is a service call, not a local handler.
+        let pull = load("pull.yaml");
+        assert_eq!(pull["dispatch"]["kind"], "execute_ref");
+        assert_eq!(pull["dispatch"]["execute"], "service:bundle/pull");
     }
 
     #[test]
@@ -3481,7 +3604,7 @@ mod tests {
                     "run",
                     "production",
                     "config:development/remote-worker",
-                    "codex-main",
+                    "example-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
@@ -3493,7 +3616,7 @@ mod tests {
                     "worker",
                     "run",
                     "config:development/remote-worker",
-                    "codex-main",
+                    "example-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
@@ -3514,7 +3637,7 @@ mod tests {
                 resolved.parameters["workflow_ref"],
                 "config:development/remote-worker"
             );
-            assert_eq!(resolved.parameters["credential_profile_id"], "codex-main");
+            assert_eq!(resolved.parameters["credential_profile_id"], "example-main");
             assert_eq!(
                 resolved.parameters["task"],
                 serde_json::json!({"goal": "fix the tests"})

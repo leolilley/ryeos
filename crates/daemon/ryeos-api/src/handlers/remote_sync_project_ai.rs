@@ -10,6 +10,7 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::{self, ProjectSyncScope};
 use crate::remote::push::push_project_ai_only;
+use ryeos_app::handler_error::typed_refusal;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -29,15 +30,21 @@ fn default_remote() -> String {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let report = config::load_remotes_report(&state.config.app_root)?;
-    let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)?;
+    let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
+        .map_err(|e| typed_refusal("remote_not_found", 404, format!("{e:#}")))?;
     let remote_cfg = loaded_remote.config.clone();
     let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)?;
     if binding.sync_scope != ProjectSyncScope::AiOnly {
-        anyhow::bail!(
-            "remote sync-project-ai requires an ai_only binding for '{}'; got {:?}",
-            binding.local_project_path.display(),
-            binding.sync_scope
-        );
+        return Err(typed_refusal(
+            "remote_binding_scope_mismatch",
+            409,
+            format!(
+                "remote sync-project-ai requires an ai_only binding for '{}'; got {:?}",
+                binding.local_project_path.display(),
+                binding.sync_scope
+            ),
+        )
+        .into());
     }
 
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;

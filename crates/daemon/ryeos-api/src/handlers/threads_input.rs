@@ -686,20 +686,24 @@ pub async fn handle(
             ref_bindings,
         } => {
             authorize_execution_refs(&item_ref, &ref_bindings, &ctx, &state)?;
-            let project_path =
-                crate::routes::abs_path::AbsolutePathBuf::try_new(project_path.into())
-                    .map_err(|error| HandlerError::BadRequest(format!("project_path: {error}")))?;
             let parameters = json!({ "input": input });
             let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
                 .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+            // Judged before any syntactic check on the path, so a key that is not
+            // the operator gets the one refusal for a relative path too.
+            let admitted_project = ryeos_app::live_project_path::admit_handler_live_path(
+                &state,
+                &ctx,
+                std::path::Path::new(&project_path),
+            )?;
             let mut project_ctx =
                 ryeos_executor::execution::project_source::resolve_project_context(
                     &state,
                     &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
-                    project_path.as_path(),
+                    &admitted_project.canonical,
                     &ctx.fingerprint,
                     &format!("thread-input-{thread_id}"),
                     None,
@@ -1258,6 +1262,9 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("executor:test/directive".to_string()),
             runtime_ref: Some("runtime:test/directive".to_string()),
         }

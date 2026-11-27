@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:d85b3fc8ef24485a455c1a0006f4d8ab26812cdaf4fa8af9285499566cbe6979:s0RsTmdBH+W4cVr+y4SARtf1PwB/qrMM5PIv9kqmNFG4TgILGnwrgIiR8GNX8KBz9Js5i8pq3omp7uQL4f4kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:adfd3bdc79e4b5e8d17f3732cde4e0c6f86b8b400a6592df06ef6d3695a7cdb3:lZiNHSsPlO9CJhbD5qf5UCAEM2ZyhJPw6w/omTrFeK3b/Tym1bP7v6Dxhimu1lJHRInOhdb8H4gQ+zCYKkYRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-build
 version: "1.0.0"
@@ -18,3 +18,5 @@ schema:
   catalog_namespace: string
   bundle_publication_policy_section_digest: string
   trust_epoch: integer
+# Release build tool: only the node operator builds a generation.
+disclosure: {}

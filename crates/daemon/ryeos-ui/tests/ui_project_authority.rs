@@ -31,6 +31,22 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
     let project_root = project_root
         .canonicalize()
         .expect("canonical fixture project");
+    // The fixture key registered this checkout: the thread states its project.
+    let identity = test_state::fixture_project_identity(&project_root);
+    create_project_thread_stating(state, thread_id, &project_root, identity);
+}
+
+/// A thread of `project_root` that states `identity` as its project, launched
+/// by the fixture key.
+fn create_project_thread_stating(
+    state: &AppState,
+    thread_id: &str,
+    project_root: &std::path::Path,
+    identity: ryeos_state::project_identity::ProjectIdentity,
+) {
+    let project_root = project_root
+        .canonicalize()
+        .expect("canonical fixture project");
     let mut project_authority = ExecutionProjectAuthority::live(
         project_root.clone(),
         format!("local:{}", project_root.display()),
@@ -40,11 +56,8 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
         Vec::new(),
     )
     .expect("live fixture project authority");
-    // The fixture key registered this checkout: the thread states its project.
     if let ExecutionProjectAuthority::LiveProject { signer_project, .. } = &mut project_authority {
-        *signer_project = ryeos_state::project_identity::LogicalProject::Stated(
-            test_state::fixture_project_identity(&project_root),
-        );
+        *signer_project = ryeos_state::project_identity::LogicalProject::Stated(identity);
     }
     state
         .state_store
@@ -647,8 +660,15 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     std::fs::create_dir(&first).expect("create first project");
     std::fs::create_dir(&second).expect("create second project");
     std::os::unix::fs::symlink(&first, &first_alias).expect("create equivalent project path");
-    create_project_thread(&state, "T-first", &first);
-    create_project_thread(&state, "T-second", &second);
+    // Each seat is the node operator's, on a checkout the operator's owner
+    // registered under its own name, so the seat states that project. The
+    // threads were launched by another key: a seat reads them because they
+    // belong to its stated project, and never the other project's.
+    let first_identity = test_state::register_operator_checkout(&state, &first, "first");
+    let second_identity = test_state::register_operator_checkout(&state, &second, "second");
+    assert_ne!(first_identity, second_identity);
+    create_project_thread_stating(&state, "T-first", &first, first_identity);
+    create_project_thread_stating(&state, "T-second", &second, second_identity);
 
     // Compile and activate real browser sessions. The first enters through an
     // equivalent symlink path, proving the session retains the canonical
@@ -758,7 +778,8 @@ fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
     let surface_ref = "surface:ryeos/ui/base";
 
     let (session, access) = retained_access_then_swap(&state, &project, &decoy);
-    let owner = format!("session:{}", session.session_id);
+    // A seat is launched by the key its session was minted for.
+    let owner = session.principal_id.clone();
 
     // A by-name walk of the project path now reaches the decoy's shadow.
     let by_name = ryeos_app::thread_lifecycle::admit_non_execution_root(
@@ -1083,4 +1104,28 @@ async fn binding_compiled_under_another_project_authoring_list_is_stale() {
             Ok(())
         })
         .expect("revalidate under the installed list");
+}
+
+/// A seat is admitted as the key its session was minted for, and its ceiling
+/// is the session's granted scopes, never that key's own grant. The node
+/// operator's key holds every scope; a session minted for it with `ui.read`
+/// alone gives a seat root whose ceiling is `ui.read` and nothing else.
+#[test]
+fn a_seat_root_admitted_as_its_key_is_capped_at_the_session_scopes() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let operator = test_state::local_operator_context(&state, vec!["*".into()]);
+    assert!(operator.scopes.iter().any(|scope| scope == "*"));
+    let admission = ryeos_ui::handlers::ui_seat::admit_seat_root(
+        &state,
+        "surface:ryeos/ui/base",
+        None,
+        &operator.fingerprint,
+        vec!["ui.read".to_string()],
+    )
+    .expect("seat admission as the operator key");
+    assert_eq!(
+        admission.project_authority().capability_ceiling(),
+        ["ui.read".to_string()].as_slice(),
+        "the seat's ceiling is the session's scopes, not the key's grant"
+    );
 }

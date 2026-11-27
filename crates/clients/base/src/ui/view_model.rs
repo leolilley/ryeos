@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,7 +20,9 @@ pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsT
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use session::{RyeOsChipMarkVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm};
+pub use session::{
+    RyeOsChipMarkVm, RyeOsProjectChipVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -187,9 +191,38 @@ pub struct RyeOsPresentationMetricsVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsThemeVm {
+    /// The stored preference: `system` or an installed theme's ref.
     pub id: String,
     pub tone: RyeOsTone,
+    /// The installed themes, when the daemon has delivered them. A renderer
+    /// resolves `id` against this (`system` follows the platform) and keeps
+    /// its boot palette until it arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<crate::theme_preference::ThemeCatalogue>,
+    /// The ground of the active Surface in each theme that has one, by theme
+    /// ref. A renderer draws the entry of the theme it resolved.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grounds: BTreeMap<String, RyeOsGroundVm>,
 }
+
+/// The picture drawn behind the active Surface's panels. `picture` is a hash
+/// the daemon granted this session; `picture_state` is `unavailable` when the
+/// ground's binding failed, and the Surface is then drawn flat. `origin` says
+/// which precedence tier supplied it, so a renderer can draw a theme's
+/// picture quieter than one the subject claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RyeOsGroundVm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::art::ArtRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_state: Option<String>,
+    pub origin: String,
+}
+
+/// The precedence tier a theme's Surface ground comes from. The tiers above
+/// it (the principal's choice, the node operator's overlay, the Surface's own
+/// binding) are consulted before it when they exist; none exists yet.
+pub const GROUND_ORIGIN_THEME: &str = "theme";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsPresentationChromeVm {
@@ -598,6 +631,107 @@ pub struct RyeOsSourceStatusVm {
     pub stale: bool,
 }
 
+/// The stated condition of a map collection against its response, worded by the
+/// signed coverage wording. Without loaded wording it reads as the fixed
+/// "not known" sentence, never as a code.
+fn collection_shape_status(
+    core: &RyeOsCore,
+    collection: Option<&super::content::CollectionBinding>,
+    response: &Value,
+) -> Option<RyeOsSourceStatusVm> {
+    let state = super::content::collection_state(collection, response)?;
+    let message = core
+        .data
+        .coverage_wording
+        .as_ref()
+        .map(|wording| wording.resolve(state.code(), "").label.clone())
+        .unwrap_or_else(|| COVERAGE_UNKNOWN_LABEL.to_owned());
+    Some(RyeOsSourceStatusVm {
+        state: state.code().into(),
+        message,
+        stale: false,
+    })
+}
+
+/// The coverage a shared read envelope states, worded by the signed coverage
+/// wording. A complete answer says nothing; every other state is stated, with
+/// the reason's own sentence when the wording has one. Without loaded wording
+/// it reads as the fixed "not known" sentence, never as a code.
+fn envelope_coverage_status(core: &RyeOsCore, response: &Value) -> Option<RyeOsSourceStatusVm> {
+    let envelope = super::read_envelope::read_envelope(response)?;
+    if envelope.state == super::read_envelope::EnvelopeCoverageState::Complete {
+        return None;
+    }
+    let message = core
+        .data
+        .coverage_wording
+        .as_ref()
+        .map(|wording| {
+            wording
+                .resolve(envelope.state.code(), envelope.reason.unwrap_or(""))
+                .label
+                .clone()
+        })
+        .unwrap_or_else(|| COVERAGE_UNKNOWN_LABEL.to_owned());
+    Some(RyeOsSourceStatusVm {
+        state: envelope.state.code().into(),
+        message,
+        stale: false,
+    })
+}
+
+/// The page facts of a shared read envelope, for a view that says how many
+/// rows exist beyond the ones shown.
+fn envelope_page(response: &Value) -> Option<RyeOsPageVm> {
+    let page = super::read_envelope::read_envelope(response)?.page?;
+    Some(RyeOsPageVm {
+        next_cursor: page.next_cursor,
+        total: page.total,
+        total_basis: page.total_basis,
+    })
+}
+
+/// How many rows a source holds in all, as its read envelope states it. The
+/// cursor is the client's to hold; no paging control reads it yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RyeOsPageVm {
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+    pub total_basis: super::read_envelope::EnvelopeTotalBasis,
+}
+
+/// The stated partial coverage of a source cut at the shared row limit. The
+/// sentence is the signed wording's `source_row_limit` reason, with `{limit}`
+/// and `{total}` filled in. Without loaded wording there is no limit to cut at.
+fn row_cut_status(
+    core: &RyeOsCore,
+    cut: Option<super::content::RowCut>,
+) -> Option<RyeOsSourceStatusVm> {
+    let cut = cut?;
+    // Rows wait for the signed bound, so a source with rows and no wording yet
+    // reads as loading, never as empty.
+    let Some(wording) = core.data.coverage_wording.as_ref() else {
+        return Some(RyeOsSourceStatusVm {
+            state: "loading".into(),
+            message: "Waiting for source".into(),
+            stale: false,
+        });
+    };
+    let message = wording
+        .resolve("partial", ROW_CUT_REASON)
+        .label
+        .replace("{limit}", &cut.limit.to_string())
+        .replace("{total}", &cut.total.to_string());
+    Some(RyeOsSourceStatusVm {
+        state: "partial".into(),
+        message,
+        stale: false,
+    })
+}
+
+/// The signed wording reason for a source cut at the row limit.
+const ROW_CUT_REASON: &str = "source_row_limit";
+
 /// What the `unresolved` state says: nothing can be read until a subject,
 /// selection or project the view needs is there.
 const UNRESOLVED_MESSAGE: &str = "Source subject or required context is unresolved";
@@ -782,10 +916,19 @@ pub enum RyeOsViewVm {
         /// dimming, alignment and width from it.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         column_roles: Vec<super::content::ColumnRole>,
+        /// Each column's signed drop priority, parallel to `columns`; `None`
+        /// leaves the column to its role's default drop order. Empty when no
+        /// column signs one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_priorities: Vec<Option<u8>>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
         total_rows: usize,
+        /// The page facts a shared read envelope reports: the next cursor, and
+        /// how many rows exist and on what basis. Absent for any other source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<RyeOsPageVm>,
         /// Service-reported collection coverage, separate from rendered row
         /// count. An absent or malformed report never implies completeness.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1071,6 +1214,8 @@ fn presentation_vm(
                 .clone()
                 .unwrap_or_else(|| crate::theme_preference::SYSTEM.to_string()),
             tone: RyeOsTone::Accent,
+            catalogue: core.data.theme_catalogue.clone(),
+            grounds: surface_grounds_vm(core),
         },
         chrome: RyeOsPresentationChromeVm {
             title: "Rye OS".to_string(),
@@ -1089,6 +1234,36 @@ fn presentation_vm(
         },
         motion: core.ui.motion.clone(),
     }
+}
+
+/// The active Surface's ground in every theme that names one, by theme ref.
+/// This is the theme tier of the ground's precedence; the tiers above
+/// it (principal choice, node operator, the Surface's own binding) are
+/// consulted ahead of it when they exist, and the flat Surface is the tier
+/// below. A ground whose binding failed stays an `unavailable` entry here, so
+/// no lower tier stands in for it.
+fn surface_grounds_vm(core: &RyeOsCore) -> BTreeMap<String, RyeOsGroundVm> {
+    let (Some(catalogue), Some(attachment)) = (
+        core.data.theme_catalogue.as_ref(),
+        core.active_surface_attachment(),
+    ) else {
+        return BTreeMap::new();
+    };
+    catalogue
+        .themes
+        .iter()
+        .filter_map(|theme| {
+            let ground = theme.surface_grounds.get(&attachment.root_ref)?;
+            Some((
+                theme.theme_ref.clone(),
+                RyeOsGroundVm {
+                    picture: ground.picture.clone(),
+                    picture_state: ground.picture_state.clone(),
+                    origin: GROUND_ORIGIN_THEME.to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The active Surface's declared style, or the defaults when there is none.
@@ -1581,7 +1756,13 @@ fn bound_view_vm_keyed(
                     .data
                     .sources
                     .get(&key)
-                    .map(|response| super::content::project_section(section, response))
+                    .map(|response| {
+                        super::content::project_section_limited(
+                            section,
+                            response,
+                            core.data.source_row_limit(),
+                        )
+                    })
                     .unwrap_or_default();
                 let expand_fields =
                     super::content::expand_fields_from_projection(&section.projection);
@@ -1662,7 +1843,21 @@ fn bound_view_vm_keyed(
                     id: section_identity(view_ref, section),
                     cursor: section_cursor,
                     title: section.title.clone(),
-                    source_status: source_status(core, &key),
+                    source_status: source_status(core, &key).or_else(|| {
+                        let response = core.data.sources.get(&key)?;
+                        collection_shape_status(core, section.collection.as_ref(), response)
+                            .or_else(|| envelope_coverage_status(core, response))
+                            .or_else(|| {
+                                row_cut_status(
+                                    core,
+                                    super::content::section_row_cut(
+                                        section,
+                                        response,
+                                        core.data.source_row_limit(),
+                                    ),
+                                )
+                            })
+                    }),
                     count,
                     collapsed: is_collapsed,
                     header_selected,
@@ -1696,6 +1891,32 @@ fn bound_view_vm_keyed(
         source_key
             .as_deref()
             .and_then(|key| source_status(core, key))
+            .or_else(|| {
+                let response = response?;
+                collection_shape_status(
+                    core,
+                    binding
+                        .primary_source()
+                        .and_then(|(_, source)| source.collection.as_ref()),
+                    response,
+                )
+                .or_else(|| envelope_coverage_status(core, response))
+                .or_else(|| {
+                    // A timeline is windowed by its own `older` count, not cut.
+                    (binding.widget != "timeline")
+                        .then(|| {
+                            row_cut_status(
+                                core,
+                                super::content::source_row_cut(
+                                    binding,
+                                    response,
+                                    core.data.source_row_limit(),
+                                ),
+                            )
+                        })
+                        .flatten()
+                })
+            })
     };
     let title = view_title(core, instance_key, view_ref).to_owned();
     if binding.widget == "text"
@@ -1763,7 +1984,11 @@ fn bound_view_vm_keyed(
         ("rows", Some(response)) => {
             let activate_affordance = activate_affordance(binding);
             let expand_fields = super::content::expand_fields(binding);
-            let records = super::content::source_collection(binding, response);
+            let (records, _) = super::content::source_collection_limited(
+                binding,
+                response,
+                core.data.source_row_limit(),
+            );
             let total_rows = records.len();
             let (start, end) = row_render_window(total_rows, cursor);
             let selected_index = clamped_row_cursor(total_rows, cursor);
@@ -1980,11 +2205,11 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
-                lane: super::timeline::timeline_lane(response, window_items),
+                lane: super::timeline::timeline_lane(response, &window_items),
                 dock: super::timeline::pending_asks(
                     binding,
                     response,
-                    window_items,
+                    &window_items,
                     instance_key,
                     view_ref,
                 ),
@@ -2015,11 +2240,22 @@ fn bound_view_vm_keyed(
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
             let column_roles = columns.iter().map(|col| col.role).collect();
-            let records = super::content::source_collection(binding, response);
+            let (records, _) = super::content::source_collection_limited(
+                binding,
+                response,
+                core.data.source_row_limit(),
+            );
+            let column_priorities: Vec<Option<u8>> =
+                columns.iter().map(|col| col.priority).collect();
+            let column_priorities = if column_priorities.iter().any(Option::is_some) {
+                column_priorities
+            } else {
+                Vec::new()
+            };
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
                 binding,
-                records,
+                &records,
                 collapsed_tree_rows.unwrap_or(&empty_tree_folds),
             )
             .map(|rows| {
@@ -2113,7 +2349,9 @@ fn bound_view_vm_keyed(
                 source_status: observation_status,
                 columns: column_labels,
                 column_roles,
+                column_priorities,
                 total_rows,
+                page: envelope_page(response),
                 coverage: table_source_coverage(
                     binding,
                     response,
@@ -2486,7 +2724,11 @@ pub(crate) fn view_pointer_tree_fold(
     let (channel, _) = binding.primary_source()?;
     let source =
         super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel).encode();
-    let records = super::content::source_collection(binding, core.data.sources.get(&source)?);
+    let (records, _) = super::content::source_collection_limited(
+        binding,
+        core.data.sources.get(&source)?,
+        core.data.source_row_limit(),
+    );
     // Rendering may provide a positional fallback for malformed source rows;
     // that fallback cannot establish a stable identity for a delayed event.
     if records
@@ -3126,6 +3368,22 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
         posture: surface
             .map(|attachment| attachment.posture)
             .unwrap_or_default(),
+        // The active Surface's own binding states the project drawn: a rebind
+        // replaces it with a later generation, while the root's never changes.
+        project_chip: core
+            .active_surface()
+            .and_then(|active| core.binding_attachment(&active.binding().binding_attachment_id))
+            .or(surface)
+            .and_then(|attachment| {
+                super::seat_project::project_chip(
+                    &attachment.seat_project,
+                    core.data.coverage_wording.as_ref(),
+                )
+            })
+            .map(|chip| session::RyeOsProjectChipVm {
+                text: chip.text,
+                tone: tone_from_name(Some(&chip.tone)),
+            }),
     }
 }
 
@@ -4781,6 +5039,36 @@ mod tests {
     }
 
     #[test]
+    fn a_table_waits_for_the_signed_row_bound_and_then_shows_its_rows() {
+        let (mut core, tile) = table_with_roles();
+        let read = |core: &RyeOsCore| {
+            let RyeOsViewVm::Table {
+                total_rows,
+                source_status,
+                ..
+            } = bound_view_vm(core, tile, "view:test/source-status")
+            else {
+                panic!("table")
+            };
+            (total_rows, source_status.map(|status| status.state))
+        };
+        // No wording yet: the bound is not known, so no row is drawn and the
+        // table says it is loading, never that it is empty.
+        core.data.coverage_wording = None;
+        assert_eq!(read(&core), (0, Some("loading".to_owned())));
+        // Wording that states a bound: the rows are drawn, the wait is over.
+        core.data.coverage_wording = Some(wording());
+        let (rows, status) = read(&core);
+        assert_eq!(rows, 1);
+        assert_ne!(status.as_deref(), Some("loading"));
+        // Wording that states no bound is an unbounded source: rows draw too.
+        let mut unbounded = wording();
+        unbounded.limits.source_rows = None;
+        core.data.coverage_wording = Some(unbounded);
+        assert_eq!(read(&core).0, 1);
+    }
+
+    #[test]
     fn shipped_tables_name_the_roles_their_fields_obviously_are() {
         use crate::ui::content::{ColumnRole, ViewBinding, table_columns};
         let history: ViewBinding = serde_yaml::from_str(include_str!(
@@ -6010,7 +6298,13 @@ mod tests {
         assert_eq!(source.item_ref, "service:ui/ryeos-ui/threads/list");
         assert_eq!(source.params["limit"], 200);
         assert_eq!(source.params["sort"], "watch");
-        assert_eq!(source.collection.as_deref(), Some("threads"));
+        assert_eq!(
+            source
+                .collection
+                .as_ref()
+                .and_then(crate::ui::content::CollectionBinding::as_plain),
+            Some("threads")
+        );
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),

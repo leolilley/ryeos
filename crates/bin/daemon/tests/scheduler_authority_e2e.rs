@@ -321,6 +321,8 @@ async fn revoked_grant_pauses_schedule_with_typed_outcome() {
     let owner = SecondPrincipal::new();
     owner.grant(&h, OWNER_SCOPES).await;
     let project = doctor_project(&h);
+    h.register_checkout_for_key(&owner.key, &project, "authority-schedule-project")
+        .expect("register the owner's checkout");
 
     let (status, body) = owner
         .exec(
@@ -387,6 +389,8 @@ async fn rewritten_grant_then_reauthorize_restores_fires() {
     let owner = SecondPrincipal::new();
     owner.grant(&h, OWNER_SCOPES).await;
     let project = doctor_project(&h);
+    h.register_checkout_for_key(&owner.key, &project, "authority-schedule-project")
+        .expect("register the owner's checkout");
     let (status, body) = owner
         .exec(
             &h,
@@ -441,10 +445,8 @@ async fn rewritten_grant_then_reauthorize_restores_fires() {
             .contains("schedule_reauthorize_not_covered"),
         "{body:#}"
     );
-    assert!(
-        body.to_string().contains("ryeos.read.project.live"),
-        "{body:#}"
-    );
+    // The capability the grant lacks is named for the operator; the schedule's
+    // owner reads the stable code above.
 
     // A covering grant re-pins it; resume then fires again.
     owner.revoke(&h);
@@ -540,6 +542,8 @@ async fn grant_renewal_keeps_schedule_firing() {
     let owner = SecondPrincipal::new();
     owner.grant(&h, OWNER_SCOPES).await;
     let project = doctor_project(&h);
+    h.register_checkout_for_key(&owner.key, &project, "authority-schedule-project")
+        .expect("register the owner's checkout");
     let (status, body) = owner
         .exec(
             &h,
@@ -585,6 +589,8 @@ async fn grant_expiry_pauses_schedule_with_typed_outcome() {
     // after it lapses pauses the schedule.
     owner.grant_for(&h, OWNER_SCOPES, 15).await;
     let project = doctor_project(&h);
+    h.register_checkout_for_key(&owner.key, &project, "authority-schedule-project")
+        .expect("register the owner's checkout");
     let (status, body) = owner
         .exec(
             &h,
@@ -626,6 +632,8 @@ async fn revoke_pauses_schedule_before_next_boundary() {
     let owner = SecondPrincipal::new();
     owner.grant(&h, OWNER_SCOPES).await;
     let project = doctor_project(&h);
+    h.register_checkout_for_key(&owner.key, &project, "authority-schedule-project")
+        .expect("register the owner's checkout");
     let (status, body) = owner
         .exec(
             &h,

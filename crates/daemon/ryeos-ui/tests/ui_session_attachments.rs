@@ -62,6 +62,7 @@ fn secondary_attachment(
                 compiled_binding: candidate.compiled_binding,
                 presentation: candidate.presentation,
                 project_authority: None,
+                seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
             },
             16,
             state.node_policy.generation_digest(),

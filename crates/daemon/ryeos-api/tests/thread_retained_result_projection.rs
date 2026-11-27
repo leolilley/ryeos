@@ -120,12 +120,10 @@ async fn exact_thread_get_exposes_retained_result_and_preserves_owner_boundary()
             .unwrap()
             .is_null()
     );
-    assert!(
-        get(state.clone(), "T-missing-result", &owner)
-            .await
-            .unwrap()
-            .is_null()
-    );
+    // A missing thread and another key's thread are one answer.
+    let missing = get(state.clone(), "T-missing-result", &owner)
+        .await
+        .unwrap_err();
     let wrong_owner = get(
         state,
         "T-retained-result",
@@ -133,6 +131,7 @@ async fn exact_thread_get_exposes_retained_result_and_preserves_owner_boundary()
     )
     .await
     .unwrap_err();
+    assert!(matches!(missing, HandlerError::NotFound));
     assert!(matches!(wrong_owner, HandlerError::NotFound));
 }
 

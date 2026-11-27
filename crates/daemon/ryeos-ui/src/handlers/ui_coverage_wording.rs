@@ -41,7 +41,7 @@ pub fn response_from_config(mut value: Value) -> Result<Value, String> {
     };
     if let Some(unknown) = body
         .keys()
-        .find(|key| !matches!(key.as_str(), "fallback" | "states" | "reasons"))
+        .find(|key| !matches!(key.as_str(), "fallback" | "states" | "reasons" | "limits"))
     {
         return Err(format!("coverage wording has an unknown field {unknown}"));
     }
@@ -102,8 +102,32 @@ mod tests {
                 .label,
             "The page does not prove exhaustive membership."
         );
+        assert_eq!(wording.limits.source_rows, Some(500));
+        assert!(
+            wording.reasons["source_row_limit"]
+                .label
+                .contains("{total}")
+        );
         for slot in ["empty", "empty_project"] {
             assert!(wording.reasons.contains_key(slot), "{slot}");
+        }
+    }
+
+    #[test]
+    fn the_shipped_config_has_a_sentence_for_each_seat_project_absence() {
+        let response = response_from_config(shipped()).unwrap();
+        let wording = RyeOsCoverageWordingDto::from_response(&response).unwrap();
+        for code in [
+            "unregistered",
+            "owner_key_not_active",
+            "no_project_name",
+            "checkout_name_changed",
+        ] {
+            let entry = wording
+                .reasons
+                .get(&format!("seat_project_{code}"))
+                .unwrap_or_else(|| panic!("no sentence for {code}"));
+            assert!(!entry.label.trim().is_empty(), "{code}");
         }
     }
 
@@ -118,6 +142,12 @@ mod tests {
         let mut stray = shipped();
         stray["extra"] = json!(true);
         assert!(response_from_config(stray).is_err());
+        let mut zero = shipped();
+        zero["limits"]["source_rows"] = json!(0);
+        assert!(response_from_config(zero).is_err());
+        let mut unknown_limit = shipped();
+        unknown_limit["limits"]["other"] = json!(1);
+        assert!(response_from_config(unknown_limit).is_err());
         assert!(response_from_config(json!([])).is_err());
     }
 }

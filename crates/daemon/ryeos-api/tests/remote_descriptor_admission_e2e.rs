@@ -884,3 +884,49 @@ fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
         project_bindings: HashMap::new(),
     }
 }
+
+/// A peer's public-key document that lacks a field the pin binds fails
+/// `remote configure` loudly, naming the field, and writes no pin. A shaped
+/// answer that drops a protocol-required field must never be read as a
+/// default.
+#[tokio::test]
+async fn remote_configure_refuses_a_public_key_document_missing_a_required_field() {
+    for field in [
+        "principal_id",
+        "fingerprint",
+        "signing_key",
+        "vault_fingerprint",
+        "site_id",
+    ] {
+        let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+        let remote_state = remote_identity();
+        let mut public_key = public_key_response(&remote_state);
+        let fingerprint = public_key["fingerprint"].as_str().unwrap().to_owned();
+        public_key.as_object_mut().unwrap().remove(field);
+        let (url, _contacts) = start_mock_remote(public_key).await.unwrap();
+        let app_root = local_state.config.app_root.clone();
+        let context = operator_context(&local_state);
+
+        let error = remote_configure::handle(
+            remote_configure::Request {
+                remote: Some("short".to_owned()),
+                url: Some(url),
+                descriptor: None,
+                expect_fingerprint: Some(fingerprint),
+            },
+            context,
+            Arc::new(local_state),
+        )
+        .await
+        .expect_err(field);
+
+        assert!(
+            format!("{error:?}").contains(field),
+            "the refusal for a missing {field} must name it: {error:?}"
+        );
+        assert!(
+            config::load_remotes(&app_root).unwrap().is_empty(),
+            "{field}"
+        );
+    }
+}

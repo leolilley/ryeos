@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T04:36:15Z:37c9a47e4c3a0b2c859007a45993ae2b317c73ce88c6203159201d40d5f5642d:C1qF9JZW7P5awms4He7zGEwiJMR3E71wk4UMgNEtX2uctUYorGPLzbHW47wQKF85e0zkRbHWOXgenuUPINEmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:44:16Z:e74a2031156942d2886c18c89c048b60ccb34f4178fe3ef80acb62ce18789b15:zIZs0wpaqAU+YeSZJi7aWKfmt6KUPjlZ2FxkdkYQANZyN1eUAOZc4MhDVd41oTmj4Xv3xedJXbr6w4HPRnvDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -348,6 +348,14 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the detached workspace input cut, epoch 146.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 145 --schema-cut-to 146` on its next upgrade; a node still on 144 goes straight to 146 with `--schema-cut-from 144 --schema-cut-to 146`. Admitted launch capsule schema 41 and launch metadata schema 40 seal two required-nullable fields for every launch: the parent workspace generation a detached child reads as data, and the chain the launch originated from. The child's process receives that generation as a private read-only-by-discard copy materialized by hash, and the generation stays reachable for garbage collection exactly while the child is live. A launch carrying a workspace input is never eligible for product-build reuse. A detached link from a grant-bearing parent also records a cancel-on-parent-end flag in a new `thread_child_link` column; nothing acts on it yet. Dispatch-effect replay moves to operational replay-index epoch 20 with the same capsule schema. Nothing in this cut makes a detached child reachable from a worker session; a node that has not enabled detached children sees no behaviour change.
+
+Operator note for the thread workload ceiling cut, epoch 145.
+
+Every node runs `ryeos node reset execution-history --confirm --schema-cut-from 144 --schema-cut-to 145` on its next upgrade. Admitted launch capsule schema 40 and launch metadata schema 39 seal a required thread workload ceiling for every launch: `unbounded` for a root launch, otherwise the narrower of the parent thread's ceiling and anything derived at the spawn. The reset discards launch rows written without it, and dispatch-effect replay moves to operational replay-index epoch 19 with the same capsule schema. Nothing in this cut yet creates a bounded ceiling; a node that has not enabled detached children from a worker session sees no behaviour change.
 
 Operator note for the owner+name project identity cut, epoch 144.
 
@@ -1005,7 +1013,7 @@ the operator key inside the CLI and submitted to the running node; see
 | Verb | Effect |
 |---|---|
 | `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes, in project `pid:v1:<owner>/<declared name>` with the operator's principal as owner (printed before signing) |
-| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes when given |
+| `ryeos --project <dir> endorse --standing --kind <kind>... --lifetime-secs <n>` | Endorse every item of those kinds the authoring key signs in that project, until the lifetime passes (required, at most 30 days; the expiry is printed before signing). Only kinds whose schema allows a standing endorsement can be named; others are refused with `endorsement_kind_not_standing` |
 | `ryeos sign`, `ryeos item remove`, `ryeos endorse` (announcement) | After the change is made and recorded, each tells a running local node through `items/revised` so seats showing the changed items can pick it up. With no node running the call is skipped and the output says so; the change is unaffected |
 | `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
 | `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |
@@ -1049,6 +1057,41 @@ checkout paths. Refusal codes: `project_manifest_missing`, `project_manifest_nam
 `project_manifest_name_invalid`, `project_name_mismatch`,
 `project_name_required`, `project_owner_is_node_key`,
 `project_owner_is_authoring_key`.
+
+### Applying a published result to your checkout
+
+`ryeos project apply <project-name> <base-snapshot-hash> <result-snapshot-hash> [--checkout <path>]`
+writes a published result into a registered checkout of yours. The base is the
+snapshot the result was authored against and the result is the snapshot it
+produced. On a running node, service `project/apply-published`; it needs the
+live-project-write capability and its own execute capability.
+
+- The checkout is taken from your own registration of the project (name it with
+  `--checkout` when you registered several); a path is never accepted from the
+  request. A project registered by anyone else, or not at all, is refused the
+  same way. The registered checkout must still declare the project's name.
+- The result must be the project's published head or an ancestor of it, and the
+  base an ancestor of the result.
+- **Only the paths the result changes are checked.** A file you edited that the
+  result does not touch stays as it is and never blocks the apply. A path the
+  result changes must still equal the base (or already equal the result); a
+  path the result adds must not exist (or already equal the result); a path
+  inside a secret or node-owned control root is refused.
+- **Nothing is merged.** If any path conflicts, nothing is written and the
+  answer lists every conflicting path with a reason: `drifted` (you changed it),
+  `missing` (you removed it), `blocks_new_file` (a different file is already
+  there), `not_regular` (not a plain file, or a parent is a link),
+  `protected_path`. The list names at most 256 paths and carries the total and
+  a `truncated` flag. Move or commit those changes and apply again.
+- It is crash-safe and repeatable: the apply stages, backs up and swaps under
+  the same lock, journal and rollback as `ryeos remote pull`, an interrupted
+  apply must be recovered before another starts (`project_apply_recovery_required`),
+  and applying the same result again changes nothing.
+- A second result that touches paths the first already changed conflicts on
+  those paths until you commit the first.
+
+`ryeos remote pull` uses the same apply and now also checks only the paths the
+result changes.
 
 A registration is what lets a live checkout state its project identity: a run
 launched from a registered checkout, by the registering owner holding

@@ -5159,6 +5159,7 @@ impl ThreadLifecycleService {
         // by signal, which never drains its own command) reaches finalization
         // HERE, not through `finalize_thread_inner`.
         self.settle_open_commands(thread_id, terminal_status);
+        self.nudge_parent_end_stop(thread_id, terminal_status);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -5688,6 +5689,7 @@ impl ThreadLifecycleService {
         // `commands.wait` blocked on them — otherwise the await rides to its
         // timeout. Best-effort: a failure here must not fail finalization.
         self.settle_open_commands(&params.thread_id, terminal_status);
+        self.nudge_parent_end_stop(&params.thread_id, terminal_status);
 
         let finalized = self
             .get_thread(&params.thread_id)?
@@ -5706,6 +5708,59 @@ impl ThreadLifecycleService {
         );
 
         Ok(finalized)
+    }
+
+    /// After a thread's terminal commit: when it has flagged detached children
+    /// still live, wake the daemon's recovery pass, whose sweep stops them (see
+    /// `cascade::stop_flagged_children_of_ended_parents`). The stop runs in that
+    /// pass, never here, so a finalizing session never waits on its own
+    /// children, on its own hosted-operation gate, or on a grace period. A
+    /// continued segment is not an end. Best-effort: a failure here is logged
+    /// and never fails finalization; the periodic sweep finds the same
+    /// children.
+    fn nudge_parent_end_stop(&self, thread_id: &str, terminal_status: &str) {
+        if terminal_status == ThreadStatus::Continued.as_str() {
+            return;
+        }
+        // The session ends with its tail: a chain that has not ended, or one
+        // with no flagged child in any segment, has nothing to wake.
+        match crate::cascade::session_chain_has_ended(&self.state_store, thread_id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to resolve the ended session's chain; the periodic sweep retries"
+                );
+                return;
+            }
+        }
+        let children = match crate::cascade::session_flagged_dispatch_children(
+            &self.state_store,
+            thread_id,
+        ) {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to list the ended session's flagged children; the periodic sweep retries"
+                );
+                return;
+            }
+        };
+        for child in children {
+            let live = match self.state_store.get_thread(&child) {
+                Ok(Some(thread)) => !crate::state_store::is_terminal_status(&thread.status),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            if live {
+                crate::recovery_nudge::nudge();
+                return;
+            }
+        }
     }
 
     /// Reject any commands still open for a finalized thread and wake blocked
@@ -6368,6 +6423,9 @@ impl ThreadLifecycleService {
         {
             return false;
         }
+        if filter.exclude_kinds.contains(&item.kind) {
+            return false;
+        }
         if let Some(project_root) = &filter.project_root
             && item.project_root.as_deref().map(Path::new) != Some(project_root.as_path())
         {
@@ -6748,8 +6806,8 @@ impl ThreadLifecycleService {
     }
 
     /// Record the portable parent→child lineage event for a child created
-    /// through a runtime's `runtime.dispatch_action` callback, unless the
-    /// calling runtime declares (`writes_child_lineage`) that it writes its own.
+    /// through a runtime's `runtime.dispatch_action` callback. The daemon is
+    /// the only writer: a runtime append of `child_thread_spawned` is refused.
     ///
     /// The caller is the operation's first caller, read from the retained
     /// action intent, so a replay from a later thread of the same chain
@@ -6757,8 +6815,9 @@ impl ThreadLifecycleService {
     /// was not created through the callback and is not owed an event. The
     /// spawn reason is the child's effective link relation, which differs
     /// from the requested one for a follow child. The append is idempotent: a
-    /// child that already has an edge (a same-chain child, or a repeated
-    /// drive) yields `AlreadyPresent` and writes nothing.
+    /// child whose lineage event is already written (a repeated drive) yields
+    /// `AlreadyPresent` and writes nothing; an edge derived only from the
+    /// child's `upstream_thread_id` (a same-chain child) is not the event.
     pub fn record_dispatch_child_lineage(
         &self,
         child_thread_id: &str,
@@ -6775,26 +6834,6 @@ impl ThreadLifecycleService {
                 ChildLineageAppendOutcome::ParentSettled,
             ));
         };
-        let parent_identity = self
-            .state_store
-            .get_launch_metadata(parent_thread_id)?
-            .and_then(|metadata| metadata.admitted_artifact_identity);
-        if let Some(ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
-            runtime_ref,
-            ..
-        }) = parent_identity
-        {
-            let canonical = CanonicalRef::parse(&runtime_ref)
-                .map_err(|error| anyhow!("parent runtime ref `{runtime_ref}`: {error}"))?;
-            let runtime = self.engine.runtimes.lookup_by_ref(&canonical).ok_or_else(|| {
-                anyhow!(
-                    "runtime `{runtime_ref}` of thread {parent_thread_id} is not in the runtime registry"
-                )
-            })?;
-            if runtime.yaml.writes_child_lineage {
-                return Ok(DispatchChildLineage::NotOwed);
-            }
-        }
         let child = self
             .state_store
             .get_thread(child_thread_id)?
@@ -6807,16 +6846,26 @@ impl ThreadLifecycleService {
             .ok_or_else(|| {
                 anyhow!("child thread {child_thread_id} has no recorded link to its parent")
             })?;
+        let mut payload = json!({
+            "child_thread_id": child_thread_id,
+            "item_id": child.item_ref,
+            "operation_id": intent.operation_id,
+            "spawn_reason": relation,
+        });
+        // A link recorded to cancel its child when the parent ends says so in
+        // the session chain, before the child runs, beside the edge itself.
+        if self
+            .state_store
+            .child_link_cancel_on_parent_end(child_thread_id)?
+            == Some(true)
+        {
+            payload["cancel_on_parent_end"] = json!(true);
+        }
         let outcome = self.append_child_thread_spawned_once(
             &parent.chain_root_id,
             parent_thread_id,
             child_thread_id,
-            json!({
-                "child_thread_id": child_thread_id,
-                "item_id": child.item_ref,
-                "operation_id": intent.operation_id,
-                "spawn_reason": relation,
-            }),
+            payload,
         )?;
         Ok(DispatchChildLineage::Recorded(outcome))
     }

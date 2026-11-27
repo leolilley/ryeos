@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:46Z:264152056ff8dba607f4f188ea49d6b6408a0d87fc6fd12c9ffda7ddfa41f9bc:C16Rdu+fR+GT2izvWkgWmuji+ajCRBq1qEr45Z+QVMhOCLYMXK517tbs36eZg3bY0Cnm5RON3VbJg3Y4PlduDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:d101584eb2f69a5f0210ed5f06084b7e936a7077169c7b2d84f1ceec251095ee:Q2n6cOejkSDOL3kh8wJoylmrlAQzobsPBVusp6SGO/dccpaU87vuxYUEqQbWQ1zQ1+EfgrJr0GogbTXWW6gnDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.sign
 availability: local
@@ -9,3 +9,5 @@ schema:
   registry_root: string?
   registry_roots: array?
 description: "Sign all signable items in a bundle source tree and rebuild binary manifest sidecars when needed."
+# Signing, publishing and node inspection are node-operator tools; a principal is served nothing.
+disclosure: {}

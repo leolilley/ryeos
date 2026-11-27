@@ -2190,14 +2190,17 @@ fn recover_thread_usage(
                 .validate()
                 .context("resume: invalid thread_usage event")?;
             if let Some(previous) = latest.as_ref()
-                && (usage.completed_turns < previous.completed_turns
-                    || usage.input_tokens < previous.input_tokens
-                    || usage.output_tokens < previous.output_tokens
-                    || usage.spend_usd < previous.spend_usd
-                    || usage.spawns_used < previous.spawns_used
-                    || usage.last_settled_turn_seq < previous.last_settled_turn_seq)
+                && usage.cumulative_regression_from(previous).is_some()
             {
                 anyhow::bail!("resume: thread_usage cumulative authority regressed");
+            }
+            // The status is cumulative too: a settlement that follows one that
+            // admitted missing usage cannot claim the usage is complete.
+            if let Some(previous) = latest.as_ref()
+                && !previous.usage_status.is_complete()
+                && usage.usage_status.is_complete()
+            {
+                anyhow::bail!("resume: thread_usage usage status regressed to complete");
             }
             unconsumed_settlement_turn = Some(usage.last_settled_turn_seq);
             latest = Some(usage);
@@ -3874,6 +3877,47 @@ mod tests {
         let usage = recover_thread_usage(&events, progress).unwrap().unwrap();
         assert_eq!(usage.completed_turns, 1);
         assert_eq!(usage.last_settled_turn_seq, 1);
+    }
+
+    fn usage_event_with_status(
+        completed_turns: u32,
+        last_settled_turn_seq: u64,
+        status: &str,
+    ) -> ReplayedEventRecord {
+        let mut event = usage_event(completed_turns, last_settled_turn_seq);
+        if status != "complete" {
+            event.payload["usage_status"] = json!(status);
+        }
+        event
+    }
+
+    #[test]
+    fn a_recovered_usage_carries_the_status_its_turns_earned() {
+        // One settlement ahead of an empty transcript is the pre-cognition
+        // crash cut resume accepts; the status rides with that settlement.
+        let events = vec![usage_event_with_status(1, 1, "partial")];
+        let progress = recover_turn_progress(&events).unwrap();
+        let usage = recover_thread_usage(&events, progress).unwrap().unwrap();
+        assert_eq!(
+            usage.usage_status,
+            ryeos_runtime::envelope::UsageStatus::Partial
+        );
+        assert_eq!(usage.completed_turns, 1);
+    }
+
+    #[test]
+    fn a_settlement_after_missing_usage_cannot_claim_complete() {
+        let events = vec![
+            usage_event_with_status(1, 1, "unavailable"),
+            usage_event(2, 2),
+        ];
+        let progress = recover_turn_progress(&events).unwrap();
+        assert!(
+            recover_thread_usage(&events, progress)
+                .unwrap_err()
+                .to_string()
+                .contains("usage status regressed to complete")
+        );
     }
 
     #[test]

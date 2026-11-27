@@ -431,6 +431,23 @@ impl CompiledDispatchInvoker {
             engine: project_ctx.request_engine.clone(),
             plan_ctx,
             requested_call: None,
+            // A caller principal is classified by its own key. A route's
+            // configured fixed principal is a grant the route admitted, never
+            // the operator key.
+            disclosure_class: match (&self.authority, ctx.principal.as_ref()) {
+                (DispatchAuthority::CallerPrincipal, Some(principal)) => {
+                    ryeos_app::operator_authority::disclosure_class_for(
+                        &ctx.state,
+                        &principal.handler_context(),
+                    )
+                }
+                (DispatchAuthority::CallerPrincipal, None) => {
+                    ryeos_node_runtime::disclosure::DisclosureClass::Public
+                }
+                (DispatchAuthority::FixedPrincipal { .. }, _) => {
+                    ryeos_node_runtime::disclosure::DisclosureClass::Principal
+                }
+            },
         };
 
         let (root_admission, root_dispatch_evidence) = match confinement {

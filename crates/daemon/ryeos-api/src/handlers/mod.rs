@@ -25,6 +25,7 @@ pub mod bundle_catalog_publish;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
+pub mod bundle_pull;
 pub mod bundle_release;
 pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
@@ -90,10 +91,12 @@ pub mod objects_put;
 pub mod objects_stage_chunk;
 pub mod offline_operations;
 pub mod product_qualification_launch;
+pub mod project_apply_published;
 pub mod project_apply_snapshot;
 pub mod project_owner;
 pub mod project_snapshot_status;
 pub mod project_status;
+pub mod publication;
 pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
@@ -158,6 +161,7 @@ pub mod threads_get;
 pub mod threads_input;
 pub mod threads_list;
 pub mod threads_receipts;
+pub mod threads_result;
 pub mod threads_set_facet;
 pub mod threads_tail;
 pub mod threads_timeline;
@@ -207,6 +211,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_closure_describe::DESCRIPTOR,
     objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
+    project_apply_published::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
     project_owner::DESCRIPTOR,
     project_status::DESCRIPTOR,
@@ -215,6 +220,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     launch_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
+    threads_result::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
     threads_tail::DESCRIPTOR,
     threads_timeline::DESCRIPTOR,
@@ -305,6 +311,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     worker_placements::ADOPT_DESCRIPTOR,
     worker_placements::ABORT_DESCRIPTOR,
     bundle_install::DESCRIPTOR,
+    bundle_pull::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     trust_list::LIST_DESCRIPTOR,
@@ -360,6 +367,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     endorsements::RECORD,
     endorsements::REVOKE,
     endorsements::LIST,
+    publication::FREEZE,
+    publication::PUBLISH,
+    publication::RETIRE,
+    publication::LIST,
     items_revised::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,

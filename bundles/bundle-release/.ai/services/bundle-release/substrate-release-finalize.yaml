@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:763d1f5c8b4443e0d765925914a4c3bebbc166539e13abac1f69e9e4dccf7410:cL53PeO5Lygll5OuAzf/QRHcl48fud5DY3Xp6gvrdvjpe1SAd+e8loAwgPCww/JYlHYsfJwzN8KrfUxVI4C9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:f60c084fc63bc7e9ded76ea7b13f53149a548e8567b3a423006679ed66409af4:mcndyyzMlHyhGSt+5v8KBVDJTkX5RBEZIUzsgm7XuuSrItvYRhPQr3WUl9dYEjzL8Y6T7Z7Roxuj2Js2XHqeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-release-finalize
 version: "1.0.0"
@@ -23,3 +23,5 @@ schema:
   qualification_evidence_hashes: array
   core_generation_hash: string
   core_generation_attestation_hash: string
+# Release tooling that builds, signs or publishes with the node's publishing authority and reads source paths; only the node operator runs it.
+disclosure: {}

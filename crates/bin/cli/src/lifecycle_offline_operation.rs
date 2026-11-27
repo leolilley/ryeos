@@ -274,7 +274,10 @@ fn signer_authority(report: &Value, fingerprint: &str) -> Result<Option<RemoteSi
         return Ok(None);
     }
     let Some(grant_digest) = text("grant_digest") else {
+        // The free-text reason reaches only the operator; any other reader
+        // gets the closed code.
         let reason = text("grant_error")
+            .or_else(|| text("grant_error_code"))
             .map(|error| format!(" ({error})"))
             .unwrap_or_default();
         bail!(

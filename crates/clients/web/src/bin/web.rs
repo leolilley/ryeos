@@ -435,7 +435,7 @@ mod tests {
                 "presentation": {"definition": {"kind": "surface", "surface": {"name": "assistant-observe"}}, "views": {}},
                 "project_path": null,
                 "subject": {"kind": "projectless"},
-                "posture": "observation_only",
+                "posture": "observation_only","seat_project":{"state":"projectless"},
                 "named_items": [], "binding_request_bounds": {
                     "max_request_bytes": 4096,
                     "max_input_bytes": 1024,

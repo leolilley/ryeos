@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T02:16:20Z:4316ba73d6cf84123598223cfa3786933346ede3f9612b67b364868e7c72c8ad:25AxvEyikzlMPou9Msg2UsaaY2J86rWN3mscJzRFwzXjBWi2WayA1WbBx0evEp/XL3s1GQs66jnlk0xGIScxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:5471b56e55e1835fb8f0b938af85bd02bc140f26a59a7fe77fdf8b947df36af1:sl6mmgCUck0oTWyaPC3Inp2AypUg3Oe17Tob2f8gRipVv8Dwz/wHrsMoDoz1srb0dKa6RK9Dcp6DV+Qc6pYtDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-touch
 version: "1.0.0"
@@ -11,3 +11,8 @@ record_thread: false
 availability: daemon_only
 schema:
   thread_id: string
+disclosure:
+  principal:
+    - "/presentation_id"
+    - "/thread_id"
+    - "/touched"

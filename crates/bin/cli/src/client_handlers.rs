@@ -283,8 +283,10 @@ fn text_list(value: Option<&Value>, flag: &str) -> Result<Vec<String>, CliError>
 /// Sign an endorsement with the operator key, in this process, and hand it to
 /// the node. Per-change: `--item` names the exact items (refs, globs or `.ai`
 /// paths) in the project; their digests are read from the signed bytes on disk.
-/// Standing: `--standing --kind <kind>` covers a kind in the project, until
-/// `--lifetime-secs` pass when given. The node verifies the signature against
+/// Standing: `--standing --kind <kind> --lifetime-secs <n>` covers a kind in
+/// the project until `n` seconds pass (30 days at most); only kinds whose
+/// schema allows a standing grant can be named, and the expiry is printed
+/// before anything is signed. The node verifies the signature against
 /// its signer registry, countersigns and stores it; the key never leaves this
 /// process.
 pub(crate) async fn endorse_items(
@@ -338,6 +340,12 @@ pub(crate) async fn endorse_items(
     if !standing && (!kinds.is_empty() || lifetime_secs.is_some()) {
         return Err(local("--kind and --lifetime-secs belong to --standing"));
     }
+    if standing && lifetime_secs.is_none() {
+        return Err(local(
+            "a standing endorsement must end: give --lifetime-secs <n> (at most 30 days, \
+             2592000 seconds)",
+        ));
+    }
 
     let described = if standing {
         Vec::new()
@@ -370,6 +378,36 @@ pub(crate) async fn endorse_items(
         .and_then(Value::as_str)
         .ok_or_else(|| local("the node did not return its endorsement ledger head"))?
         .to_owned();
+    if standing {
+        // Refuse before signing anything what the node would refuse after.
+        let allowed: Vec<&str> = facts
+            .get("standing_kinds")
+            .and_then(Value::as_array)
+            .map(|kinds| kinds.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if let Some(kind) = kinds.iter().find(|kind| !allowed.contains(&kind.as_str())) {
+            return Err(local(format!(
+                "endorsement_kind_not_standing: kind `{kind}` cannot be endorsed as a standing \
+                 grant (kinds that can: {}). A standing grant would trust everything the \
+                 authoring key signs of it from now on; endorse its items one change at a time \
+                 with `ryeos endorse --item <ref>`",
+                if allowed.is_empty() {
+                    "none".to_owned()
+                } else {
+                    allowed.join(", ")
+                }
+            )));
+        }
+        let max = facts
+            .get("max_standing_lifetime_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(ryeos_engine::trust::MAX_STANDING_LIFETIME_SECS);
+        if lifetime_secs.is_some_and(|secs| secs > max) {
+            return Err(local(format!(
+                "endorsement_standing_lifetime_too_long: --lifetime-secs is at most {max}"
+            )));
+        }
+    }
     let endorser = format!("fp:{}", signer.fingerprint);
     // The endorsement names the project as pid:v1:<owner>/<declared name>:
     // the owner is the principal the node registry resolves the endorsing
@@ -399,12 +437,21 @@ pub(crate) async fn endorse_items(
     let now = lillux::time::unix_secs_now();
     let endorsed_at = lillux::time::iso8601_from_unix_secs(now);
     let body = if standing {
+        let not_after = lifetime_secs
+            .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs)));
+        if let Some(not_after) = &not_after {
+            console
+                .info(&crate::tty::Diagnostic::info(format!(
+                    "standing endorsement of {} in {project_text}, ending {not_after}",
+                    kinds.join(", ")
+                )))
+                .map_err(CliError::Io)?;
+        }
         EndorsementBody::standing(
             &project_identity,
             &endorser,
             kinds,
-            lifetime_secs
-                .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs))),
+            not_after,
             &endorsed_at,
             &nonce,
             &ledger_head,
@@ -453,6 +500,133 @@ pub(crate) async fn endorse_items(
         recorded["announcement"] = announcement;
     }
     Ok(recorded)
+}
+
+/// The instant `--not-after` names: a date (the end of that UTC day) or a
+/// canonical UTC instant (`YYYY-MM-DDTHH:MM:SSZ`).
+fn parse_not_after(text: &str) -> Result<String, CliError> {
+    let candidate = if text.len() == 10 {
+        format!("{text}T23:59:59Z")
+    } else {
+        text.to_owned()
+    };
+    lillux::time::unix_secs_from_iso8601(&candidate)
+        .map(lillux::time::iso8601_from_unix_secs)
+        .ok_or_else(|| {
+            local("--not-after must be a UTC date (YYYY-MM-DD) or instant (YYYY-MM-DDTHH:MM:SSZ)")
+        })
+}
+
+/// Publish an installed bundle to anyone holding the link: freeze it on the
+/// node, sign the publication record with the operator key in this process,
+/// and hand it to the node, which checks the signer and countersigns. The key
+/// never leaves this process.
+pub(crate) async fn publish_bundle(
+    app_root: &Path,
+    console: &crate::tty::Console,
+    parameters: &Value,
+) -> Result<Value, CliError> {
+    let bundle_name = parameters
+        .get("bundle_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("publish requires a bundle name"))?
+        .to_owned();
+    let not_after = parse_not_after(
+        parameters
+            .get("not_after")
+            .and_then(Value::as_str)
+            .ok_or_else(|| local("publish requires --not-after <date>"))?,
+    )?;
+    console
+        .info(&crate::tty::Diagnostic::info(
+            "anything published can be copied and cannot be recalled",
+        ))
+        .map_err(CliError::Io)?;
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let facts = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:publication/freeze",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "bundle_name": bundle_name },
+        }),
+    )
+    .await?;
+    let text = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("the node's freeze answer omits {name}")))
+    };
+    let number = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| local(format!("the node's freeze answer omits {name}")))
+    };
+    let (node_fingerprint, manifest_hash) = (text("node_fingerprint")?, text("manifest_hash")?);
+    let version = text("bundle_version")?;
+    let read_bound = number("largest_file_bytes")?
+        .max(number("manifest_bytes")?)
+        .clamp(
+            ryeos_engine::trust::MIN_PUBLICATION_READ_BYTES,
+            ryeos_engine::trust::MAX_PUBLICATION_READ_BYTES,
+        );
+    let id: [u8; 16] = rand::random();
+    let nonce: [u8; 16] = rand::random();
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let record = ryeos_engine::trust::PublicationRecord::new(
+        &hex(&id),
+        &hex(&nonce),
+        &node_fingerprint,
+        &manifest_hash,
+        &bundle_name,
+        &version,
+        &not_after,
+        &lillux::time::iso8601_now(),
+        read_bound,
+    );
+    record.validate_shape().map_err(local_error)?;
+    let signing_text = record.operator_signing_text().map_err(local_error)?;
+    let signature = signer.sign_bytes_base64(signing_text.as_bytes());
+    let mut published = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:publication/publish",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "record": record, "signature": signature },
+        }),
+    )
+    .await?;
+    if let (Some(id), Some(hash)) = (
+        published
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        published
+            .get("record_hash")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    ) {
+        published["share"] = json!({
+            "path": format!("/published/{id}"),
+            "node": format!("fp:{node_fingerprint}"),
+            "expect": hash,
+        });
+    }
+    Ok(published)
 }
 
 /// Tell a running node about a change this process made, so seats that show
@@ -1088,6 +1262,8 @@ mod tests {
             json!({ "project_path": path, "item": ["view:a"], "kind": ["view"] }),
             json!({ "project_path": path, "item": ["view:a"], "lifetime_secs": 5 }),
             json!({ "project_path": path, "standing": true, "kind": ["view"], "lifetime_secs": 0 }),
+            // A standing endorsement must end.
+            json!({ "project_path": path, "standing": true, "kind": ["knowledge"] }),
         ] {
             let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
             let error = endorse_items(root.path(), &console, &parameters)

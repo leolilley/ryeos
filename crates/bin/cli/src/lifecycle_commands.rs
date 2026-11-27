@@ -306,6 +306,26 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["key", "link-body"],
+        summary: "Build the body of a key link from the two public keys",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "link-sign"],
+        summary: "Sign a key-link body with one private key",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "link"],
+        summary: "Pin a signed key link on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["key", "unlink"],
+        summary: "Withdraw a key link, or every link one key signed, on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["project", "register"],
         summary: "Register a live checkout under its project name on a stopped node",
         category: "maintenance",
@@ -553,6 +573,10 @@ pub async fn try_dispatch(
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
             crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("key", Some(verb @ ("link-body" | "link-sign" | "link" | "unlink"))) => {
+            crate::lifecycle_key_link::run(verb, &argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("project", Some(verb @ ("register" | "unregister"))) => {
@@ -3246,7 +3270,13 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         checks.push(process_quarantine_check(&config.app_root));
         checks.push(sync_apply_quarantine_check(&config.app_root));
         checks.push(stale_publication_check(&config.app_root));
+        checks.push(node_journal_check(&config.app_root));
     } else {
+        checks.push(check(
+            "node_journal",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
         checks.push(check(
             "stale_publication",
             NA,
@@ -4186,6 +4216,59 @@ fn sync_apply_quarantine_details(
     })
 }
 
+/// The node journal must verify for the daemon to append to it: a project open
+/// whose journal write fails is refused with `journal_write_failed`. Reading
+/// the chain here finds a broken journal before an open does.
+fn node_journal_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::WARN;
+    let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let node = match ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())
+    {
+        Ok(node) => node,
+        Err(error) => {
+            return check(
+                "node_journal",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "the node key is needed to verify the journal's signatures",
+                }),
+            );
+        }
+    };
+    node_journal_check_with(ryeos_node::node_journal::NodeJournal::for_app_root(
+        app_root, node,
+    ))
+}
+
+fn node_journal_check_with(
+    journal: ryeos_node::node_journal::NodeJournal,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match journal.load() {
+        Ok(state) => check(
+            "node_journal",
+            OK,
+            serde_json::json!({
+                "last_sequence": state.last_sequence,
+                "retained": state.retained,
+                "dropped_records": state.dropped_records,
+                "head": state.head,
+            }),
+        ),
+        Err(error) => check(
+            "node_journal",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "the journal does not verify, so every project open is refused with `journal_write_failed` (cause `chain_integrity`) until it is repaired",
+            }),
+        ),
+    }
+}
+
 fn stale_publication_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -4939,14 +5022,20 @@ fn ui_browser_sessions_check(
                 "live_sessions": "n/a offline: needs the running node",
             }),
         ),
-        Err(error) => check(
-            "ui_browser_sessions",
-            FAIL,
-            serde_json::json!({
-                "error": format!("{error:#}"),
-                "fix": "publish a complete valid `.ai/node/policies/` generation whose ui_browser_sessions section is schema 5 (session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes); then run `ryeos node doctor` again",
-            }),
-        ),
+        Err(error) => {
+            let error = ryeos_node::name_policy_generation_cure(app_root, error);
+            if let Some(detail) = stale_section_schema_detail(&error) {
+                return check("ui_browser_sessions", FAIL, detail);
+            }
+            check(
+                "ui_browser_sessions",
+                FAIL,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": "publish a complete valid `.ai/node/policies/` generation whose ui_browser_sessions section is schema 6 (session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes, max_art_grants); then run `ryeos node doctor` again",
+                }),
+            )
+        }
     }
 }
 
@@ -5247,6 +5336,7 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
             }),
         )
     });
+    rows.push(key_link_row(app_root, &node_key, &graph));
     let public_successions: Vec<serde_json::Value> = chain
         .iter()
         .filter(|event| {
@@ -5628,6 +5718,80 @@ fn bundle_state_checks(
     checks
 }
 
+/// The `key_links` doctor row: every pinned key link grouped by the key that
+/// signed it, with its state. A link into an owner stops working when it
+/// expires, so one that ends within 30 days or already has is a warning.
+fn key_link_row(
+    app_root: &Path,
+    node_key: &lillux::crypto::VerifyingKey,
+    graph: &ryeos_engine::trust::SuccessionGraph,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let ledger = match ryeos_engine::trust::KeyLinkLedger::load(app_root, node_key) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            return check(
+                "key_links",
+                FAIL,
+                serde_json::json!({ "error": error.to_string() }),
+            );
+        }
+    };
+    let now = lillux::time::unix_secs_now();
+    let mut by_signer: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    let mut attention = 0_usize;
+    for stored in &ledger.links {
+        let body = &stored.link.body;
+        let (created, not_after) = body.times().unwrap_or((0, 0));
+        let revoked = ledger.is_revoked(&stored.id);
+        let lineage = body.key_fingerprint().ok().is_some_and(|key| {
+            graph.node(key).is_some_and(|node| {
+                node.predecessor.is_some() || graph.successors(key).next().is_some()
+            })
+        });
+        let state = if revoked {
+            "revoked"
+        } else if lineage {
+            "ignored_lineage_wins"
+        } else if not_after <= now {
+            "expired"
+        } else if created > now {
+            "not_yet_valid"
+        } else if not_after - now <= ryeos_engine::trust::LINK_EXPIRY_WARNING_SECS {
+            "expires_within_30_days"
+        } else {
+            "active"
+        };
+        if matches!(
+            state,
+            "expired" | "expires_within_30_days" | "ignored_lineage_wins"
+        ) {
+            attention += 1;
+        }
+        by_signer
+            .entry(body.linked_by.clone())
+            .or_default()
+            .push(serde_json::json!({
+                "id": stored.id,
+                "key": body.key,
+                "principal": body.principal,
+                "not_after": body.not_after,
+                "state": state,
+            }));
+    }
+    let detail = serde_json::json!({
+        "links_by_signer": by_signer,
+        "tombstones": ledger.tombstones.len(),
+        "note": "a link joins a key to a principal's owner; renew one before it expires with `ryeos key link-body`, `link-sign` and `link`, and withdraw a compromised signer's links with `ryeos key unlink --signed-by`",
+    });
+    if attention == 0 {
+        check("key_links", OK, detail)
+    } else {
+        check("key_links", WARN, detail)
+    }
+}
+
 fn check(
     name: &str,
     status: &str,
@@ -5655,16 +5819,48 @@ fn node_policy_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::d
             OK,
             serde_json::json!({ "generation_digest": snapshot.generation_digest() }),
         ),
-        Err(error) => check("node_policy", FAIL, node_policy_failure_detail(&error)),
+        Err(error) => check(
+            "node_policy",
+            FAIL,
+            node_policy_failure_detail(app_root, error),
+        ),
     }
+}
+
+/// The finding for a section stored at a schema this release no longer reads:
+/// the section, the stored and required schemas, and the exact command.
+/// `error` must already carry the node's own profile and host class.
+fn stale_section_schema_detail(error: &anyhow::Error) -> Option<serde_json::Value> {
+    use ryeos_node_runtime::node_policy::generation::NodePolicySectionSchemaStale;
+    let stale = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<NodePolicySectionSchemaStale>())?;
+    let command = stale.cure_command();
+    Some(serde_json::json!({
+        "code": "node_policy_section_schema_stale",
+        "section": stale.section,
+        "stored_schema": stale.stored,
+        "required_schema": stale.required,
+        "operator_applied_or_unrecorded": stale.reset_section_needed,
+        "command": command,
+        "error": format!("{error:#}"),
+        "fix": format!("stop the daemon, then run: {command}"),
+    }))
 }
 
 /// A generation missing a newly required section gets its typed code and the
 /// replacement that cures it; any other failure is reported as it is.
-fn node_policy_failure_detail(error: &anyhow::Error) -> serde_json::Value {
+fn node_policy_failure_detail(
+    app_root: &std::path::Path,
+    error: anyhow::Error,
+) -> serde_json::Value {
     use ryeos_node_runtime::node_policy::generation::{
         NodePolicySectionsMissing, POLICY_GENERATION_RESET_COMMAND,
     };
+    let error = ryeos_node::name_policy_generation_cure(app_root, error);
+    if let Some(detail) = stale_section_schema_detail(&error) {
+        return detail;
+    }
     match error
         .chain()
         .find_map(|cause| cause.downcast_ref::<NodePolicySectionsMissing>())
@@ -6349,6 +6545,49 @@ mod tests {
         assert!(fix.contains("ryeos node external-execution retire external_execution/w9"));
     }
 
+    mod node_journal_doctor {
+        use super::*;
+        use ryeos_core_tools::actions::doctor::{FAIL, OK};
+
+        fn journal(root: &std::path::Path) -> ryeos_node::node_journal::NodeJournal {
+            let key =
+                ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).node_signing_key_path();
+            let node = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
+            ryeos_node::node_journal::NodeJournal::for_app_root(root, node)
+        }
+
+        #[test]
+        fn a_verifying_journal_is_ok() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, OK, "{:?}", result.detail);
+            assert_eq!(result.detail["last_sequence"], 1);
+        }
+
+        #[test]
+        fn a_journal_that_does_not_verify_fails_and_names_the_refusal() {
+            let root = tempfile::tempdir().unwrap();
+            let journal = journal(root.path());
+            journal.record_initialized("standard").unwrap();
+            let record = ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf())
+                .state()
+                .join("node-journal")
+                .join(format!("{:020}.json", 1));
+            let text = std::fs::read_to_string(&record).unwrap();
+            std::fs::write(&record, text.replacen("standard", "tampered", 1)).unwrap();
+            let result = node_journal_check_with(journal);
+            assert_eq!(result.status, FAIL, "{:?}", result.detail);
+            assert!(
+                result.detail["note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("journal_write_failed")
+            );
+        }
+    }
+
     mod sync_apply_quarantine_doctor {
         use super::*;
         use ryeos_app::sync_apply_quarantine_report::{SyncApplyQuarantineEntry, write_report};
@@ -6887,7 +7126,7 @@ mod tests {
             sections: vec!["event_storage".to_owned()],
         })
         .context("load verified node policy generation");
-        let detail = node_policy_failure_detail(&error);
+        let detail = node_policy_failure_detail(std::path::Path::new("/nonexistent"), error);
         assert_eq!(detail["code"], "node_policy_section_missing");
         assert_eq!(detail["sections"], serde_json::json!(["event_storage"]));
         assert!(
@@ -6897,7 +7136,10 @@ mod tests {
                 .contains(POLICY_GENERATION_RESET_COMMAND)
         );
 
-        let other = node_policy_failure_detail(&anyhow::anyhow!("signature mismatch"));
+        let other = node_policy_failure_detail(
+            std::path::Path::new("/nonexistent"),
+            anyhow::anyhow!("signature mismatch"),
+        );
         assert!(other.get("code").is_none());
         assert!(
             other["error"]
@@ -6905,6 +7147,106 @@ mod tests {
                 .unwrap()
                 .contains("signature mismatch")
         );
+    }
+
+    /// Init options for a standard/local node from this repo's bundles.
+    fn doctor_init_options(app_root: &std::path::Path, replace: bool) -> ryeos_node::InitOptions {
+        let root = ryeos_engine::test_support::workspace_root();
+        ryeos_node::InitOptions {
+            app_root: app_root.to_path_buf(),
+            bind: None,
+            uds_path: None,
+            source_dir: root.join("bundles"),
+            trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: (!replace).then(|| {
+                ryeos_node::SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("standard".to_owned()),
+                    Some("local".to_owned()),
+                )
+                .unwrap()
+            }),
+            replace_node_policy_generation: replace,
+            policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+                keep: Default::default(),
+                reset: replace
+                    .then(|| "ui_browser_sessions".to_owned())
+                    .into_iter()
+                    .collect(),
+            },
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
+            skip_preflight: true,
+        }
+    }
+
+    #[test]
+    fn doctor_fails_a_schema_five_browser_session_policy_with_the_command_until_reset() {
+        use ryeos_core_tools::actions::doctor::{FAIL, OK};
+        let directory = tempfile::tempdir().unwrap();
+        let app_root = directory.path().join("state");
+        ryeos_node::run_init(&doctor_init_options(&app_root, false)).expect("initialize the node");
+        assert_eq!(node_policy_check(&app_root).status, OK);
+        assert_eq!(ui_browser_sessions_check(&app_root, true).status, OK);
+
+        // The section as a node signed it at schema 5, before `max_art_grants`.
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(&app_root).unwrap();
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            &app_root,
+            &trust,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+        .unwrap();
+        let mut body = current.policies()["ui_browser_sessions"].clone();
+        body["schema"] = serde_json::json!(5);
+        body.as_object_mut().unwrap().remove("max_art_grants");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &app_root.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let path = app_root.join(".ai/node/policies/ui_browser_sessions.yaml");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(
+            &path,
+            ryeos_node_runtime::node_document::render_signed_item(
+                "ui_browser_sessions",
+                "policy",
+                &body,
+                &identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        for row in [
+            node_policy_check(&app_root),
+            ui_browser_sessions_check(&app_root, true),
+        ] {
+            assert_eq!(row.status, FAIL, "{}: {}", row.name, row.detail);
+            assert_eq!(row.detail["code"], "node_policy_section_schema_stale");
+            assert_eq!(row.detail["section"], "ui_browser_sessions");
+            assert_eq!(row.detail["stored_schema"], 5);
+            assert_eq!(row.detail["required_schema"], 6);
+            let command = row.detail["command"].as_str().unwrap();
+            assert!(
+                command.starts_with(
+                    "ryeos node reset policy-generation --node-profile standard \
+                     --host-class local"
+                ) && command.ends_with("--confirm"),
+                "{command}"
+            );
+            assert!(row.detail["fix"].as_str().unwrap().contains(command));
+        }
+
+        // The named replacement cures it.
+        ryeos_node::run_init(&doctor_init_options(&app_root, true))
+            .expect("replace the generation");
+        assert_eq!(node_policy_check(&app_root).status, OK);
+        assert_eq!(ui_browser_sessions_check(&app_root, true).status, OK);
     }
 
     #[test]
@@ -7013,6 +7355,7 @@ mod tests {
                 unmet: std::collections::BTreeMap::new(),
             },
             established_residency: None,
+            publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
         };
         let row = |section: &crate::tty::Section, key: &str| {
             section

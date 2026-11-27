@@ -1,6 +1,8 @@
-# ryeos:signed:2026-11-13T01:35:02Z:e3f77a4e0def0507e79a80c0e76a2a0303f0db90c5969b088b133589b9e21b10:AcCqCJPML4jrk1rn0Vsy0NVqqEeFKNU5g0h57vO5vkv00MufGdrdjzQ2iUajEQ/SpXLk0mOt8j+nEM5YStngAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:97c0e9c39da98d84a49fa3edaf2b2801d6661cfa0cdc4eb0d08927672ff0ec55:ItFOvzcOthhxFZejQOP2Q5QTnazKzR9AkSYVcsLzFatMNvu2IBWUd/0+E9Q3KaBnMM5iZckjY9MoUfSXX8adBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.scrub
 required_caps: ["ryeos.execute.service.external-content/scrub"]
 schema: {}
 description: "Verify retained large-object bytes, sidecars, and abandoned ingest staging; quarantine objects whose bytes no longer match their hash"
+# Large-object integrity scrub requires the local configured operator.
+disclosure: {}

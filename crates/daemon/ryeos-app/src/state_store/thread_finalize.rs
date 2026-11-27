@@ -616,11 +616,23 @@ impl StateStore {
                 StopIntent::Cancel => ThreadStatus::Cancelled,
                 StopIntent::Kill => ThreadStatus::Killed,
             };
+            // A child stopped because its flagged parent session ended is a
+            // stopped child like any other (cancelled or killed per the
+            // intent), told apart only by its outcome code and reason.
+            let parent_ended = stopped_by_parent_session_end(g, thread_id)?;
             effective_update.status = status.as_str().to_string();
-            effective_update.outcome_code = Some(status.as_str().to_string());
+            effective_update.outcome_code = Some(if parent_ended {
+                crate::cascade::PARENT_END_OUTCOME_CODE.to_string()
+            } else {
+                status.as_str().to_string()
+            });
             effective_update.result_json = None;
             effective_update.error_json = Some(json!({
-                "reason": "durable_stop_intent",
+                "reason": if parent_ended {
+                    crate::cascade::PARENT_END_REASON
+                } else {
+                    "durable_stop_intent"
+                },
                 "intent": intent.as_str(),
             }));
             // The runtime supplied envelope describes its reported outcome,
@@ -752,6 +764,7 @@ impl StateStore {
                 settled_at: now.clone(),
                 last_settled_turn_seq: u64::from(cost.completed_turns),
                 elapsed_ms: 0, // daemon doesn't track wall-clock time
+                usage_status: cost.usage_status,
                 provider_id: None,
                 model: None,
                 profile: None,
@@ -855,6 +868,31 @@ impl StateStore {
             &g.runtime_db,
             cas_mutation_guard,
         )?);
+
+        // The child's terminal state settles its link when the link carries no
+        // spend draw. A link with a draw is left alone here: it settles only
+        // when the spend unit releases the draw, after the child's accounting
+        // settlement is durable, so a terminal child with an unsettled draw
+        // keeps counting until then. The terminal is already committed, so a
+        // failure here is logged and never fails the finalize; startup
+        // reconcile settles whatever this misses.
+        let settle = g
+            .runtime_db
+            .child_link_spend(thread_id)
+            .and_then(|spend| match spend {
+                Some(spend) if spend.draw.is_none() => g
+                    .runtime_db
+                    .settle_child_link(thread_id, lillux::time::timestamp_millis())
+                    .map(|_| ()),
+                _ => Ok(()),
+            });
+        if let Err(error) = settle {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %error,
+                "failed to settle the terminal child's link; reconcile will retry"
+            );
+        }
 
         Ok((
             persisted_from_append(&result, &events_to_append)?,
@@ -1192,6 +1230,18 @@ pub fn is_terminal_status(status: &str) -> bool {
         status,
         "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
     )
+}
+
+/// Whether the stop that dominates `thread_id`'s finalization was written as
+/// a parent-end stop: by the sweep that stops a flagged `dispatch` child when
+/// its session ends, by the cascade of a stopped parent reaching a flagged
+/// child, or by the link of a flagged child born under an ended or stopped
+/// parent. Provenance of the stop decides the label, not the parent's state: a
+/// person's cancel or kill of a flagged child, written first, keeps the
+/// child's own cancelled or killed outcome whether or not its parent has
+/// ended since.
+fn stopped_by_parent_session_end(g: &Inner, thread_id: &str) -> Result<bool> {
+    g.runtime_db.thread_stopped_by_parent_end(thread_id)
 }
 
 pub(super) fn terminal_event_type(status: &str) -> Result<&'static str> {

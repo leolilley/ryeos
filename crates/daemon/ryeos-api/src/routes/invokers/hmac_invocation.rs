@@ -480,6 +480,7 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             authorized_key_class: None,
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
+            minted_session_grant: None,
             metadata,
         }))
     }
@@ -1392,6 +1393,7 @@ mod tests {
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
                     ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+                    ryeos_node_runtime::node_policy::shipped_approval_ceiling_record(),
                     std::sync::Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),

@@ -85,6 +85,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: Some(caller.principal_id().to_string()),
         project_root: project_root.clone(),
+        // A seat is the UI's own session thread, not work.
+        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
         ..Default::default()
     };
     let threads = state.threads.list_thread_views_query(
@@ -288,6 +290,7 @@ pub async fn handle_approval_history(
                     &ryeos_app::thread_lifecycle::ThreadListFilter {
                         principal: Some(caller.principal_id().to_string()),
                         project_root,
+                        exclude_kinds: vec![crate::handlers::ui_seat::seat_kind(&state)?],
                         ..Default::default()
                     },
                     ryeos_app::thread_lifecycle::ThreadSort::Newest,
@@ -433,6 +436,7 @@ pub async fn handle_candidate(
         "evaluator_item_ref":evaluation.and_then(|value| value.pointer("/evaluator/item_ref")),
         "evaluator_definition_digest":evaluation.and_then(|value| value.pointer("/evaluator/effective_definition_digest")),
         "evaluator_result_digest":evaluation.and_then(|value| value.pointer("/result/result_digest")),
+        "evaluator_evidence_scope":evaluation.and_then(|value| value.pointer("/result/evidence_scope")),
         "publication_result":session.publication_result,
         "terminal_reason":session.terminal_reason,
         "completion":completion,

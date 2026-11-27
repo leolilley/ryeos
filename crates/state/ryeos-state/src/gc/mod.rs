@@ -1343,6 +1343,65 @@ mod tests {
         );
     }
 
+    /// A detached child's captured workspace generation is held by the roots
+    /// the daemon supplies (the child's sealed input, or the released intent
+    /// before the child exists). A real sweep keeps both objects while they
+    /// are rooted and collects them once they are not.
+    #[test]
+    fn a_workspace_input_generation_survives_a_sweep_only_while_it_is_rooted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        let cas_root = runtime_state_dir.join("objects");
+        let refs_root = runtime_state_dir.join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+        let cas = lillux::CasStore::new(cas_root.clone());
+        let input_snapshot = store_snapshot(&cas, "T-input-snapshot");
+        let input_capture = store_snapshot(&cas, "T-input-capture");
+        let path = |hash: &str| lillux::shard_path(&cas_root, "objects", hash, ".json");
+        assert!(path(&input_snapshot).is_file() && path(&input_capture).is_file());
+
+        let rooted = run_gc_with_additional_roots(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+            &AdditionalCasRoots {
+                object_hashes: vec![input_snapshot.clone(), input_capture.clone()],
+                blob_hashes: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(rooted.deleted_objects, 0);
+        assert!(path(&input_snapshot).is_file() && path(&input_capture).is_file());
+
+        // Only one of the pair rooted: the other is collected.
+        let half = run_gc_with_additional_roots(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+            &AdditionalCasRoots {
+                object_hashes: vec![input_snapshot.clone()],
+                blob_hashes: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(half.deleted_objects, 1);
+        assert!(path(&input_snapshot).is_file());
+        assert!(!path(&input_capture).exists());
+
+        let unrooted = run_gc(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+        )
+        .unwrap();
+        assert_eq!(unrooted.deleted_objects, 1);
+        assert!(!path(&input_snapshot).exists());
+    }
+
     #[test]
     fn gc_collects_a_stored_retirement_closure_that_no_fence_roots() {
         // R2/R3: a crash after the closure was stored but before the fence

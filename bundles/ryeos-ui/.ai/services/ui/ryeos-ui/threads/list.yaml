@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:ce08e8e5836047baac74e398dfacbef7084691224c148a19f291f361ce5fd00a:AWoxMxo/MX8dKMWzzJ/1fjL1rXEhGZYuuJGNEBsc2BYFjMkxSXKxng3nB3w3Bq0jxK+YCn2iGCD4lq0rVhAAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:27:28Z:774d49b406d70fca85a5d87fef160e7104f6fb754da4f14dc685acd1586bbe20:IDoniZf4HjjsvV8PScQzzhpIIsttgpL//ux0V7Zema+h9Eabl3B/xa5MuJv83sDI7LD1AZhOOMW1WRWd/L+qCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/threads/list
 version: "1.0.0"
@@ -8,3 +8,36 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /threads/*/thread_id
+    - /threads/*/chain_root_id
+    - /threads/*/kind
+    - /threads/*/status
+    - /threads/*/item_ref
+    - /threads/*/launch_mode
+    - /threads/*/current_site_id
+    - /threads/*/origin_site_id
+    - /threads/*/upstream_thread_id
+    - /threads/*/successor_thread_id
+    - /threads/*/created_at
+    - /threads/*/updated_at
+    - /threads/*/execution
+    - /threads/*/pending
+    - /threads/*/current_node
+    - /coverage/state
+    - /coverage/reason
+  free_text:
+    - /threads/*/title
+    - /threads/*/facets
+    - /threads/*/error
+    - /threads/*/project_root
+    - /threads/*/project_authority
+    - /threads/*/admitted_launch_capsule_hash
+    - /threads/*/follow
+  interim_free_text:
+    - /threads/*/project/name  # removed by: m4
+    - /threads/*/project/path  # removed by: m4
+    - /threads/*/requested_by  # removed by: m4
+  max_items: 2048
+  max_result_bytes: 4194304

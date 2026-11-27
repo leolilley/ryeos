@@ -14,7 +14,7 @@ const LIST_CAP: &str = "ryeos.execute.service.credential-profiles/list";
 #[test]
 fn cli_descriptor_binds_pagination_flags_through_service_schema() {
     let command: ryeos_runtime::CommandDef = serde_yaml::from_str(include_str!(
-        "../../../../bundles/codex/.ai/node/commands/profile-list.yaml"
+        "../../../../bundles/core/.ai/node/commands/credential-profile-list.yaml"
     ))
     .unwrap();
     let service: Value = serde_yaml::from_str(include_str!(
@@ -56,6 +56,12 @@ fn remote_principal(owner: &str) -> HandlerContext {
     )
 }
 
+fn operator_principal(state: &AppState) -> String {
+    ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+        .unwrap()
+        .principal_id()
+}
+
 fn add_profile(state: &AppState, id: &str, owner: &str) {
     state
         .state_store
@@ -80,7 +86,7 @@ async fn list(state: Arc<AppState>, ctx: HandlerContext, params: Value) -> anyho
 async fn lists_only_owner_metadata_with_stable_pagination() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let alice = format!("fp:{}", "a".repeat(64));
+    let alice = operator_principal(&state);
     let bob = format!("fp:{}", "b".repeat(64));
     for (id, owner) in [("a", &alice), ("b", &bob), ("c", &alice), ("d", &alice)] {
         add_profile(&state, id, owner);
@@ -134,11 +140,16 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
             "updated_at_ms"
         ]
     );
-    let other = list(state.clone(), remote_principal(&bob), json!({}))
+    let all = list(state.clone(), remote_principal(&alice), json!({}))
         .await
         .unwrap();
-    assert_eq!(other["profiles"].as_array().unwrap().len(), 1);
-    assert_eq!(other["profiles"][0]["profile_id"], "b");
+    let ids = all["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|profile| profile["profile_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["a", "c"], "another owner's profile is not listed");
     assert!(
         !state
             .config
@@ -207,7 +218,7 @@ async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
 async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let owner = format!("fp:{}", "a".repeat(64));
+    let owner = operator_principal(&state);
     for request in [
         json!({"limit":0}),
         json!({"limit":201}),
@@ -226,4 +237,19 @@ async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
             "{request}"
         );
     }
+}
+
+#[tokio::test]
+async fn list_refuses_a_remote_principal_that_does_not_speak_for_the_operator_owner() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let state = Arc::new(state);
+    let stranger = format!("fp:{}", "a".repeat(64));
+    let error = list(state, remote_principal(&stranger), json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("operator_owner_not_spoken_for")
+            || ryeos_app::handler_error::extract_handler_error(&error).is_some(),
+        "{error:#}"
+    );
 }

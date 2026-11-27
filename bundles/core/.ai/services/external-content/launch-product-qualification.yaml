@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T04:33:31Z:bedf84991ea9e840852a8350d5a4b61789cfa811d6e07ea7b59cc7e56c8a9995:gSUgq+VCDKdIJWdU/sxVXqpN+xZn4Fq2zv6rviU99x5UC4qGBNDbyTV+YLF2SXgvEJmIarIxIhhWo4W0iHy2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:d2345ef5c03040cc16463d24a8223081406eee84af60eb51dd93e52723e6edcc:d8+MZQ0BCelMTXg9rnFI+OGNxRcsMQrlarB1UjB1ubbSyec5OeD3XO61MW98jvQwdKbWX6Z86WeyafIkm69VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.launch-product-qualification
 required_caps: ["ryeos.execute.service.external-content/launch-product-qualification"]
@@ -11,3 +11,5 @@ schema:
   consumer_invocation: object|null?
   auxiliary_product_selections: array?
 description: Accept one exact operator-owned product qualification launch; the signed relationship and current Bundle select its verifier and policy, an explicit nullable project context preserves pinned project authority when required by the verifier slot, and an optional consumer invocation supplies authenticated occurrence selectors without overriding signed verifier parameters
+# Requires the admitted or local configured operator; no principal is served.
+disclosure: {}

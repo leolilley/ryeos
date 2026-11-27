@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -62,22 +62,36 @@ fn default_policy() -> String {
     DEFAULT_POLICY.to_string()
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let remote_cfg = {
         let remotes = config::load_remotes(&state.config.app_root)?;
         config::get_remote(&remotes, &req.remote)?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
-    let expected_key = remote_cfg.pinned_signing_key().with_context(|| {
-        format!(
-            "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",
-            remote_cfg.name, remote_cfg.name,
+    let expected_key = remote_cfg.pinned_signing_key().map_err(|error| {
+        refuse(
+            "remote_signing_key_unpinned",
+            409,
+            format!(
+                "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`: {error:#}",
+                remote_cfg.name, remote_cfg.name,
+            ),
         )
     })?;
     if let Some(input) = req.expected_signing_key.as_deref() {
         let asserted_key = decode_expected_signing_key(input)?;
         if asserted_key.as_bytes() != expected_key.as_bytes() {
-            anyhow::bail!("expected_signing_key does not match pinned remote signing_key");
+            return Err(refuse(
+                "expected_signing_key_mismatch",
+                409,
+                "expected_signing_key does not match pinned remote signing_key",
+            ));
         }
     }
     let expected_issuer = format!("fp:{}", lillux::crypto::fingerprint(&expected_key));
@@ -128,7 +142,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 fn decode_expected_signing_key(input: &str) -> Result<lillux::crypto::VerifyingKey> {
-    config::decode_signing_key(input).context("invalid expected_signing_key")
+    config::decode_signing_key(input).map_err(|error| {
+        refuse(
+            "expected_signing_key_invalid",
+            400,
+            format!("invalid expected_signing_key: {error:#}"),
+        )
+    })
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

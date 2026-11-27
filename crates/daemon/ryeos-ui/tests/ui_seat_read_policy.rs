@@ -1,4 +1,4 @@
-// A UI seat reads only what the node's signed `ui_seat_reads` policy admits:
+// A UI seat reads only what the node's signed `read_disclosure` policy admits:
 // mint attenuates a source the policy does not admit, dispatch pins and
 // checks parameters and shapes what is disclosed, and the policy exempts the
 // UI plane's own services and nothing else.
@@ -24,7 +24,6 @@ const BUNDLES_ATTENUATION: &str = "source:view:ryeos/node/bundles:default";
 fn entry(target: &str, extra: Value) -> Value {
     let mut base = json!({
         "target": target,
-        "classes": ["local_operator", "hosted_principal"],
         "keep": ["/bundles/*/name"],
         "max_result_bytes": 65536,
         "max_items": 64
@@ -115,7 +114,7 @@ fn refusal_text(error: &anyhow::Error) -> String {
 }
 
 #[tokio::test]
-async fn mint_attenuates_a_source_the_policy_has_no_entry_for_and_keeps_the_ui_plane() {
+async fn mint_attenuates_a_source_the_policy_has_no_entry_for_including_the_ui_plane() {
     let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
     // Entries for other services only: bundle/list has none.
     set_seat_reads(
@@ -137,31 +136,29 @@ async fn mint_attenuates_a_source_the_policy_has_no_entry_for_and_keeps_the_ui_p
             .is_none_or(|channels| !channels.contains_key("default"))
     );
 
-    // The node Surface's UI-plane projections stay bound with no entry.
-    let threads = binding
-        .sources
-        .get("view:ryeos/node/threads/history")
-        .expect("UI-plane thread history stays bound");
-    assert!(threads.contains_key("default"));
+    // The node Surface's UI-plane projections need an entry like any read.
+    assert!(
+        binding
+            .sources
+            .get("view:ryeos/node/threads/history")
+            .is_none_or(|channels| !channels.contains_key("default")),
+        "a UI-plane projection with no entry stays bound"
+    );
 }
 
 #[tokio::test]
-async fn an_empty_policy_admits_no_non_ui_plane_source() {
+async fn an_empty_policy_admits_no_source() {
     let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
     set_seat_reads(&mut state, &policy(vec![]));
     let (session_id, _, _, _) = live_presentation_with_surface(&state, NODE_SURFACE).await;
     let binding = binding_for(&state, &session_id, NODE_SURFACE);
 
     for channels in binding.sources.values() {
-        for source in channels.values() {
-            assert!(
-                ryeos_ui::seat_read_policy::is_ui_plane_service(
-                    &source.target.identity.canonical_ref
-                ),
-                "{} is bound with no policy entry",
-                source.target.identity.canonical_ref
-            );
-        }
+        assert!(
+            channels.is_empty(),
+            "a source is bound with no policy entry: {:?}",
+            channels.keys().collect::<Vec<_>>()
+        );
     }
     assert!(attenuation(&binding, BUNDLES_ATTENUATION).is_some());
 }
@@ -183,23 +180,6 @@ async fn mint_attenuates_an_entry_naming_a_parameter_the_service_does_not_declar
         reason.contains("seat_read_undeclared_parameter"),
         "{reason}"
     );
-}
-
-#[tokio::test]
-async fn mint_admits_a_class_only_an_entry_names() {
-    // A hosted principal is the class every live fixture session carries.
-    let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
-    set_seat_reads(
-        &mut state,
-        &policy(vec![entry(
-            "service:bundle/list",
-            json!({"classes": ["local_operator"]}),
-        )]),
-    );
-    let (session_id, _, _, _) = live_presentation_with_surface(&state, NODE_SURFACE).await;
-    let binding = binding_for(&state, &session_id, NODE_SURFACE);
-    let reason = attenuation(&binding, BUNDLES_ATTENUATION).expect("attenuated for hosted class");
-    assert!(reason.contains("seat_read_no_entry"), "{reason}");
 }
 
 #[tokio::test]
@@ -257,6 +237,92 @@ async fn the_shipped_policy_keeps_node_status_without_its_filesystem_paths() {
     assert!(shown.get("uds_path").is_none());
     assert!(shown.get("db_path").is_none());
     assert!(shown["isolation"].get("source").is_none());
+}
+
+/// A UI-plane service has no seat-policy entry, so the only thing shaping its
+/// answer is the service item's own tier. The seat's key is not the operator's,
+/// so a field the tier withholds must stay withheld in the dispatch envelope's
+/// `result`, the path a client reads every bound source through.
+#[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
+async fn a_field_the_service_tier_withholds_stays_withheld_through_dispatch() {
+    let (_tmp, _owner, state) = build_test_state_with_live_bundles();
+    let (_id, ctx, producer, coordinate) =
+        live_presentation_with_surface(&state, NODE_SURFACE).await;
+    let state = Arc::new(state);
+    // The handler omits `state` and `recent_events` when the node has neither
+    // sidecar nor log, so seed both: the answer then really holds the fields
+    // the tier withholds.
+    let gc_dir = state.config.runtime_state_dir();
+    std::fs::create_dir_all(gc_dir.join("logs")).expect("gc log directory");
+    std::fs::write(
+        gc_dir.join("gc.state.json"),
+        br#"{"phase":"idle","note":"/srv/private/gc"}"#,
+    )
+    .expect("gc state sidecar");
+    std::fs::write(
+        gc_dir.join("logs").join("gc.jsonl"),
+        b"{\"event\":\"swept\",\"path\":\"/srv/private/x\"}\n",
+    )
+    .expect("gc log");
+    // Positive control: the configured operator's own call of the handler,
+    // which no tier shapes, holds the fields the tier withholds from a seat.
+    let operator = ryeos_ui::test_support::local_operator_context(&state, vec!["*".into()]);
+    let raw = (ryeos_ui::handlers::ui_gc::DESCRIPTOR.handler)(json!({}), operator, state.clone())
+        .await
+        .unwrap_or_else(|error| panic!("gc handler: {}", refusal_text(&error)));
+    assert!(raw.get("state").is_some(), "{raw}");
+    assert!(raw.get("recent_events").is_some(), "{raw}");
+    assert!(raw.get("schema_version").is_some(), "{raw}");
+    let gc = dispatch_source(
+        &state,
+        &ctx,
+        &producer,
+        &coordinate,
+        "view:ryeos/node/gc",
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("gc status: {}", refusal_text(&error)));
+    let shown = &gc["result"]["result"];
+    assert!(shown.is_object(), "{shown}");
+    assert!(shown.get("schema_version").is_some(), "{shown}");
+    // The service item names `state` and `recent_events` as free text: raw
+    // sidecar and log JSON that only the operator may read.
+    assert!(shown.get("state").is_none(), "{shown}");
+    assert!(shown.get("recent_events").is_none(), "{shown}");
+    let text = serde_json::to_string(shown).unwrap();
+    assert!(!text.contains("/srv/private"), "{text}");
+}
+
+/// The dispatch envelope allows 12000 items, but the read it dispatches is
+/// shaped by its own block first. bundle/list declares 512 items, so 600
+/// bundles are refused by that bound, not passed because the wrapper is wide.
+#[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
+async fn a_dispatched_reads_own_bound_refuses_before_the_wrappers_does() {
+    let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
+    let names: Vec<String> = (0..600).map(|n| format!("bundle-{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    add_bundles(&mut state, &names);
+    let (_session_id, ctx, producer, coordinate) =
+        live_presentation_with_surface(&state, NODE_SURFACE).await;
+    let state = Arc::new(state);
+    let refused = dispatch_source(
+        &state,
+        &ctx,
+        &producer,
+        &coordinate,
+        "view:ryeos/node/bundles",
+        json!({}),
+    )
+    .await
+    .expect_err("600 bundles are over bundle/list's own 512");
+    assert!(
+        refusal_text(&refused).contains("read_too_many_items"),
+        "{}",
+        refusal_text(&refused)
+    );
 }
 
 #[tokio::test]
@@ -481,8 +547,8 @@ async fn a_condition_the_call_does_not_meet_is_refused() {
 fn every_shipped_source_has_an_entry_in_every_profile() {
     use ryeos_node_runtime::node_policy::NodePolicyContext;
     use ryeos_node_runtime::node_policy::NodePolicySection as _;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-        SECTION_NAME, UiSeatReadsPolicy, UiSeatReadsPolicySection,
+    use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+        ReadDisclosurePolicy, ReadDisclosurePolicySection, SECTION_NAME,
     };
 
     fn collect(value: &serde_yaml::Value, in_sources: bool, found: &mut Vec<String>) {
@@ -530,10 +596,7 @@ fn every_shipped_source_has_an_entry_in_every_profile() {
             serde_yaml::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
         collect(&parsed, false, &mut sources);
     }
-    sources.retain(|reference| {
-        reference.starts_with("service:")
-            && !ryeos_ui::seat_read_policy::is_ui_plane_service(reference)
-    });
+    sources.retain(|reference| reference.starts_with("service:"));
     sources.sort();
     sources.dedup();
     assert!(
@@ -547,7 +610,7 @@ fn every_shipped_source_has_an_entry_in_every_profile() {
     for path in profiles {
         let profile: serde_json::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let record = UiSeatReadsPolicySection
+        let record = ReadDisclosurePolicySection
             .parse(
                 &NodePolicyContext {
                     section: SECTION_NAME.to_owned(),
@@ -557,7 +620,10 @@ fn every_shipped_source_has_an_entry_in_every_profile() {
                 &profile["policies"][SECTION_NAME],
             )
             .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
-        let policy = record.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        let policy = record
+            .as_any()
+            .downcast_ref::<ReadDisclosurePolicy>()
+            .unwrap();
         for source in &sources {
             assert!(
                 !policy.entries_for(source).is_empty(),
@@ -575,10 +641,11 @@ mod revisions {
 
     use serde_json::{Value, json};
 
+    use ryeos_node_runtime::disclosure::{DisclosureClass, ServiceDisclosure, shape_result};
     use ryeos_node_runtime::node_policy::NodePolicyContext;
     use ryeos_node_runtime::node_policy::NodePolicySection as _;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-        SECTION_NAME, SeatClass, UiSeatReadsPolicy, UiSeatReadsPolicySection,
+    use ryeos_node_runtime::node_policy::sections::read_disclosure::{
+        ReadDisclosurePolicy, ReadDisclosurePolicySection, SECTION_NAME,
     };
     use ryeos_ui::seat_read_policy::{RequestFacts, SeatReadRefusal, SessionFacts, decide};
 
@@ -599,9 +666,9 @@ mod revisions {
         paths
     }
 
-    fn policy_of(path: &std::path::Path) -> UiSeatReadsPolicy {
+    fn policy_of(path: &std::path::Path) -> ReadDisclosurePolicy {
         let profile: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let record = UiSeatReadsPolicySection
+        let record = ReadDisclosurePolicySection
             .parse(
                 &NodePolicyContext {
                     section: SECTION_NAME.to_owned(),
@@ -613,12 +680,12 @@ mod revisions {
             .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
         record
             .as_any()
-            .downcast_ref::<UiSeatReadsPolicy>()
+            .downcast_ref::<ReadDisclosurePolicy>()
             .unwrap()
             .clone()
     }
 
-    fn standard() -> UiSeatReadsPolicy {
+    fn standard() -> ReadDisclosurePolicy {
         policy_of(
             &ryeos_engine::test_support::workspace_root()
                 .join("bundles/.ai/node/init/profiles/standard.yaml"),
@@ -640,7 +707,7 @@ mod revisions {
     }
 
     fn call(
-        policy: &UiSeatReadsPolicy,
+        policy: &ReadDisclosurePolicy,
         target: &str,
         params: Value,
         project_root: Option<&str>,
@@ -648,7 +715,6 @@ mod revisions {
         let name = target.rsplit('/').next().unwrap();
         let admitted = decide(
             policy,
-            SeatClass::HostedPrincipal,
             target,
             &declared(name),
             Some(RequestFacts {
@@ -736,7 +802,7 @@ mod revisions {
     }
 
     #[test]
-    fn every_profile_admits_both_reads_for_both_classes_and_pins_the_project() {
+    fn every_profile_admits_both_reads_and_pins_the_project() {
         let paths = profile_paths();
         assert_eq!(paths.len(), 15);
         for path in paths {
@@ -745,13 +811,6 @@ mod revisions {
                 let entries = policy.entries_for(target);
                 assert_eq!(entries.len(), 1, "{} {target}", path.display());
                 let entry = entries[0];
-                for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
-                    assert!(
-                        entry.classes.contains(&class),
-                        "{} {target}",
-                        path.display()
-                    );
-                }
                 assert_eq!(
                     entry.pin.get("project_path"),
                     Some(&json!("@session:project_root")),
@@ -759,18 +818,38 @@ mod revisions {
                     path.display()
                 );
                 // Every parameter the entry names is one the service declares.
-                for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
-                    decide(
-                        &policy,
-                        class,
-                        target,
-                        &declared(target.rsplit('/').next().unwrap()),
-                        None,
-                    )
-                    .unwrap_or_else(|error| panic!("{} {target}: {error}", path.display()));
-                }
+                decide(
+                    &policy,
+                    target,
+                    &declared(target.rsplit('/').next().unwrap()),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{} {target}: {error}", path.display()));
             }
         }
+    }
+
+    /// The service item's own tier for a principal, then the policy entry's
+    /// narrowing: the answer a seat receives. A refusal is its stable code.
+    fn seat_view(
+        name: &str,
+        shaping: &ryeos_ui::seat_read_policy::DetachedShaping,
+        answer: Value,
+    ) -> Result<Value, String> {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join(format!("bundles/core/.ai/services/revisions/{name}.yaml"));
+        let item: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let tier = ServiceDisclosure::parse(&item["disclosure"]).unwrap();
+        let by_item = shape_result(
+            DisclosureClass::Principal,
+            Some(&tier),
+            answer,
+            tier.bounds(),
+        )
+        .map_err(|refusal| refusal.code().to_owned())?;
+        shaping
+            .apply(by_item)
+            .map_err(|refusal| refusal.code().to_owned())
     }
 
     #[test]
@@ -787,7 +866,7 @@ mod revisions {
         assert_eq!(params["item_ref"], "view:a");
         assert_eq!(params["limit"], 50);
 
-        let shown = shaping.apply(list_answer(2)).expect("within bounds");
+        let shown = seat_view("list", &shaping, list_answer(2)).expect("within bounds");
         assert_eq!(shown["item_ref"], "view:a");
         assert_eq!(shown["total"], 2);
         assert_eq!(shown["sound"], true);
@@ -822,7 +901,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        let shown = shaping.apply(get_answer("name: a\n")).unwrap();
+        let shown = seat_view("get", &shaping, get_answer("name: a\n")).unwrap();
         assert_eq!(shown["record"]["body"]["content"], "name: a\n");
         assert_eq!(shown["record"]["body"]["previous"], "genesis:view:a");
         assert_eq!(shown["record"]["seq"], 1);
@@ -881,7 +960,7 @@ mod revisions {
         let mut answer = list_answer(1);
         answer["a_later_field"] = json!("x");
         answer["records"][0]["a_later_field"] = json!("x");
-        let shown = list_shaping.apply(answer).unwrap();
+        let shown = seat_view("list", &list_shaping, answer).unwrap();
         let text = shown.to_string();
         for forbidden in [
             "/home/operator",
@@ -903,7 +982,7 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        let shown = get_shaping.apply(get_answer("name: a\n")).unwrap();
+        let shown = seat_view("get", &get_shaping, get_answer("name: a\n")).unwrap();
         let body = &shown["record"]["body"];
         assert!(body.get("provenance").is_none());
         assert!(body.get("schema").is_none());
@@ -922,12 +1001,10 @@ mod revisions {
         .unwrap();
         // A page over the service's own largest page holds more rows than
         // the entry allows.
-        let refusal = list_shaping
-            .apply(list_answer(201))
+        let refusal = seat_view("list", &list_shaping, list_answer(201))
             .expect_err("more rows than max_items");
-        assert_eq!(refusal.code(), "seat_read_too_many_items");
-        list_shaping
-            .apply(list_answer(200))
+        assert_eq!(refusal, "read_too_many_items");
+        seat_view("list", &list_shaping, list_answer(200))
             .expect("the service's largest page fits");
 
         let (_, get_shaping) = call(
@@ -937,13 +1014,15 @@ mod revisions {
             Some(OWN_PROJECT),
         )
         .unwrap();
-        get_shaping
-            .apply(get_answer(&"x".repeat(512 * 1024)))
+        seat_view("get", &get_shaping, get_answer(&"x".repeat(512 * 1024)))
             .expect("a large authored item fits");
-        let refusal = get_shaping
-            .apply(get_answer(&"x".repeat(2 * 1024 * 1024)))
-            .expect_err("signed bytes over the bound");
-        assert_eq!(refusal.code(), "seat_read_result_too_large");
+        let refusal = seat_view(
+            "get",
+            &get_shaping,
+            get_answer(&"x".repeat(2 * 1024 * 1024)),
+        )
+        .expect_err("signed bytes over the bound");
+        assert_eq!(refusal, "read_result_too_large");
     }
 }
 
@@ -995,7 +1074,7 @@ fn no_shipped_profile_lets_a_seat_reach_the_item_announcement_service() {
             }
         }
         let mut reads = Vec::new();
-        find(&document, "ui_seat_reads", &mut reads);
+        find(&document, "read_disclosure", &mut reads);
         for policy in reads {
             let mut targets = Vec::new();
             find(policy, "target", &mut targets);

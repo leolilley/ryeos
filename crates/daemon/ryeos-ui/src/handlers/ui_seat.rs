@@ -23,7 +23,6 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{CutAppendResult, ExactSeat, NewEventRecord, SeatCut};
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
 use ryeos_ui_presentation_contract::seat_control::{SEAT_APPEND_RECEIPT_SCHEMA, SeatAppendReceipt};
 
 use crate::browser_session::transfer_reservation::CompletedPairedCut;
@@ -213,7 +212,16 @@ fn browser_session(ctx: &HandlerContext, state: &AppState) -> Result<BrowserSess
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))
 }
 
-fn seat_owner(session: &BrowserSession) -> String {
+/// The key a seat is launched by: the key its session was minted for. It is
+/// the seat thread's `requested_by` and its admission principal.
+fn seat_launcher(session: &BrowserSession) -> &str {
+    &session.principal_id
+}
+
+/// The holder of a seat's lease: the browser session itself. The daemon binds
+/// a seat to its session in the session's presentation membership, and the
+/// lease keeps its first holder.
+fn seat_holder(session: &BrowserSession) -> String {
     format!("session:{}", session.session_id)
 }
 
@@ -276,13 +284,14 @@ fn append_control(
     control
         .validate()
         .map_err(|error| HandlerError::Internal(error.into()))?;
-    let owner = seat_owner(session);
+    let holder = seat_holder(session);
     let outcome = state
         .state_store
         .append_seat_events_and_renew_if_mixed_cut(
             &ExactSeat {
                 root_id: &detail.chain_root_id,
-                owner: &owner,
+                launcher: seat_launcher(session),
+                holder: &holder,
                 item_ref: &detail.item_ref,
                 executor_ref: &detail.executor_ref,
             },
@@ -345,7 +354,7 @@ pub fn admit_seat_root(
     state: &AppState,
     surface_ref: &str,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
-    owner: &str,
+    launcher: &str,
     granted_caps: Vec<String>,
 ) -> Result<ryeos_app::thread_lifecycle::NonExecutionRootAdmission, HandlerError> {
     let node_history_policy = state
@@ -353,7 +362,9 @@ pub fn admit_seat_root(
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let request = ryeos_app::thread_lifecycle::NonExecutionRootRequest {
         item_ref: surface_ref,
-        requested_by: owner,
+        requested_by: launcher,
+        // The seat's ceiling is the session's granted scopes, never the
+        // launcher key's own grant.
         caller_scopes: granted_caps,
         current_site_id: state.threads.site_id(),
         origin_site_id: state.threads.site_id(),
@@ -482,7 +493,7 @@ fn require_presentation_seat_for_read(
         .thread_id
         .as_deref()
         .ok_or_else(|| HandlerError::Conflict("presentation seat is not prepared".into()))?;
-    let detail = require_owned_seat(state, thread, &seat_owner(session))?;
+    let detail = require_owned_seat(state, session, &membership, thread)?;
     let attachment = ui
         .browser_sessions
         .resolve_attachment(&session.session_id, &membership.root_coordinate)
@@ -960,7 +971,8 @@ fn require_writer(
 /// StateStore action callback. A stale frontier is a retry, never authority.
 pub(crate) struct UiSeatActionAdmission {
     pub anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
-    pub owner: String,
+    pub launcher: String,
+    pub holder: String,
     pub item_ref: String,
     pub executor_ref: String,
 }
@@ -1048,7 +1060,12 @@ fn validate_prepared_operation(
         )
         .into());
     }
-    super::ui_invocations_dispatch::validate_prepared_operation_binding(&attachment, operation)
+    super::ui_invocations_dispatch::validate_prepared_operation_binding(
+        state,
+        &session.granted_caps,
+        &attachment,
+        operation,
+    )
 }
 
 fn validate_completed_operation(
@@ -1328,11 +1345,20 @@ fn producer_response(
         "state":control.state,"next_engine_seq":control.next_engine_seq.to_string()})
 }
 
+/// The seat thread `thread_id` that `membership`, a presentation membership of
+/// `session` the daemon bound, names, when its signed launcher is the
+/// session's key. Both halves are required: another session of the same key
+/// holds no membership naming this thread, and a membership never makes a
+/// thread another key launched this session's seat.
 fn require_owned_seat(
     state: &AppState,
+    session: &BrowserSession,
+    membership: &crate::browser_session::PresentationMembership,
     thread_id: &str,
-    owner: &str,
 ) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    if membership.thread_id.as_deref() != Some(thread_id) {
+        return Err(HandlerError::NotFound);
+    }
     let detail = state
         .state_store
         .get_thread(thread_id)
@@ -1343,7 +1369,7 @@ fn require_owned_seat(
             "thread {thread_id} is not a seat session"
         )));
     }
-    if detail.requested_by.as_deref() != Some(owner) {
+    if detail.requested_by.as_deref() != Some(seat_launcher(session)) {
         return Err(HandlerError::NotFound);
     }
     Ok(detail)
@@ -1604,9 +1630,13 @@ pub async fn handle_open(
                                     &compile_context,
                                     &state,
                                     attachment.project_authority.as_deref(),
-                                    SeatClass::of_session(session.user_principal_id.as_deref()),
                                 )?
                             };
+                            let seat_project = crate::seat_project::resolve_for_binding(
+                                &state,
+                                &compiled_binding,
+                                &session.granted_caps,
+                            )?;
                             candidates.push(crate::browser_session::InitialSurfaceCandidate {
                                 seed,
                                 candidate: crate::browser_session::BindingAttachmentCandidate {
@@ -1614,6 +1644,7 @@ pub async fn handle_open(
                                     compiled_binding: Arc::new(compiled_binding),
                                     presentation,
                                     project_authority: attachment.project_authority.clone(),
+                                    seat_project,
                                 },
                             });
                         }
@@ -1982,7 +2013,8 @@ impl CompletedSeatIngressAdmission {
     pub(crate) fn seat(&self) -> ExactSeat<'_> {
         ExactSeat {
             root_id: self.action.anchor.chain_root_id(),
-            owner: &self.action.owner,
+            launcher: &self.action.launcher,
+            holder: &self.action.holder,
             item_ref: &self.action.item_ref,
             executor_ref: &self.action.executor_ref,
         }
@@ -2111,7 +2143,8 @@ impl CompletedSeatIngressRead {
         Ok(CompletedSeatIngressAdmission {
             action: UiSeatActionAdmission {
                 anchor: self.anchor.clone(),
-                owner: seat_owner(session),
+                launcher: seat_launcher(session).to_owned(),
+                holder: seat_holder(session),
                 item_ref: detail.item_ref,
                 executor_ref: detail.executor_ref,
             },
@@ -2287,7 +2320,7 @@ pub async fn handle_append(
             HandlerError::Conflict("append session changed during proof read".into()).into(),
         );
     }
-    let owner = seat_owner(&session);
+    let holder = seat_holder(&session);
     let (detail, membership) = require_presentation_seat_for_read(
         &state,
         &session,
@@ -2591,7 +2624,8 @@ pub async fn handle_append(
     let persisted = match state.state_store.append_seat_events_and_renew_if_mixed_cut(
         &ExactSeat {
             root_id: &detail.chain_root_id,
-            owner: &owner,
+            launcher: seat_launcher(&session),
+            holder: &holder,
             item_ref: &detail.item_ref,
             executor_ref: &detail.executor_ref,
         },

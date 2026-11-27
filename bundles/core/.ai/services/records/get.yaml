@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:48:38Z:40c24ca7ac78f19637c7731c3e8845b32ef19aba26405d0bcdc6c64bedb7f38a:u6c0nh8iyi3gWgwWXu0AUjn81hgYjGQRH+GKyEo5SvVg+jA28eekrzJJrjYEstoLbxiaUKANQqi7IQL0gcgQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T02:45:53Z:b5ef61b80eef3477bd2aff8b65a3271e8228b8fbface9c4103a453e3061b0188:/0/v+11uTPQtzXBLJTTIzQhQMJb+hNwXKJ14m2mNLw2IGP3hwpVD6SCbMT+Wzowz5OBaBK6FJjuiK0tEbcNBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: records.get
 availability: both
@@ -6,4 +6,56 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.records/get"]
+schema:
+  record_kind: string
+  key: string?
+  hash: string?
+  holder: string?
+  include_unverified: boolean?
+  if_revision: string?
 description: "Read one signed record of this node by its declared kind, with what was checked: scheme, signer, freshness. A record that fails verification is withheld"
+disclosure:
+  principal:
+    - "/record/record_kind"
+    - "/record/key"
+    - "/record/hash"
+    - "/record/stored_as"
+    - "/record/bytes"
+    - "/record/truncated"
+    - "/record/verify/status"
+    - "/record/verify/scheme"
+    - "/record/verify/reason"
+    - "/record/verify/fresh"
+    - "/record/verify/signer_status"
+    - "/record/body/schema"
+    - "/record/body/generated_at"
+    - "/record/body/composition/host_class"
+    - "/record/body/floor/admitted"
+    - "/record/body/host/kernel_kind"
+    - "/record/collections/provided/*/name"
+    - "/record/collections/provided/*/source"
+    - "/record/collections/provided/*/provider"
+    - "/record/collections/missing/*/name"
+    - "/record/collections/floor_met/*/label"
+    - "/record/collections/floor_met/*/name"
+    - "/record/collections/floor_met/*/source"
+    - "/record/collections/floor_met/*/provider"
+    - "/record/collections/floor_unmet/*/label"
+    - "/record/collections/capacity/*/name"
+    - "/record/collections_coverage/provided"
+    - "/record/collections_coverage/missing"
+    - "/record/collections_coverage/floor_met"
+    - "/record/collections_coverage/floor_unmet"
+    - "/record/collections_coverage/capacity"
+    - "/schema"
+    - "/as_of"
+    - "/revision"
+    - "/coverage/state"
+    - "/coverage/reason"
+    - "/signers/*/status"
+    - "/not_modified"
+  free_text:
+    - "/record/verify/signer"
+    - "/record/verify/detail"
+    - "/signers/*/label"
+    - "/signers/*/role"

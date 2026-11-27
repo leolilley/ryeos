@@ -29,10 +29,14 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
+mod key_link;
 mod ownership;
+mod publication;
 mod registry;
 pub use endorsement::*;
+pub use key_link::*;
 pub use ownership::*;
+pub use publication::*;
 pub use registry::*;
 
 use crate::contracts::{
@@ -509,7 +513,10 @@ impl TrustStore {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
         let chain = load_event_chain(&events_dir(app_root), &node_key)?;
-        let mut store = Self::from_registry(node_key, records)?.with_succession_chain(&chain);
+        let links = KeyLinkLedger::load(app_root, &node_key)?.entries()?;
+        let mut store = Self::from_registry(node_key, records)?
+            .with_succession_chain(&chain)
+            .with_key_links(links);
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, &store)?;
         tracing::debug!(
@@ -521,7 +528,32 @@ impl TrustStore {
         Ok(store)
     }
 
-    /// The endorsements in force, as of now.
+    /// Which kinds a standing endorsement may name under this store. Unset
+    /// until [`Self::with_standing_kinds`] is called, so a store that was
+    /// never paired with a kind registry honours no standing endorsement.
+    pub fn standing_gate(&self) -> &endorsement::StandingGate {
+        self.endorsements.gate()
+    }
+
+    /// This store, paired with the kinds whose signed schema allows a standing
+    /// endorsement. The pairing belongs to the returned value, so an engine
+    /// generation that owns this store and its kind registry moves them
+    /// together: no endorsement is judged by another generation's registry.
+    pub fn with_standing_kinds(mut self, kinds: impl IntoIterator<Item = String>) -> Self {
+        self.endorsements = self
+            .endorsements
+            .with_gate(endorsement::StandingGate::of_kinds(kinds));
+        self
+    }
+
+    /// The stored endorsements that cover nothing under this store's gate,
+    /// by digest, with why.
+    pub fn endorsement_inert(&self) -> Vec<(String, endorsement::InertReason)> {
+        self.endorsements.current().inert(self.endorsements.gate())
+    }
+
+    /// The endorsements in force, as of now. This is the stored index; use
+    /// [`Self::endorsement_inert`] for the ones that cover nothing.
     pub fn endorsement_index(&self) -> std::sync::Arc<EndorsementIndex> {
         self.endorsements.current()
     }
@@ -546,7 +578,7 @@ impl TrustStore {
         })?;
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, self)?;
-        let identity = index.identity(lillux::time::unix_secs_now());
+        let identity = index.identity(self.endorsements.gate(), lillux::time::unix_secs_now());
         self.endorsements.replace(index);
         Ok(identity)
     }
@@ -561,7 +593,7 @@ impl TrustStore {
     ) -> Option<EndorsementSnapshot> {
         self.endorsements
             .current()
-            .snapshot_for(logical_project.identity()?)
+            .snapshot_for(self.endorsements.gate(), logical_project.identity()?)
     }
 
     /// The scoped signer list a launch carries: this store's entries, with the
@@ -636,6 +668,15 @@ impl TrustStore {
         self
     }
 
+    /// This store with the key links in force read into its owner graph. A
+    /// store with no graph (never given a succession chain) is unchanged.
+    pub fn with_key_links(mut self, links: Vec<KeyLinkEntry>) -> Self {
+        if let Some(graph) = self.succession.take() {
+            self.succession = Some(std::sync::Arc::new((*graph).clone().with_links(links)));
+        }
+        self
+    }
+
     /// The node's key-succession graph, when this store holds one.
     pub fn succession(&self) -> Option<&SuccessionGraph> {
         self.succession.as_deref()
@@ -651,6 +692,16 @@ impl TrustStore {
             .as_deref()
             .ok_or(OwnerRefusal::Unavailable)?;
         graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+    }
+
+    /// [`Self::owner_for`] judging key links at `now_secs`, for a writer that
+    /// has the node's clock.
+    pub fn owner_for_at(&self, key: &str, now_secs: u64) -> Result<ResolvedOwner, OwnerRefusal> {
+        let graph = self
+            .succession
+            .as_deref()
+            .ok_or(OwnerRefusal::Unavailable)?;
+        graph.ownership_of_at(key.strip_prefix("fp:").unwrap_or(key), now_secs)
     }
 
     /// The principal a signature by `key` speaks for when verified: its
@@ -788,7 +839,7 @@ impl TrustStore {
             &mut bytes,
             self.endorsements
                 .current()
-                .identity(lillux::time::unix_secs_now())
+                .identity(self.endorsements.gate(), lillux::time::unix_secs_now())
                 .as_bytes(),
         );
         lillux::cas::sha256_hex(&bytes)
@@ -906,6 +957,7 @@ impl TrustStore {
         // whose identity the daemon sealed into the frozen snapshot.
         if let Some(launch) = &self.launch_endorsements {
             return self.endorsements.current().covers(
+                self.endorsements.gate(),
                 &launch.project,
                 context.kind,
                 content_digest,
@@ -918,6 +970,7 @@ impl TrustStore {
             return false;
         };
         self.endorsements.current().covers(
+            self.endorsements.gate(),
             identity,
             context.kind,
             content_digest,
@@ -1020,6 +1073,7 @@ pub fn verify_node_signed_document(
 /// the pattern in `crates/bin/daemon/src/auth.rs` and `crates/bin/daemon/src/identity.rs`.
 #[tracing::instrument(
     name = "engine:trust_verify",
+    level = "debug",
     skip(content, trust_store, context),
     fields(signer = ?header.signer_fingerprint)
 )]

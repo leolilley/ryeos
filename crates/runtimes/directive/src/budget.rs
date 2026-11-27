@@ -65,19 +65,24 @@ impl BudgetTracker {
         input: u64,
         output: u64,
         usd: UsdNanos,
+        prior_status: Option<UsageStatus>,
     ) -> Result<(), RuntimeCostError> {
         let cost = RuntimeCost {
             input_tokens: input,
             output_tokens: output,
             total_usd: usd,
             basis: None,
-            usage_status: Default::default(),
+            usage_status: prior_status.unwrap_or_default(),
         };
         cost.validate()?;
         self.total_input = input;
         self.total_output = output;
         self.total_usd = usd;
-        self.usage_status = None;
+        // The earlier turns' status is the run's starting point, so a later
+        // settled turn can only fold into it, never reset it to complete.
+        // `None` means there were no earlier turns: the first new member then
+        // seeds the aggregate, as in a fresh run.
+        self.usage_status = prior_status;
         Ok(())
     }
 
@@ -143,6 +148,43 @@ mod tests {
         // Settled tokens and spend are measurements and do not change it.
         tracker.report(1, 1, usd("0.01")).unwrap();
         assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+    }
+
+    #[test]
+    fn a_resumed_run_keeps_the_status_its_earlier_turns_earned() {
+        // Earlier turns were partial: a clean new turn does not clear that.
+        let mut tracker = make_tracker("10");
+        tracker
+            .reseed(10, 5, usd("0.01"), Some(UsageStatus::Partial))
+            .unwrap();
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+        tracker.note_usage_status(UsageStatus::Complete);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+
+        // Earlier turns were all unavailable: an unavailable new turn stays so,
+        // a measured one makes the run partial.
+        let mut tracker = make_tracker("10");
+        tracker
+            .reseed(0, 0, UsdNanos::ZERO, Some(UsageStatus::Unavailable))
+            .unwrap();
+        tracker.note_usage_status(UsageStatus::Unavailable);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Unavailable);
+        tracker.note_usage_status(UsageStatus::Complete);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+
+        // Earlier turns were complete: one unavailable new turn makes it partial.
+        let mut tracker = make_tracker("10");
+        tracker
+            .reseed(10, 5, usd("0.01"), Some(UsageStatus::Complete))
+            .unwrap();
+        tracker.note_usage_status(UsageStatus::Unavailable);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+
+        // No earlier turns at all: the first new member seeds it, as in a fresh run.
+        let mut tracker = make_tracker("10");
+        tracker.reseed(0, 0, UsdNanos::ZERO, None).unwrap();
+        tracker.note_usage_status(UsageStatus::Unavailable);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Unavailable);
     }
 
     #[test]

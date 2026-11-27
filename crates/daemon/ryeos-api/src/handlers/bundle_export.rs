@@ -174,7 +174,7 @@ pub(crate) fn exported_blob_hashes(
 }
 
 /// Recursively walk a directory, store each regular file as a blob in CAS.
-fn walk_and_ingest(
+pub(crate) fn walk_and_ingest(
     base: &std::path::Path,
     current: &std::path::Path,
     cas: Option<&lillux::cas::CasStore>,

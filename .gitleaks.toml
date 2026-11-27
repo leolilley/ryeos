@@ -25,6 +25,8 @@ paths = [
 regexes = [
   '''id=publisher-key,src=''',
   '''Sec-WebSocket-Key: ''',
+  # A made-up secret-floor test value in the workload-client unit test; not a credential.
+  '''sk-live-0123456789''',
   # rust-cache cache names in the CI workflow.
   '''^(workspace-crates|scheduler-compositions|crash-qualification)-v[0-9]+$''',
 ]

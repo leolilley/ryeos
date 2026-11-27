@@ -12,6 +12,15 @@
 //! Scenarios that drive HOSTED directly forge requests the way a compromised or
 //! mistaken origin could, signing with ORIGIN's node key, and prove HOSTED
 //! refuses wrong-audience, expired, tampered and transitive delegations.
+//!
+//! Run it under nextest (one process per test), or with `-- --test-threads 1`.
+//! The tests start two daemons each and set up their node policy in the test
+//! process, where the native SQLite host's process-wide guard
+//! (`ryeos_native_process_matches`) refuses a check made while another thread
+//! installs or closes the native region. Plain `cargo test` runs the tests as
+//! threads of one process and can hit "inherited native process authority
+//! refused" during setup; that is the suite sharing the guard, not a fault in
+//! the code under test.
 
 use ryeosd::test_support as common;
 
@@ -450,12 +459,21 @@ async fn a_delegated_call_is_recorded_on_hosted_as_the_principal_and_revocation_
     let probe = lillux::sha256_hex(b"recorded-as-the-principal");
     let (status, text) = pair.hosted_as_node(&delegation, &probe).await?;
     ensure!(status.is_success(), "forwarded request: {status} {text}");
-    let recorded: Value = serde_json::from_str(&text)?;
-    let result = recorded.get("result").unwrap_or(&recorded);
-    assert_eq!(result["revoked_by"], u1_principal.as_str());
-    assert_eq!(
-        result["delegated_via"],
-        pair.origin_fixture.site_id().as_str()
+    // The forwarded principal is not the hosted node's operator, so the
+    // response discloses only the digest and time; the ledger holds who revoked
+    // and through which site.
+    let ledger = std::fs::read_to_string(pair.tombstone_path(&probe))
+        .context("hosted holds no tombstone for the forwarded request")?;
+    assert!(
+        ledger.contains(&format!("revoked_by = \"{u1_principal}\"")),
+        "{ledger}"
+    );
+    assert!(
+        ledger.contains(&format!(
+            "delegated_via = \"{}\"",
+            pair.origin_fixture.site_id()
+        )),
+        "{ledger}"
     );
 
     // Revoking from ORIGIN tombstones the digest on HOSTED and drops the local
@@ -565,11 +583,8 @@ async fn a_principal_without_a_delegation_is_refused_on_origin_and_capped_on_hos
         body.to_string().contains("remote_delegation_missing"),
         "{body}"
     );
-    assert!(
-        body.to_string()
-            .contains("ryeos remote delegate --remote hosted"),
-        "{body}"
-    );
+    // The cure sentence is for the operator; a principal without a delegation
+    // reads only the stable code above.
 
     // With a delegation that lends more than U2's grant on HOSTED holds, HOSTED
     // still refuses the capability outside the grant.
@@ -625,6 +640,59 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
     Ok(())
 }
 
+/// A caller the origin authorizes (a stored delegation for the remote) is
+/// refused by the live-install rule, not by authority: it learns that live
+/// installs are staged, nothing is written on the origin, and the node boots
+/// again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_nothing() -> Result<()>
+{
+    let mut pair = start_pair().await?;
+    let u1 = common::fast_fixture::user_signing_key();
+    pair.delegate(&u1, &[VAULT_LIST]).await?;
+    let bundle = "staged-refusal-demo";
+
+    let (status, body) = pair
+        .origin_service(
+            &u1,
+            "service:remote/bundle-install",
+            json!({"remote": HOSTED_REMOTE, "bundle_name": bundle}),
+        )
+        .await?;
+    assert_eq!(status.as_u16(), 501, "{body}");
+    assert_eq!(body["code"], "live_install_staged_unavailable", "{body}");
+    let text = body["error"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("live installs are staged; staging is not available yet"),
+        "{body}"
+    );
+    assert!(
+        !pair
+            .origin
+            .state_path
+            .join(".ai/bundles")
+            .join(bundle)
+            .exists(),
+        "a refused install left a bundle behind"
+    );
+    assert!(
+        !pair
+            .origin
+            .state_path
+            .join(".ai/node/bundles")
+            .join(format!("{bundle}.yaml"))
+            .exists(),
+        "a refused install left a registration behind"
+    );
+
+    pair.origin.restart().await?;
+    let (status, listed) = pair
+        .origin_service(&u1, "service:bundle/list", json!({}))
+        .await?;
+    assert_eq!(status.as_u16(), 200, "{listed}");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hosted_refuses_wrong_audience_expired_tampered_and_transitive_delegations() -> Result<()> {
     let pair = start_pair().await?;
@@ -665,5 +733,49 @@ async fn hosted_refuses_wrong_audience_expired_tampered_and_transitive_delegatio
     // Positive control: the untampered delegation is admitted.
     let (status, text) = pair.hosted_as_node(&good, &probe).await?;
     ensure!(status.is_success(), "control request: {status} {text}");
+    Ok(())
+}
+
+/// `remote configure` and `remote status` run against a live peer, not a
+/// config written by the fixture: the peer's public-key document is read
+/// through its service tier as the public reads it, and it must carry the
+/// vault fingerprint the pin binds.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_and_status_read_a_live_peers_public_key_document() -> Result<()> {
+    let pair = start_pair().await?;
+    let operator = common::fast_fixture::user_signing_key();
+    let hosted_node = hosted_node_key();
+    let (status, configured) = pair
+        .origin_service(
+            &operator,
+            "service:remote/configure",
+            json!({
+                "remote": "live",
+                "url": format!("http://{}", pair.hosted.bind),
+                "expect_fingerprint": fingerprint(&hosted_node),
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "remote configure: {status} {configured}"
+    );
+    let vault = configured["result"]["vault_fingerprint"]
+        .as_str()
+        .with_context(|| format!("configure returned no vault fingerprint: {configured}"))?;
+    ensure!(!vault.is_empty(), "empty vault fingerprint: {configured}");
+
+    let (status, report) = pair
+        .origin_service(
+            &operator,
+            "service:remote/status",
+            json!({"remote": "live"}),
+        )
+        .await?;
+    ensure!(status.is_success(), "remote status: {status} {report}");
+    ensure!(
+        report["result"]["remote"]["configured_vault_matches"] == json!(true),
+        "the live peer's vault fingerprint is not the pinned one: {report}"
+    );
     Ok(())
 }

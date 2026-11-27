@@ -145,6 +145,11 @@ impl ResponseMode for LaunchMode {
             }
         }
 
+        crate::routes::interpolation::require_literal_project_path(
+            &raw.response.source_config,
+            &raw.id,
+            "launch",
+        )?;
         let cfg: RawLaunchSourceConfig = if raw.response.source_config.is_null() {
             return Err(RouteConfigError::InvalidResponseSpec {
                 id: raw.id.clone(),
@@ -610,6 +615,7 @@ mod tests {
             authorized_key_class: None,
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
+            minted_session_grant: None,
             metadata,
         };
         let body = serde_json::json!({"action": "opened"});

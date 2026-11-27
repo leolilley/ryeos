@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T02:33:22Z:19867d94470365f8928fda67ae8ab77a105945851d5c5d3153608a0bc9d7e5c4:/fB6Pacx+tM3xF5nKalpOkO2ApkSgHpKhlcuKxwWN/0LqKMYV8jWq/WfGky7aMQzJQBZlzwWuylFsJLpA/MdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-26T02:47:10Z:69bbb35794e81bf4b42d0898d817df08194750ade5ea0000d48923616b0b10ab:0mZYY7iQILMN6lzOovqFV49ZaYPMTX86gj5ak2QWcg9r8PF5zF2fyEVnz7mxKNbAGj4RgT0o5RwVIS1yY45yAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -277,7 +277,7 @@ runs these steps as one command. Confirmation refusals are typed HTTP 409
 codes (`credential_confirm_lock_held`, `credential_confirm_expired`,
 `credential_confirm_wrong_state`). An expired, unfinished login is cleared
 explicitly through `service:credential-profiles/abandon-login` (CLI:
-`ryeos codex profile abandon-login <profile-id> <login-epoch>`).
+`ryeos credential-profile abandon-login <profile-id> <login-epoch>`).
 The exact parameter schemas are the signed service items. App Server
 notifications are pushed into the root RyeOS thread chain before worker
 acknowledgement; reattach/replay uses the ordinary thread/event surfaces, not

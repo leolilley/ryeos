@@ -42,6 +42,8 @@ struct BoundInvocation {
 }
 
 pub(crate) fn validate_prepared_operation_binding(
+    state: &AppState,
+    scopes: &[String],
     attachment: &AdmittedBindingAttachment,
     operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
 ) -> Result<()> {
@@ -51,7 +53,8 @@ pub(crate) fn validate_prepared_operation_binding(
     let marker = crate::seat_auth::attachment_project_query_identity(attachment)
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?
         .map(|path| path.to_string_lossy().into_owned());
-    let bound = resolve_binding_request(attachment, &admission.request, marker.as_deref())?;
+    let markers = SessionMarkers::for_attachment(state, attachment, scopes, marker.as_deref());
+    let bound = resolve_binding_request(attachment, &admission.request, &markers)?;
     use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
     let purpose = match bound.target.result_effect {
         Some(CompiledUiResultEffect::SurfaceOpening) => {
@@ -221,7 +224,13 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     // a request or durable row.
     let project_marker = crate::seat_auth::attachment_project_query_identity(&attachment)?
         .map(|path| path.to_string_lossy().into_owned());
-    let mut bound = resolve_binding_request(&attachment, &req, project_marker.as_deref())?;
+    let markers = SessionMarkers::for_attachment(
+        &state,
+        &attachment,
+        &session.granted_caps,
+        project_marker.as_deref(),
+    );
+    let mut bound = resolve_binding_request(&attachment, &req, &markers)?;
     let item_ref = bound.target.identity.canonical_ref.clone();
     // Every read passes the node's seat read policy: parameters are pinned and
     // checked here, and the returned shaping decides what the result may
@@ -231,13 +240,10 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     {
         let policy = state
             .node_policy
-            .require::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::read_disclosure::ReadDisclosurePolicy>(
         )?;
         let admitted = crate::seat_read_policy::decide(
             policy,
-            ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass::of_session(
-                session.user_principal_id.as_deref(),
-            ),
             &item_ref,
             &bound.target.parameter_schema,
             Some(crate::seat_read_policy::RequestFacts {
@@ -342,7 +348,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             (Some(_), Some(operation_id)) => {
                 let operation =
                     ingress.require_prepared(&state, &session, &producer, operation_id, &req)?;
-                validate_prepared_operation_binding(&attachment, &operation)?;
+                validate_prepared_operation_binding(
+                    &state,
+                    &session.granted_caps,
+                    &attachment,
+                    &operation,
+                )?;
                 if bound
                     .params
                     .get("creation_request_id")
@@ -414,15 +425,17 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some(producer.clone()),
         bound.project_authored_source,
         async {
-            if bound.target.source_safe {
-                execute_read_only_service(
+            if runs_unrecorded(&bound.target) {
+                // Surface admission runs inline here, not on a daemon-owned
+                // task, so its large future lives on the heap.
+                Box::pin(execute_unrecorded_service(
                     &item_ref,
                     bound.params,
                     &state,
                     prepared,
                     verified,
                     trusted_handler_context,
-                )
+                ))
                 .await
             } else {
                 execute_prepared_item_ref(
@@ -1131,8 +1144,9 @@ fn enforce_request_bounds(
 fn resolve_binding_request(
     attachment: &AdmittedBindingAttachment,
     req: &UiBindingRequest,
-    project_root: Option<&str>,
+    markers: &SessionMarkers<'_>,
 ) -> Result<BoundInvocation> {
+    let project_root = markers.project_root;
     match (&req.coordinate, &req.payload) {
         (UiBindingCoordinate::SurfaceRoute, UiBindingPayload::Input { value, route }) => {
             let surface_route = attachment
@@ -1145,7 +1159,7 @@ fn resolve_binding_request(
                         "surface route is absent from the compiled binding".into(),
                     )
                 })?;
-            let mut params = resolve_session_markers(&surface_route.parameters, project_root)?;
+            let mut params = resolve_session_markers(&surface_route.parameters, markers)?;
             let params = params.as_object_mut().ok_or_else(|| {
                 HandlerError::Internal("compiled surface route parameters are not an object".into())
             })?;
@@ -1208,7 +1222,7 @@ fn resolve_binding_request(
             Ok(BoundInvocation {
                 project_authored_source: source.project_authored,
                 target: source.target.clone(),
-                params: bind_source_parameters(source, params, project_root)?,
+                params: bind_source_parameters(source, params, markers)?,
             })
         }
         (
@@ -1321,7 +1335,7 @@ fn resolve_binding_request(
                     .into());
                 }
             };
-            let params = resolve_session_markers(&params, project_root)?;
+            let params = resolve_session_markers(&params, markers)?;
             Ok(BoundInvocation {
                 project_authored_source: false,
                 target: target.clone(),
@@ -1367,7 +1381,7 @@ fn validate_route_context(route: &ryeos_client_base::ui::UiBindingRouteContext) 
 fn bind_source_parameters(
     source: &CompiledUiSource,
     supplied: &Value,
-    project_root: Option<&str>,
+    markers: &SessionMarkers<'_>,
 ) -> Result<Value> {
     let supplied = supplied
         .as_object()
@@ -1406,7 +1420,7 @@ fn bind_source_parameters(
         }
     }
     let value = Value::Object(bound);
-    resolve_session_markers(&value, project_root)
+    resolve_session_markers(&value, markers)
 }
 
 fn bind_dynamic_source_parameter(key: &str, value: &Value) -> Result<Value> {
@@ -1495,8 +1509,127 @@ fn bind_authored_parameter(
     }
 }
 
-fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<Value> {
+/// What the session markers of a signed binding entry resolve from, taken from
+/// the admitted attachment at dispatch. The path markers read the retained
+/// checkout; the typed markers read who the seat is and what it stands for,
+/// judged now: `@session:key` is the seat's key (`fp:<hex>`),
+/// `@session:principal` the owner that key acts for (`pid:v1:<hex>`), and
+/// `@session:project` the project the seat states (`pid:v1:<hex>/<name>`).
+/// A typed marker that cannot resolve is a typed refusal, never an empty value.
+pub(crate) struct SessionMarkers<'a> {
+    project_root: Option<&'a str>,
+    typed: Option<TypedSessionFacts<'a>>,
+}
+
+/// What the typed markers are judged from.
+struct TypedSessionFacts<'a> {
+    state: &'a AppState,
+    compiled: &'a crate::compiled_binding::SessionCompiledUiBinding,
+    scopes: &'a [String],
+}
+
+impl<'a> SessionMarkers<'a> {
+    pub(crate) fn for_attachment(
+        state: &'a AppState,
+        attachment: &'a AdmittedBindingAttachment,
+        scopes: &'a [String],
+        project_root: Option<&'a str>,
+    ) -> Self {
+        Self {
+            project_root,
+            typed: Some(TypedSessionFacts {
+                state,
+                compiled: &attachment.compiled_binding,
+                scopes,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn project_root_only(project_root: Option<&'a str>) -> Self {
+        Self {
+            project_root,
+            typed: None,
+        }
+    }
+
+    fn typed(&self, marker: &str) -> Result<&TypedSessionFacts<'a>> {
+        self.typed.as_ref().ok_or_else(|| {
+            HandlerError::Internal(format!("session marker `{marker}` has no session to read"))
+                .into()
+        })
+    }
+
+    fn key(&self) -> Result<String> {
+        Ok(self
+            .typed("@session:key")?
+            .compiled
+            .binding
+            .principal_id
+            .clone())
+    }
+
+    fn principal(&self) -> Result<String> {
+        let facts = self.typed("@session:principal")?;
+        let key = &facts.compiled.binding.principal_id;
+        match facts.state.engine.trust_store.owner_for(key) {
+            Ok(owner) => Ok(owner.principal.to_string()),
+            Err(refusal) => Err(owner_marker_refusal(refusal)),
+        }
+    }
+
+    fn project(&self) -> Result<String> {
+        let facts = self.typed("@session:project")?;
+        match crate::seat_project::resolve_for_binding(facts.state, facts.compiled, facts.scopes)? {
+            ryeos_client_base::ui::UiSeatProject::Stated { project } => Ok(project),
+            ryeos_client_base::ui::UiSeatProject::Absent { absence } => Err(marker_refusal(
+                absence.code(),
+                "this seat's checkout states no project",
+            )),
+            ryeos_client_base::ui::UiSeatProject::Projectless => Err(marker_refusal(
+                "project_required",
+                "this signed binding entry requires a seat that states a project",
+            )),
+        }
+    }
+}
+
+/// What `@session:principal` answers when the node cannot name the owner of
+/// the seat's key: a retired or revoked key is the typed `owner_key_not_active`;
+/// any other refusal is the node's own fault.
+fn owner_marker_refusal(refusal: ryeos_engine::trust::OwnerRefusal) -> anyhow::Error {
+    match refusal {
+        ryeos_engine::trust::OwnerRefusal::KeyNotActive { .. } => marker_refusal(
+            "owner_key_not_active",
+            "this seat's key no longer acts for an owner",
+        ),
+        other => {
+            HandlerError::Internal(format!("resolve the owner of the seat key: {other}")).into()
+        }
+    }
+}
+
+/// A typed refusal of a session marker: the code names why the seat cannot
+/// stand for what the marker asks.
+fn marker_refusal(code: &str, message: &str) -> anyhow::Error {
+    HandlerError::Structured {
+        code: code.to_owned(),
+        status: 409,
+        body: json!({"code": code, "error": message}),
+    }
+    .into()
+}
+
+fn resolve_session_markers(value: &Value, markers: &SessionMarkers<'_>) -> Result<Value> {
+    let project_root = markers.project_root;
     match value {
+        Value::String(marker) if marker == "@session:key" => Ok(Value::String(markers.key()?)),
+        Value::String(marker) if marker == "@session:principal" => {
+            Ok(Value::String(markers.principal()?))
+        }
+        Value::String(marker) if marker == "@session:project" => {
+            Ok(Value::String(markers.project()?))
+        }
         Value::String(marker) if marker == "@session:project_root_or_null" => {
             Ok(project_root.map(Value::from).unwrap_or(Value::Null))
         }
@@ -1515,15 +1648,13 @@ fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<
         Value::Array(values) => Ok(Value::Array(
             values
                 .iter()
-                .map(|value| resolve_session_markers(value, project_root))
+                .map(|value| resolve_session_markers(value, markers))
                 .collect::<Result<_>>()?,
         )),
         Value::Object(values) => Ok(Value::Object(
             values
                 .iter()
-                .map(|(key, value)| {
-                    Ok((key.clone(), resolve_session_markers(value, project_root)?))
-                })
+                .map(|(key, value)| Ok((key.clone(), resolve_session_markers(value, markers)?)))
                 .collect::<Result<_>>()?,
         )),
         value => Ok(value.clone()),
@@ -1602,6 +1733,7 @@ pub(crate) fn prepare_item_ref(
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(state, ctx),
     };
 
     Ok(PreparedInvocation {
@@ -1611,7 +1743,15 @@ pub(crate) fn prepare_item_ref(
     })
 }
 
-async fn execute_read_only_service(
+/// Whether a compiled target runs on the unrecorded daemon-service executor:
+/// a read-only source, or a service that declares a session transition. The
+/// declaration is the only key; compilation already refused it on anything
+/// but a trusted-bundle, session-local, non-read-only service.
+fn runs_unrecorded(target: &crate::compiled_binding::CompiledUiTarget) -> bool {
+    target.source_safe || target.result_effect.is_some()
+}
+
+async fn execute_unrecorded_service(
     item_ref: &str,
     params: Value,
     state: &AppState,
@@ -1656,12 +1796,13 @@ async fn execute_read_only_service(
             ))
         })?;
 
-    // Read-only UI sources are in-process daemon queries. They need the live
-    // project only as a resolution/input scope; manufacturing project
-    // execution provenance for them both over-authorizes the handler and
-    // wrongly demands `ryeos.write.project.live`. Availability, signed
-    // required_caps, audit policy, and session-local context are still
-    // enforced by the shared verified service executor.
+    // Read-only UI sources and declared session transitions are in-process
+    // daemon work. They need the live project only as a resolution/input
+    // scope; manufacturing project execution provenance for them both
+    // over-authorizes the handler and wrongly demands
+    // `ryeos.write.project.live`. Availability, signed required_caps, audit
+    // policy, and session-local context are still enforced by the shared
+    // verified service executor.
     let result = ryeos_executor::executor::execute_service_verified(
         verified,
         item_ref,
@@ -1752,7 +1893,26 @@ async fn execute_prepared_item_ref(
         &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
-    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
+    .map_err(|error| {
+        // The refusal names the capability the seat lacks. It travels as a
+        // typed field so a non-operator seat reads it too: a capability name
+        // is policy vocabulary, not a path or a secret.
+        let message = format!("{error:#}");
+        let capability = ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY;
+        let mut body = json!({
+            "code": "capability_required",
+            "error": message,
+            "retryable": false,
+        });
+        if message.contains(capability) {
+            body["capability"] = json!(capability);
+        }
+        HandlerError::Structured {
+            code: "capability_required".to_owned(),
+            status: 403,
+            body,
+        }
+    })?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_root.clone(),
         exec_ctx.engine.clone(),
@@ -2084,6 +2244,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_declared_transition_or_a_read_only_source_runs_unrecorded() {
+        // A service that declares no effect keeps the recorded lane, whatever
+        // its result carries.
+        assert!(!runs_unrecorded(&target(None)));
+        assert!(runs_unrecorded(&target(Some(
+            CompiledUiResultEffect::SurfaceOpening
+        ))));
+        let mut read_only = target(None);
+        read_only.source_safe = true;
+        assert!(runs_unrecorded(&read_only));
+    }
+
     fn session(user_principal_id: Option<String>) -> BrowserSession {
         let now = Instant::now();
         BrowserSession {
@@ -2118,7 +2291,7 @@ mod tests {
         let descriptor = |id: &str, root_ref: &str, definition: Value| {
             json!({
                 "binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64),
-                "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+                "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
                 "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":1024,"max_seat_append_bytes":65536},
                 "presentation":{"definition":definition,"views":{"view:test/work":{"widget":"rows"}}}
             })
@@ -2231,12 +2404,42 @@ mod tests {
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 
+    /// The caps a session's invocation is launched with are the session's own
+    /// grant. The executor then refuses any declared cap this grant does not
+    /// cover (`caller_capability_not_covered`, pinned in `root_admission_e2e`),
+    /// so a directive cannot be born with more than the session holds.
+    #[tokio::test]
+    async fn a_session_invocation_is_prepared_with_the_sessions_grant_alone() {
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai")).unwrap();
+        let mut granted = session(None);
+        granted.granted_caps = vec!["ryeos.execute.directive.only-this".to_string()];
+
+        let ctx = invocation_context_for_session(&granted);
+        let prepared = prepare_item_ref(&ctx, &state, project.path(), None)
+            .expect("prepare the session's invocation");
+
+        assert_eq!(
+            prepared.exec_ctx.principal_fingerprint,
+            granted.principal_id
+        );
+        assert_eq!(prepared.exec_ctx.caller_scopes, granted.granted_caps);
+        match &prepared.exec_ctx.plan_ctx.requested_by {
+            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+                assert_eq!(principal.fingerprint, granted.principal_id);
+                assert_eq!(principal.scopes, granted.granted_caps);
+            }
+            other => panic!("expected the session's local principal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn saved_surface_transition_rejects_extra_descriptors_and_coordinate_drift() {
         let presentation = "11111111-1111-4111-8111-111111111111";
         let binding = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11"});
         let attachment = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11",
-            "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"saved-surface","library_revision":1,"record_digest":"ab".repeat(32)},
@@ -2330,7 +2533,7 @@ mod tests {
         let presentation = "11111111-1111-4111-8111-111111111111";
         let binding = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32)});
         let attachment = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32),
-            "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"reusable","library_revision":2,"record_digest":"ab".repeat(32)},"active_view_set_id":"set-one",
@@ -2410,7 +2613,7 @@ mod tests {
             "binding_attachment_id":"origin","binding_generation":2,"binding_digest":"ab".repeat(32),
             "root_ref":"surface:test/base","root_generation":"cd".repeat(32),
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
-            "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":65536}
         })).unwrap();
         let coordinate = UiBindingAttachmentCoordinate {
@@ -2498,7 +2701,7 @@ mod tests {
                 "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
                 "project_path": null,
                 "subject": {"kind":"projectless"},
-                "posture": "observation_only",
+                "posture": "observation_only","seat_project":{"state":"projectless"},
                 "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
             }
         });
@@ -2613,7 +2816,7 @@ mod tests {
                 "presentation_id": "11111111-1111-4111-8111-111111111111",
                 "creation_request_id": "33333333-3333-4333-8333-333333333333",
                 "surface": {"surface_instance_id":"22222222-2222-4222-8222-222222222222", "ordinal":1, "title":"Fixture", "binding":{"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11"}},
-                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","named_items": [], "binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
+                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","seat_project":{"state":"projectless"},"named_items": [], "binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
             }
         });
         result["ui_transition"]["attachment"]["presentation"]["views"] =
@@ -2694,7 +2897,7 @@ mod tests {
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
             "project_path": null,
             "subject": {"kind":"projectless"},
-            "posture": "observation_only",
+            "posture": "observation_only","seat_project":{"state":"projectless"},
             "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
         });
         assert!(
@@ -2765,7 +2968,7 @@ mod tests {
         assert_eq!(
             resolve_session_markers(
                 &json!({"project_path": "@session:project_root_or_null"}),
-                None,
+                &SessionMarkers::project_root_only(None),
             )
             .unwrap(),
             json!({"project_path": null})
@@ -2773,7 +2976,7 @@ mod tests {
         assert_eq!(
             resolve_session_markers(
                 &json!({"project_path": "@session:project_root_or_null"}),
-                Some("/project"),
+                &SessionMarkers::project_root_only(Some("/project")),
             )
             .unwrap(),
             json!({"project_path": "/project"})
@@ -2782,6 +2985,166 @@ mod tests {
 
     #[test]
     fn required_project_marker_still_refuses_projectless_sessions() {
-        assert!(resolve_session_markers(&json!("@session:project_root"), None).is_err());
+        assert!(
+            resolve_session_markers(
+                &json!("@session:project_root"),
+                &SessionMarkers::project_root_only(None)
+            )
+            .is_err()
+        );
+    }
+
+    /// A seat of the fixture key, on a checkout that states no project (the
+    /// fixture registered none) or on no checkout at all.
+    fn marker_session(
+        state: &AppState,
+        checkout: Option<&std::path::Path>,
+    ) -> (Arc<AdmittedBindingAttachment>, Vec<String>) {
+        let launch = crate::test_support::launch_context(
+            "surface:ryeos/ui/base",
+            checkout
+                .map(|path| path.to_string_lossy().into_owned())
+                .as_deref(),
+            crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+            None,
+        );
+        let (session_id, token) = crate::test_support::mint_launch(state, launch);
+        let ui = get_ui_state(state).expect("UI state");
+        assert_eq!(
+            ui.browser_sessions.consume_launch_token(&token),
+            Some(session_id.clone())
+        );
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("session");
+        (
+            session.attachments[&session.root_attachment_id].clone(),
+            session.granted_caps.clone(),
+        )
+    }
+
+    fn refusal_code(error: &anyhow::Error) -> Option<String> {
+        match error.downcast_ref::<HandlerError>() {
+            Some(HandlerError::Structured { code, .. }) => Some(code.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_retired_or_revoked_key_is_the_typed_owner_refusal_and_other_faults_are_not() {
+        use ryeos_engine::trust::{OwnerRefusal, SignerStatus};
+        for status in [SignerStatus::Retired, SignerStatus::Revoked] {
+            let error = owner_marker_refusal(OwnerRefusal::KeyNotActive { status });
+            assert_eq!(
+                refusal_code(&error).as_deref(),
+                Some("owner_key_not_active")
+            );
+        }
+        let error = owner_marker_refusal(OwnerRefusal::Unavailable);
+        assert!(
+            refusal_code(&error).is_none(),
+            "a damaged registry is not a seat refusal"
+        );
+    }
+
+    #[test]
+    fn a_seat_on_a_registered_checkout_states_its_project_and_loses_it_with_the_registration() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        let canonical = checkout.path().canonicalize().expect("canonical checkout");
+        let identity = crate::test_support::register_operator_checkout(&state, &canonical, "demo");
+
+        // A seat of the operator's key on that checkout, sealed with the
+        // project the registration states.
+        let operator = crate::test_support::operator_launch_context(&state);
+        let key = if operator.fingerprint.starts_with("fp:") {
+            operator.fingerprint.clone()
+        } else {
+            format!("fp:{}", operator.fingerprint)
+        };
+        let mut launch = crate::test_support::launch_context(
+            "surface:ryeos/ui/base",
+            Some(canonical.to_string_lossy().as_ref()),
+            crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+            None,
+        );
+        {
+            let binding = &mut Arc::make_mut(&mut launch.compiled_binding).binding;
+            binding.principal_id = key;
+            binding.signer_project =
+                ryeos_state::project_identity::LogicalProject::Stated(identity.clone());
+        }
+        let (session_id, token) = crate::test_support::mint_launch(&state, launch);
+        let ui = get_ui_state(&state).expect("UI state");
+        assert_eq!(
+            ui.browser_sessions.consume_launch_token(&token),
+            Some(session_id.clone())
+        );
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("session");
+        let attachment = session.attachments[&session.root_attachment_id].clone();
+        let scopes = vec!["*".to_owned()];
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+
+        // The registration states the project: the marker is its identity, with the name.
+        let stated = resolve_session_markers(&json!("@session:project"), &markers).unwrap();
+        assert_eq!(stated, json!(identity.to_string()));
+        assert!(stated.as_str().unwrap().ends_with("/demo"));
+
+        // The registration is gone: the same seat answers the typed absence,
+        // so the answer is judged now and not carried from mint.
+        ryeos_node::project_registry::unregister(
+            &ryeos_node::project_registry::RegistrationChange {
+                app_root: &state.config.app_root,
+                node: &state.identity,
+                request_digest: &"0".repeat(64),
+                path: &canonical,
+                identity: &identity,
+            },
+        )
+        .expect("unregister the checkout");
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("unregistered"));
+    }
+
+    #[test]
+    fn the_typed_markers_say_who_the_seat_is_and_what_it_stands_for() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let project = tempfile::TempDir::new().expect("checkout");
+
+        // A seat on no checkout: the key and its owner resolve; a project does not.
+        let (attachment, scopes) = marker_session(&state, None);
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+        assert_eq!(
+            resolve_session_markers(&json!({"k": "@session:key"}), &markers).unwrap(),
+            json!({"k": crate::test_support::FIXTURE_KEY})
+        );
+        let owner = state
+            .engine
+            .trust_store
+            .owner_for(crate::test_support::FIXTURE_KEY)
+            .expect("the fixture key acts for its own owner")
+            .principal
+            .to_string();
+        assert!(owner.starts_with("pid:v1:"));
+        assert_eq!(
+            resolve_session_markers(&json!("@session:principal"), &markers).unwrap(),
+            json!(owner)
+        );
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("project_required"));
+
+        // A seat on a checkout that states no project: the typed absence, never a path.
+        let (attachment, scopes) = marker_session(&state, Some(project.path()));
+        let markers = SessionMarkers::for_attachment(&state, &attachment, &scopes, None);
+        let error = resolve_session_markers(&json!("@session:project"), &markers).unwrap_err();
+        assert_eq!(refusal_code(&error).as_deref(), Some("unregistered"));
+
+        // The typed markers need a session to read: without one they are refused.
+        let bare = SessionMarkers::project_root_only(None);
+        assert!(resolve_session_markers(&json!("@session:key"), &bare).is_err());
     }
 }

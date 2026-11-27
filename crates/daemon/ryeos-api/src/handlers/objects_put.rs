@@ -7,6 +7,7 @@
 //! stores via `CasStore::store_blob` which hashes and dedups.
 //! For objects, the client sends the full JSON value.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -77,9 +78,20 @@ pub const MAX_CAPSULE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_OBJECT_PUT_BODY_BYTES: usize = 100 * 1024 * 1024;
 pub const MAX_OBJECT_PUT_ENTRIES: usize = 100_000;
 
+/// A refusal of the caller's own upload; its text stays in the error's display
+/// so the signed-route check that formats it still reports the reason.
+fn bad_request(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::HandlerError::BadRequest(
+        message.into(),
+    ))
+}
+
 fn add_canonical_len(total: usize, amount: usize, limit: usize) -> anyhow::Result<usize> {
     let next = total.saturating_add(amount);
-    anyhow::ensure!(next <= limit, "canonical JSON exceeds {limit} bytes");
+    anyhow::ensure!(
+        next <= limit,
+        bad_request(format!("canonical JSON exceeds {limit} bytes"))
+    );
     Ok(next)
 }
 
@@ -87,7 +99,7 @@ fn accumulate_request_payload(total: usize, amount: usize) -> anyhow::Result<usi
     let next = total.saturating_add(amount);
     anyhow::ensure!(
         next <= MAX_OBJECT_PUT_BODY_BYTES,
-        "objects.put canonical payload exceeds 100 MiB"
+        bad_request("objects.put canonical payload exceeds 100 MiB")
     );
     Ok(next)
 }
@@ -104,7 +116,10 @@ fn canonical_string_len(value: &str, limit: usize) -> anyhow::Result<usize> {
         };
         len = add_canonical_len(len, n, limit)?;
     }
-    anyhow::ensure!(len <= limit, "canonical JSON string exceeds {limit} bytes");
+    anyhow::ensure!(
+        len <= limit,
+        bad_request(format!("canonical JSON string exceeds {limit} bytes"))
+    );
     Ok(len)
 }
 
@@ -121,7 +136,10 @@ fn bounded_canonical_json_len(value: &Value, limit: usize) -> anyhow::Result<usi
                 let rendered = number.to_string();
                 let normalized: serde_json::Number = serde_json::from_str(&rendered)?;
                 let len = normalized.to_string().len();
-                anyhow::ensure!(len <= limit, "canonical JSON number exceeds {limit} bytes");
+                anyhow::ensure!(
+                    len <= limit,
+                    bad_request(format!("canonical JSON number exceeds {limit} bytes"))
+                );
                 Ok(len)
             }
             Value::String(string) => canonical_string_len(string, limit),
@@ -150,7 +168,10 @@ fn bounded_canonical_json_len(value: &Value, limit: usize) -> anyhow::Result<usi
         }
     }
     let len = visit(value, limit)?;
-    anyhow::ensure!(len <= limit, "canonical JSON exceeds {limit} bytes");
+    anyhow::ensure!(
+        len <= limit,
+        bad_request(format!("canonical JSON exceeds {limit} bytes"))
+    );
     Ok(len)
 }
 
@@ -158,12 +179,14 @@ fn decode_inline_blob_bounded(data: &str) -> anyhow::Result<usize> {
     let max_encoded = MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4;
     anyhow::ensure!(
         data.len() <= max_encoded,
-        "inline blob exceeds 16 MiB; use blob_chunks"
+        bad_request("inline blob exceeds 16 MiB; use blob_chunks")
     );
-    let decoded = base64::engine::general_purpose::STANDARD.decode(data)?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| bad_request(error.to_string()))?;
     anyhow::ensure!(
         decoded.len() <= MAX_INLINE_BLOB_BYTES,
-        "inline blob exceeds 16 MiB; use blob_chunks"
+        bad_request("inline blob exceeds 16 MiB; use blob_chunks")
     );
     Ok(decoded.len())
 }
@@ -240,14 +263,14 @@ struct RawObjectEntry {
 pub fn validate_raw_object_put_request(raw: &[u8]) -> anyhow::Result<()> {
     anyhow::ensure!(
         raw.len() <= MAX_OBJECT_PUT_BODY_BYTES,
-        "objects.put body exceeds 100 MiB"
+        bad_request("objects.put body exceeds 100 MiB")
     );
     let envelope: RawPutEnvelope = serde_json::from_slice(raw)?;
     let entry_count =
         envelope.blobs.0.len() + envelope.blob_chunks.0.len() + envelope.objects.0.len();
     anyhow::ensure!(
         entry_count <= MAX_OBJECT_PUT_ENTRIES,
-        "objects.put exceeds 100000 entries"
+        bad_request("objects.put exceeds 100000 entries")
     );
     let mut aggregate = 0usize;
     for item in &envelope.objects.0 {
@@ -255,7 +278,7 @@ pub fn validate_raw_object_put_request(raw: &[u8]) -> anyhow::Result<()> {
         let bytes = object.value.get().as_bytes();
         anyhow::ensure!(
             bytes.len() <= MAX_RAW_OBJECT_BYTES,
-            "objects.put object exceeds 32 MiB raw bytes"
+            bad_request("objects.put object exceeds 32 MiB raw bytes")
         );
         let is_capsule = if bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
             lillux::cas::json_object_is_capsule_kind(bytes)?
@@ -269,7 +292,7 @@ pub fn validate_raw_object_put_request(raw: &[u8]) -> anyhow::Result<()> {
         };
         anyhow::ensure!(
             bytes.len() <= ceiling,
-            "objects.put object exceeds {ceiling} raw bytes"
+            bad_request(format!("objects.put object exceeds {ceiling} raw bytes"))
         );
         let value: Value = serde_json::from_str(object.value.get())?;
         let canonical_len = bounded_canonical_json_len(&value, ceiling)?;
@@ -283,22 +306,24 @@ pub fn validate_raw_object_put_request(raw: &[u8]) -> anyhow::Result<()> {
         let chunk: BlobChunkEntry = serde_json::from_str(item.get())?;
         anyhow::ensure!(
             chunk.total_size <= MAX_BLOB_BYTES,
-            "blob exceeds per-blob limit"
+            bad_request("blob exceeds per-blob limit")
         );
         anyhow::ensure!(
             chunk.data.len() <= MAX_BLOB_CHUNK_BYTES.saturating_mul(2),
-            "encoded blob chunk exceeds route-safe bound"
+            bad_request("encoded blob chunk exceeds route-safe bound")
         );
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&chunk.data)?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&chunk.data)
+            .map_err(|error| bad_request(error.to_string()))?;
         anyhow::ensure!(
             decoded.len() <= MAX_BLOB_CHUNK_BYTES,
-            "blob chunk exceeds 512 KiB"
+            bad_request("blob chunk exceeds 512 KiB")
         );
         aggregate = accumulate_request_payload(aggregate, decoded.len())?;
     }
     anyhow::ensure!(
         aggregate <= MAX_OBJECT_PUT_BODY_BYTES,
-        "objects.put canonical payload exceeds 100 MiB"
+        bad_request("objects.put canonical payload exceeds 100 MiB")
     );
     Ok(())
 }
@@ -309,7 +334,7 @@ fn validate_typed_request_limits(req: &Request) -> anyhow::Result<()> {
     let count = req.blobs.len() + req.blob_chunks.len() + req.objects.len();
     anyhow::ensure!(
         count <= MAX_OBJECT_PUT_ENTRIES,
-        "objects.put exceeds 100000 entries"
+        bad_request("objects.put exceeds 100000 entries")
     );
     let mut aggregate = 0usize;
     for object in &req.objects {
@@ -328,22 +353,24 @@ fn validate_typed_request_limits(req: &Request) -> anyhow::Result<()> {
     for chunk in &req.blob_chunks {
         anyhow::ensure!(
             chunk.total_size <= MAX_BLOB_BYTES,
-            "blob exceeds per-blob limit"
+            bad_request("blob exceeds per-blob limit")
         );
         anyhow::ensure!(
             chunk.data.len() <= MAX_BLOB_CHUNK_BYTES.saturating_mul(2),
-            "encoded blob chunk exceeds route-safe bound"
+            bad_request("encoded blob chunk exceeds route-safe bound")
         );
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&chunk.data)?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&chunk.data)
+            .map_err(|error| bad_request(error.to_string()))?;
         anyhow::ensure!(
             decoded.len() <= MAX_BLOB_CHUNK_BYTES,
-            "blob chunk exceeds 512 KiB"
+            bad_request("blob chunk exceeds 512 KiB")
         );
         aggregate = accumulate_request_payload(aggregate, decoded.len())?;
     }
     anyhow::ensure!(
         aggregate <= MAX_OBJECT_PUT_BODY_BYTES,
-        "objects.put canonical payload exceeds 100 MiB"
+        bad_request("objects.put canonical payload exceeds 100 MiB")
     );
     Ok(())
 }
@@ -397,7 +424,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     };
     if let Some(target) = stage.admitted_target_hash() {
-        anyhow::bail!("durable upload session is already admitted for publication target {target}");
+        return Err(typed_refusal(
+            "upload_session_admitted",
+            409,
+            format!("durable upload session is already admitted for publication target {target}"),
+        )
+        .into());
     }
 
     let mut blob_hashes = Vec::with_capacity(req.blobs.len());
@@ -405,28 +437,60 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         // Cheap base64-length bound before decoding allocates anything.
         let max_encoded = MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4;
         if blob.data.len() > max_encoded {
-            anyhow::bail!(
-                "inline blob exceeds {MAX_INLINE_BLOB_BYTES} bytes; use bounded blob_chunks"
-            );
+            return Err(typed_refusal(
+                "upload_blob_too_large",
+                400,
+                format!(
+                    "inline blob exceeds {MAX_INLINE_BLOB_BYTES} bytes; use bounded blob_chunks"
+                ),
+            )
+            .into());
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&blob.data)
-            .map_err(|e| anyhow::anyhow!("invalid base64 in blob data: {e}"))?;
+            .map_err(|e| {
+                typed_refusal(
+                    "upload_invalid_base64",
+                    400,
+                    format!("invalid base64 in blob data: {e}"),
+                )
+            })?;
         let hash = stage.store_blob(&cas_guard, &cas, &bytes)?;
         blob_hashes.push(hash);
     }
     for chunk in &req.blob_chunks {
         if chunk.total_size > MAX_BLOB_BYTES {
-            anyhow::bail!("blob exceeds the {} byte per-blob limit", MAX_BLOB_BYTES);
+            return Err(typed_refusal(
+                "upload_blob_too_large",
+                400,
+                format!("blob exceeds the {} byte per-blob limit", MAX_BLOB_BYTES),
+            )
+            .into());
         }
         if chunk.data.len() > MAX_BLOB_CHUNK_BYTES.saturating_mul(2) {
-            anyhow::bail!("encoded blob chunk exceeds the route-safe bound");
+            return Err(typed_refusal(
+                "upload_blob_chunk_too_large",
+                400,
+                "encoded blob chunk exceeds the route-safe bound",
+            )
+            .into());
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&chunk.data)
-            .map_err(|e| anyhow::anyhow!("invalid base64 in blob chunk: {e}"))?;
+            .map_err(|e| {
+                typed_refusal(
+                    "upload_invalid_base64",
+                    400,
+                    format!("invalid base64 in blob chunk: {e}"),
+                )
+            })?;
         if bytes.len() > MAX_BLOB_CHUNK_BYTES {
-            anyhow::bail!("blob chunk exceeds {MAX_BLOB_CHUNK_BYTES} bytes");
+            return Err(typed_refusal(
+                "upload_blob_chunk_too_large",
+                400,
+                format!("blob chunk exceeds {MAX_BLOB_CHUNK_BYTES} bytes"),
+            )
+            .into());
         }
         if stage.store_blob_chunk(
             &cas_guard,

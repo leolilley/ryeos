@@ -38,6 +38,10 @@ const MAX_TREE_WORK: usize = 131_072;
 /// Maximum recursive depth for file-space tree snapshots.
 const MAX_TREE_DEPTH: usize = 12;
 
+fn no_project_bound() -> HandlerError {
+    HandlerError::Forbidden("no_project_bound: no project is bound to this invocation".to_owned())
+}
+
 fn resolve_allowed_root(
     root_type: &str,
     caller: &crate::seat_auth::SeatCaller,
@@ -47,8 +51,16 @@ fn resolve_allowed_root(
     let project = match caller.project_access()? {
         Some(project) => project.try_clone_directory()?,
         None => {
-            let path = operator_project_path
-                .ok_or_else(|| anyhow::anyhow!("no project bound to this invocation"))?;
+            // A seat with no project of its own may name one only when its key
+            // is the node operator's. Any other key is refused, so a seat
+            // minted for another principal cannot read an arbitrary directory.
+            let operator =
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)
+                    .map_err(|_| no_project_bound())?;
+            if caller.principal_id() != operator.principal_id() {
+                return Err(no_project_bound().into());
+            }
+            let path = operator_project_path.ok_or_else(no_project_bound)?;
             PinnedDirectory::open(Path::new(path))?
                 .ok_or_else(|| anyhow::anyhow!("operator-selected project does not exist"))?
         }
@@ -556,6 +568,39 @@ mod tests {
         }
         seen_signed.sort();
         assert_eq!(seen_signed, allowed);
+    }
+
+    #[tokio::test]
+    async fn a_projectless_seat_may_name_a_project_only_under_the_operator_key() {
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .expect("fixture operator");
+        let project = tempfile::tempdir().expect("project");
+        let named = project.path().to_str().unwrap();
+        let app_root = state.config.app_root.clone();
+
+        let other = crate::seat_auth::SeatCaller::Operator {
+            principal_id: "fp:not-the-operator".to_owned(),
+        };
+        for root in ["project", "project_ai"] {
+            let refused = resolve_allowed_root(root, &other, Some(named), &app_root)
+                .expect_err("a non-operator key names no project");
+            assert!(
+                format!("{refused:#}").contains("no_project_bound"),
+                "{refused:#}"
+            );
+        }
+
+        let operator_seat = crate::seat_auth::SeatCaller::Operator {
+            principal_id: operator.principal_id(),
+        };
+        resolve_allowed_root("project", &operator_seat, Some(named), &app_root)
+            .expect("the operator's seat may name a project");
+        let unnamed = resolve_allowed_root("project", &operator_seat, None, &app_root)
+            .expect_err("no project named");
+        assert!(format!("{unnamed:#}").contains("no_project_bound"));
     }
 
     #[test]

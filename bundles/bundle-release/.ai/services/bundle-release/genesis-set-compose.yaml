@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:63dcdc81277f0ddb48e894903d07d4ab813769d126dedf19ba370e70a31499c1:OTofk2b26SxNh1ZRJ8/GRSth5qg5AFt9di7cJ0pX1FKKqIf/pcnbCCIuuFI7xOdiEwXCPH600VrfIaBBdYpjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:d36df960369635d4700c8b6492dacf0e57c71dc39526e766ac8e37ba88b98de3:s4q2Wfx/7Ms0zo31rP5Atm38ngoJC8/ko1vgNtRnvghLJCJo/wK0WcH/ML596ZMYgLqgAm/Gb62wNr/ZPmDtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: genesis-set-compose
 version: "1.0.0"
@@ -14,3 +14,5 @@ schema:
   catalog_namespace: string
   bundle_publication_policy_section_digest: string
   trust_epoch: integer
+# Release composition tool: only the node operator composes the first bundle set.
+disclosure: {}

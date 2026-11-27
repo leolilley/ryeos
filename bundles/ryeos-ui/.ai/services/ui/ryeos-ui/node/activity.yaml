@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:655b2aebe883fd91b5b4615c6cc1166ad15d66bbdb6ab9e5d5b06cb1548ae21b:5R2ElH4T3LOUPmJ6KpXAXZeftq8PQuA6ACOYUKpLW7TgY/dPaXtjEXdG7x5cRwKFhaanV2NCU5i57mJmZNaGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:23:42Z:16bee3006e032d51cdccbcbaf341fe782588041a2d3351a38b0bafbf751a88ae:xsrhN5SLPG7OD8vRK+5hPtpkohnhSUSXjtFI0OcDYN4hpFCyaiz2tusWgAlFXM7a7kxWBrG95++6g2xHNQYcBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
@@ -11,3 +11,24 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schema_version
+    - /pulse/*/label
+    - /pulse/*/value
+    - /coverage/state
+    - /coverage/reason
+    - /pulse_coverage/state
+    - /pulse_coverage/reason
+    - /pulse_coverage/observed_threads
+    - /pulse_coverage/thread_limit
+    - /events_coverage/state
+    - /events_coverage/reason
+    - /usage/*/label
+    - /usage/*/value
+    - /usage_coverage/state
+    - /usage_coverage/reason
+  interim_free_text:
+    - /events/*/event_hash  # removed by: per-chain publication
+    - /events/*/event_type  # removed by: per-chain publication
+    - /events/*/thread_id  # removed by: per-chain publication

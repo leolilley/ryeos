@@ -322,14 +322,16 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         .as_str()
         .expect("head")
         .to_owned();
-    let sign = |item: &str| {
+    let sign_with = |kinds: Vec<String>, lifetime: Option<u64>| {
         let nonce: [u8; 16] = rand::random();
         SignedEndorsement::sign(
             EndorsementBody::standing(
                 &project_identity(&fixture.user),
                 &format!("fp:{}", fixture.user_fp()),
-                vec![item.to_owned()],
-                None,
+                kinds,
+                lifetime.map(|secs| {
+                    lillux::time::iso8601_from_unix_secs(lillux::time::unix_secs_now() + secs)
+                }),
                 &lillux::time::iso8601_now(),
                 &nonce
                     .iter()
@@ -341,6 +343,45 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
         )
         .expect("sign")
     };
+    let sign = |item: &str| sign_with(vec![item.to_owned()], Some(3600));
+
+    // A standing endorsement can name only kinds that allow one, and must end.
+    for (kinds, lifetime, code) in [
+        (
+            vec!["directive".to_owned()],
+            Some(3600),
+            "endorsement_kind_not_standing",
+        ),
+        (
+            vec!["directive".to_owned(), "knowledge".to_owned()],
+            Some(3600),
+            "endorsement_kind_not_standing",
+        ),
+        (
+            vec!["knowledge".to_owned()],
+            None,
+            "endorsement_standing_lifetime_required",
+        ),
+        (
+            vec!["knowledge".to_owned()],
+            Some(31 * 24 * 3600),
+            "endorsement_standing_lifetime_too_long",
+        ),
+    ] {
+        let (status, refused) = service(
+            &h,
+            "service:endorsements/record",
+            json!({ "endorsement": sign_with(kinds, lifetime) }),
+        )
+        .await;
+        assert_eq!(status, 403, "{refused:#}");
+        assert!(refused.to_string().contains(code), "{code}: {refused:#}");
+    }
+    assert_eq!(
+        trust_class(&h, project.path()).await,
+        "untrusted_project",
+        "a refused endorsement trusts nothing"
+    );
     let (status, first) = service(
         &h,
         "service:endorsements/record",
@@ -351,7 +392,7 @@ async fn only_an_operator_signature_endorses_and_the_ledger_head_orders_writers(
     let (status, second) = service(
         &h,
         "service:endorsements/record",
-        json!({ "endorsement": sign("directive") }),
+        json!({ "endorsement": sign("knowledge") }),
     )
     .await;
     assert_eq!(status, 409, "{second:#}");
@@ -457,4 +498,240 @@ async fn recording_an_endorsement_announces_the_items_it_covers() {
     )
     .await;
     assert_eq!(status, 409, "{withdrawn:#}");
+}
+
+/// The project `key` owns under `name`, as the node's registry resolves it.
+fn project_named(key: &SigningKey, name: &str) -> ProjectIdentity {
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(&compute_fingerprint(&key.verifying_key()))
+        .expect("the key owns a principal")
+        .principal;
+    ProjectIdentity::new(owner, ProjectName::new(name).expect("project name"))
+}
+
+/// Grant `key` a `local_client` grant with `scopes` on the node at `state_path`.
+fn authorize_local_client(
+    state_path: &Path,
+    fixture: &FastFixture,
+    key: &SigningKey,
+    scopes: &[&str],
+) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    ryeos_node_runtime::identity::write_authorized_key_toml(
+        &state_path
+            .join(ryeos_engine::AI_DIR)
+            .join("node/auth/authorized_keys"),
+        &compute_fingerprint(&key.verifying_key()),
+        &base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes()),
+        &scopes
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect::<Vec<_>>(),
+        "endorsement-e2e-local",
+        &fixture.node_fp(),
+        &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        &fixture.node,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
+    )?;
+    Ok(())
+}
+
+/// Call a node service over a signed `POST /execute` as `key`.
+async fn service_as(
+    h: &DaemonHarness,
+    fixture: &FastFixture,
+    key: &SigningKey,
+    service: &str,
+    params: Value,
+) -> (u16, Value) {
+    let body = json!({
+        "item_ref": service,
+        "ref_bindings": {},
+        "parameters": params,
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
+    });
+    let bytes = serde_json::to_vec(&body).expect("request body");
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}/execute", h.bind))
+        .header("content-type", "application/json")
+        .body(bytes.clone());
+    for (name, value) in
+        common::build_signed_headers_for_bytes(key, &fixture.node, "POST", "/execute", &bytes)
+    {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.expect("post /execute");
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(json!({})))
+}
+
+/// A signed items endorsement of `digest` for `project` by `signer`, against `head`.
+fn sign_items(
+    signer: &SigningKey,
+    project: &ProjectIdentity,
+    digest: &str,
+    head: &str,
+) -> SignedEndorsement {
+    let nonce: [u8; 16] = rand::random();
+    SignedEndorsement::sign(
+        EndorsementBody::for_items(
+            project,
+            &format!("fp:{}", compute_fingerprint(&signer.verifying_key())),
+            vec![EndorsedItem {
+                item_ref: KNOWLEDGE_REF.to_owned(),
+                kind: "knowledge".to_owned(),
+                digest: digest.to_owned(),
+            }],
+            &lillux::time::iso8601_now(),
+            &nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            head,
+        ),
+        signer,
+    )
+    .expect("sign")
+}
+
+/// `endorsements/list` shows the operator the whole ledger and any other key
+/// only the rows whose project owner it speaks for; the owner filter runs
+/// before the `project` parameter and the ledger head is the operator's alone.
+///
+/// The operator cannot endorse a project it does not own, so the second row is
+/// recorded by key B itself: B is pinned as an operator-role signer in the
+/// registry (it speaks for its own principal) but is not the node's
+/// configured operator, so it is admitted only as an ordinary local client.
+#[tokio::test(flavor = "multi_thread")]
+async fn endorsement_list_shows_a_non_operator_only_the_projects_it_owns() {
+    let key_b = SigningKey::from_bytes(&[181_u8; 32]);
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            register_workflow_bundles(state_path, fixture)?;
+            authorize_local_client(
+                state_path,
+                fixture,
+                &key_b,
+                &[
+                    "ryeos.execute.service.endorsements/list",
+                    "ryeos.execute.service.endorsements/record",
+                ],
+            )?;
+            common::pin_signer(
+                state_path,
+                &key_b.verifying_key(),
+                ryeos_engine::trust::SignerRole::Operator,
+                ryeos_engine::trust::SignerScope::operator_default(),
+            );
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start daemon with a second admitted key");
+    let operator_project = project_identity(&fixture.user);
+    let b_project = project_named(&key_b, "b-project");
+    assert_ne!(operator_project.owner(), b_project.owner());
+
+    // The operator records its own project's endorsement, then B records B's,
+    // each against the head the operator reads just before.
+    let (_, facts) = service(&h, "service:endorsements/record", json!({})).await;
+    let head = facts["result"]["ledger_head"].as_str().expect("head");
+    let (status, recorded) = service(
+        &h,
+        "service:endorsements/record",
+        json!({ "endorsement": sign_items(&fixture.user, &operator_project, &"1".repeat(64), head) }),
+    )
+    .await;
+    assert_eq!(status, 200, "{recorded:#}");
+    let (_, facts) = service(&h, "service:endorsements/record", json!({})).await;
+    let head = facts["result"]["ledger_head"].as_str().expect("head");
+    let (status, recorded) = service_as(
+        &h,
+        &fixture,
+        &key_b,
+        "service:endorsements/record",
+        json!({ "endorsement": sign_items(&key_b, &b_project, &"2".repeat(64), head) }),
+    )
+    .await;
+    assert_eq!(status, 200, "{recorded:#}");
+    // B's row is recognised by its digest; its project is the canonical form.
+    let b_digest = recorded["result"]["endorsement_digest"]
+        .as_str()
+        .expect("recorded digest")
+        .to_owned();
+
+    // The operator sees both rows and the ledger head.
+    let (status, all) = service(&h, "service:endorsements/list", json!({})).await;
+    assert_eq!(status, 200, "{all:#}");
+    let mut projects: Vec<String> = all["result"]["endorsements"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["project"].as_str().expect("project").to_owned())
+        .collect();
+    projects.sort();
+    let mut expected = vec![operator_project.to_string(), b_project.to_string()];
+    expected.sort();
+    assert_eq!(projects, expected, "{all:#}");
+    assert!(all["result"]["ledger_head"].is_string(), "{all:#}");
+
+    // B sees only its own row, and no ledger head.
+    let list_as_b = |params: Value| {
+        let (h, fixture, key_b) = (&h, &fixture, &key_b);
+        async move {
+            let (status, body) =
+                service_as(h, fixture, key_b, "service:endorsements/list", params).await;
+            assert_eq!(status, 200, "{body:#}");
+            body
+        }
+    };
+    let own = list_as_b(json!({})).await;
+    let rows = own["result"]["endorsements"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{own:#}");
+    assert_eq!(rows[0]["endorsement_digest"], json!(b_digest), "{own:#}");
+    let project = rows[0]["project"].as_str().expect("the project leaf");
+    assert_eq!(project, b_project.to_string(), "{own:#}");
+    assert!(
+        !own.to_string().contains(&operator_project.to_string()),
+        "another owner's project reached B: {own:#}"
+    );
+    let (owner, name) = project.split_once('/').expect("owner/name");
+    assert_eq!(name, "b-project", "{own:#}");
+    assert!(
+        owner
+            .strip_prefix("pid:v1:")
+            .is_some_and(|hex| hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "not the canonical owner form: {own:#}"
+    );
+    assert!(own["result"].get("ledger_head").is_none(), "{own:#}");
+
+    // A project B does not own answers exactly as one that exists nowhere.
+    let operators = list_as_b(json!({ "project": operator_project.to_string() })).await;
+    let nowhere =
+        list_as_b(json!({ "project": project_named(&key_b, "nowhere").to_string() })).await;
+    assert_eq!(
+        serde_json::to_vec(&operators["result"]).unwrap(),
+        serde_json::to_vec(&nowhere["result"]).unwrap(),
+        "{operators:#} vs {nowhere:#}"
+    );
+    assert!(
+        operators["result"]["endorsements"]
+            .as_array()
+            .expect("rows")
+            .is_empty(),
+        "{operators:#}"
+    );
+
+    // B asking for its own project gets that one row.
+    let mine = list_as_b(json!({ "project": b_project.to_string() })).await;
+    let rows = mine["result"]["endorsements"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{mine:#}");
+    assert_eq!(rows[0]["endorsement_digest"], json!(b_digest), "{mine:#}");
 }

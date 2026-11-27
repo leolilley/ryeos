@@ -422,7 +422,10 @@ fn preflight_verify_bundle_in_context_inner(
 
     let mut failures: Vec<String> = Vec::new();
     let mut warnings: Vec<PreflightIssue> = Vec::new();
-    for failure in collect_node_config_failures(&ai_dir, &trust_store) {
+    // A kind a command names must be one this bundle can see: its own, or one
+    // from the dependency bundles whose schemas were loaded above.
+    let known_kind = |kind: &str| kinds.contains(kind);
+    for failure in collect_node_config_failures(&ai_dir, &trust_store, &known_kind) {
         failures.push(failure);
     }
     for kind_name in kinds.kinds() {
@@ -1179,6 +1182,8 @@ enum PreflightCommandDispatch {
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
+        #[serde(default)]
+        item_kinds: Option<Vec<String>>,
         #[serde(rename = "validate_only")]
         _validate_only: bool,
         #[serde(default)]
@@ -1204,7 +1209,11 @@ enum PreflightCommandAvailability {
     Both,
 }
 
-fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<String> {
+fn collect_node_config_failures(
+    ai_dir: &Path,
+    trust_store: &TrustStore,
+    known_kind: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let node_dir = ai_dir.join("node");
     let mut failures = Vec::new();
     let metadata = match fs::symlink_metadata(&node_dir) {
@@ -1261,7 +1270,13 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
             continue;
         }
 
-        match validate_node_config_item(&file_path, &node_dir.join(section), section, trust_store) {
+        match validate_node_config_item(
+            &file_path,
+            &node_dir.join(section),
+            section,
+            trust_store,
+            known_kind,
+        ) {
             Ok(()) => {}
             Err(e) => failures.push(format!(
                 "{}: node config validation failed: {e}",
@@ -1311,6 +1326,7 @@ fn validate_node_config_item(
     section_root: &Path,
     expected_section: &str,
     trust_store: &TrustStore,
+    known_kind: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     if !file_path.is_file() || file_path.is_symlink() {
         bail!("not a regular file (symlinks rejected)");
@@ -1363,7 +1379,7 @@ fn validate_node_config_item(
     match expected_section {
         "bundles" => validate_node_bundle_record(file_path, &body),
         "routes" => validate_node_route_record(&body),
-        "commands" => validate_node_command_record(file_path, section_root, &body),
+        "commands" => validate_node_command_record(file_path, section_root, &body, known_kind),
         _ => Ok(()),
     }
 }
@@ -1425,6 +1441,7 @@ fn validate_node_command_record(
     file_path: &Path,
     section_root: &Path,
     body: &serde_json::Value,
+    known_kind: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     let record: PreflightCommandRecord = serde_json::from_value(body.clone())
         .context("failed to parse command node-config record")?;
@@ -1472,7 +1489,7 @@ fn validate_node_command_record(
         bail!("command record missing non-empty 'description'");
     }
     validate_preflight_command_tokens(&command_name, &record.tokens)?;
-    validate_preflight_command_dispatch(&command_name, &record.dispatch)?;
+    validate_preflight_command_dispatch(&command_name, &record.dispatch, known_kind)?;
     for (arg_idx, argument) in record.arguments.iter().enumerate() {
         if argument.name.is_empty() {
             bail!("{} arguments[{arg_idx}] has empty name", command_name);
@@ -1521,6 +1538,7 @@ fn validate_preflight_command_tokens(name: &str, tokens: &[String]) -> Result<()
 fn validate_preflight_command_dispatch(
     name: &str,
     dispatch: &PreflightCommandDispatch,
+    known_kind: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     match dispatch {
         PreflightCommandDispatch::Group => {}
@@ -1532,6 +1550,30 @@ fn validate_preflight_command_dispatch(
             if item_ref_arg.is_empty() =>
         {
             bail!("command '{}' has empty item_ref_arg", name);
+        }
+        PreflightCommandDispatch::DirectExecuteItemRef {
+            item_kinds: Some(kinds),
+            ..
+        } if kinds.is_empty() || kinds.iter().any(|kind| kind.trim().is_empty()) => {
+            bail!(
+                "command '{}' declares item_kinds that is empty or names an empty kind; omit the field to accept any kind",
+                name
+            );
+        }
+        PreflightCommandDispatch::DirectExecuteItemRef {
+            item_kinds: Some(kinds),
+            ..
+        } if kinds.iter().any(|kind| !known_kind(kind)) => {
+            let unknown = kinds
+                .iter()
+                .filter(|kind| !known_kind(kind))
+                .cloned()
+                .collect::<Vec<_>>();
+            bail!(
+                "command_item_kind_unknown: command '{}' names item_kinds {:?} that no kind schema in scope declares; a bundle sees its own kinds and those of its dependency bundles",
+                name,
+                unknown
+            );
         }
         PreflightCommandDispatch::DirectExecuteItemRef { .. } => {}
         PreflightCommandDispatch::ExecuteRef { execute, .. } => {
@@ -1572,7 +1614,7 @@ mod tests {
             }
             let body: serde_json::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            validate_node_command_record(&path, &root, &body)
+            validate_node_command_record(&path, &root, &body, &|_| true)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
             checked += 1;
         }
@@ -1592,7 +1634,7 @@ mod tests {
             let path = root.join(format!("{name}.yaml"));
             let body: serde_json::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            validate_node_command_record(&path, &root, &body).unwrap();
+            validate_node_command_record(&path, &root, &body, &|_| true).unwrap();
             let record: PreflightCommandRecord = serde_json::from_value(body.clone()).unwrap();
             let policy = record._project.unwrap();
             assert_eq!(
@@ -1601,7 +1643,7 @@ mod tests {
             );
             let mut unknown = body;
             unknown["project"]["undeclared_projection"] = serde_json::json!(true);
-            assert!(validate_node_command_record(&path, &root, &unknown).is_err());
+            assert!(validate_node_command_record(&path, &root, &unknown, &|_| true).is_err());
         }
     }
 
@@ -2339,6 +2381,7 @@ aliases:
             &layout.ai_dir.join("node/commands"),
             "commands",
             &trust_store,
+            &|_| true,
         )
         .expect("signed valid command should pass node-config preflight");
     }
@@ -2359,6 +2402,66 @@ aliases:
                 panic!("current availability `{availability}` must pass preflight: {error}")
             });
         }
+    }
+
+    #[test]
+    fn command_preflight_refuses_an_empty_item_kinds_list() {
+        let dispatch = |kinds: serde_json::Value| -> PreflightCommandDispatch {
+            serde_json::from_value(serde_json::json!({
+                "kind": "direct_execute_item_ref",
+                "item_ref_arg": "item_ref",
+                "validate_only": false,
+                "item_kinds": kinds,
+            }))
+            .unwrap()
+        };
+        for refused in [
+            serde_json::json!([]),
+            serde_json::json!(["worker_execution", " "]),
+        ] {
+            let error = validate_preflight_command_dispatch("demo", &dispatch(refused), &|_| true)
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("item_kinds"), "{error:#}");
+        }
+        validate_preflight_command_dispatch(
+            "demo",
+            &dispatch(serde_json::json!(["tool"])),
+            &|_| true,
+        )
+        .unwrap();
+        let absent: PreflightCommandDispatch = serde_json::from_value(serde_json::json!({
+            "kind": "direct_execute_item_ref",
+            "item_ref_arg": "item_ref",
+            "validate_only": false,
+        }))
+        .unwrap();
+        validate_preflight_command_dispatch("demo", &absent, &|_| true).unwrap();
+    }
+
+    #[test]
+    fn command_preflight_refuses_an_item_kind_no_schema_in_scope_declares() {
+        let dispatch: PreflightCommandDispatch = serde_json::from_value(serde_json::json!({
+            "kind": "direct_execute_item_ref",
+            "item_ref_arg": "item_ref",
+            "validate_only": false,
+            "item_kinds": ["worker_execution", "worker_exection"],
+        }))
+        .unwrap();
+        let known = |kind: &str| kind == "worker_execution";
+        let error = validate_preflight_command_dispatch("demo", &dispatch, &known).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("command_item_kind_unknown"), "{text}");
+        assert!(text.contains("worker_exection"), "{text}");
+        assert!(!text.contains("\"worker_execution\""), "{text}");
+
+        let fine: PreflightCommandDispatch = serde_json::from_value(serde_json::json!({
+            "kind": "direct_execute_item_ref",
+            "item_ref_arg": "item_ref",
+            "validate_only": false,
+            "item_kinds": ["worker_execution"],
+        }))
+        .unwrap();
+        validate_preflight_command_dispatch("demo", &fine, &known).unwrap();
     }
 
     #[test]
@@ -2383,6 +2486,7 @@ dispatch:
             &layout.ai_dir.join("node/commands"),
             "commands",
             &trust_store,
+            &|_| true,
         )
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -2403,7 +2507,7 @@ dispatch:
         );
         let trust_store = layout.trust_store();
 
-        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store, &|_| true);
 
         assert!(
             failures
@@ -2424,7 +2528,8 @@ admission_token_ttl_secs: 600
 allow_loopback_http: true
 "#,
         );
-        let failures = collect_node_config_failures(&layout.ai_dir, &layout.trust_store());
+        let failures =
+            collect_node_config_failures(&layout.ai_dir, &layout.trust_store(), &|_| true);
 
         assert!(
             failures
@@ -2443,7 +2548,7 @@ allow_loopback_http: true
         std::os::unix::fs::symlink(&target, layout.ai_dir.join("node")).unwrap();
         let trust_store = layout.trust_store();
 
-        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store, &|_| true);
 
         assert!(
             failures
@@ -2463,7 +2568,7 @@ allow_loopback_http: true
         std::os::unix::fs::symlink(&target, layout.ai_dir.join("node/commands")).unwrap();
         let trust_store = layout.trust_store();
 
-        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store, &|_| true);
 
         assert!(
             failures
@@ -2626,6 +2731,7 @@ strict_fields: warn
             launch_trust: None,
             project_shadowing: Default::default(),
             runtime_authoring: Default::default(),
+            standing_endorsement: Default::default(),
         }
     }
 

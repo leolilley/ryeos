@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:0dc63dd8ec9b910bcc07ca618581b831604ebff0481535a3244c5933d55e041e:PNKCQFYM+SoupEQmvGmOZa09N8nesUr/uEV3WV8HyqTeX2eIjN9Nh1JwtQ9nUJo8NYYgalo4pBZ33xSw8SSPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:52Z:cf4a7f8b57ada5fdab830432a3faaffea5090c05a6159122631705877938ecb5:wywbq/4hgRdUuGjiPIs64xOqmDeP/DXgVWT3BUHmSIK43+FWLj1VK1XigW22mGY9a3rYjmq5OBgGIJ19Wyg6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/schedules/list
 version: "1.0.0"
@@ -8,3 +8,16 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 availability: daemon_only
+disclosure:
+  principal:
+    - /schedules/*/schedule_id
+    - /schedules/*/item_ref
+    - /schedules/*/schedule_type
+    - /schedules/*/expression
+    - /schedules/*/timezone
+    - /schedules/*/enabled
+    - /schedules/*/last_fire_at
+    - /schedules/*/last_fire_status
+    - /schedules/*/total_fires
+  free_text:
+    - /schedules/*/signer_fingerprint

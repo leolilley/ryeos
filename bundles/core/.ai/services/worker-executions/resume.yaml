@@ -1,6 +1,13 @@
-# ryeos:signed:2026-08-26T11:48:49Z:ce863f66ebe88e3ae1bfbc4fd2edc7fc0dc00024a26ae0da0662e6afc69ebbaa:3c/XXxRAuN9a+vG60/sZuGLIu6EBUzALAkN1Ee0HFxJAw14+tLU/eueFTsq11aH83PwTFD8d3NB5uR1rB0dVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:1779185cf83685c14c3a16175d22dbc6b00ea9fb1de34512cfbd251d22cb9df2:adIorQbWBUXs2DEgDruflK9WGagWY87f2BLmC1P1+oSO12Z6YR7Ojew+1AQlOLZTbuCueO9WwrRW8roUlfFRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.resume
 required_caps: ["ryeos.execute.service.worker-executions/resume"]
 schema: {chain_root_id: string, manifest_ref: string}
 description: Continue one frozen portable worker execution from its authoritative checkpoint.
+disclosure:
+  principal:
+    - "/chain_root_id"
+    - "/source_placement_thread_id"
+    - "/placement_thread_id"
+    - "/manifest_ref"
+    - "/delivery"

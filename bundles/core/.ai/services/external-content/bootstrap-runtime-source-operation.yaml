@@ -1,7 +1,9 @@
-# ryeos:signed:2026-10-10T04:34:12Z:69e9f2f0c05cbbbadd943d499d5accb34f101b51e351c36b4dbdb0d133338763:uysg7atcEJcDPd2zCokN4HvA1iho3DbzdfCjMpk0B8UxgUHOeul2MLa58DnFHEWvPgam9+apWZZ3LtQ/Mg4oAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:4de31170399d749ba380298f8b463510d906d82cea441f64adcbfa91f394bbd6:gGT3VJX7wmIBnFERyYpadBVxQlmwm63LUEbgOJlfPXC7DXwCZY4s/mVA6tIMZOcq9kvmI+bhcP4m+jsvWfMPAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.bootstrap-runtime-source-operation
 required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source-operation"]
 schema:
   operation_id: string
 description: Read the exact retained one-shot bootstrap source operation without issuing provider contact
+# Reads a retained provider operation; requires an admitted operator.
+disclosure: {}

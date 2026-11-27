@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:41:50Z:2f894441ff36ec12dda87b8053ffc3a970045c5a4dc1a09980229ccb9bd283ba:0SAwIQcv0+Iu0CrQrI9vdvSNWULX+1JD17gtmRk57WbsGiCkiPGG5KEnpU+Yf8LzlK77Vekt3fNlX9kmBxvNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:06Z:a57ec860dbd240f76b9a20c7fde7d305b17f2b02b8eb50f6bb0987e4b251c7d5:zCEHQACUxcFK4gBtcWCn+Y1D0mh1/1QGsFiZAr2dieYYv1CDY6QAftmOh5VNs/u3uvSCxsjpM60S1T5YYxQeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: trust.show
 availability: both
@@ -8,3 +8,5 @@ required_caps: ["ryeos.execute.service.trust/show"]
 schema:
   fingerprint: string
 description: "Show one pinned signer's record (with the time it was first pinned) and the key events that produced it, each with its signing time"
+# Signer registry and key events are trust-operator data; nothing for a principal.
+disclosure: {}

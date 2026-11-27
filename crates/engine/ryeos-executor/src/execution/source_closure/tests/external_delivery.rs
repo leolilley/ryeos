@@ -198,6 +198,9 @@ pub(crate) fn capsule(
         accounting_scope: None,
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         runtime_ref: "tool:test/runtime".to_owned(),
         executor_ref: "tool:test/executor".to_owned(),
     };

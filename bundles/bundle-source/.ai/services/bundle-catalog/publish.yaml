@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:d3232ea7a954883fc4d768001e699bd55700853d9ad622d39690eb83504c9adf:m4O7hTWj8BIYZ8F6UzD1MFYbeUcg4d7Gqpwd9u2vJleGANV0s31v6i7hVumL1hGCAnJ+JZLtakln4UFgqaHaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:3de9480aa0b3c1eca0df659ce7c646163ffda155ffc30057070b808b6d09ca68:cq5JlsdA1mExVTL4MfWy4de/v2aBpZVQvdZ7qphazQ02SDK1hsiXIcDjHtdfOgS1//KY9CApse5njra685EhCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle-catalog.publish
 required_caps: ["ryeos.execute.service.bundle-catalog/publish"]
@@ -9,3 +9,9 @@ schema:
   expected_catalog_head: string?
   upload_session_id: string
 description: "Verify and atomically publish one exact publisher-authorized catalog successor"
+disclosure:
+  principal:
+    - "/catalog_namespace"
+    - "/catalog_publication_attestation_hash"
+    - "/sequence"
+    - "/idempotent"

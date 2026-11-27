@@ -1,5 +1,6 @@
 //! `objects/closure/get` — retrieve every present CAS entry in a schema-defined closure.
 
+use ryeos_app::handler_error::typed_refusal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -32,25 +33,28 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
     let cas = authority.cas_store()?;
     let report = collect_limited_closure_with_cas(&req, &cas)?;
     if !req.allow_incomplete && !report.is_complete() {
-        bail!(
-            "object closure is incomplete: missing_objects={} first_missing_object={:?}; \
+        return Err(typed_refusal(
+            "object_closure_incomplete",
+            409,
+            format!(
+                "object closure is incomplete: missing_objects={} first_missing_object={:?}; \
              missing_blobs={} first_missing_blob={:?}; malformed_objects={} \
              first_malformed_object={:?}; unsupported_objects={} first_unsupported_object={:?}",
-            report.missing_objects.len(),
-            report.missing_objects.first(),
-            report.missing_blobs.len(),
-            report.missing_blobs.first(),
-            report.malformed_objects.len(),
-            report.malformed_objects.first(),
-            report.unsupported_objects.len(),
-            report.unsupported_objects.first(),
-        );
+                report.missing_objects.len(),
+                report.missing_objects.first(),
+                report.missing_blobs.len(),
+                report.missing_blobs.first(),
+                report.malformed_objects.len(),
+                report.malformed_objects.first(),
+                report.unsupported_objects.len(),
+                report.unsupported_objects.first()
+            ),
+        )
+        .into());
     }
     if !report.large_object_hashes.is_empty() && !req.allow_untransported_large_objects {
-        bail!(
-            "objects/closure/get cannot transport {} referenced large objects; use a large-object-aware transport",
-            report.large_object_hashes.len()
-        );
+        return Err(typed_refusal("object_closure_large_objects_untransportable", 422, format!("objects/closure/get cannot transport {} referenced large objects; use a large-object-aware transport",
+            report.large_object_hashes.len())).into());
     }
 
     let mut entries = Vec::new();
@@ -85,11 +89,15 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .checked_add(object_bytes)
                 .context("object closure byte count overflow")?;
             if total_object_bytes > req.max_total_object_bytes {
-                bail!(
-                    "object closure exceeds max_total_object_bytes: {} > {}",
-                    total_object_bytes,
-                    req.max_total_object_bytes
-                );
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    format!(
+                        "object closure exceeds max_total_object_bytes: {} > {}",
+                        total_object_bytes, req.max_total_object_bytes
+                    ),
+                )
+                .into());
             }
             let entry_shell = serde_json::to_vec(&serde_json::json!({
                 "hash": hash,
@@ -105,11 +113,15 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .and_then(|size| size.checked_add(entry_overhead))
                 .context("object closure response size overflow")?;
             if estimated_response_bytes > req.max_response_bytes {
-                bail!(
-                    "object closure response exceeds max_response_bytes: {} > {}",
-                    estimated_response_bytes,
-                    req.max_response_bytes
-                );
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    format!(
+                        "object closure response exceeds max_response_bytes: {} > {}",
+                        estimated_response_bytes, req.max_response_bytes
+                    ),
+                )
+                .into());
             }
             entries.push(serde_json::json!({
                 "hash": hash,
@@ -128,7 +140,12 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .and_then(|size| size.checked_add(entry_separator))
                 .context("object closure response size overflow")?;
             if estimated_response_bytes > req.max_response_bytes {
-                bail!("object closure response exceeds max_response_bytes");
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    "object closure response exceeds max_response_bytes",
+                )
+                .into());
             }
             entries.push(serde_json::json!({
                 "hash": hash,
@@ -147,7 +164,13 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
         let response_budget = req
             .max_response_bytes
             .checked_sub(estimated_response_bytes)
-            .context("object closure response exceeds max_response_bytes")?;
+            .ok_or_else(|| {
+                typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    "object closure response exceeds max_response_bytes",
+                )
+            })?;
         let (read_ceiling, entry_overhead) = admitted_blob_entry_read_bound(
             hash,
             req.max_blob_bytes,
@@ -161,11 +184,15 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .checked_add(blob_bytes)
                 .context("object closure blob byte count overflow")?;
             if total_blob_bytes > req.max_total_blob_bytes {
-                bail!(
-                    "object closure exceeds max_total_blob_bytes: {} > {}",
-                    total_blob_bytes,
-                    req.max_total_blob_bytes
-                );
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    format!(
+                        "object closure exceeds max_total_blob_bytes: {} > {}",
+                        total_blob_bytes, req.max_total_blob_bytes
+                    ),
+                )
+                .into());
             }
             let encoded_bytes = encoded_len(blob_bytes);
             estimated_response_bytes = estimated_response_bytes
@@ -173,11 +200,15 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .and_then(|size| size.checked_add(encoded_bytes))
                 .context("object closure response size overflow")?;
             if estimated_response_bytes > req.max_response_bytes {
-                bail!(
-                    "object closure response exceeds max_response_bytes: {} > {}",
-                    estimated_response_bytes,
-                    req.max_response_bytes
-                );
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    format!(
+                        "object closure response exceeds max_response_bytes: {} > {}",
+                        estimated_response_bytes, req.max_response_bytes
+                    ),
+                )
+                .into());
             }
             entries.push(serde_json::json!({
                 "hash": hash,
@@ -198,7 +229,12 @@ pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Val
                 .checked_add(missing_overhead)
                 .context("object closure response size overflow")?;
             if estimated_response_bytes > req.max_response_bytes {
-                bail!("object closure response exceeds max_response_bytes");
+                return Err(typed_refusal(
+                    "object_closure_limit_exceeded",
+                    422,
+                    "object closure response exceeds max_response_bytes",
+                )
+                .into());
             }
             entries.push(serde_json::json!({
                 "hash": hash,
@@ -236,7 +272,13 @@ fn admitted_blob_entry_read_bound(
         .context("object closure response size overflow")?;
     let response_data_bytes = remaining_response_bytes
         .checked_sub(entry_overhead)
-        .context("object closure response has no remaining blob budget")?;
+        .ok_or_else(|| {
+            typed_refusal(
+                "object_closure_limit_exceeded",
+                422,
+                "object closure response has no remaining blob budget",
+            )
+        })?;
     let response_blob_bytes = (response_data_bytes / 4).saturating_mul(3);
     Ok((
         max_blob_bytes

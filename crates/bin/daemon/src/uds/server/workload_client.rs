@@ -21,9 +21,9 @@ use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmission
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use ryeos_runtime::workload_client::{
     WORKLOAD_CLIENT_CHANNEL_ENV, WORKLOAD_CLIENT_CHANNEL_TARGET_FD, WORKLOAD_CLIENT_PROTOCOL,
-    WorkloadClientBootFrame, WorkloadClientDispatchFrame, WorkloadClientOperation,
-    WorkloadClientOutcome, WorkloadClientReadyFrame, WorkloadClientRequestContract,
-    WorkloadClientResponseFrame,
+    WorkloadClientBootFrame, WorkloadClientCollectedChild, WorkloadClientCollectedResult,
+    WorkloadClientDispatchFrame, WorkloadClientOperation, WorkloadClientOutcome,
+    WorkloadClientReadyFrame, WorkloadClientRequestContract, WorkloadClientResponseFrame,
 };
 
 const WORKLOAD_PRESENTATION_EVENT: &str = "hosted_session.workload_client_admitted";
@@ -293,6 +293,9 @@ pub(super) fn prepare_for_dedicated_boot(
         root_capability.effective_definition_digest.clone(),
         root_capability.hard_limits.clone(),
         root_capability.depth,
+        // The worker session is a child of its root thread: it can hold no
+        // wider ceiling than the root bearer it is derived from.
+        root_capability.thread_ceiling,
     );
     let callback_token = callback.token.clone();
     let mut minted_thread_auth_token = None;
@@ -309,6 +312,12 @@ pub(super) fn prepare_for_dedicated_boot(
             )
         {
             bail!("workload-client callback disappeared during boot admission");
+        }
+        if !state.callback_tokens.set_evaluator_origin_chain(
+            &callback_token,
+            root_capability.evaluator_origin_chain.clone(),
+        ) {
+            bail!("workload-client callback disappeared during origin binding");
         }
         if !state.callback_tokens.restrict_runtime_methods(
             &callback_token,
@@ -498,6 +507,9 @@ fn present_admitted_executions(
         caller_scopes: scopes.to_vec(),
         engine: provenance.request_engine().clone(),
         requested_call: None,
+        // A validate-only presentation of what a worker may launch; no
+        // handler runs.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
         plan_ctx: PlanContext {
             logical_project: provenance.signer_project(),
             requested_by: EffectivePrincipal::Local(Principal {
@@ -670,7 +682,43 @@ fn serve_daemon_broker(
     Ok(())
 }
 
+/// Route one validated frame by its operation. Collect is answered here from
+/// the daemon's own records; it is not a runtime callback method, so it adds
+/// nothing to any callback method surface or thread-ceiling list.
 fn dispatch_request(
+    state: &AppState,
+    runtime: &tokio::runtime::Handle,
+    grant: &AdmittedWorkloadClientGrant,
+    grant_digest: &str,
+    callback_token: &str,
+    thread_auth_token: &str,
+    dispatch: WorkloadClientDispatchFrame,
+) -> WorkloadClientResponseFrame {
+    if matches!(
+        dispatch.request.operation,
+        WorkloadClientOperation::Collect(_)
+    ) {
+        return collect_request(
+            state,
+            grant,
+            grant_digest,
+            callback_token,
+            thread_auth_token,
+            dispatch,
+        );
+    }
+    execute_request(
+        state,
+        runtime,
+        grant,
+        grant_digest,
+        callback_token,
+        thread_auth_token,
+        dispatch,
+    )
+}
+
+fn execute_request(
     state: &AppState,
     runtime: &tokio::runtime::Handle,
     grant: &AdmittedWorkloadClientGrant,
@@ -693,7 +741,9 @@ fn dispatch_request(
             callback_token,
             thread_auth_token,
         )?;
-        let WorkloadClientOperation::Execute(execute) = dispatch.request.operation;
+        let WorkloadClientOperation::Execute(execute) = dispatch.request.operation else {
+            bail!("workload operation is not an execute");
+        };
         // The request id is the runtime-asserted occurrence coordinate. Keep
         // behavior out of this identity: runtime.dispatch_action separately
         // retains the canonical action digest, so replaying the same
@@ -751,6 +801,196 @@ fn dispatch_request(
         request_id,
         outcome,
     }
+}
+
+/// Answer one collect request. The frame's only input is a child id; whether
+/// this session may read that child is decided from the daemon's own link and
+/// thread records, never from the request.
+fn collect_request(
+    state: &AppState,
+    grant: &AdmittedWorkloadClientGrant,
+    grant_digest: &str,
+    callback_token: &str,
+    thread_auth_token: &str,
+    dispatch: WorkloadClientDispatchFrame,
+) -> WorkloadClientResponseFrame {
+    let request_id = dispatch.request.request_id.clone();
+    let outcome = (|| -> Result<WorkloadClientOutcome> {
+        dispatch.validate()?;
+        grant.validate()?;
+        if !grant.ingresses.contains(&dispatch.source.ingress()) {
+            bail!("workload invocation selected an ungranted ingress");
+        }
+        validate_live_boot(
+            state,
+            grant,
+            grant_digest,
+            callback_token,
+            thread_auth_token,
+        )?;
+        let WorkloadClientOperation::Collect(collect) = &dispatch.request.operation else {
+            bail!("workload operation is not a collect");
+        };
+        let child_id = collect.child_thread_id.as_str();
+        let link = collect_link_facts(state, child_id)?;
+        let thread = state.threads.get_thread(child_id)?;
+        collect_outcome(
+            grant,
+            link.as_ref().map(|(parent_chain_root, relation)| {
+                (parent_chain_root.as_str(), relation.as_str())
+            }),
+            thread
+                .as_ref()
+                .and_then(|thread| thread.requested_by.as_deref()),
+            thread.as_ref().map(collected_child_from_thread),
+            || {
+                Ok(state.threads.get_thread_result(child_id)?.map(|record| {
+                    WorkloadClientCollectedResult {
+                        outcome_code: record.outcome_code,
+                        result: record.result,
+                        error: record.error,
+                    }
+                }))
+            },
+            || {
+                Ok(ryeos_app::vault::node_held_secret_values(
+                    &state.secret_sources(),
+                )?)
+            },
+        )
+    })();
+    WorkloadClientResponseFrame {
+        protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+        request_id,
+        outcome: outcome.unwrap_or_else(|error| classify_workload_dispatch_error(&error)),
+    }
+}
+
+/// The facts of a child's link that decide a collect, read from the daemon's
+/// own records: the chain root of the link's parent thread and the link's
+/// relation. The parent's chain root is its thread row's, never a request
+/// field. `None` when the child has no link or its parent has no thread row.
+fn collect_link_facts(state: &AppState, child_id: &str) -> Result<Option<(String, String)>> {
+    let Some((parent, relation)) = state.state_store.child_link_parent_and_relation(child_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(state
+        .threads
+        .get_thread(&parent)?
+        .map(|parent| (parent.chain_root_id, relation)))
+}
+
+/// The fixed allow-list of a thread row a session may read of its child.
+fn collected_child_from_thread(
+    thread: &ryeos_app::state_store::ThreadDetail,
+) -> WorkloadClientCollectedChild {
+    WorkloadClientCollectedChild {
+        thread_id: thread.thread_id.clone(),
+        status: thread.status.clone(),
+        kind: thread.kind.clone(),
+        item_ref: thread.item_ref.clone(),
+        created_at: thread.created_at.clone(),
+        started_at: thread.started_at.clone(),
+        finished_at: thread.finished_at.clone(),
+        result: None,
+    }
+}
+
+fn collect_not_permitted() -> WorkloadClientOutcome {
+    WorkloadClientOutcome::Failed {
+        code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE.to_owned(),
+        message: ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_MESSAGE.to_owned(),
+        retryable: false,
+    }
+}
+
+/// Daemon-authored error reasons a collect passes through as the error code.
+/// Every other error becomes the generic code.
+const COLLECT_KNOWN_ERROR_REASONS: [&str; 2] =
+    [ryeos_app::cascade::PARENT_END_REASON, "durable_stop_intent"];
+
+const COLLECT_GENERIC_ERROR_CODE: &str = "child_error";
+const COLLECT_ERROR_MESSAGE: &str =
+    "the child ended with an error; the node does not return error text to a worker session";
+
+/// The failure a worker session sees in place of a child's recorded error: a
+/// code and one fixed sentence. The child's own error text is never carried,
+/// because it can name paths, hosts and values of the node. The code is
+/// chosen from the daemon's own vocabulary, never copied from the child.
+fn redacted_failure(error: &Value) -> Value {
+    let code = error
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| COLLECT_KNOWN_ERROR_REASONS.contains(reason))
+        .unwrap_or(COLLECT_GENERIC_ERROR_CODE);
+    json!({ "code": code, "message": COLLECT_ERROR_MESSAGE })
+}
+
+fn collect_result_withheld() -> WorkloadClientOutcome {
+    WorkloadClientOutcome::Failed {
+        code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_WITHHELD_CODE.to_owned(),
+        message: ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_WITHHELD_MESSAGE
+            .to_owned(),
+        retryable: false,
+    }
+}
+
+/// Decide one collect from the facts the daemon holds. `child` is the thread
+/// row's allow-list projection and is `None` when no such thread exists;
+/// `link` is the child's link as `(chain root of the link's parent thread,
+/// relation)`. `read_result` is called only for a permitted, terminal child.
+/// A refused request yields one outcome whatever the reason.
+///
+/// The child's output is the disclosure surface: whatever the child printed,
+/// the session reads. Two floors stand under it. The recorded error never
+/// leaves as text (see [`redacted_failure`]). The result passes an
+/// exact-match secret floor: when `node_secrets` yields a value of at least
+/// the minimum length that appears in the output, byte for byte (raw,
+/// JSON-escaped or ASCII-escaped), the whole output is withheld with a typed
+/// failure, never cut or masked. `node_secrets` is called only when there is
+/// output to check, and a failure to enumerate withholds it. The floor is
+/// exact-match only: it does not see an encoded, hashed, split or shortened
+/// secret, nor one that was never in the set it was given.
+fn collect_outcome<S: AsRef<str>>(
+    grant: &AdmittedWorkloadClientGrant,
+    link: Option<(&str, &str)>,
+    child_requested_by: Option<&str>,
+    child: Option<WorkloadClientCollectedChild>,
+    read_result: impl FnOnce() -> Result<Option<WorkloadClientCollectedResult>>,
+    node_secrets: impl FnOnce() -> Result<Vec<S>>,
+) -> Result<WorkloadClientOutcome> {
+    if grant.authorize_collect(link, child_requested_by).is_err() {
+        return Ok(collect_not_permitted());
+    }
+    let Some(mut child) = child else {
+        return Ok(collect_not_permitted());
+    };
+    if ryeos_app::state_store::is_terminal_status(&child.status) {
+        child.result = read_result()?.map(|mut record| {
+            record.error = record.error.as_ref().map(redacted_failure);
+            record
+        });
+    }
+    if !child.result_within_cap()? {
+        return Ok(WorkloadClientOutcome::Failed {
+            code: ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE.to_owned(),
+            message: "the child's result exceeds the per-call collect byte cap".to_owned(),
+            retryable: false,
+        });
+    }
+    if let Some(output) = child.result.as_ref() {
+        let Ok(secrets) = node_secrets() else {
+            return Ok(collect_result_withheld());
+        };
+        if ryeos_runtime::workload_client::value_contains_secret(
+            &serde_json::to_value(output)?,
+            &secrets,
+        ) {
+            return Ok(collect_result_withheld());
+        }
+    }
+    Ok(WorkloadClientOutcome::Collected { child })
 }
 
 fn classify_workload_dispatch_error(error: &anyhow::Error) -> WorkloadClientOutcome {
@@ -898,7 +1138,319 @@ mod tests {
             effect_classes: vec!["live".to_owned()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
+            collect: false,
         }
+    }
+
+    const SESSION: &str = "T-00000000-0000-4000-8000-0000000000aa";
+    const CHILD: &str = "T-00000000-0000-4000-8000-0000000000c1";
+
+    fn collect_grant(detached: bool, collect: bool) -> AdmittedWorkloadClientGrant {
+        let mut execution = test_execution("tool:project/check");
+        execution.detached = detached;
+        execution.collect = collect;
+        AdmittedWorkloadClientGrant {
+            schema: AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: SESSION.to_owned(),
+            placement_thread_id: SESSION.to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            executions: vec![execution],
+            execution_product_selections: BTreeMap::new(),
+            execution_presentation: Value::Null,
+            effective_caps: vec!["ryeos.execute.tool.project/check".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        }
+    }
+
+    fn child_row(status: &str) -> WorkloadClientCollectedChild {
+        WorkloadClientCollectedChild {
+            thread_id: CHILD.to_owned(),
+            status: status.to_owned(),
+            kind: "tool".to_owned(),
+            item_ref: "tool:project/check".to_owned(),
+            created_at: "2026-11-25T00:00:00Z".to_owned(),
+            started_at: Some("2026-11-25T00:00:01Z".to_owned()),
+            finished_at: None,
+            result: None,
+        }
+    }
+
+    fn recorded_result(value: Value) -> Result<Option<WorkloadClientCollectedResult>> {
+        Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(value),
+            error: None,
+        }))
+    }
+
+    fn unreachable_result() -> Result<Option<WorkloadClientCollectedResult>> {
+        panic!("a result is read only for a permitted, terminal child")
+    }
+
+    fn no_secrets() -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    #[test]
+    fn collect_returns_status_for_a_running_child_and_the_result_once_terminal() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let link = Some((SESSION, "dispatch"));
+
+        let running = collect_outcome(
+            &grant,
+            link,
+            Some(owner.as_str()),
+            Some(child_row("running")),
+            unreachable_result,
+            no_secrets,
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Collected { child } = running else {
+            panic!("a running child is collected as status");
+        };
+        assert_eq!(child.status, "running");
+        assert!(child.result.is_none());
+
+        let done = collect_outcome(
+            &grant,
+            link,
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || recorded_result(json!({"answer": 42})),
+            no_secrets,
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Collected { child } = done else {
+            panic!("a terminal child is collected with its result");
+        };
+        assert_eq!(child.status, "completed");
+        assert_eq!(child.result.unwrap().result, Some(json!({"answer": 42})));
+        // A collected child is data, never an execution success.
+        let frame = WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: WorkloadClientOutcome::Collected {
+                child: child_row("running"),
+            },
+        };
+        frame.validate().unwrap();
+        assert!(!frame.outcome.succeeded());
+    }
+
+    #[test]
+    fn every_refused_collect_is_the_same_outcome() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let row = || Some(child_row("completed"));
+        let refused = |link: Option<(&str, &str)>,
+                       requested_by: Option<&str>,
+                       child: Option<WorkloadClientCollectedChild>| {
+            collect_outcome(
+                &grant,
+                link,
+                requested_by,
+                child,
+                unreachable_result,
+                no_secrets,
+            )
+            .unwrap()
+        };
+        let outcomes = [
+            // A thread id that does not exist.
+            refused(None, None, None),
+            // A thread that exists and is the owner's but this session was
+            // never given.
+            refused(None, Some(owner.as_str()), row()),
+            // A sibling session's child.
+            refused(
+                Some(("T-00000000-0000-4000-8000-0000000000bb", "dispatch")),
+                Some(owner.as_str()),
+                row(),
+            ),
+            // A grandchild: its link names the child.
+            refused(
+                Some(("T-00000000-0000-4000-8000-0000000000c2", "dispatch")),
+                Some(owner.as_str()),
+                row(),
+            ),
+            // A direct child launched by a different key.
+            refused(Some((SESSION, "dispatch")), Some("fp:someone-else"), row()),
+            // A direct link under another relation.
+            refused(Some((SESSION, "continuation")), Some(owner.as_str()), row()),
+        ];
+        for outcome in &outcomes {
+            let WorkloadClientOutcome::Failed {
+                code, retryable, ..
+            } = outcome
+            else {
+                panic!("a refused collect is a typed failure");
+            };
+            assert_eq!(
+                code,
+                ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE
+            );
+            assert!(!retryable);
+            assert_eq!(outcome, &outcomes[0], "no existence oracle");
+        }
+        // The refusal is itself a valid wire answer.
+        WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: outcomes[0].clone(),
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_grant_that_does_not_allow_collect_refuses_it_identically() {
+        let owner = collect_grant(true, true).owner_principal;
+        let attempt = |grant: &AdmittedWorkloadClientGrant| {
+            collect_outcome(
+                grant,
+                Some((SESSION, "dispatch")),
+                Some(owner.as_str()),
+                Some(child_row("completed")),
+                unreachable_result,
+                no_secrets,
+            )
+            .unwrap()
+        };
+        // The permitted case reads the terminal child's result; the refusals
+        // below must never reach that read.
+        let permitted = collect_outcome(
+            &collect_grant(true, true),
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || Ok(None),
+            no_secrets,
+        )
+        .unwrap();
+        assert!(matches!(permitted, WorkloadClientOutcome::Collected { .. }));
+        let no_collect = attempt(&collect_grant(true, false));
+        let no_detached = attempt(&collect_grant(false, false));
+        let collect_without_detached = attempt(&collect_grant(false, true));
+        for outcome in [&no_collect, &no_detached, &collect_without_detached] {
+            let WorkloadClientOutcome::Failed { code, .. } = outcome else {
+                panic!("a grant without collect refuses it");
+            };
+            assert_eq!(
+                code,
+                ryeos_runtime::workload_client::WORKLOAD_COLLECT_NOT_PERMITTED_CODE
+            );
+            assert_eq!(outcome, &no_collect);
+        }
+    }
+
+    #[test]
+    fn a_result_over_the_cap_is_refused_typed_and_not_cut() {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let outcome = collect_outcome(
+            &grant,
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child_row("completed")),
+            || {
+                recorded_result(json!("x".repeat(
+                    ryeos_runtime::workload_client::MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES
+                )))
+            },
+            no_secrets,
+        )
+        .unwrap();
+        let WorkloadClientOutcome::Failed {
+            code, retryable, ..
+        } = &outcome
+        else {
+            panic!("an oversize result is refused");
+        };
+        assert_eq!(
+            code,
+            ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE
+        );
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn a_collected_child_is_a_fixed_allow_list_of_the_thread_row() {
+        let value = serde_json::to_value(child_row("completed")).unwrap();
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        // No project path, authority, capsule, lineage, requester or runtime
+        // detail crosses the worker boundary.
+        assert_eq!(
+            keys,
+            [
+                "created_at",
+                "finished_at",
+                "item_ref",
+                "kind",
+                "started_at",
+                "status",
+                "thread_id"
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_adds_no_callback_method_and_detach_stays_unreachable() {
+        // Collect is answered by the broker from its own records. The session's
+        // callback surface is still exactly the one dispatch method, and the
+        // production inline surface still refuses a detached action.
+        let source = include_str!("workload_client.rs");
+        let (production, _tests) = source
+            .split_once("#[cfg(test)]")
+            .expect("module has a test section");
+        assert_eq!(
+            production
+                .matches("CallbackRuntimeMethodSurface::exact(vec![")
+                .count(),
+            1
+        );
+        assert!(production.contains("thread: \"inline\".to_owned()"));
+        assert!(!production.contains("thread: \"detached\""));
+        assert!(!production.contains("authorize_detached_ceiling"));
+        let grant = collect_grant(true, true);
+        let mut action = ryeos_runtime::callback::ActionPayload {
+            product_selections: Default::default(),
+            operation_id: None,
+            item_id: "tool:project/check".to_owned(),
+            ref_bindings: BTreeMap::new(),
+            params: json!({}),
+            thread: "detached".to_owned(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        assert!(grant.authorize_action(&action).is_err());
+        action.thread = "inline".to_owned();
+        assert!(grant.authorize_action(&action).is_ok());
     }
 
     #[test]
@@ -1024,5 +1576,295 @@ mod tests {
         next.worker_instance_id = "worker-recovered".to_owned();
         next.boot_epoch = 2;
         require_reserved_boot(&successor, &next).unwrap();
+    }
+
+    // ── Collect: error shaping, the secret floor, and the session chain ─────
+
+    fn collect_with(
+        child: WorkloadClientCollectedChild,
+        record: Result<Option<WorkloadClientCollectedResult>>,
+        secrets: Result<Vec<String>>,
+    ) -> WorkloadClientOutcome {
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        collect_outcome(
+            &grant,
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child),
+            || record,
+            || secrets,
+        )
+        .unwrap()
+    }
+
+    fn collected_result(outcome: WorkloadClientOutcome) -> WorkloadClientCollectedResult {
+        let WorkloadClientOutcome::Collected { child } = outcome else {
+            panic!("the collect was permitted and returned");
+        };
+        child.result.expect("a terminal child carries its result")
+    }
+
+    fn assert_withheld(outcome: &WorkloadClientOutcome) {
+        let WorkloadClientOutcome::Failed {
+            code, retryable, ..
+        } = outcome
+        else {
+            panic!("the output is withheld as a typed failure");
+        };
+        assert_eq!(
+            code,
+            ryeos_runtime::workload_client::WORKLOAD_COLLECT_RESULT_WITHHELD_CODE
+        );
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn a_collected_error_is_a_code_and_a_fixed_sentence_never_the_nodes_text() {
+        let raw = "failed to open /home/operator/.local/share/node/secrets.db: permission denied";
+        let record = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("failed".to_owned()),
+            result: None,
+            error: Some(json!({"code": "ENOENT", "message": raw, "path": "/home/operator/x"})),
+        }));
+        let outcome = collect_with(child_row("failed"), record, no_secrets());
+        let result = collected_result(outcome.clone());
+        let error = result.error.expect("an error is still reported");
+        assert_eq!(
+            error,
+            json!({"code": "child_error", "message": COLLECT_ERROR_MESSAGE})
+        );
+        let wire = serde_json::to_string(&outcome).unwrap();
+        assert!(!wire.contains("/home/operator"), "{wire}");
+        assert!(!wire.contains("permission denied"), "{wire}");
+        assert!(!wire.contains("ENOENT"), "{wire}");
+        // A daemon-authored stop reason keeps its own code.
+        let stopped = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("cancelled_by_parent_end".to_owned()),
+            result: None,
+            error: Some(json!({"reason": "parent_session_ended", "intent": "cancel"})),
+        }));
+        let error = collected_result(collect_with(child_row("cancelled"), stopped, no_secrets()))
+            .error
+            .unwrap();
+        assert_eq!(
+            error,
+            json!({"code": "parent_session_ended", "message": COLLECT_ERROR_MESSAGE})
+        );
+        // No recorded error stays absent.
+        let clean = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(json!({"answer": 42})),
+            error: None,
+        }));
+        assert_eq!(
+            collected_result(collect_with(child_row("completed"), clean, no_secrets())).error,
+            None
+        );
+    }
+
+    #[test]
+    fn a_result_holding_a_node_secret_is_withheld_typed_and_one_without_is_returned() {
+        let secret = "provider-key-0123456789".to_owned();
+        let leaking = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(json!({"log": format!("auth header was {secret}")})),
+            error: None,
+        }));
+        let withheld = collect_with(child_row("completed"), leaking, Ok(vec![secret.clone()]));
+        assert_withheld(&withheld);
+        // The refusal itself carries nothing of the output.
+        assert!(
+            !serde_json::to_string(&withheld)
+                .unwrap()
+                .contains("auth header")
+        );
+        WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: withheld,
+        }
+        .validate()
+        .unwrap();
+
+        let clean = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(json!({"answer": 42})),
+            error: None,
+        }));
+        let returned = collected_result(collect_with(
+            child_row("completed"),
+            clean,
+            Ok(vec![secret.clone()]),
+        ));
+        assert_eq!(returned.result, Some(json!({"answer": 42})));
+    }
+
+    #[test]
+    fn the_secret_floor_has_a_minimum_length_and_matches_the_escaped_form() {
+        let record = |text: &str| {
+            Ok(Some(WorkloadClientCollectedResult {
+                outcome_code: Some("ok".to_owned()),
+                result: Some(json!({"log": text})),
+                error: None,
+            }))
+        };
+        // A value below the minimum length is not checked.
+        let short = "abc1234".to_owned();
+        assert!(matches!(
+            collect_with(
+                child_row("completed"),
+                record("contains abc1234 here"),
+                Ok(vec![short])
+            ),
+            WorkloadClientOutcome::Collected { .. }
+        ));
+        // A secret with a quote in it, printed as an already-serialized
+        // document, is found in its escaped form.
+        let quoted = "pa\"ss-word-0123".to_owned();
+        let printed = serde_json::to_string(&quoted).unwrap();
+        assert_withheld(&collect_with(
+            child_row("completed"),
+            record(&printed),
+            Ok(vec![quoted]),
+        ));
+        // A non-ASCII secret printed in its \uXXXX form is found.
+        let accented = "clé-secrète-été".to_owned();
+        assert_withheld(&collect_with(
+            child_row("completed"),
+            record("cl\\u00e9-secr\\u00e8te-\\u00e9t\\u00e9"),
+            Ok(vec![accented]),
+        ));
+    }
+
+    #[test]
+    fn output_is_withheld_when_the_nodes_secrets_cannot_be_enumerated() {
+        let record = Ok(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(json!({"answer": 42})),
+            error: None,
+        }));
+        assert_withheld(&collect_with(
+            child_row("completed"),
+            record,
+            Err(anyhow!("sealed store unreadable")),
+        ));
+        // A running child has no output, so no secret is ever read for it.
+        let grant = collect_grant(true, true);
+        let owner = grant.owner_principal.clone();
+        let running = collect_outcome(
+            &grant,
+            Some((SESSION, "dispatch")),
+            Some(owner.as_str()),
+            Some(child_row("running")),
+            unreachable_result,
+            || -> Result<Vec<String>> { panic!("no output to check") },
+        )
+        .unwrap();
+        assert!(matches!(running, WorkloadClientOutcome::Collected { .. }));
+    }
+
+    fn session_thread(thread_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+        let hash = "a".repeat(64);
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: format!("directive:test/{thread_id}"),
+            executor_ref: "native:test".to_string(),
+            launch_mode: "wait".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: format!("directive:test/{thread_id}"),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }),
+        }
+    }
+
+    /// Real: the StateStore with its runtime and state databases, the child
+    /// links, thread rows and continuation chain, the broker's link-fact
+    /// resolution and the grant's authorization. Substituted: the live boot
+    /// validation and the wire frame, which need a hosted worker.
+    #[test]
+    fn a_child_of_an_earlier_segment_is_collected_from_the_successor_and_no_other_is() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let store = &state.state_store;
+        let owner = collect_grant(true, true).owner_principal;
+        let make_running = |id: &str| {
+            store.create_thread_for_test(&session_thread(id)).unwrap();
+            store.mark_thread_running(id, None).unwrap();
+        };
+        // The session: segment 1 launches a child, then continues as segment 2.
+        make_running("T-seg-1");
+        make_running("T-seg-1-child");
+        store
+            .record_child_link("T-seg-1", "T-seg-1-child", "dispatch")
+            .unwrap();
+        let mut successor = session_thread("T-seg-2");
+        successor.chain_root_id = "T-seg-1".to_string();
+        successor.upstream_thread_id = Some("T-seg-1".to_string());
+        successor.captured_history_policy = None;
+        store
+            .create_continuation_for_test(&successor, "T-seg-1", "T-seg-1", Some("continue"))
+            .unwrap();
+        // The child's own child, and another session with its own child.
+        make_running("T-seg-1-grandchild");
+        store
+            .record_child_link("T-seg-1-child", "T-seg-1-grandchild", "dispatch")
+            .unwrap();
+        make_running("T-other");
+        make_running("T-other-child");
+        store
+            .record_child_link("T-other", "T-other-child", "dispatch")
+            .unwrap();
+
+        // The grant is the successor's: placement is segment 2, chain root the
+        // session's.
+        let mut grant = collect_grant(true, true);
+        grant.chain_root_id = "T-seg-1".to_owned();
+        grant.placement_thread_id = "T-seg-2".to_owned();
+        let attempt = |child: &str| {
+            let facts = collect_link_facts(&state, child).unwrap();
+            collect_outcome(
+                &grant,
+                facts
+                    .as_ref()
+                    .map(|(chain, relation)| (chain.as_str(), relation.as_str())),
+                Some(owner.as_str()),
+                Some(child_row("completed")),
+                || recorded_result(json!({"answer": 42})),
+                no_secrets,
+            )
+            .unwrap()
+        };
+        assert!(
+            matches!(
+                attempt("T-seg-1-child"),
+                WorkloadClientOutcome::Collected { .. }
+            ),
+            "the successor collects what the earlier segment launched"
+        );
+        let unknown = attempt("T-00000000-0000-4000-8000-0000000000ff");
+        assert!(matches!(unknown, WorkloadClientOutcome::Failed { .. }));
+        for refused in ["T-other-child", "T-seg-1-grandchild"] {
+            assert_eq!(attempt(refused), unknown, "{refused}: no oracle");
+        }
     }
 }

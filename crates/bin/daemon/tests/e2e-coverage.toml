@@ -293,6 +293,10 @@ paths = ["crates/state/ryeos-state/src/large_object_store.rs", "crates/state/rye
 covers = ["ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/state/ryeos-state/src/project_discovery.rs", "crates/state/ryeos-state/src/project_identity.rs"]
 
+[tests.project_apply_published_e2e]
+covers = ["ryeos-api"]
+paths = ["crates/daemon/ryeos-api/src/handlers/project_apply_published.rs", "crates/daemon/ryeos-api/src/remote/pull.rs"]
+
 [tests.project_schedule_deploy_e2e]
 covers = ["ryeos-api", "ryeos-expression", "ryeos-project-capture", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
 paths = ["crates/daemon/ryeos-api/src/project_deploy/**"]
@@ -304,6 +308,14 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 [tests.provider_bad_turn_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
+
+[tests.publication_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/bin/daemon/src/startup.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/handlers/publication.rs", "crates/engine/ryeos-engine/src/authority/trust/publication.rs"]
+
+[tests.publication_pull_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-http-egress", "ryeos-node"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_pull.rs", "crates/daemon/ryeos-api/src/handlers/bundle_pull/**", "crates/daemon/ryeos-api/src/handlers/remote_bundle_install.rs", "crates/daemon/ryeos-api/src/published.rs"]
 
 [tests.python_runtime_contract]
 covers = ["ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowledge-runtime"]
@@ -424,6 +436,10 @@ covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "
 [tests.trust_registry_e2e]
 covers = ["ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/engine/ryeos-engine/src/authority/**", "crates/state/ryeos-state/src/signer.rs"]
+
+[tests.ui_live_rebind_e2e]
+covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/kernel/lillux/src/crypto/**", "crates/kernel/lillux/src/signature.rs"]
 
 [tests.ui_session_auth_e2e]
 covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]

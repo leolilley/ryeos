@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T19:53:53Z:8df8496919ac1278be22c244262ffd193b5b708ca634bafe44e649241e1f6ece:yYR6T5URQGamdDjmqvhZrEbMCRr2sJ7ZayWVNYQq9v5+OxkNbUc+UYoU5xF58Clvn0cM7ziNWmfBgmZBzDzqAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T13:50:08Z:7c868fc286d9439e0cc45b2f4853a6778685df3d047829bda51cc4722c5313ba:BuKlUnFQA0b6wdzS1gZlPQw5J7K9Y2gB/gGXxuW558qExl3un/9eBe3/UxSCJIqGyLIxVPZkDHE5BGiGo8z7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.claim
 required_caps: []
@@ -16,3 +16,23 @@ schema:
   nonce: string
   signature: string
 description: "Claim a one-time node-local admission token and materialize an authorized-key grant"
+disclosure:
+  principal:
+    - "/admitted"
+    - "/fingerprint"
+    - "/scopes"
+    - "/created_at"
+    - "/principal_class"
+    - "/origin_site_id"
+    - "/expires_at"
+  free_text:
+    - "/label"
+    - "/granted_by"
+  public:
+    - /admitted
+    - /fingerprint
+    - /scopes
+    - /created_at
+    - /principal_class
+    - /origin_site_id
+    - /expires_at

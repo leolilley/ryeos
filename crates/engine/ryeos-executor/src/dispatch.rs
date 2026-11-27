@@ -106,6 +106,86 @@ pub struct ParentExecutionContext {
     /// Parent's immutable accounting scope; paid descendants inherit this
     /// execution budget authority (never a fresh allowance).
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Parent's workload ceiling, narrowed by whatever the spawn itself
+    /// derives. The child's own ceiling is this value; it is never read from
+    /// runtime-supplied params or fields.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Chain the child's launch originated from: the launching thread's own
+    /// origin when it has one, otherwise its own chain. The child seals this
+    /// as its evaluator origin chain. It is never read from runtime-supplied
+    /// params or fields. Absent only on a context rebuilt from a persisted
+    /// follow parent, whose child already carries the sealed value.
+    pub evaluator_origin_chain: Option<String>,
+}
+
+impl ParentExecutionContext {
+    /// The context a thread's spawned child launches under. Every spawn path
+    /// (inline, detached, follow) builds it here, so the child's ceiling is the
+    /// calling thread's bearer ceiling and nothing runtime-supplied; any
+    /// narrowing derived at a spawn belongs in this one function.
+    pub fn for_child_of(cap: &ryeos_app::callback_token::CallbackCapability) -> Self {
+        Self {
+            parent_thread_id: cap.thread_id.clone(),
+            hard_limits: cap.hard_limits.clone(),
+            depth: cap.depth,
+            accounting_scope: cap.accounting_scope.clone(),
+            thread_ceiling: cap.thread_ceiling,
+            evaluator_origin_chain: Some(cap.launch_origin_chain()),
+        }
+    }
+
+    /// The origin chain a launch records when no sealed identity already
+    /// carries one: the parent context's stamp for a callback-dispatched
+    /// child, else the stamp of the service call that made the launch from
+    /// inside an execution, else none (a person's root launch). Every
+    /// non-continuation launch resolves its stamp here.
+    pub fn launch_origin(
+        parent: Option<&Self>,
+        handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    ) -> Option<String> {
+        parent
+            .and_then(|parent| parent.evaluator_origin_chain.clone())
+            .or_else(|| {
+                handler_context
+                    .and_then(|context| context.launch_origin_chain())
+                    .map(str::to_owned)
+            })
+    }
+
+    /// The context a detached child of a grant-bearing thread launches under:
+    /// the calling thread's ceiling narrowed by the ceiling the grant seals for
+    /// this detached item. The grant's ceiling can only narrow, never widen,
+    /// what the calling thread already carries.
+    pub fn for_detached_child_of(
+        cap: &ryeos_app::callback_token::CallbackCapability,
+        grant_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    ) -> Self {
+        let mut context = Self::for_child_of(cap);
+        context.thread_ceiling = context.thread_ceiling.meet(grant_ceiling);
+        context
+    }
+
+    /// The durable form of this context, for a child admitted after the live
+    /// callback context is gone.
+    pub fn persisted(&self) -> ryeos_app::launch_metadata::PersistedParentExecutionContext {
+        ryeos_app::launch_metadata::PersistedParentExecutionContext {
+            parent_thread_id: self.parent_thread_id.clone(),
+            hard_limits: self.hard_limits.clone(),
+            depth: self.depth,
+            accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: self.thread_ceiling,
+        }
+    }
+
+    /// Ceiling a launch with this parent context carries. A launch with no
+    /// parent execution context is a root launch and is the only place a
+    /// thread is unbounded.
+    pub fn launch_ceiling(parent: Option<&Self>) -> ryeos_state::objects::ThreadWorkloadCeiling {
+        match parent {
+            Some(parent) => parent.thread_ceiling,
+            None => ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        }
+    }
 }
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
@@ -2349,6 +2429,7 @@ pub(crate) async fn dispatch_method(
         None,
         serde_json::Value::Null,
         0,
+        ParentExecutionContext::launch_ceiling(request.parent_execution_context.as_ref()),
     );
     if !state
         .callback_tokens
@@ -3473,6 +3554,7 @@ async fn dispatch_via_method_executor(
             method: Some(method),
             args: Some(args.clone()),
         }),
+        disclosure_class: ctx.disclosure_class,
     };
 
     let dispatch_req = DispatchRequest {
@@ -3921,6 +4003,7 @@ fn dispatch_daemon_owned_inner(
         engine: ctx.engine.clone(),
         plan_ctx: ctx.plan_ctx.clone(),
         requested_call: ctx.requested_call.clone(),
+        disclosure_class: ctx.disclosure_class,
     };
     let state = state.clone();
 
@@ -5163,15 +5246,15 @@ pub struct RootDispatchPreflight {
     pub requested_subject: VerifiedItem,
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pub root_dispatch_evidence: RootDispatchEvidence,
-    pub effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
+    pub effect_class_ceiling: ryeos_engine::kind_registry::ProjectedEffectClass,
     /// The kind's `unproven_max`, present only when `effect_class_ceiling`
     /// exceeds it: the subject's ceiling is authored testimony the kind does
     /// not admit above this class without qualification evidence.
     pub effect_class_unproven_cap: Option<ryeos_effect_contract::EffectClass>,
-    /// Kind-owned signed shared-workspace relationship. `None` is deny-all for
-    /// workload-delegated workspace access; ordinary dispatch does not infer a
-    /// relationship from this field.
-    pub workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    /// Kind-owned signed shared-workspace relationship. `Undeclared` is
+    /// deny-all for workload-delegated workspace access; ordinary dispatch
+    /// does not infer a relationship from this field.
+    pub workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess,
 }
 
 /// Refuse, before any thread row exists, a fresh managed root whose caller does
@@ -5214,17 +5297,17 @@ pub fn enforce_preflight_effect_class(
     let Some(requested) = requested_effect_class else {
         return Ok(());
     };
-    let ceiling =
-        preflight
-            .effect_class_ceiling
-            .ok_or_else(|| DispatchError::LaunchPolicyForbidden {
-                code: "durable_effect_subject_ineligible".to_string(),
-                message: format!(
-                    "`{}` has no signed durable-effect ceiling",
-                    preflight.requested_subject.resolved.canonical_ref
-                ),
-                binding: None,
-            })?;
+    let ceiling = preflight
+        .effect_class_ceiling
+        .durable_class()
+        .ok_or_else(|| DispatchError::LaunchPolicyForbidden {
+            code: "durable_effect_subject_ineligible".to_string(),
+            message: format!(
+                "`{}` has no signed durable-effect ceiling",
+                preflight.requested_subject.resolved.canonical_ref
+            ),
+            binding: None,
+        })?;
     if !ceiling.permits(requested) {
         return Err(DispatchError::LaunchPolicyForbidden {
             code: "durable_effect_ceiling_exceeded".to_string(),
@@ -5260,7 +5343,7 @@ pub fn enforce_preflight_effect_class(
 /// exceeds what its kind admits on authored testimony alone, the kind's cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct EffectClassCeilingAdmission {
-    ceiling: Option<ryeos_effect_contract::EffectClass>,
+    ceiling: ryeos_engine::kind_registry::ProjectedEffectClass,
     unproven_cap: Option<ryeos_effect_contract::EffectClass>,
 }
 
@@ -5281,18 +5364,39 @@ fn effect_class_ceiling_for_admission(
     )
 }
 
-/// Project the kind-declared path of a composed value into a ceiling. Generic
-/// dispatch reads only the declaration, never the kind's name or field.
+/// Project the kind's effect-class declaration, a fixed constant or a path
+/// into the composed value, into a ceiling. Generic dispatch reads only the
+/// declaration, never the kind's name or field. No declaration and a declared
+/// path the item omits are both `Undeclared`; a declared `live` is `Live`.
 fn project_effect_class_ceiling(
     kind: &str,
     declaration: Option<&ryeos_engine::kind_registry::EffectClassCeilingDecl>,
     composed: &serde_json::Value,
 ) -> Result<EffectClassCeilingAdmission, DispatchError> {
+    use ryeos_effect_contract::EffectClass;
+    use ryeos_engine::kind_registry::{
+        EffectClassConstant, EffectClassSource, ProjectedEffectClass,
+    };
     let Some(declaration) = declaration else {
         return Ok(EffectClassCeilingAdmission::default());
     };
+    let path = match &declaration.source {
+        EffectClassSource::Constant(constant) => {
+            let ceiling = match constant {
+                EffectClassConstant::NoDirectEffect => ProjectedEffectClass::NoDirectEffect,
+                EffectClassConstant::Recorded => ProjectedEffectClass::Class(EffectClass::Recorded),
+                EffectClassConstant::Sealed => ProjectedEffectClass::Class(EffectClass::Sealed),
+                EffectClassConstant::Live => ProjectedEffectClass::Live,
+            };
+            return Ok(EffectClassCeilingAdmission {
+                ceiling,
+                unproven_cap: None,
+            });
+        }
+        EffectClassSource::Path(path) => path,
+    };
     let mut value = composed;
-    for segment in &declaration.path {
+    for segment in path {
         let Some(next) = value.get(segment) else {
             return Ok(EffectClassCeilingAdmission::default());
         };
@@ -5304,13 +5408,13 @@ fn project_effect_class_ceiling(
             kind: kind.to_owned(),
             detail: format!(
                 "signed effect-class projection `{}` resolved to a non-string value",
-                declaration.path.join(".")
+                path.join(".")
             ),
         })?;
     let ceiling = match class {
-        "live" => None,
-        "recorded" => Some(ryeos_effect_contract::EffectClass::Recorded),
-        "sealed" => Some(ryeos_effect_contract::EffectClass::Sealed),
+        "live" => ProjectedEffectClass::Live,
+        "recorded" => ProjectedEffectClass::Class(EffectClass::Recorded),
+        "sealed" => ProjectedEffectClass::Class(EffectClass::Sealed),
         other => {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: kind.to_owned(),
@@ -5318,7 +5422,7 @@ fn project_effect_class_ceiling(
             });
         }
     };
-    let unproven_cap = match (ceiling, declaration.unproven_max) {
+    let unproven_cap = match (ceiling.durable_class(), declaration.unproven_max) {
         (Some(ceiling), Some(cap)) if !cap.permits(ceiling) => Some(cap),
         _ => None,
     };
@@ -5331,14 +5435,14 @@ fn project_effect_class_ceiling(
 fn workspace_access_for_admission(
     engine: &ryeos_engine::engine::Engine,
     admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
-) -> Result<Option<ryeos_engine::kind_registry::WorkspaceAccess>, DispatchError> {
+) -> Result<ryeos_engine::kind_registry::ProjectedWorkspaceAccess, DispatchError> {
     let kind = &admission.verified_subject().resolved.canonical_ref.kind;
     let Some(execution) = engine
         .kinds
         .get(kind)
         .and_then(|schema| schema.execution.as_ref())
     else {
-        return Ok(None);
+        return Ok(ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Undeclared);
     };
     execution
         .project_workspace_access(&admission.resolution_output().composed.composed)
@@ -6404,6 +6508,7 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                                     args: Some(args),
                                                 },
                                             ),
+                                            disclosure_class: ctx.disclosure_class,
                                         };
                                         let mut target = preflight_root_dispatch_with_remote_consumer(
                                             &target_ref,
@@ -6691,6 +6796,7 @@ pub fn preflight_root_dispatch_for_provenance_with_remote_consumer(
             .resolution_plan_context_for(&ctx.plan_ctx)
             .map_err(DispatchError::Internal)?,
         requested_call: ctx.requested_call.clone(),
+        disclosure_class: ctx.disclosure_class,
     };
     let mut admitted = preflight_root_dispatch_with_remote_consumer(
         item_ref,
@@ -7393,6 +7499,7 @@ metadata:
                 node_trust_store,
             )),
             plan_ctx: test_plan_context(bundle_root),
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         }
     }
@@ -7438,6 +7545,7 @@ metadata:
                 scheduled_fire: None,
                 validate_only: false,
             },
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         }
     }
@@ -7485,7 +7593,7 @@ metadata:
     }
 
     fn effect_preflight(
-        ceiling: Option<ryeos_effect_contract::EffectClass>,
+        ceiling: ryeos_engine::kind_registry::ProjectedEffectClass,
         unproven_cap: Option<ryeos_effect_contract::EffectClass>,
     ) -> RootDispatchPreflight {
         let root = tempdir();
@@ -7509,7 +7617,7 @@ metadata:
             },
             effect_class_ceiling: ceiling,
             effect_class_unproven_cap: unproven_cap,
-            workspace_access: None,
+            workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Undeclared,
         }
     }
 
@@ -7520,11 +7628,240 @@ metadata:
         }
     }
 
+    #[test]
+    fn callback_ceiling_refuses_a_preflight_above_it_with_the_typed_code() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let bounded = ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ThreadEffectCeiling::Recorded,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let judged = |class: Effect| {
+            let mut preflight = effect_preflight(class, None);
+            preflight.workspace_access =
+                Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
+            crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+                &bounded, &preflight,
+            )
+        };
+        judged(Effect::Class(EffectClass::Recorded)).unwrap();
+        judged(Effect::NoDirectEffect).unwrap();
+        for above in [Effect::Class(EffectClass::Sealed), Effect::Live] {
+            let error = judged(above).unwrap_err();
+            match error.downcast_ref::<DispatchError>() {
+                Some(DispatchError::LaunchPolicyForbidden { code, .. }) => {
+                    assert_eq!(code, "thread_ceiling_effect_class_exceeded")
+                }
+                other => panic!("expected a typed launch-policy refusal, got {other:?}"),
+            }
+        }
+        // An undeclared effect class is refused for want of a declaration.
+        let error = judged(Effect::Undeclared).unwrap_err();
+        match error.downcast_ref::<DispatchError>() {
+            Some(DispatchError::LaunchPolicyForbidden { code, .. }) => {
+                assert_eq!(code, "thread_ceiling_no_declared_projection")
+            }
+            other => panic!("expected a typed launch-policy refusal, got {other:?}"),
+        }
+        // A subject with no declared workspace projection is refused too.
+        let preflight = effect_preflight(Effect::Class(EffectClass::Recorded), None);
+        assert!(
+            crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+                &bounded, &preflight
+            )
+            .is_err()
+        );
+        crate::execution::runtime_dispatch::enforce_thread_ceiling_on_preflight(
+            &ThreadWorkloadCeiling::node_root(),
+            &preflight,
+        )
+        .unwrap();
+    }
+
+    fn detached_judgement_code(error: anyhow::Error) -> String {
+        match error.downcast_ref::<DispatchError>() {
+            Some(DispatchError::LaunchPolicyForbidden { code, .. }) => code.clone(),
+            _ => format!("{error:#}"),
+        }
+    }
+
+    #[test]
+    fn detached_call_is_refused_from_the_childs_preflight_before_any_state_exists() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
+        use ryeos_state::objects::ThreadWorkloadCeiling;
+        let grant =
+            crate::execution::runtime_dispatch::tests::detached_test_grant(&["live", "recorded"]);
+        let unbounded = ThreadWorkloadCeiling::node_root();
+        let judged = |class: Effect, access: Workspace| {
+            let mut preflight = effect_preflight(class, None);
+            preflight.workspace_access = access;
+            crate::execution::runtime_dispatch::judge_detached_call(
+                &grant,
+                &unbounded,
+                "tool:example/effectful",
+                &preflight,
+            )
+        };
+        let immutable = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
+        let recorded = Effect::Class(EffectClass::Recorded);
+        // The child's class above what the grant lists is refused.
+        let error = judged(Effect::Class(EffectClass::Sealed), immutable).unwrap_err();
+        assert!(
+            detached_judgement_code(error).contains("exceeds the admitted ceiling"),
+            "a sealed child is above a grant that lists only live and recorded"
+        );
+        // No declared projection, and exclusive access, each have their code.
+        assert_eq!(
+            detached_judgement_code(judged(recorded, Workspace::Undeclared).unwrap_err()),
+            "workload_detach_no_declared_projection"
+        );
+        assert_eq!(
+            detached_judgement_code(judged(Effect::Undeclared, immutable).unwrap_err()),
+            "workload_detach_no_declared_projection"
+        );
+        assert_eq!(
+            detached_judgement_code(
+                judged(
+                    recorded,
+                    Workspace::Access(WorkspaceAccess::SharedExclusive)
+                )
+                .unwrap_err()
+            ),
+            "workload_detach_shared_exclusive"
+        );
+        let (access, ceiling) = judged(recorded, immutable).unwrap();
+        assert_eq!(access, WorkspaceAccess::ImmutableCurrentGeneration);
+        assert!(ceiling.is_bounded());
+        // A subject that declares no direct effect and no direct workspace
+        // use passes the projection gates.
+        let (access, ceiling) = judged(Effect::NoDirectEffect, Workspace::NoDirect).unwrap();
+        assert_eq!(access, WorkspaceAccess::ImmutableCurrentGeneration);
+        assert!(ceiling.is_bounded());
+    }
+
+    #[test]
+    fn detached_call_is_also_judged_against_the_calling_threads_own_ceiling() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
+        use ryeos_state::objects::{
+            ThreadEffectCeiling, ThreadWorkloadCeiling, ThreadWorkspaceCeiling,
+        };
+        let grant = crate::execution::runtime_dispatch::tests::detached_test_grant(&[
+            "live", "recorded", "sealed",
+        ]);
+        let narrow_parent = ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ThreadEffectCeiling::Recorded,
+            workspace_access: ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let mut preflight = effect_preflight(Effect::Class(EffectClass::Sealed), None);
+        preflight.workspace_access = Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration);
+        // The grant admits a sealed child; the calling thread's narrower
+        // ceiling does not.
+        crate::execution::runtime_dispatch::judge_detached_call(
+            &grant,
+            &ThreadWorkloadCeiling::node_root(),
+            "tool:example/effectful",
+            &preflight,
+        )
+        .unwrap();
+        let error = crate::execution::runtime_dispatch::judge_detached_call(
+            &grant,
+            &narrow_parent,
+            "tool:example/effectful",
+            &preflight,
+        )
+        .unwrap_err();
+        assert_eq!(
+            detached_judgement_code(error),
+            "thread_ceiling_effect_class_exceeded"
+        );
+    }
+
+    #[test]
+    fn detached_child_authority_is_never_wider_than_the_same_items_inline_authority() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess as Workspace, WorkspaceAccess,
+        };
+        use ryeos_state::objects::ThreadWorkloadCeiling;
+        let lists: [&[&str]; 5] = [
+            &["recorded"],
+            &["live", "recorded"],
+            &["recorded", "sealed"],
+            &["live", "recorded", "sealed"],
+            &["live"],
+        ];
+        for list in lists {
+            let grant = crate::execution::runtime_dispatch::tests::detached_test_grant(list);
+            for class in [
+                Effect::Undeclared,
+                Effect::NoDirectEffect,
+                Effect::Live,
+                Effect::Class(EffectClass::Recorded),
+                Effect::Class(EffectClass::Sealed),
+            ] {
+                for access in [
+                    Workspace::Undeclared,
+                    Workspace::NoDirect,
+                    Workspace::Access(WorkspaceAccess::ImmutableCurrentGeneration),
+                    Workspace::Access(WorkspaceAccess::SharedExclusive),
+                ] {
+                    let mut preflight = effect_preflight(class, None);
+                    preflight.workspace_access = access;
+                    let inline = grant
+                        .authorize_effect_class("tool:example/effectful", class)
+                        .and_then(|()| {
+                            grant
+                                .authorize_workspace_access("tool:example/effectful", access)
+                                .map(|_| ())
+                        });
+                    let detached = crate::execution::runtime_dispatch::judge_detached_call(
+                        &grant,
+                        &ThreadWorkloadCeiling::node_root(),
+                        "tool:example/effectful",
+                        &preflight,
+                    );
+                    if inline.is_err() {
+                        assert!(detached.is_err(), "{list:?} {class:?} {access:?}");
+                    }
+                    if let Ok((_, ceiling)) = detached {
+                        // Every class the child's calls may reach is a class
+                        // the grant lists for this item.
+                        let ThreadWorkloadCeiling::Bounded {
+                            max_effect_class, ..
+                        } = ceiling
+                        else {
+                            panic!("a detached child is always bounded");
+                        };
+                        for label in max_effect_class.admitted_labels() {
+                            assert!(
+                                list.contains(label),
+                                "{list:?} sealed a ceiling reaching `{label}`"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn effects_decl(
         unproven_max: Option<ryeos_effect_contract::EffectClass>,
     ) -> ryeos_engine::kind_registry::EffectClassCeilingDecl {
         ryeos_engine::kind_registry::EffectClassCeilingDecl {
-            path: vec!["effects".to_owned()],
+            source: ryeos_engine::kind_registry::EffectClassSource::Path(vec![
+                "effects".to_owned(),
+            ]),
             unproven_max,
         }
     }
@@ -7532,6 +7869,7 @@ metadata:
     #[test]
     fn effect_ceiling_projects_sealed_but_marks_it_unproven_under_kind_cap() {
         use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let decl = effects_decl(Some(EffectClass::Recorded));
         let sealed = project_effect_class_ceiling(
             "tool",
@@ -7539,7 +7877,7 @@ metadata:
             &serde_json::json!({"effects": "sealed"}),
         )
         .unwrap();
-        assert_eq!(sealed.ceiling, Some(EffectClass::Sealed));
+        assert_eq!(sealed.ceiling, Effect::Class(EffectClass::Sealed));
         assert_eq!(sealed.unproven_cap, Some(EffectClass::Recorded));
         let recorded = project_effect_class_ceiling(
             "tool",
@@ -7547,7 +7885,7 @@ metadata:
             &serde_json::json!({"effects": "recorded"}),
         )
         .unwrap();
-        assert_eq!(recorded.ceiling, Some(EffectClass::Recorded));
+        assert_eq!(recorded.ceiling, Effect::Class(EffectClass::Recorded));
         assert_eq!(recorded.unproven_cap, None, "recorded is within the cap");
         let live = project_effect_class_ceiling(
             "tool",
@@ -7555,12 +7893,14 @@ metadata:
             &serde_json::json!({"effects": "live"}),
         )
         .unwrap();
-        assert_eq!(live, EffectClassCeilingAdmission::default());
+        assert_eq!(live.ceiling, Effect::Live);
+        assert_eq!(live.unproven_cap, None);
     }
 
     #[test]
     fn kind_without_unproven_max_keeps_current_behaviour() {
         use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let decl = effects_decl(None);
         let sealed = project_effect_class_ceiling(
             "tool",
@@ -7568,7 +7908,7 @@ metadata:
             &serde_json::json!({"effects": "sealed"}),
         )
         .unwrap();
-        assert_eq!(sealed.ceiling, Some(EffectClass::Sealed));
+        assert_eq!(sealed.ceiling, Effect::Class(EffectClass::Sealed));
         assert_eq!(sealed.unproven_cap, None);
         enforce_preflight_effect_class(
             &effect_preflight(sealed.ceiling, sealed.unproven_cap),
@@ -7583,10 +7923,125 @@ metadata:
     }
 
     #[test]
+    fn undeclared_declared_live_none_and_class_are_four_distinct_admissions() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::{
+            EffectClassCeilingDecl, EffectClassConstant, EffectClassSource,
+            ProjectedEffectClass as Effect, ProjectedWorkspaceAccess, WorkspaceAccess,
+        };
+        let path_decl = effects_decl(None);
+        let constant = |constant| EffectClassCeilingDecl {
+            source: EffectClassSource::Constant(constant),
+            unproven_max: None,
+        };
+        let project = |decl: Option<&EffectClassCeilingDecl>, composed: serde_json::Value| {
+            project_effect_class_ceiling("tool", decl, &composed)
+                .unwrap()
+                .ceiling
+        };
+        // No declaration on the kind, and a declared path the item omits.
+        assert_eq!(project(None, serde_json::json!({})), Effect::Undeclared);
+        assert_eq!(
+            project(Some(&path_decl), serde_json::json!({})),
+            Effect::Undeclared
+        );
+        // A declared `live` is not the same as no declaration.
+        assert_eq!(
+            project(Some(&path_decl), serde_json::json!({"effects": "live"})),
+            Effect::Live
+        );
+        assert_eq!(
+            project(
+                Some(&constant(EffectClassConstant::Live)),
+                serde_json::json!({})
+            ),
+            Effect::Live
+        );
+        // The kind's fixed `none`, whatever the item says.
+        assert_eq!(
+            project(
+                Some(&constant(EffectClassConstant::NoDirectEffect)),
+                serde_json::json!({"effects": "sealed"})
+            ),
+            Effect::NoDirectEffect
+        );
+        // A fixed class and an authored class.
+        assert_eq!(
+            project(
+                Some(&constant(EffectClassConstant::Recorded)),
+                serde_json::json!({})
+            ),
+            Effect::Class(EffectClass::Recorded)
+        );
+        assert_eq!(
+            project(Some(&path_decl), serde_json::json!({"effects": "sealed"})),
+            Effect::Class(EffectClass::Sealed)
+        );
+        let all = [
+            Effect::Undeclared,
+            Effect::Live,
+            Effect::NoDirectEffect,
+            Effect::Class(EffectClass::Recorded),
+        ];
+        for (index, left) in all.iter().enumerate() {
+            for right in &all[index + 1..] {
+                assert_ne!(left, right);
+            }
+        }
+        // The same distinction for workspace access.
+        let all = [
+            ProjectedWorkspaceAccess::Undeclared,
+            ProjectedWorkspaceAccess::NoDirect,
+            ProjectedWorkspaceAccess::Access(WorkspaceAccess::ImmutableCurrentGeneration),
+        ];
+        for (index, left) in all.iter().enumerate() {
+            for right in &all[index + 1..] {
+                assert_ne!(left, right);
+            }
+        }
+    }
+
+    #[test]
+    fn an_item_cannot_author_none_at_a_path_declaration() {
+        // `none` is the signed kind schema's constant, never an authored value.
+        let error = project_effect_class_ceiling(
+            "tool",
+            Some(&effects_decl(None)),
+            &serde_json::json!({"effects": "none"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, DispatchError::SchemaMisconfigured { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_none_is_not_a_durable_effect_ceiling() {
+        use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
+        // The capsule and receipt vocabulary has no `none`: a durable request
+        // against a subject that declares it, or declares nothing, or declares
+        // live, is ineligible rather than admitted at some invented class.
+        for ceiling in [Effect::NoDirectEffect, Effect::Undeclared, Effect::Live] {
+            let (code, _) = refusal_code(enforce_preflight_effect_class(
+                &effect_preflight(ceiling, None),
+                Some(EffectClass::Recorded),
+            ));
+            assert_eq!(code, "durable_effect_subject_ineligible", "{ceiling:?}");
+            enforce_preflight_effect_class(&effect_preflight(ceiling, None), None).unwrap();
+        }
+    }
+
+    #[test]
     fn sealed_request_against_unproven_sealed_ceiling_refuses_with_sealed_unqualified() {
         use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let (code, message) = refusal_code(enforce_preflight_effect_class(
-            &effect_preflight(Some(EffectClass::Sealed), Some(EffectClass::Recorded)),
+            &effect_preflight(
+                Effect::Class(EffectClass::Sealed),
+                Some(EffectClass::Recorded),
+            ),
             Some(EffectClass::Sealed),
         ));
         assert_eq!(code, "durable_effect_sealed_unqualified");
@@ -7598,7 +8053,11 @@ metadata:
     #[test]
     fn recorded_request_against_unproven_sealed_ceiling_is_admitted() {
         use ryeos_effect_contract::EffectClass;
-        let preflight = effect_preflight(Some(EffectClass::Sealed), Some(EffectClass::Recorded));
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
+        let preflight = effect_preflight(
+            Effect::Class(EffectClass::Sealed),
+            Some(EffectClass::Recorded),
+        );
         enforce_preflight_effect_class(&preflight, Some(EffectClass::Recorded)).unwrap();
         enforce_preflight_effect_class(&preflight, None).unwrap();
     }
@@ -7606,8 +8065,9 @@ metadata:
     #[test]
     fn missing_ceiling_refuses_subject_ineligible() {
         use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let (code, _) = refusal_code(enforce_preflight_effect_class(
-            &effect_preflight(None, None),
+            &effect_preflight(Effect::Undeclared, None),
             Some(EffectClass::Recorded),
         ));
         assert_eq!(code, "durable_effect_subject_ineligible");
@@ -7616,8 +8076,9 @@ metadata:
     #[test]
     fn recorded_ceiling_refuses_sealed_request() {
         use ryeos_effect_contract::EffectClass;
+        use ryeos_engine::kind_registry::ProjectedEffectClass as Effect;
         let (code, _) = refusal_code(enforce_preflight_effect_class(
-            &effect_preflight(Some(EffectClass::Recorded), None),
+            &effect_preflight(Effect::Class(EffectClass::Recorded), None),
             Some(EffectClass::Sealed),
         ));
         assert_eq!(code, "durable_effect_ceiling_exceeded");
@@ -7647,9 +8108,9 @@ metadata:
                 admitted_subject_ref: admitted.resolved.canonical_ref.clone(),
                 admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
             },
-            effect_class_ceiling: None,
+            effect_class_ceiling: ryeos_engine::kind_registry::ProjectedEffectClass::Undeclared,
             effect_class_unproven_cap: None,
-            workspace_access: None,
+            workspace_access: ryeos_engine::kind_registry::ProjectedWorkspaceAccess::Undeclared,
         };
 
         preflight.rebind_requested_subject(wrapper.clone());
@@ -7990,6 +8451,79 @@ runtime_authority:
             err.contains("effective trust class is TrustedProject"),
             "a project-trusted composed ancestor must taint runtime authority: {err}"
         );
+    }
+
+    /// A key whose items nobody has endorsed or trusted for the project is
+    /// classed `UntrustedProject`, never `TrustedProject`, and the class alone
+    /// keeps its project manifest from minting runtime authority, however
+    /// well the manifest is signed and backs the request.
+    #[test]
+    fn an_item_whose_signer_nobody_trusted_mints_no_runtime_authority() {
+        let project = tempdir().join("arc");
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &SELF_BUNDLE_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
+        let ctx = test_execution_context(project.clone());
+        let mut resolved = resolved_tool_in_space(
+            &project,
+            "tool:arc-project/send",
+            ryeos_engine::contracts::ItemSpace::Project,
+            &signing_key(),
+        );
+        resolved.resolved_item.metadata.extra = requires_extra(json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "item_authoring": [
+                    { "kind": "knowledge", "namespace": "runtime-authored/*" }
+                ]
+            } } }
+        }));
+        let requires = resolved.resolved_item.metadata.extra.get("requires");
+
+        for class in [
+            ryeos_engine::resolution::TrustClass::UntrustedProject,
+            ryeos_engine::resolution::TrustClass::Unsigned,
+        ] {
+            let err =
+                mint_runtime_capability_caps(requires, &resolved.resolved_item, class, &ctx.engine)
+                    .unwrap_err();
+            assert!(
+                err.contains("project runtime capability requirements need TrustedProject"),
+                "{class:?} must mint nothing: {err}"
+            );
+        }
+    }
+
+    /// A state home belongs to an installed bundle. A project item, trusted
+    /// and holding the caller's own `use` capability, is refused one.
+    #[test]
+    fn a_project_items_state_home_is_refused_even_when_trusted() {
+        let project = tempdir().join("arc");
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &STATE_HOME_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
+        let mut ctx = test_execution_context(project.clone());
+        ctx.caller_scopes = vec!["ryeos.use.bundle-state.*".to_owned()];
+        let mut resolved = resolved_tool_in_space(
+            &project,
+            "tool:arc-project/keep",
+            ryeos_engine::contracts::ItemSpace::Project,
+            &signing_key(),
+        );
+        resolved.resolved_item.metadata.extra = state_home_tool_requires();
+
+        let error = derive_tool_state_home_cap(
+            &resolved.resolved_item,
+            ryeos_engine::resolution::TrustClass::TrustedProject,
+            &ctx,
+            &json!({ "realm": "ns1" }),
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPreparationFailed { code, .. } = &error else {
+            panic!("expected a preparation refusal: {error}");
+        };
+        assert_eq!(code, "bundle_state_home_undeclared");
     }
 
     #[test]
@@ -9229,6 +9763,7 @@ runtime_authority:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx,
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         };
         // `unknown` kind has no schema; only `runtime` was loaded.

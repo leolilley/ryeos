@@ -1917,6 +1917,7 @@ async fn try_execute_recorded_service(
             scheduled_fire: None,
             validate_only: false,
         },
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
         requested_call: None,
     };
     let verified = ryeos_executor::executor::resolve_and_verify(
@@ -2031,6 +2032,7 @@ fn dispatch_pinned_public_worker(
                     caller_scopes: scopes.clone(),
                     engine: request_engine,
                     plan_ctx,
+                    disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
                     requested_call: None,
                 };
                 let handler_context =
@@ -4768,6 +4770,7 @@ async fn run_production_tls_candidate(
             caller_scopes: scopes,
             engine: state.engine.clone(),
             plan_ctx,
+            disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Operator,
             requested_call: None,
         };
         let dispatch_state = state.clone();
@@ -6229,15 +6232,26 @@ async fn evaluate_integrate_and_publish_candidate(
             "candidate_validation_hash":candidate_validation_hash,
             "evaluator_chain_root_id":evaluator_thread_id,
             "evaluator_terminal_thread_id":evaluator_thread_id,
-            "evaluator_capsule_hash":evaluator_capsule_hash,
             "evaluator_item_ref":"tool:test/external-candidate/evaluate",
-            "evaluator_definition_digest":evaluator_request.effective_definition_digest(),
-            "evaluator_parameters_digest":evaluator_request.admitted_parameters_digest().unwrap(),
             "integration_launch_id":integration_launch_id,
         }),
     )
     .await;
     assert_eq!(qualified_c.value["accepted"], true);
+    // The daemon derived the sealed evaluator's coordinates; the test computed
+    // them independently from the same capsule and they agree.
+    assert_eq!(
+        qualified_c.value["evaluator"]["capsule_hash"],
+        evaluator_capsule_hash
+    );
+    assert_eq!(
+        qualified_c.value["evaluator"]["effective_definition_digest"],
+        evaluator_request.effective_definition_digest().as_str()
+    );
+    assert_eq!(
+        qualified_c.value["evaluator"]["parameters_digest"],
+        evaluator_request.admitted_parameters_digest().unwrap()
+    );
     let accepted_evaluation_hash = qualified_c.value["candidate_evaluation_hash"]
         .as_str()
         .expect("candidate C qualification returned exact testimony")
@@ -6389,10 +6403,7 @@ async fn evaluate_integrate_and_publish_candidate(
             "candidate_validation_hash":integrated_validation_hash,
             "evaluator_chain_root_id":integrated_evaluator_thread_id,
             "evaluator_terminal_thread_id":integrated_evaluator_thread_id,
-            "evaluator_capsule_hash":integrated_evaluator_capsule_hash,
             "evaluator_item_ref":"tool:test/external-candidate/evaluate",
-            "evaluator_definition_digest":integrated_evaluator_request.effective_definition_digest(),
-            "evaluator_parameters_digest":integrated_evaluator_request.admitted_parameters_digest().unwrap(),
             "integration":{
                 "chain_root_id":integration_thread_id,
                 "terminal_thread_id":integration_thread_id,

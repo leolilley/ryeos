@@ -327,6 +327,34 @@ fn owner_base_head_key(
     ))
 }
 
+/// Refusal code for an evaluator whose launch ancestry reaches the session
+/// whose candidate it judges. Qualification, integration and publication
+/// (which re-prove the retained evaluator every time) all refuse with it.
+const EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION: &str = "evaluator_lineage_reaches_source_session";
+
+/// Refuse an evaluator that was launched from inside the session it judges, at
+/// any depth: its origin chain is read from its sealed capsule (never from a
+/// runtime claim) and walked up the dispatch links; reaching the source
+/// session's chain refuses. An ancestry that cannot be resolved refuses too.
+fn require_evaluator_outside_session_lineage(
+    state: &AppState,
+    evaluator_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    source_chain_root_id: &str,
+) -> Result<(), HandlerError> {
+    match state
+        .state_store
+        .sealed_origin_reaches_chain(evaluator_capsule, source_chain_root_id)
+    {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(HandlerError::Conflict(format!(
+            "{EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION}: the evaluator was launched from inside the session whose candidate it judges"
+        ))),
+        Err(error) => Err(HandlerError::Conflict(format!(
+            "{EVALUATOR_LINEAGE_REACHES_SOURCE_SESSION}: the evaluator's launch ancestry could not be resolved: {error:#}"
+        ))),
+    }
+}
+
 /// A pinned generation that sealed an owner+name identity at admission must
 /// name exactly the head integration and publication target. `Absent` seals
 /// nothing and is allowed: the head comes from the base and the fresh owner.
@@ -4418,6 +4446,10 @@ async fn handoff(
                 .as_ref()
                 .and_then(|value| value.get("worker_attach_recovery_ms"))
                 .and_then(Value::as_u64),
+            "adoption_path":_target_adoption_qualification_measurements
+                .as_ref()
+                .and_then(|value| value.get("adoption_path"))
+                .and_then(Value::as_str),
             "total_handoff_ms":qualification_started.elapsed_millis(),
         });
         response
@@ -6984,6 +7016,17 @@ async fn resolve_approval(
                     "the admitted structured-session contract does not allow accepting this authority delta".into(),
                 )
             }
+            ryeos_app::dedicated_session_service::AcceptRefusal::RefusedByNodePolicy {
+                operation_class,
+            } => HandlerError::Structured {
+                code: "approval_accept_refused_by_node_policy".to_owned(),
+                status: 403,
+                body: json!({
+                    "code": "approval_accept_refused_by_node_policy",
+                    "error": "this node's approval ceiling does not list this class of request `allow`; decline it, or have the node operator list the class",
+                    "operation_class": operation_class,
+                }),
+            },
             ryeos_app::dedicated_session_service::AcceptRefusal::UnnamedMethod => {
                 HandlerError::Structured {
                     code: "approval_method_unnamed".to_owned(),
@@ -7512,10 +7555,11 @@ pub struct QualifyCandidateRequest {
     candidate_validation_hash: String,
     evaluator_chain_root_id: String,
     evaluator_terminal_thread_id: String,
-    evaluator_capsule_hash: String,
+    /// The evaluator is the person's choice, so it stays a request field and
+    /// must equal the ref the daemon sealed for that thread. The capsule hash
+    /// and the definition and parameters digests are not: the daemon holds
+    /// them for the sealed evaluator thread and records what it derives.
     evaluator_item_ref: String,
-    evaluator_definition_digest: String,
-    evaluator_parameters_digest: String,
     #[serde(default)]
     integration: Option<CandidateIntegrationCoordinate>,
     /// One pre-minted launch coordinate reserved by accepted source-candidate
@@ -8486,6 +8530,7 @@ fn verify_candidate_evaluation_testimony(
             "candidate evaluator capsule contradicts its terminal authority",
         ));
     }
+    require_evaluator_outside_session_lineage(state, &evaluator_capsule, &session.chain_root_id)?;
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
             &evaluator_capsule,
@@ -9334,6 +9379,23 @@ fn verified_candidate_source(
     })
 }
 
+/// An evaluator the person names by a bundle's ref must be that bundle's item.
+/// A project may carry its own evaluator under its own ref, but a project file
+/// that took a bundle item's ref (so `tool:ryeos/core/evaluate/unchecked` would
+/// run the project's file instead) is refused, whatever its trust.
+fn refuse_project_item_standing_for_a_bundle_item(
+    authority_kind: &str,
+    shadows_bundle_item: bool,
+) -> Result<(), HandlerError> {
+    if authority_kind == "base_project_generation" && shadows_bundle_item {
+        return Err(HandlerError::BadRequest(
+            "candidate operation program is a project item standing in for an installed bundle item under the same ref"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn immutable_base_program_evidence(
     sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
     base_snapshot_hash: &str,
@@ -9366,6 +9428,10 @@ fn immutable_base_program_evidence(
             ));
         }
     };
+    refuse_project_item_standing_for_a_bundle_item(
+        authority_kind,
+        sealed.admitted_subject_shadows_bundle_item(),
+    )?;
     let trusted_effective = match authority_kind {
         "installed_bundle" => resolution.effective_trust_class == TrustClass::TrustedBundle,
         "base_project_generation" => matches!(
@@ -9848,21 +9914,9 @@ fn candidate_qualification_request_matches(
             .and_then(Value::as_str)
             == Some(req.evaluator_terminal_thread_id.as_str())
         && evaluation
-            .pointer("/evaluator/capsule_hash")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_capsule_hash.as_str())
-        && evaluation
             .pointer("/evaluator/item_ref")
             .and_then(Value::as_str)
             == Some(req.evaluator_item_ref.as_str())
-        && evaluation
-            .pointer("/evaluator/effective_definition_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_definition_digest.as_str())
-        && evaluation
-            .pointer("/evaluator/parameters_digest")
-            .and_then(Value::as_str)
-            == Some(req.evaluator_parameters_digest.as_str())
         && (!compare_reserved_launch
             || evaluation
                 .pointer("/qualification/reserved_integration_launch_id")
@@ -10072,23 +10126,19 @@ async fn qualify_candidate(
         .admitted_launch_capsule_hash
         .as_deref()
         .ok_or_else(|| HandlerError::BadRequest("evaluator has no admitted capsule".into()))?;
-    if evaluator_capsule_hash != req.evaluator_capsule_hash {
-        return Err(HandlerError::BadRequest(
-            "evaluator capsule differs from the requested qualification coordinate".into(),
-        ));
-    }
     let evaluator_capsule = state
         .state_store
         .admitted_launch_capsule(&req.evaluator_terminal_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("evaluator admitted capsule disappeared"))?;
-    if evaluator_capsule.content_hash().map_err(internal)? != req.evaluator_capsule_hash
+    if evaluator_capsule.content_hash().map_err(internal)? != evaluator_capsule_hash
         || evaluator_capsule.project_authority != evaluator.project_authority
     {
         return Err(internal(
             "evaluator capsule contradicts its authoritative terminal snapshot",
         ));
     }
+    require_evaluator_outside_session_lineage(&state, &evaluator_capsule, &session.chain_root_id)?;
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
             &evaluator_capsule,
@@ -10116,15 +10166,17 @@ async fn qualify_candidate(
             "evaluator capsule is sealed to another retained candidate operation".into(),
         ));
     }
-    if sealed.item_ref() != req.evaluator_item_ref
-        || evaluator.item_ref != req.evaluator_item_ref
-        || sealed.effective_definition_digest().as_str() != req.evaluator_definition_digest
-        || sealed.admitted_parameters_digest().map_err(internal)? != req.evaluator_parameters_digest
-    {
+    if sealed.item_ref() != req.evaluator_item_ref || evaluator.item_ref != req.evaluator_item_ref {
         return Err(HandlerError::BadRequest(
-            "evaluator invocation differs from the exact requested definition or parameters".into(),
+            "evaluator invocation differs from the requested evaluator item".into(),
         ));
     }
+    // What the sealed evaluator thread was admitted with. The daemon derives
+    // these; a caller never carries them. They are written into the
+    // qualification record and returned, so the testimony names exactly which
+    // definition and parameters were evaluated.
+    let evaluator_definition_digest = sealed.effective_definition_digest().as_str().to_owned();
+    let evaluator_parameters_digest = sealed.admitted_parameters_digest().map_err(internal)?;
 
     let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
         stable_project_identity,
@@ -10215,6 +10267,22 @@ async fn qualify_candidate(
     let reserved_integration_thread_id = reserved_integration_launch_id
         .as_ref()
         .map(|_| ryeos_app::thread_lifecycle::new_thread_id());
+    // What the evaluator says it checked, kept short and printable so the
+    // person deciding sees it (an evaluator that ran nothing says so).
+    let evidence_scope = evaluator_result
+        .evidence
+        .get("scope")
+        .and_then(Value::as_str)
+        .filter(|scope| scope.len() <= 200 && !scope.chars().any(char::is_control))
+        .map(str::to_owned);
+    let evaluator_coordinate = json!({
+        "chain_root_id":req.evaluator_chain_root_id,
+        "terminal_thread_id":req.evaluator_terminal_thread_id,
+        "capsule_hash":evaluator_capsule_hash,
+        "item_ref":req.evaluator_item_ref,
+        "effective_definition_digest":evaluator_definition_digest,
+        "parameters_digest":evaluator_parameters_digest,
+    });
     let evaluation_evidence = json!({
         "schema":"ryeos.hosted_candidate_evaluation.v1",
         "candidate":closure_evidence,
@@ -10223,10 +10291,10 @@ async fn qualify_candidate(
         "evaluator":{
             "chain_root_id":req.evaluator_chain_root_id,
             "terminal_thread_id":req.evaluator_terminal_thread_id,
-            "capsule_hash":req.evaluator_capsule_hash,
+            "capsule_hash":evaluator_capsule_hash,
             "item_ref":req.evaluator_item_ref,
-            "effective_definition_digest":req.evaluator_definition_digest,
-            "parameters_digest":req.evaluator_parameters_digest,
+            "effective_definition_digest":evaluator_definition_digest,
+            "parameters_digest":evaluator_parameters_digest,
             "immutable_definition_authority":immutable_evaluator,
             "project_authority_digest":evaluator_project_authority_digest,
             "candidate_realization":realization_kind,
@@ -10238,6 +10306,7 @@ async fn qualify_candidate(
             "accepted":evaluator_result.accepted,
             "result_digest":evaluator_result_digest,
             "claim_evidence_digest":evaluator_claim_evidence_digest,
+            "evidence_scope":evidence_scope,
         },
         "qualification":{
             "root_thread_id":qualification_root_id,
@@ -10255,6 +10324,8 @@ async fn qualify_candidate(
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
             "candidate_validation_hash":req.candidate_validation_hash,
             "candidate_evaluation_hash":candidate_evaluation_hash,
+            "evaluator":evaluator_coordinate,
+            "evidence_scope":evidence_scope,
             "accepted":false,
         }));
     }
@@ -10333,6 +10404,8 @@ async fn qualify_candidate(
         "candidate_evaluation_hash":candidate_evaluation_hash,
         "qualification_root_id":qualification_root_id,
         "qualification_operation_id":qualification_operation_id,
+        "evaluator":evaluator_coordinate,
+        "evidence_scope":evidence_scope,
         "accepted":true,
         "idempotent":false,
     }))
@@ -11553,6 +11626,23 @@ mod tests {
         }
     }
     #[test]
+    fn a_project_item_standing_in_for_a_bundle_item_is_not_an_accepted_evaluator() {
+        // A project's own evaluator, under its own ref, is fine.
+        super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", false)
+            .unwrap();
+        // The bundle's own item is fine.
+        super::refuse_project_item_standing_for_a_bundle_item("installed_bundle", false).unwrap();
+        // A project file that took a bundle item's ref is refused.
+        let refused =
+            super::refuse_project_item_standing_for_a_bundle_item("base_project_generation", true)
+                .unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("standing in for an installed bundle item"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
     fn a_sealed_identity_must_name_the_targeted_head() {
         use ryeos_state::project_identity::{
             LogicalProject, LogicalProjectAbsence, ProjectHeadKey, ProjectIdentity, ProjectName,
@@ -12605,10 +12695,7 @@ mod tests {
                 "candidate_validation_hash":hash(),
                 "evaluator_chain_root_id":"T-evaluator",
                 "evaluator_terminal_thread_id":"T-evaluator",
-                "evaluator_capsule_hash":hash(),
                 "evaluator_item_ref":"tool:project/evaluate",
-                "evaluator_definition_digest":hash(),
-                "evaluator_parameters_digest":hash(),
                 "integration":{
                     "chain_root_id":"T-integration",
                     "terminal_thread_id":"T-integration"

@@ -52,22 +52,12 @@ pub async fn handle(
             "env-check requires a project: run inside a project directory".into(),
         )
     })?;
-    let project_path = std::fs::canonicalize(&requested_project_path).map_err(|error| {
-        HandlerError::BadRequest(format!(
-            "could not resolve project path `{requested_project_path}`: {error}"
-        ))
-    })?;
-    if !project_path.is_dir() {
-        return Err(HandlerError::BadRequest(format!(
-            "project path is not a directory: {}",
-            project_path.display()
-        )));
-    }
-    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
-        &project_path,
-        &state.config.app_root,
-    )
-    .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
+    let project_path = ryeos_app::live_project_path::admit_handler_live_path(
+        &state,
+        &ctx,
+        std::path::Path::new(&requested_project_path),
+    )?
+    .canonical;
 
     let canonical =
         ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
@@ -146,6 +136,8 @@ pub async fn handle(
         engine: state.engine.clone(),
         plan_ctx: plan_ctx.clone(),
         requested_call: None,
+        // Applicability checks resolve a launch contract; no handler runs.
+        disclosure_class: ryeos_node_runtime::disclosure::DisclosureClass::Public,
     };
     let applicability = ryeos_executor::dispatch::launch_contract_applicability(
         &req.item_ref,

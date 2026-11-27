@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:05c0da088c88c95c03b422b9fdccf7e0829738953311c13e5a80020245d61ef8:FP5/0GjRBTGofcP2Voa6us407Ejfm2fP8hDaKwjXNevWUisOPgHqPlr48bTC76m7nsLXYyK/Oo9KsilGmlS2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:0329818fff5062943e2849667d76793629a188c51487ee3f8109d15e0afb1331:X10lzWm7YYZJPauqctrwCcgw9kI8dQq35cHSf4M3VW2OSE4emhYNmoBMRlEsQ2MMAfp56RblGnUrrZvNgM9RBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-qualify
 version: "1.1.0"
@@ -21,3 +21,5 @@ schema:
   substrate_build_recipe_signed_config: string
   substrate_build_recipe_raw_digest: string
   substrate_product_witness: string
+# Release qualification tool: only the node operator qualifies a substrate release.
+disclosure: {}

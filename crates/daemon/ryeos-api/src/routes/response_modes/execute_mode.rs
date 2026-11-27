@@ -1366,6 +1366,20 @@ impl From<(StatusCode, Value)> for AdmissionOutcome {
     }
 }
 
+/// The answer for a refused live project path: 403 with one fixed body for a
+/// key that is not the operator (whatever the cause), and the operator's own
+/// 400 or 403 texts.
+fn live_project_path_response(
+    refusal: &ryeos_app::live_project_path::LiveProjectPathRefusal,
+) -> (StatusCode, Value) {
+    use ryeos_app::live_project_path::LiveProjectPathRefusal as Refusal;
+    let status = match refusal {
+        Refusal::NotRegisteredToCaller | Refusal::NodeInternal(_) => StatusCode::FORBIDDEN,
+        Refusal::BadPath(_) => StatusCode::BAD_REQUEST,
+    };
+    (status, json!({ "error": refusal.to_string() }))
+}
+
 /// Sole buffered/accepted admission owner. Callers supply verified identity,
 /// not reconstructed principals or synthetic HTTP requests. A nested call
 /// retains identity/grants/origin but receives its own service-local root.
@@ -1688,45 +1702,30 @@ async fn admit_execution_with_publication(
                             .into());
                 }
             } else {
-                if !path.is_absolute() {
+                let live_source = matches!(
+                    &project_source,
+                    ProjectSource::LiveFs | ProjectSource::CaptureLiveFullProject
+                );
+                if !live_source && !path.is_absolute() {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         json!({ "error": "project_path must be absolute" }),
                     )
                         .into());
                 }
-                if matches!(
-                    &project_source,
-                    ProjectSource::LiveFs | ProjectSource::CaptureLiveFullProject
-                ) {
-                    match std::fs::canonicalize(&path) {
-                        Ok(path) => {
-                            if let Err(refusal) =
-                                ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
-                                    &path,
-                                    &state.config.app_root,
-                                )
-                            {
-                                return Ok((
-                                    StatusCode::FORBIDDEN,
-                                    json!({ "error": refusal.to_string() }),
-                                )
-                                    .into());
-                            }
-                            path
-                        }
-                        Err(error) => {
-                            return Ok((
-                                    StatusCode::BAD_REQUEST,
-                                    json!({
-                                        "error": format!(
-                                            "live project_path '{}' cannot be resolved for the selected execution policy: {error}",
-                                            path.display()
-                                        )
-                                    }),
-                                )
-                                    .into());
-                        }
+                if live_source {
+                    let operator = ryeos_app::operator_authority::require_admitted_operator(
+                        &state, &principal,
+                    )
+                    .is_ok();
+                    match ryeos_app::live_project_path::admit_live_project_path(
+                        &state,
+                        &caller_principal_id,
+                        operator,
+                        &path,
+                    ) {
+                        Ok(admitted) => admitted.canonical,
+                        Err(refusal) => return Ok(live_project_path_response(&refusal).into()),
                     }
                 } else {
                     path
@@ -1995,6 +1994,7 @@ async fn admit_execution_with_publication(
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: request.call().cloned(),
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(&state, &principal),
     };
 
     ryeos_app::command_invocation::normalize_selected_parameters(
@@ -2082,6 +2082,7 @@ async fn admit_execution_with_publication(
             engine: exec_ctx.engine.clone(),
             plan_ctx: exec_ctx.plan_ctx.clone(),
             requested_call: exec_ctx.requested_call.clone(),
+            disclosure_class: exec_ctx.disclosure_class,
         };
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();

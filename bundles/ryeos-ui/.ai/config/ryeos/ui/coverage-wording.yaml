@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T20:02:52Z:4dbab443e1057aa2e6c10813b8a10a99d8431aa40408a5cac3641182a84d79d1:W/YD7/Dp2b0SMLs4MVYlE6W6sCboE37/K2aYFg1vDgk2d8cCwuhHMi6nk3PaiB/p+FhBW91KLzNVOzJ4v7b9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T01:30:21Z:04c232467ae28375d91833eb88312bdbf7fd3bd814c226a6484cea86aa3dbae4:+mg37DPQV/oWgCC4c/z7ZuPL3KmZ5uyq29j7+xdBA/NVRzuUf0+PskIdYNF+BpVhs+YJl3iZWHpzG50oyfErAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -11,6 +11,11 @@ description: The sentence and tone a table's coverage line shows for each state 
 # `reasons` also holds the sentences a view says in place of rows. A view names
 # one under `body.empty`, and `empty` when it names none. They are plain
 # sentences like the rest and need no service to report them.
+# `reasons` also holds the sentence a seat's project chip draws when the seat
+# is bound to a checkout that states no project, under `seat_project_<code>`
+# for each of the four absence codes. A code with no entry here reads as the
+# client's fixed "not known" line. The chip draws no sentence for a seat that
+# states a project (it draws the name) or has none.
 # Tone is one of none, good, warn, danger, accent. A sentence is plain, in
 # normal case, and says what the page shows or does not show.
 fallback:
@@ -32,7 +37,28 @@ states:
   unavailable:
     label: This source is not available.
     tone: warn
+  not_reported:
+    label: This source did not report this list.
+    tone: warn
+  wrong_shape:
+    label: This source reported this list in a form this page cannot read.
+    tone: warn
+  key_collision:
+    label: This list was not shown because an entry already has the field its name would be stored in.
+    tone: danger
+# `limits` are bounds the client applies to what a source shows. `source_rows`
+# is the most rows one source shows, whether it reports an array or a map; when
+# rows are cut the source reads as `partial` with the reason `source_row_limit`,
+# whose sentence may use `{limit}` (the bound) and `{total}` (rows that exist).
+limits:
+  source_rows: 500
 reasons:
+  source_row_limit:
+    label: Showing the first {limit} of {total} rows.
+    tone: warn
+  contract_mismatch:
+    label: This source answered in a form this page was not written for, so nothing from it is shown.
+    tone: danger
   coverage_not_reported:
     label: This source did not say what it covers.
     tone: warn
@@ -98,4 +124,16 @@ reasons:
     tone: none
   empty_project:
     label: Nothing observed in this project yet.
+    tone: none
+  seat_project_unregistered:
+    label: This folder is not registered as a project, so no project is shown. Register the folder to show one.
+    tone: none
+  seat_project_owner_key_not_active:
+    label: The key for this seat is not active, so no project is shown. Activate the key to show one.
+    tone: warn
+  seat_project_no_project_name:
+    label: This folder's manifest names no project, so no project is shown. Add a name to its manifest.
+    tone: none
+  seat_project_checkout_name_changed:
+    label: This folder's manifest now names a different project than it was registered under, so no project is shown. Register it again under the new name.
     tone: none

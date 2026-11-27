@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 38;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 40;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -294,6 +294,23 @@ pub struct PersistedParentExecutionContext {
     /// children admitted after the live callback context is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Parent's workload ceiling, already narrowed for this spawn. The child
+    /// can never hold a wider one.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+}
+
+/// The origin chain a launch made from inside an execution records: the
+/// launching thread's own sealed origin when it has one, otherwise the launching
+/// thread's own chain root. This is the one rule every launching site shares, so
+/// a launch made from inside any execution names where it came from. A null
+/// origin is left only to a launch no execution made, a person's root launch.
+pub fn child_launch_origin_chain(
+    launcher_sealed_origin: Option<&str>,
+    launcher_chain_root_id: &str,
+) -> String {
+    launcher_sealed_origin
+        .unwrap_or(launcher_chain_root_id)
+        .to_owned()
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -506,6 +523,28 @@ pub struct ResumeContext {
     /// as capabilities held by the child.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub parent_delegation_caps: Option<Vec<String>>,
+    /// Bound on the workload authority of every tool call made from this
+    /// thread's tree. Sealed into the admitted launch capsule and carried on
+    /// the thread's callback bearer; recovery and continuation copy it, a
+    /// spawn only narrows it. Required: only a launch with no parent
+    /// execution context states `Unbounded`.
+    pub thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
+    /// Parent workspace generation a detached child reads as data. This is
+    /// the reader's record of what the process saw: the project authority
+    /// describes the child's own pinned workspace, which the process is never
+    /// given, while the process sees a private scratch copy of this
+    /// generation. It is
+    /// mounted read-only into the child's process by hash, re-attached on
+    /// recovery, sealed into the admitted launch capsule, and its objects stay
+    /// reachable for GC exactly while the thread is live. Required-nullable:
+    /// `None` states the launch received no workspace input.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub workspace_input: Option<ryeos_state::objects::WorkspaceGenerationPair>,
+    /// Chain root of the session this launch originated from. A detached
+    /// child records its parent session's chain here; a continuation copies
+    /// it. Required-nullable: `None` states no session origin.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub evaluator_origin_chain: Option<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
     /// graph — carry no item `executor_id`, so a continuation successor
@@ -652,6 +691,14 @@ impl ResumeContext {
         }
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
+        if let Some(input) = &self.workspace_input {
+            input.validate()?;
+        }
+        if let Some(chain) = &self.evaluator_origin_chain
+            && (chain.is_empty() || chain.trim() != chain || chain.chars().any(char::is_control))
+        {
+            anyhow::bail!("resume evaluator origin chain is empty, untrimmed, or control-bearing");
+        }
         if let Some(identity) = &self.stable_project_identity {
             identity.validate()?;
         }
@@ -1228,6 +1275,9 @@ impl RuntimeLaunchMetadata {
             )?,
             source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
+            workspace_input: resume.workspace_input.clone(),
+            evaluator_origin_chain: resume.evaluator_origin_chain.clone(),
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1333,6 +1383,9 @@ impl RuntimeLaunchMetadata {
                 anyhow::anyhow!("sealed launch has no admitted execution closure")
             })?,
             accounting_scope: self.accounting_scope.clone(),
+            thread_ceiling: resume.thread_ceiling,
+            workspace_input: resume.workspace_input.clone(),
+            evaluator_origin_chain: resume.evaluator_origin_chain.clone(),
             effective_caps,
             parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_owned(),
@@ -1730,6 +1783,9 @@ mod tests {
             scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
@@ -1837,6 +1893,116 @@ mod tests {
             .product_selections
             .push(duplicate.product_selections[0].clone());
         assert!(duplicate.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn a_continuation_successor_keeps_the_bounded_ceiling_and_cannot_widen_it() {
+        let project = tempfile::tempdir().unwrap();
+        let bounded = ryeos_state::objects::ThreadWorkloadCeiling::Bounded {
+            max_effect_class: ryeos_state::objects::ThreadEffectCeiling::Recorded,
+            workspace_access:
+                ryeos_state::objects::ThreadWorkspaceCeiling::ImmutableCurrentGeneration,
+        };
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.thread_ceiling = bounded;
+
+        // The seed a continuation derives keeps the sealed ceiling, not an
+        // unbounded one.
+        let metadata = RuntimeLaunchMetadata {
+            resume_context: Some(source.clone()),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let seed = metadata
+            .for_continuation_successor("T-source", PathBuf::from("/state/successor/checkpoints"));
+        assert_eq!(
+            seed.resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+        let machine_seed = metadata.continuation_successor_seed(source.clone());
+        assert_eq!(
+            machine_seed
+                .resume_context
+                .as_ref()
+                .map(|resume| resume.thread_ceiling),
+            Some(bounded)
+        );
+
+        // A successor that states the same ceiling is the same authority; one
+        // that states a wider ceiling differs outside its typed transition.
+        source
+            .clone()
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            )
+            .unwrap();
+        let mut widened = source.clone();
+        widened.thread_ceiling = ryeos_state::objects::ThreadWorkloadCeiling::node_root();
+        assert!(
+            widened
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_continuation_inherits_workspace_input_and_origin_chain_and_cannot_change_them() {
+        let project = tempfile::tempdir().unwrap();
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.workspace_input = Some(ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: Some("b".repeat(64)),
+        });
+        source.evaluator_origin_chain = Some("T-session-root".to_string());
+        let metadata = RuntimeLaunchMetadata {
+            resume_context: Some(source.clone()),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let seed = metadata
+            .for_continuation_successor("T-source", PathBuf::from("/state/successor/checkpoints"));
+        let inherited = seed.resume_context.as_ref().expect("successor resume");
+        assert_eq!(inherited.workspace_input, source.workspace_input);
+        assert_eq!(
+            inherited.evaluator_origin_chain,
+            source.evaluator_origin_chain
+        );
+        source
+            .clone()
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .unwrap();
+        let mut dropped = source.clone();
+        dropped.workspace_input = None;
+        let mut rechained = source.clone();
+        rechained.evaluator_origin_chain = Some("T-other-root".to_string());
+        for drifted in [dropped, rechained] {
+            assert!(
+                drifted
+                    .validate_continuation_transition_from(
+                        &source,
+                        None,
+                        ContinuationAuthorityTransitionKind::Inherit,
+                    )
+                    .is_err()
+            );
+        }
+        let mut malformed = source.clone();
+        malformed.workspace_input.as_mut().unwrap().snapshot_hash = "nope".to_string();
+        assert!(malformed.authoritative_project_identity().is_err());
     }
 
     #[test]
@@ -2236,6 +2402,7 @@ mod tests {
                 hard_limits: serde_json::json!({"max_depth": 2}),
                 depth: 1,
                 accounting_scope: None,
+                thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
             }),
             follow_launch_window: Some(FollowLaunchWindow {
                 key: "follow:source".to_string(),
@@ -2480,6 +2647,9 @@ mod tests {
             ),
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
             parent_delegation_caps: None,
+            thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+            workspace_input: None,
+            evaluator_origin_chain: None,
             executor_ref: Some("native:test-runtime".to_string()),
             runtime_ref: Some("runtime:test".to_string()),
         };

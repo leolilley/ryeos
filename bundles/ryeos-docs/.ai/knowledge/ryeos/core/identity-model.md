@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:21:17Z:fa45bcd532a598d71d441d53a1ce04dd3885b7181d7ca5857e3d7668155800a6:U93XJnkiXxw5FFXSDN08JoZ2sWNLRdQXPBFqZvZ94DUmufOA91saRIOfA+GNfyfKMvANJVDWOn0k8aO6EV6ZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:22:30Z:be0025b1deb5eeef03307c8aaf5689d4a406fc4703a34efcb61955ad183d820d:w8xvikxxtIaD3TstdwOIvuW6GYw9jMB7gPTUneyd1vrnp4ZQJGz02+m0N8w+/NOIfl45aIL7x8Mog6NkPaQeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -363,7 +363,7 @@ from the operator's machine). The session is always minted by a principal that
 holds a key; a human without a key on the node machine has no other login.
 
 What a session may do is bounded by the node's signed `ui_browser_sessions`
-policy (schema 5), never by the cookie flags alone:
+policy (schema 6), never by the cookie flags alone:
 
 - **Authority ceiling.** `session_scopes` is the most any browser session on
   this node may hold. The session's grant is the minter's scopes intersected
@@ -378,6 +378,10 @@ policy (schema 5), never by the cookie flags alone:
   use, `session_idle_secs` ends one that is not used, and `launch_token_ttl_secs`
   (at most 300) bounds the single-use activation link. None has a code default;
   a policy without them is refused.
+- **Picture grants.** `max_art_grants` bounds the picture hashes a service may
+  grant one session beyond those its bindings name. A full set refuses the
+  grant (the row then reads `picture_state: unavailable`); there is no code
+  default.
 - **End.** A session ends itself with `POST /ui/api/session/end`
   (`ui.session.end`); the response clears the cookie.
 - **List and revoke.** The configured local operator lists live sessions with
@@ -388,5 +392,6 @@ policy (schema 5), never by the cookie flags alone:
   or launch tokens.
 
 Sessions live in daemon memory; a restart ends them all. A node whose policy
-generation still carries `ui_browser_sessions` at schema 4 refuses to start
-until the section is re-issued at schema 5.
+generation still carries `ui_browser_sessions` at schema 5 or older refuses to
+start until the section is re-issued at schema 6, which adds `max_art_grants`:
+the most picture hashes one session's grant set may hold.

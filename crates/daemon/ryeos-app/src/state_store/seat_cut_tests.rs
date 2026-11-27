@@ -6,6 +6,7 @@ use ryeos_state::{AuthoritativeThreadEventReadAnchor as Anchor, RetiredChainDepe
 
 const FENCED_KIND: &str = "fenced_test_kind";
 const OWNER: &str = "fp:test";
+const HOLDER: &str = "session:holder";
 const ITEM: &str = "directive:test";
 const EXECUTOR: &str = "native:test";
 
@@ -100,7 +101,8 @@ fn finish(store: &StateStore, id: &str) {
 fn seat(id: &str) -> ExactSeat<'_> {
     ExactSeat {
         root_id: id,
-        owner: OWNER,
+        launcher: OWNER,
+        holder: HOLDER,
         item_ref: ITEM,
         executor_ref: EXECUTOR,
     }
@@ -270,7 +272,7 @@ fn exact_seat_action_is_admitted_only_for_the_anchored_running_seat() {
     // Foreign owner, item and executor are not the signed seat.
     for foreign in [
         ExactSeat {
-            owner: "fp:other",
+            launcher: "fp:other",
             ..seat("S-act")
         },
         ExactSeat {
@@ -395,7 +397,7 @@ fn seat_lease_renewal_is_conditional_on_the_cut() {
         !store
             .touch_seat_lease_if_anchors(
                 &ExactSeat {
-                    owner: "fp:other",
+                    launcher: "fp:other",
                     ..seat("S-touch")
                 },
                 &fresh,
@@ -498,7 +500,7 @@ fn closed_lease_claim_needs_the_anchored_closing_tip() {
         .touch_seat_lease_if_anchors(&seat("S-id"), &id_cut, std::slice::from_ref(&id_cut))
         .unwrap();
     let foreign = ExactSeat {
-        owner: "fp:other",
+        launcher: "fp:other",
         ..seat("S-id")
     };
     assert!(
@@ -585,7 +587,7 @@ fn seat_append_renews_the_lease_in_one_gated_step() {
         store
             .append_seat_events_and_renew_if_anchor(
                 &ExactSeat {
-                    owner: "fp:other",
+                    launcher: "fp:other",
                     ..seat("S-app")
                 },
                 &[event("three")],
@@ -654,7 +656,7 @@ fn seat_append_with_a_paired_cut_checks_the_counterpart_and_retired_fences() {
         store
             .append_seat_events_and_renew_if_anchors(
                 &ExactSeat {
-                    owner: "fp:other",
+                    launcher: "fp:other",
                     ..seat("S-a")
                 },
                 &[event("x")],
@@ -1041,7 +1043,11 @@ fn a_stopping_seat_takes_no_append_touch_or_action() {
     let a = anchor(&store, "S-stop");
     let base = tip_seq(&store, "S-stop");
     store
-        .request_thread_stop("S-stop", crate::runtime_db::StopIntent::Cancel)
+        .request_thread_stop(
+            "S-stop",
+            crate::runtime_db::StopIntent::Cancel,
+            crate::runtime_db::StopOrigin::Explicit,
+        )
         .unwrap();
     assert!(matches!(
         store
@@ -1432,7 +1438,7 @@ fn seat_pair_refuses_without_writing_on_every_unadmitted_shape() {
     let entered = std::cell::Cell::new(false);
     // A foreign owner on either seat is not the running seat.
     let foreign = |id| ExactSeat {
-        owner: "fp:other",
+        launcher: "fp:other",
         ..seat(id)
     };
     assert!(matches!(
@@ -1526,4 +1532,78 @@ fn seat_pair_reports_a_failed_second_batch_as_first_committed() {
     assert_eq!(tip_seq(&store, "S-dst"), dst_base + 1);
     assert_eq!(tip_seq(&store, "S-src"), src_base);
     assert!(!lease_active(&store, "S-src"));
+}
+
+/// A seat's lease is held by its first session and never moves: another
+/// session of the same launching key passes the signed snapshot check, yet
+/// renews nothing, publishes nothing and appends nothing to the seat.
+#[test]
+fn another_session_of_the_same_key_never_takes_a_held_seat() {
+    let store = new_store();
+    running_seat(&store, "S-held");
+    let a = anchor(&store, "S-held");
+    assert!(
+        store
+            .touch_seat_lease_if_anchors(&seat("S-held"), &a, std::slice::from_ref(&a))
+            .unwrap()
+    );
+    let other = ExactSeat {
+        holder: "session:other",
+        ..seat("S-held")
+    };
+    assert!(
+        !store
+            .touch_seat_lease_if_anchors(&other, &a, std::slice::from_ref(&a))
+            .unwrap(),
+        "a touch by another holder renews nothing"
+    );
+    assert_eq!(
+        store
+            .with_exact_seat_action_if_anchor(&other, &a, || Ok("published"))
+            .unwrap(),
+        None
+    );
+    let base = tip_seq(&store, "S-held");
+    let appended = store
+        .append_seat_events_and_renew_if_anchors(
+            &other,
+            &[event("x")],
+            &a,
+            std::slice::from_ref(&a),
+        )
+        .unwrap();
+    assert!(
+        !matches!(appended, CutAppendResult::Committed(_)),
+        "{appended:?}"
+    );
+    assert_eq!(tip_seq(&store, "S-held"), base);
+    assert_eq!(
+        store
+            .seat_leases_for_owner_client(HOLDER, EXECUTOR)
+            .unwrap(),
+        vec!["S-held".to_string()]
+    );
+    assert!(
+        store
+            .seat_leases_for_owner_client("session:other", EXECUTOR)
+            .unwrap()
+            .is_empty()
+    );
+    // The first holder still renews and appends.
+    assert!(
+        store
+            .touch_seat_lease_if_anchors(&seat("S-held"), &a, std::slice::from_ref(&a))
+            .unwrap()
+    );
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_anchors(
+                &seat("S-held"),
+                &[event("y")],
+                &a,
+                std::slice::from_ref(&a)
+            )
+            .unwrap(),
+        CutAppendResult::Committed(_)
+    ));
 }

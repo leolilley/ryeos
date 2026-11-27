@@ -808,6 +808,7 @@ pub struct DaemonHarness {
 enum FastBundleSelection {
     CoreOnly,
     CoreScheduling,
+    CoreKnowledge,
     Standard,
     StandardCentralAuth,
     Development,
@@ -815,6 +816,45 @@ enum FastBundleSelection {
 }
 
 impl DaemonHarness {
+    /// Register `checkout` to the owner `key` acts for on this node, as the
+    /// operator's offline registration would, under the project `name`. A key
+    /// that is not the node operator may run a live project only at a
+    /// checkout registered to its owner, so a test that has a second
+    /// principal run a live project registers it first. The daemon reads
+    /// registrations on every request, so no restart is needed.
+    pub fn register_checkout_for_key(
+        &self,
+        key: &lillux::crypto::SigningKey,
+        checkout: &Path,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let canonical = checkout.canonicalize()?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(&self.state_path)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let fingerprint = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        );
+        let owner = trust
+            .owner_for(&fingerprint)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?
+            .principal;
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &self.state_path.join(".ai/node/identity/private_key.pem"),
+        )?;
+        let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name.parse()?);
+        ryeos_node::project_registry::register(
+            &ryeos_node::project_registry::RegistrationChange {
+                app_root: &self.state_path,
+                node: &node,
+                request_digest: &"0".repeat(64),
+                path: &canonical,
+                identity: &identity,
+            },
+        )?;
+        Ok(())
+    }
+
     /// The daemon's stderr log so far, for tests that must see a refusal the
     /// retained thread record deliberately reduces to a closed code.
     pub fn stderr_so_far(&self) -> String {
@@ -1142,6 +1182,24 @@ impl DaemonHarness {
         .await
     }
 
+    /// A node initialized with the shipped Core-knowledge profile and its own node
+    /// and operator keys: the smallest shipped selection that provides the
+    /// `knowledge` kind, for a test that needs a second node that does not
+    /// already hold the bundle it pulls.
+    pub async fn start_fast_core_knowledge_with_node_and_user_keys(
+        node_key: SigningKey,
+        user_key: SigningKey,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::CoreKnowledge,
+            |_state_path, _user_space, _fixture| Ok(()),
+            |_| {},
+        )
+        .await
+    }
+
     /// Cross-site fixture with distinct node and operator identities. This is
     /// the faithful shape for forwarding tests: the source operator must be an
     /// origin-bound remote authority on the target, never its local operator.
@@ -1185,6 +1243,9 @@ impl DaemonHarness {
             FastBundleSelection::CoreScheduling => {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
+            FastBundleSelection::CoreKnowledge => {
+                copy_core_to_temp_prepared(&["core", "knowledge"])?
+            }
             FastBundleSelection::Standard => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Standard
                     .exact_bundles()
@@ -1207,6 +1268,7 @@ impl DaemonHarness {
         let selected_profile = match bundle_selection {
             FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
             FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
+            FastBundleSelection::CoreKnowledge => fast_fixture::FastFixtureProfile::CoreKnowledge,
             FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
             FastBundleSelection::StandardCentralAuth => {
                 fast_fixture::FastFixtureProfile::StandardCentralAuth
@@ -1248,6 +1310,9 @@ impl DaemonHarness {
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         match bundle_selection {
+            FastBundleSelection::CoreKnowledge => {
+                fast_fixture::register_core_knowledge_composition(&state_path, &fixture)?
+            }
             FastBundleSelection::Standard => {
                 fast_fixture::register_standard_composition(&state_path, &fixture)?
             }
@@ -1526,6 +1591,11 @@ impl DaemonHarness {
                 serde_json::json!({ "thread_id": thread_id }),
             )
             .await?;
+        // A thread the daemon does not know answers NotFound, as one that is
+        // not the caller's does.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         anyhow::ensure!(status.is_success(), "threads/get failed: {status} {body}");
         Ok(body.get("result").filter(|value| !value.is_null()).cloned())
     }
@@ -1705,6 +1775,25 @@ impl DaemonHarness {
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
         Ok((status, value))
+    }
+
+    /// Send one request with no signature, cookie or credential of any kind,
+    /// as a stranger would. Returns (status, response headers, body bytes).
+    pub async fn raw_request(
+        &self,
+        method: reqwest::Method,
+        route_path: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>)> {
+        let resp = ryeos_http_egress::client_builder()
+            .build()
+            .expect("the HTTP client builds")
+            .request(method, format!("http://{}{}", self.bind, route_path))
+            .send()
+            .await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.bytes().await?.to_vec();
+        Ok((status, headers, body))
     }
 
     /// Path the daemon writes standalone-mode audit records to.
@@ -2221,6 +2310,32 @@ impl StandaloneHarness {
             app_root,
             fixture,
         })
+    }
+
+    /// Start the stopped node again, as an operator does after a stopped-node
+    /// change. Fails when the daemon refuses to boot on the state left behind.
+    pub async fn restart_node(&mut self) -> anyhow::Result<()> {
+        self.node.restart().await
+    }
+
+    /// Stop the node in order, so a stopped-node service can run again.
+    pub async fn stop_node(&mut self) -> anyhow::Result<()> {
+        self.node.stop_gracefully().await
+    }
+
+    /// The names `service:bundle/list` reports from the running node.
+    pub async fn listed_bundle_names(&self) -> anyhow::Result<Vec<String>> {
+        let (status, body) = self
+            .node
+            .post_execute("service:bundle/list", ".", serde_json::json!({}))
+            .await?;
+        anyhow::ensure!(status.as_u16() == 200, "bundle/list: {status} {body:#}");
+        Ok(body["result"]["bundles"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("bundle/list carried no bundles: {body:#}"))?
+            .iter()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect())
     }
 
     /// Run `ryeosd run-service <service_ref> [--params <json>]` against

@@ -745,4 +745,27 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db.descendant_thread_ids(root_thread_id)
     }
+
+    /// Whether the launch ancestry of `origin_chain` reaches `source_chain`
+    /// through the child links; bounded, and an error rather than "no" when the
+    /// ancestry cannot be resolved.
+    pub fn lineage_reaches_chain(&self, origin_chain: &str, source_chain: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db
+            .lineage_reaches_chain(origin_chain, source_chain)
+    }
+
+    /// Whether the launch ancestry sealed in `capsule` reaches `source_chain`.
+    /// The origin is read from the sealed capsule, never from a runtime claim;
+    /// a capsule with no origin (a person's root launch) reaches nothing.
+    pub fn sealed_origin_reaches_chain(
+        &self,
+        capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+        source_chain: &str,
+    ) -> Result<bool> {
+        match capsule.evaluator_origin_chain.as_deref() {
+            None => Ok(false),
+            Some(origin) => self.lineage_reaches_chain(origin, source_chain),
+        }
+    }
 }

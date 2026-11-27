@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T16:53:50Z:313f1de5b5e7aa0875d9b0ed626bc8a282f97c3e80084f0d92d3d12c9be74542:BvHRf3ZrpaOZpdifPQFAxZ0GO45++fnZgQ2trlKc9q9oWyrl2sji5GWTVwbVroJi+I4D+eWBmyrOcuKL1tiQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-25T18:53:46Z:19f091fbe7e1e6212b509542e9f4c4044324632778731d4991b76e67715af4e3:4nnYIUNq3eOYRfxV0HUjj/nvUJaZFFvTeh0wF6RSD5/dkMrKN98CtqafsIgHonOOBd0lH4gU3x84pkak+li/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -276,7 +276,7 @@ updating presentation. Current policy and attachment admission are also checked
 by the daemon; client checks do not grant authority.
 
 A source a Surface binds is read by a seat only when the node's signed
-`ui_seat_reads` policy has an entry for its service that admits the seat's class
+`read_disclosure` policy has an entry for its service that admits the seat's class
 (`local_operator` or `hosted_principal`, from whether the session carries a
 hosted principal). A service with no entry is attenuated at mint and refused at
 dispatch; services under `ui/ryeos-ui/` scope their own results and are exempt.
@@ -299,6 +299,16 @@ list and bounds, and an event that cannot be shaped ends the stream with a
 
 Attachment count is bounded by the signed `ui_browser_sessions` node policy.
 There is no daemon fallback value. Test fixtures must supply that policy too.
+The same policy (schema 6) bounds the picture grants a session may hold
+(`max_art_grants`); `BrowserSessionStore::grant_art` takes the bound from the
+caller, which reads it from the policy. A node still on schema 5 needs
+`ryeos node reset policy-generation` after the new profile is installed.
+
+Themes are signed `theme` items, not renderer constants. A client never holds a
+palette of its own: the stored preference is `system` or an installed theme's
+ref, validated by the daemon against the installed set, and the palettes arrive
+as `theme_catalogue` from the config source. The only embedded copy is the
+shipped item files themselves, used for the boot palette and for fixtures.
 Releasing an unused attachment is an explicit session-wide operation: another
 browser tab may share it. Never infer permission to revoke from one renderer's
 last closed mount. The shared command dialog offers release only when this

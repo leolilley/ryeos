@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:43Z:daeb0d2b381a74bae78ff93ec749550b5870e8bcf638e62127ef38011e691147:0rk/o0NHXOvxkTVjx1lT+pulZqbqKZDzQHwuPPEGuGiRWVYgChZGuj5gyBxgf2nMC6evCaAkLJQ2iez9JVCrAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:05Z:628b4fa9ac97178c373f4deff913bc51112d327c3641eee5ad11b843cfbceef1:SLNoumRSYnU/A2InIkd+xO24xG5UHX7CO8U6alfPgl9Yodg0DPCI8/OpRCNjeqe02ON43oTGQ0xuAb6t/In5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "get"
 kind: service
@@ -7,3 +7,16 @@ required_caps: ["ryeos.execute.service.commands/get"]
 schema:
   command_id: integer
 description: "Read one command record by id, scoped to a thread owned by the caller"
+disclosure:
+  principal:
+    - "/command_id"
+    - "/thread_id"
+    - "/command_type"
+    - "/status"
+    - "/created_at"
+    - "/claimed_at"
+    - "/completed_at"
+  free_text:
+    - "/requested_by"
+    - "/params"
+    - "/result"

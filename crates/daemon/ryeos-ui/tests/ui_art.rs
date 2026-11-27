@@ -13,7 +13,7 @@ use ryeos_api::routes::compile::ResponseMode;
 use ryeos_app::state::AppState;
 use ryeos_state::objects::{ItemSource, SourceManifest};
 use ryeos_ui::art::{ArtMode, ArtRequest, CompiledArtMode};
-use ryeos_ui::browser_session::{ArtGrantRefusal, MAX_ART_GRANTS_PER_SESSION};
+use ryeos_ui::browser_session::ArtGrantRefusal;
 use ryeos_ui::compiled_binding::{CompiledUiArt, EffectiveUiPosture};
 use ryeos_ui::test_support;
 
@@ -428,12 +428,17 @@ async fn the_grant_set_serves_what_no_binding_names_and_is_per_session_and_bound
     let mode = art_mode(&state);
     let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
     let sessions = &ui.browser_sessions;
+    let max_grants = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+        .unwrap()
+        .max_art_grants as usize;
 
     assert!(matches!(
         serve(mode.as_ref(), &state, &granted, &sha).await,
         Err(RouteDispatchError::NotFound)
     ));
-    sessions.grant_art(&granted, &sha).unwrap();
+    sessions.grant_art(&granted, &sha, max_grants).unwrap();
     let response = serve(mode.as_ref(), &state, &granted, &sha).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(matches!(
@@ -442,30 +447,30 @@ async fn the_grant_set_serves_what_no_binding_names_and_is_per_session_and_bound
     ));
 
     assert_eq!(
-        sessions.grant_art(&granted, "../../etc/passwd"),
+        sessions.grant_art(&granted, "../../etc/passwd", max_grants),
         Err(ArtGrantRefusal::MalformedHash)
     );
     assert_eq!(
-        sessions.grant_art("no-such-session", &sha),
+        sessions.grant_art("no-such-session", &sha, max_grants),
         Err(ArtGrantRefusal::UnknownSession)
     );
     // A grant of a hash nothing installs is accepted into the set but serves
     // nothing.
     let absent = "cd".repeat(32);
-    sessions.grant_art(&granted, &absent).unwrap();
+    sessions.grant_art(&granted, &absent, max_grants).unwrap();
     assert!(matches!(
         serve(mode.as_ref(), &state, &granted, &absent).await,
         Err(RouteDispatchError::NotFound)
     ));
-    for index in 0..MAX_ART_GRANTS_PER_SESSION {
+    for index in 0..max_grants {
         let hash = format!("{index:064x}");
-        let outcome = sessions.grant_art(&granted, &hash);
+        let outcome = sessions.grant_art(&granted, &hash, max_grants);
         if outcome.is_err() {
             assert_eq!(outcome, Err(ArtGrantRefusal::SetFull));
             return;
         }
     }
-    panic!("the grant set must refuse once it holds {MAX_ART_GRANTS_PER_SESSION} hashes");
+    panic!("the grant set must refuse once it holds {max_grants} hashes");
 }
 
 #[tokio::test]

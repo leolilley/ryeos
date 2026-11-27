@@ -320,6 +320,10 @@ async fn a_second_principal_is_bounded_by_the_name_ceilings() {
 
     // 2. B's launch declaring the name under the operator vault is refused,
     // and the provider never sees the secret.
+    // A key that is not the operator runs a live project only at a checkout
+    // registered to its owner.
+    h.register_checkout_for_key(&principal_b, project.path(), "vault-ceiling-project")
+        .expect("register B's checkout");
     let (status, body) = launch_as(&h, &principal_b, project.path()).await;
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body:#}");
     assert!(

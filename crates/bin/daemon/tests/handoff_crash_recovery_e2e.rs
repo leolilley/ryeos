@@ -4012,10 +4012,14 @@ fn install_target_project_head(
     target.verify_project_snapshot_closure(snapshot_hash)?;
     let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project)?
         .context("the target checkout declares a project name")?;
-    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &fixture_key_principal(owner_principal),
-        &name,
-    );
+    // The target resolves `owner_principal`'s key through its registry, where a
+    // pinned key link makes it the principal of the owner it is linked to.
+    let target_trust = ryeos_engine::trust::TrustStore::load_node_registry(target_state_path)?;
+    let head_owner = target_trust
+        .owner_for(owner_principal)
+        .map_err(|error| anyhow::anyhow!("target owner of {owner_principal}: {error}"))?
+        .principal;
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(&head_owner, &name);
     let signer = NodeIdentitySigner::from_identity(&daemon_identity(target_state_path)?);
     target.with_state_db(|db| {
         db.write_project_head_ref(
@@ -4290,11 +4294,37 @@ async fn start_real_portable_handoff_with(
         lillux::signature::compute_fingerprint(&source_operator_key.verifying_key())
     );
     let target_profile_owner = source_operator_principal.clone();
+    let link_source_operator_key = source_operator_key.clone();
     let (mut target, target_fixture) = DaemonHarness::start_fast_with_node_and_user_keys(
         target_node_signing_key(),
         target_operator_signing_key(),
         move |state_path, _user_space, fixture| {
-            plant_portable_worker_for_owner(state_path, fixture, &target_profile_owner)
+            plant_portable_worker_for_owner(state_path, fixture, &target_profile_owner)?;
+            // The source operator reaches the target as a remote principal, so
+            // it is an operator there only by speaking for the owner the
+            // target's own operator acts for. Pin that link before the target
+            // daemon loads its registry.
+            let target_operator = target_operator_signing_key();
+            let target_trust = ryeos_engine::trust::TrustStore::load_node_registry(state_path)?;
+            let target_operator_key = format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&target_operator.verifying_key())
+            );
+            let target_operator_owner = target_trust
+                .owner_for(&target_operator_key)
+                .map_err(|error| anyhow::anyhow!("target operator owner: {error}"))?
+                .principal
+                .to_string();
+            ryeos_engine::trust::pin_link_for_tests(
+                state_path,
+                &fixture.node,
+                &target_operator,
+                &link_source_operator_key,
+                &target_operator_owner,
+                3600,
+            )
+            .map_err(|error| anyhow::anyhow!("pin the source operator link: {error}"))?;
+            Ok(())
         },
         |command| {
             command.env("HOSTNAME", "handoff-target");
@@ -4982,6 +5012,15 @@ fn build_handoff_measurement_record(
     }
     authority.ensure_guard(&guard)?;
 
+    // A measured stage that is absent on a successful handoff is reported with
+    // the whole measurement document, which names the adoption path taken (a
+    // re-driven adoption skips the stages an earlier call already executed).
+    if failure_cut.is_none() {
+        eprintln!(
+            "handoff measurement for `{case_id}`: stage measurements as received: {}",
+            measurements.map_or_else(|| "absent".to_owned(), serde_json::Value::to_string)
+        );
+    }
     Ok(HandoffMeasurementRecord {
         schema: "ryeos.worker_handoff_qualification_record.v1".to_owned(),
         case_id: case_id.to_owned(),
@@ -6624,7 +6663,11 @@ async fn durable_stop_cut_on_created_remote_adoption_settles_before_target_recov
             && target_store.dedicated_session(&successor_id)?.is_none(),
         "pre-attachment target cut already consumed or lost its reservation"
     );
-    let stopped = target_store.request_thread_stop(&successor_id, StopIntent::Cancel)?;
+    let stopped = target_store.request_thread_stop(
+        &successor_id,
+        StopIntent::Cancel,
+        ryeos_app::state_store::StopOrigin::Explicit,
+    )?;
     anyhow::ensure!(
         stopped.stop_requested_at_ms.is_some()
             && stopped.stop_intent == Some(StopIntent::Cancel)

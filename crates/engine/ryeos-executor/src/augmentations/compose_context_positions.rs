@@ -58,6 +58,7 @@ pub async fn run(
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<&Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
     request_trust: Option<&ryeos_engine::trust::TrustStore>,
+    thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling,
 ) -> Result<Vec<super::LaunchAugmentationAudit>, LaunchAugmentationError> {
     let (
         target_kind,
@@ -606,6 +607,10 @@ pub async fn run(
             None,
             serde_json::Value::Null,
             0,
+            // The augmentation child is launched for the thread being
+            // launched and holds no caps; it runs under that thread's own
+            // workload ceiling, never a wider one.
+            thread_ceiling,
         );
         if !state
             .callback_tokens

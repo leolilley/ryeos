@@ -254,15 +254,6 @@ pub(crate) fn compiled_ui_source_is_project_authored() -> bool {
         .unwrap_or(false)
 }
 
-/// The browser session id the dispatch owner associated with this compiled
-/// UI dispatch after authenticating it, if any. Never taken from a request.
-pub(crate) fn compiled_ui_browser_session_id() -> Option<String> {
-    COMPILED_UI_DISPATCH
-        .try_with(|context| context.browser_session_id.clone())
-        .ok()
-        .flatten()
-}
-
 pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachment>> {
     COMPILED_UI_DISPATCH
         .try_with(|context| context.attachment.clone())
@@ -551,6 +542,7 @@ mod tests {
             root_ref: "surface:ryeos/ui/base-observe".into(),
             project_query_identity: None,
             project_authority: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         })
     }
 
@@ -689,6 +681,7 @@ mod tests {
             user_principal_id: None,
             project_authority: None,
             registered_project_id: None,
+            seat_project: ryeos_client_base::ui::UiSeatProject::Projectless,
         };
         let (id, token, retained) = store
             .mint_token(launch, 8, &"22".repeat(32))

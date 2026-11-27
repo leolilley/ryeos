@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::{ffi::OsStr, ffi::OsString};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::handlers::remote_push::named_remote_client;
@@ -44,13 +44,23 @@ pub struct Request {
     pub output_dir: String,
 }
 
+fn refuse(code: &str, status: u16, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+        code, status, message,
+    ))
+}
+
 pub async fn handle(
     req: Request,
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
-        anyhow::bail!("object_hashes and blob_hashes must not both be empty");
+        return Err(refuse(
+            "pull_hashes_empty",
+            400,
+            "object_hashes and blob_hashes must not both be empty",
+        ));
     }
 
     let client = named_remote_client(&state, &req.remote, &ctx)?;
@@ -65,12 +75,16 @@ pub async fn handle(
         .collect::<Vec<_>>();
     let requested_count = req.object_hashes.len() + req.blob_hashes.len();
     if !missing.is_empty() {
-        bail!(
-            "remote.pull: {} of {} requested hashes not found on remote: {}",
-            missing.len(),
-            requested_count,
-            missing.join(", ")
-        );
+        return Err(refuse(
+            "pull_hashes_not_found",
+            404,
+            format!(
+                "remote.pull: {} of {} requested hashes not found on remote: {}",
+                missing.len(),
+                requested_count,
+                missing.join(", ")
+            ),
+        ));
     }
     let resp = client
         .objects_get(&req.root, &req.object_hashes, &[])
@@ -81,17 +95,33 @@ pub async fn handle(
 
     let output_dir = std::path::PathBuf::from(&req.output_dir);
     if !output_dir.is_absolute() {
-        anyhow::bail!("remote.pull output_dir must be an absolute path");
+        return Err(refuse(
+            "pull_output_dir_not_absolute",
+            400,
+            "remote.pull output_dir must be an absolute path",
+        ));
     }
-    let parent_path = output_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("remote.pull output_dir has no parent"))?;
-    let output_name = output_dir
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("remote.pull output_dir has no final name"))?;
+    let parent_path = output_dir.parent().ok_or_else(|| {
+        refuse(
+            "pull_output_dir_invalid",
+            400,
+            "remote.pull output_dir has no parent",
+        )
+    })?;
+    let output_name = output_dir.file_name().ok_or_else(|| {
+        refuse(
+            "pull_output_dir_invalid",
+            400,
+            "remote.pull output_dir has no final name",
+        )
+    })?;
     let parent = lillux::PinnedDirectory::open_or_create(parent_path)?;
     if parent.open_entry(output_name, false)?.is_some() {
-        anyhow::bail!("remote.pull output_dir already exists; refusing a partial merge");
+        return Err(refuse(
+            "pull_output_dir_exists",
+            409,
+            "remote.pull output_dir already exists; refusing a partial merge",
+        ));
     }
     let staging = PinnedStagingDirectory::create(parent)?;
 

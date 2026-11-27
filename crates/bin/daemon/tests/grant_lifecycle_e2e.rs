@@ -591,6 +591,11 @@ async fn revoke_cancels_live_threads_of_principal() {
     .expect("daemon starts");
     plant_sleeper_tool(project.path(), &fixture.publisher).expect("plant the sleeper tool");
     let project_path = project.path().canonicalize().unwrap();
+    // A key that is not the operator runs a live project only at a checkout
+    // registered to its owner.
+    harness
+        .register_checkout_for_key(&grantee, &project_path, "grant-lifecycle-project")
+        .expect("register the grantee's checkout");
 
     // The grantee starts the sleeper without waiting for it. Its launch is a
     // live project launch, which needs live write access (read-only access is

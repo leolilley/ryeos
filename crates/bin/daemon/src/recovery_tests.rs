@@ -1097,6 +1097,7 @@ fn build_test_state() -> (
                 ryeos_node_runtime::node_policy::default_authorization_record(),
                 ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+                ryeos_node_runtime::node_policy::shipped_approval_ceiling_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),
@@ -1197,6 +1198,9 @@ fn projectless_resume() -> ResumeContext {
         scheduled_fire: None,
         effective_caps: Vec::new(),
         parent_delegation_caps: None,
+        thread_ceiling: ryeos_state::objects::ThreadWorkloadCeiling::node_root(),
+        workspace_input: None,
+        evaluator_origin_chain: None,
         executor_ref: Some("executor:test/runtime".to_string()),
         runtime_ref: Some("runtime:test/graph".to_string()),
     }

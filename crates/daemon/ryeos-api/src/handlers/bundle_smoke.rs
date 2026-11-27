@@ -72,13 +72,12 @@ pub async fn handle(
 ) -> Result<Value, HandlerError> {
     ctx.require_verified()?;
 
-    let source = PathBuf::from(&req.source);
-    if !source.is_absolute() {
-        return Err(HandlerError::BadRequest(format!(
-            "source must be an absolute path, got '{}'",
-            req.source
-        )));
-    }
+    let source = ryeos_app::live_project_path::admit_handler_live_path(
+        &state,
+        &ctx,
+        std::path::Path::new(&req.source),
+    )?
+    .canonical;
     let ai_dir = source.join(".ai");
     if !ai_dir.is_dir() {
         return Err(HandlerError::BadRequest(format!(
@@ -244,6 +243,7 @@ async fn run_entry(
         engine: state.engine.clone(),
         plan_ctx,
         requested_call: None,
+        disclosure_class: ryeos_app::operator_authority::disclosure_class_for(state, ctx),
     };
     if let Err(error) =
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)

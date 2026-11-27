@@ -44,6 +44,18 @@ pub fn speaks_for(state: &crate::state::AppState, key: &str, owner: &PrincipalId
     speaks_for_in(&state.engine.trust_store, key, owner)
 }
 
+/// Whether `key` may act for the owner of `project` on this node: the owner
+/// the project's own identity names, judged by the node registry as
+/// [`speaks_for`] judges it. A reader that filters rows by project ownership
+/// asks this and never compares an owner with a key itself.
+pub fn key_owns_project(
+    state: &crate::state::AppState,
+    key: &str,
+    project: &ryeos_state::project_identity::ProjectIdentity,
+) -> bool {
+    speaks_for(state, key, project.owner())
+}
+
 /// Refuse unless `key` speaks for `owner`, naming both.
 pub fn require_speaks_for_in(trust: &TrustStore, key: &str, owner: &PrincipalId) -> Result<()> {
     if speaks_for_in(trust, key, owner) {
@@ -90,6 +102,9 @@ pub fn head_advancer_in(
         via_root: match resolved.via {
             ryeos_engine::trust::OwnerVia::Solo => None,
             ryeos_engine::trust::OwnerVia::Lineage { root } => Some(root),
+            // A linked key advanced the head for the principal it was joined to;
+            // the link id is evidence, not a root key.
+            ryeos_engine::trust::OwnerVia::Linked { .. } => None,
         },
     })
 }

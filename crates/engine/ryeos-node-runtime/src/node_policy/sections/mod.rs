@@ -1,4 +1,5 @@
 pub mod accounting;
+pub mod approval_ceiling;
 pub mod authorization;
 pub mod bundle_publication;
 pub mod command_registration;
@@ -15,10 +16,11 @@ pub mod native_capacity;
 pub mod object_closure;
 pub mod persistent_sessions;
 pub mod provider_environment;
+pub mod publication;
+pub mod read_disclosure;
 pub mod recipients;
 pub mod sealed_vault_names;
 pub mod thread_attachments;
 pub mod thread_history;
 pub mod ui_browser_sessions;
 pub mod ui_inspection;
-pub mod ui_seat_reads;

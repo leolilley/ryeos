@@ -2529,14 +2529,13 @@ async fn run_release_graph(
     state: Arc<AppState>,
 ) -> anyhow::Result<Value> {
     async {
-        let requested_path = std::path::PathBuf::from(&request.project_path);
-        let project_path = requested_path.canonicalize().with_context(|| {
-            format!(
-                "canonicalize bundle release project {}",
-                requested_path.display()
-            )
-        })?;
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&context.scopes)?;
+        let project_path = ryeos_app::live_project_path::admit_handler_live_path(
+            &state,
+            &context,
+            std::path::Path::new(&request.project_path),
+        )?
+        .canonical;
         let resolved_authority =
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_path,
@@ -2581,6 +2580,7 @@ async fn run_release_graph(
             engine: Arc::clone(&state.engine),
             plan_ctx,
             requested_call: None,
+            disclosure_class: ryeos_app::operator_authority::disclosure_class_for(&state, &context),
         };
         let parameters = serde_json::to_value(&request)?;
         let acting_principal = context.fingerprint.clone();

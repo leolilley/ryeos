@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T19:54:26Z:66d44e323a2ecf64f7796c2bff98196ed4bf85395f6092ec3b3973ecfb5cec8e:LM2wN5RrkGM0csehxwJQGyxM3uaOtO9OiA9he2JHxlSF0TSxq3uXiKFjmypeI2e6a8Eg/o/fTRFUkMRwAfxkDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T20:26:04Z:9cc2e856b8493c6dbf8d47d22c49733671cc85770e5592fc5dd3605850d2cade:UVUVeDOyBBLQ8ibdHlmFyP2WLbtJ55oDD+g/QEF5/B+MbokXlaYavxDxRUfe98MsYAsgSMQT+JLJ9xyzlfzxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: input-inspect
 version: "1.0.0"
@@ -17,3 +17,5 @@ schema:
   build_profile: string
   predecessor_set_hash: string
   catalog_namespace: string
+# Release-authority tool: reads or writes publisher authority, build products and local paths; the node operator only.
+disclosure: {}

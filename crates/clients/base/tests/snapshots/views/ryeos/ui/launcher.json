@@ -248,7 +248,7 @@
               "id": "8b9974fb47fe7e4009bf236e811bc6ff285ce8e4993aeac7d1be0ce9171a7905",
               "intent": {
                 "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
-                "projection_guard": "d99c918dd9f97b2a7b7ebf7b8cec4a7ff4e23a472e513abd0dd2b3617e3981f1",
+                "projection_guard": "480cae2979c0fb864b59c99ff95b60bdd660af6f8825e88af5aa33a08aa3f4b3",
                 "record_id": "8b9974fb47fe7e4009bf236e811bc6ff285ce8e4993aeac7d1be0ce9171a7905",
                 "type": "activate_local_projection"
               },
@@ -285,7 +285,7 @@
               "id": "65f467807bd70f505ffb17728df184943aaf3ebbc504e705688ed02f7529fbc2",
               "intent": {
                 "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
-                "projection_guard": "d99c918dd9f97b2a7b7ebf7b8cec4a7ff4e23a472e513abd0dd2b3617e3981f1",
+                "projection_guard": "480cae2979c0fb864b59c99ff95b60bdd660af6f8825e88af5aa33a08aa3f4b3",
                 "record_id": "65f467807bd70f505ffb17728df184943aaf3ebbc504e705688ed02f7529fbc2",
                 "type": "activate_local_projection"
               },

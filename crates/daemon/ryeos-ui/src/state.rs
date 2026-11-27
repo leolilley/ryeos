@@ -131,6 +131,9 @@ pub struct UiState {
     field_token_key: Arc<[u8; 32]>,
     field_projection_cache: Arc<FieldProjectionCache>,
     composition_checkpoints: Arc<CompositionCheckpointCache>,
+    /// The picture index for the engine generation in force, shared by the
+    /// picture route and every service that grants a session a picture.
+    pub art_index: Arc<crate::art::ArtIndexCache>,
 }
 
 impl Default for UiState {
@@ -148,6 +151,7 @@ impl UiState {
             field_token_key: Arc::new(rand::random()),
             field_projection_cache: Arc::new(FieldProjectionCache::default()),
             composition_checkpoints: Arc::new(CompositionCheckpointCache::default()),
+            art_index: Arc::new(crate::art::ArtIndexCache::default()),
         }
     }
 

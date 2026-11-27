@@ -29,6 +29,23 @@ pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
     } else {
         surface.width
     };
+    // The project chip sits at the right of the line, in its own tone: the
+    // project's name, or the signed sentence for why the seat states none.
+    // It is words only; nothing here decides what the seat may do.
+    let limit = match &vm.session.project_chip {
+        Some(chip) => {
+            let words = truncate(&chip.text, (limit / 2).max(8));
+            let room = display_width(&words) + 2;
+            if limit > room {
+                let at = limit - room + 1;
+                surface.draw_text(at, y, &words, tone_style(chip.tone));
+                at - 1
+            } else {
+                limit
+            }
+        }
+        None => limit,
+    };
     let surfaces = &vm.session.surfaces;
     if surfaces.is_empty() {
         surface.draw_text(
@@ -432,7 +449,9 @@ mod tests {
             source_status: None,
             columns: vec!["thread".into()],
             column_roles: Vec::new(),
+            column_priorities: Vec::new(),
             total_rows: 1,
+            page: None,
             coverage: None,
             empty: None,
             provenance: None,

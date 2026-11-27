@@ -1727,6 +1727,106 @@ pub(super) fn project_unregister(ctx: &HandlerContext<'_>) -> Result<Value> {
     Ok(serde_json::to_value(outcome)?)
 }
 
+// ── Key links ────────────────────────────────────────────────────────────
+
+/// The pair-signed link `node.key.link` pins. Both keys signed it where their
+/// private halves are; the node holds neither.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyLinkArguments {
+    pub link: ryeos_engine::trust::SignedKeyLink,
+}
+
+impl KeyLinkArguments {
+    pub fn validate(&self) -> Result<()> {
+        self.link.verify()?;
+        Ok(())
+    }
+}
+
+/// Which links `node.key.unlink` withdraws: one by id, or every link one key
+/// signed (the cleanup after that key is compromised).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyUnlinkArguments {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+    /// `fp:<hex>` of the linking key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_by: Option<String>,
+    pub reason: String,
+}
+
+impl KeyUnlinkArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.link_id.is_some() != self.signed_by.is_some(),
+            "name exactly one of link_id and signed_by"
+        );
+        if let Some(id) = &self.link_id {
+            ensure!(
+                id.len() == 64
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "link_id is not a lowercase SHA-256 digest"
+            );
+        }
+        if let Some(signer) = &self.signed_by {
+            let hex = signer.strip_prefix("fp:").unwrap_or_default();
+            ensure!(
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "signed_by is not a canonical `fp:` key"
+            );
+        }
+        ensure!(
+            !self.reason.trim().is_empty()
+                && self.reason.len() <= 1024
+                && !self.reason.contains('\0'),
+            "a reason of 1 to 1024 bytes is required"
+        );
+        Ok(())
+    }
+}
+
+pub(super) fn key_link(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: KeyLinkArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .map_err(|error| anyhow::anyhow!("load the node signer registry: {error}"))?;
+    let outcome = crate::key_link::link_key(
+        ctx.app_root,
+        ctx.node,
+        &trust,
+        arguments.link,
+        lillux::time::unix_secs_now(),
+    )?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+pub(super) fn key_unlink(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: KeyUnlinkArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let selector = match (arguments.link_id, arguments.signed_by) {
+        (Some(id), None) => crate::key_link::UnlinkSelector::Id(id),
+        (None, Some(signer)) => crate::key_link::UnlinkSelector::SignedBy(signer),
+        _ => bail!("name exactly one of link_id and signed_by"),
+    };
+    let revoked_by = operator_public(ctx)?.principal_id();
+    let outcome = crate::key_link::unlink_keys(
+        ctx.app_root,
+        ctx.node,
+        &selector,
+        &revoked_by,
+        &arguments.reason,
+        lillux::time::unix_secs_now(),
+    )?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
 pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: RemotePinArguments = ctx.arguments()?;
     arguments.validate()?;

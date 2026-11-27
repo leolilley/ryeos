@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 pub enum CredentialCeremonyRefusal {
     /// `begin` saw a login that is still inside its window.
     #[error(
-        "credential_enrollment_in_progress: credential profile '{profile_id}' is {state} for login epoch {login_epoch}; finish that login, or let it expire and run `ryeos codex profile abandon-login {profile_id} {login_epoch}`"
+        "credential_enrollment_in_progress: credential profile '{profile_id}' is {state} for login epoch {login_epoch}; finish that login, or let it expire and run `ryeos credential-profile abandon-login {profile_id} {login_epoch}`"
     )]
     EnrollmentInProgress {
         profile_id: String,
@@ -20,7 +20,7 @@ pub enum CredentialCeremonyRefusal {
     },
     /// `begin` saw an expired login nobody finished.
     #[error(
-        "credential_enrollment_abandoned: credential profile '{profile_id}' was left {state} by expired login epoch {login_epoch}; end the login session that holds the profile, then run `ryeos codex profile abandon-login {profile_id} {login_epoch}`"
+        "credential_enrollment_abandoned: credential profile '{profile_id}' was left {state} by expired login epoch {login_epoch}; end the login session that holds the profile, then run `ryeos credential-profile abandon-login {profile_id} {login_epoch}`"
     )]
     EnrollmentAbandoned {
         profile_id: String,
@@ -40,7 +40,7 @@ pub enum CredentialCeremonyRefusal {
     },
     /// `confirm` arrived after the login window closed.
     #[error(
-        "credential_confirm_expired: the confirmation window for credential profile '{profile_id}' login epoch {login_epoch} has closed; {}run `ryeos codex profile abandon-login {profile_id} {login_epoch}` and log in again",
+        "credential_confirm_expired: the confirmation window for credential profile '{profile_id}' login epoch {login_epoch} has closed; {}run `ryeos credential-profile abandon-login {profile_id} {login_epoch}` and log in again",
         expired_lock_text(.lock_owner.as_deref())
     )]
     ConfirmExpired {
@@ -258,6 +258,6 @@ mod tests {
             lock_owner: None,
         }
         .to_string();
-        assert!(expired.contains("ryeos codex profile abandon-login p 3"));
+        assert!(expired.contains("ryeos credential-profile abandon-login p 3"));
     }
 }

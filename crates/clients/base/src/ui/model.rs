@@ -481,6 +481,12 @@ pub struct RyeOsDataState {
     /// follows the platform (`system`).
     #[serde(default)]
     pub theme_preference: Option<String>,
+    /// The installed themes (palettes, and the Surface grounds the daemon
+    /// granted this session) from the same source. Absent until read; the
+    /// presentation then carries no palette and a renderer keeps its boot
+    /// palette.
+    #[serde(default)]
+    pub theme_catalogue: Option<crate::theme_preference::ThemeCatalogue>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,
@@ -522,6 +528,11 @@ pub struct RyeOsDataState {
     /// older response never overwrites a newer one.
     #[serde(default)]
     pub source_stored_epoch: HashMap<String, u64>,
+    /// The parameters (without `if_revision`) each source key's stored answer
+    /// was fetched with. A `not_modified` reply keeps the stored rows only
+    /// for the same request, and `if_revision` is sent only for it.
+    #[serde(default)]
+    pub source_stored_params: HashMap<String, serde_json::Value>,
     /// Minimum acceptable result id per source key, raised when the key's
     /// SUBJECT changes (lens swap, drill return, selection facet write):
     /// a straggler for the previous subject must never land under the new
@@ -559,6 +570,29 @@ pub(crate) struct RyeOsTimelineSourceCache {
 // The live cognition buffer type + its accumulation logic live with the rest
 // of the thread-execution-stream concern in `super::timeline`.
 pub use super::timeline::RyeOsLiveDelta;
+
+/// `params` without the `if_revision` the client adds to them.
+pub(crate) fn without_if_revision(params: &serde_json::Value) -> serde_json::Value {
+    let mut params = params.clone();
+    if let Some(fields) = params.as_object_mut() {
+        fields.remove("if_revision");
+    }
+    params
+}
+
+impl RyeOsDataState {
+    /// The signed bound on rows one source shows, if the wording carries one.
+    ///
+    /// Until the wording has loaded the bound is not known, and a source draws
+    /// no rows: a bound that waits for a file does not bound what is drawn.
+    /// Loaded wording that states no `source_rows` is an unbounded source.
+    pub fn source_row_limit(&self) -> Option<usize> {
+        match self.coverage_wording.as_ref() {
+            None => Some(0),
+            Some(wording) => wording.limits.source_rows,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRuntimeState {
@@ -1096,6 +1130,11 @@ impl RyeOsCore {
         now_ms: u64,
     ) -> Self {
         let mut core = Self::default();
+        #[cfg(test)]
+        {
+            core.data.coverage_wording =
+                Some(super::dto::RyeOsCoverageWordingDto::unit_test_default());
+        }
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
         core.runtime.last_tick_ms = now_ms;
@@ -1346,9 +1385,18 @@ impl RyeOsCore {
                         && (!source.requires_project
                             || attachment.descriptor.project_path.is_some())
                 })
-                .map(|(channel, source)| (channel.clone(), source.params.clone()))
+                .map(|(channel, source)| (channel.clone(), source.clone()))
                 .collect::<Vec<_>>();
-            for (channel, params) in sources {
+            for (channel, source) in sources {
+                let tile_id = super::source_key::RyeOsSurfaceSourceKey {
+                    presentation_id: presentation_id.clone(),
+                    surface_instance_id: surface_id.clone(),
+                    channel: channel.clone(),
+                }
+                .encode();
+                // A surface source that declares `if_revision` as dynamic asks
+                // with the held answer's revision, like a view source does.
+                let params = self.with_if_revision(&tile_id, &source, source.params.clone());
                 if let Some((request, request_bounds)) = self
                     .compiled_binding_operation_for_attachment(
                         &coordinate.binding_attachment_id,
@@ -1359,18 +1407,11 @@ impl RyeOsCore {
                         super::binding::UiBindingPayload::SourceParameters { params },
                     )
                 {
-                    effects.push(
-                        self.emit(RyeOsEffectKind::FetchSource {
-                            tile_id: super::source_key::RyeOsSurfaceSourceKey {
-                                presentation_id: presentation_id.clone(),
-                                surface_instance_id: surface_id.clone(),
-                                channel,
-                            }
-                            .encode(),
-                            request,
-                            request_bounds,
-                        }),
-                    );
+                    effects.push(self.emit(RyeOsEffectKind::FetchSource {
+                        tile_id,
+                        request,
+                        request_bounds,
+                    }));
                 }
             }
         }
@@ -1553,24 +1594,44 @@ impl RyeOsCore {
             };
             if binding.widget == "sections" {
                 for section in &binding.sections {
-                    if is_thread_collection(section.collection.as_deref()) {
+                    if is_thread_collection(
+                        section
+                            .collection
+                            .as_ref()
+                            .and_then(super::content::CollectionBinding::as_plain),
+                    ) {
                         targets.push((
                             super::source_key::RyeOsSourceInstanceKey::named(
                                 instance_key.clone(),
                                 &section.source_channel,
                             )
                             .encode(),
-                            section.collection.clone().unwrap_or_default(),
+                            section
+                                .collection
+                                .as_ref()
+                                .and_then(super::content::CollectionBinding::as_plain)
+                                .unwrap_or_default()
+                                .to_owned(),
                         ));
                     }
                 }
             } else if let Some((channel, source)) = binding.primary_source()
-                && is_thread_collection(source.collection.as_deref())
+                && is_thread_collection(
+                    source
+                        .collection
+                        .as_ref()
+                        .and_then(super::content::CollectionBinding::as_plain),
+                )
             {
                 targets.push((
                     super::source_key::RyeOsSourceInstanceKey::named(instance_key, channel)
                         .encode(),
-                    source.collection.clone().unwrap_or_default(),
+                    source
+                        .collection
+                        .as_ref()
+                        .and_then(super::content::CollectionBinding::as_plain)
+                        .unwrap_or_default()
+                        .to_owned(),
                 ));
             }
         }
@@ -1987,6 +2048,43 @@ impl RyeOsCore {
         params
     }
 
+    /// A source that declares the `if_revision` parameter and holds a read
+    /// envelope sends that envelope's revision, so an unchanged source answers
+    /// `not_modified` and the held rows stay. A source with no held envelope
+    /// sends nothing.
+    fn with_if_revision(
+        &self,
+        source_key: &str,
+        source: &super::content::SourceBinding,
+        mut params: serde_json::Value,
+    ) -> serde_json::Value {
+        const IF_REVISION: &str = "if_revision";
+        if !source
+            .dynamic_parameters
+            .iter()
+            .any(|name| name == IF_REVISION)
+        {
+            return params;
+        }
+        // The held answer is of one request; another request (a page turned, a
+        // filter changed) holds none, so it asks for a full answer.
+        let same_request = self
+            .data
+            .source_stored_params
+            .get(source_key)
+            .is_some_and(|held| *held == without_if_revision(&params));
+        let revision = self
+            .data
+            .sources
+            .get(source_key)
+            .filter(|_| same_request)
+            .and_then(super::read_envelope::stored_revision);
+        if let (Some(revision), Some(fields)) = (revision, params.as_object_mut()) {
+            fields.insert(IF_REVISION.to_string(), revision.into());
+        }
+        params
+    }
+
     /// Refetch a timeline source's whole window, after an incremental update
     /// that the stored window could not absorb.
     pub(crate) fn refetch_window_in_full(&mut self, source_key: &str) -> Vec<RyeOsEffect> {
@@ -2057,6 +2155,7 @@ impl RyeOsCore {
             return None;
         }
         let params = self.with_window_since(&source_key, source, params);
+        let params = self.with_if_revision(&source_key, source, params);
         if hint_single_flight
             && self.pending_effects.values().any(|kind| {
                 matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &source_key)
@@ -2949,14 +3048,17 @@ impl RyeOsCore {
             Some(ViewLocalState::GenericList { cursor, .. }) => *cursor,
             _ => return,
         };
-        let total = super::content::source_collection(binding, new).len();
+        let limit = self.data.source_row_limit();
+        let total = super::content::source_collection_limited(binding, new, limit)
+            .0
+            .len();
         let (start, end) = row_signature_window(total, cursor);
-        let new_rows = projected_row_signatures(binding, new, start, end);
+        let new_rows = projected_row_signatures(binding, new, start, end, limit);
         if new_rows.is_empty() {
             return;
         }
         let old_rows = old
-            .map(|value| projected_row_signatures(binding, value, start, end))
+            .map(|value| projected_row_signatures(binding, value, start, end, limit))
             .unwrap_or_default();
         let now_ms = self.runtime.now_ms;
         let Some(ViewLocalState::GenericList { changed_rows, .. }) =
@@ -3108,7 +3210,11 @@ impl RyeOsCore {
             super::source_key::RyeOsSourceInstanceKey::named(tile.instance_key.clone(), channel)
                 .encode();
         let response = self.data.sources.get(&source_key)?;
-        let records = super::content::source_collection(binding, response);
+        let (records, _) = super::content::source_collection_limited(
+            binding,
+            response,
+            self.data.source_row_limit(),
+        );
         let (cursor, collapsed_tree_rows) = match &tile.local {
             ViewLocalState::GenericList {
                 cursor,
@@ -3117,7 +3223,7 @@ impl RyeOsCore {
             } => (*cursor, collapsed_tree_rows),
             ViewLocalState::None | ViewLocalState::Field(_) => return None,
         };
-        let rows = super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows)?;
+        let rows = super::content::table_hierarchy_rows(binding, &records, collapsed_tree_rows)?;
         let row = rows.get(cursor.min(rows.len().saturating_sub(1)))?;
         Some((row.has_children, row.collapsed))
     }
@@ -3221,16 +3327,25 @@ impl RyeOsCore {
                 .encode();
         let response = self.data.sources.get(&source_key)?;
         match binding.widget.as_str() {
-            "rows" => super::content::source_collection(binding, response)
-                .get(cursor)
-                .map(|record| {
-                    (
-                        projected_row_key(record, cursor, &binding.projections),
-                        record.clone(),
-                    )
-                }),
+            "rows" => super::content::source_collection_limited(
+                binding,
+                response,
+                self.data.source_row_limit(),
+            )
+            .0
+            .get(cursor)
+            .map(|record| {
+                (
+                    projected_row_key(record, cursor, &binding.projections),
+                    record.clone(),
+                )
+            }),
             "table" => {
-                let records = super::content::source_collection(binding, response);
+                let (records, _) = super::content::source_collection_limited(
+                    binding,
+                    response,
+                    self.data.source_row_limit(),
+                );
                 let collapsed_tree_rows = match &tile.local {
                     ViewLocalState::GenericList {
                         collapsed_tree_rows,
@@ -3238,7 +3353,7 @@ impl RyeOsCore {
                     } => collapsed_tree_rows,
                     ViewLocalState::None | ViewLocalState::Field(_) => return None,
                 };
-                match super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows) {
+                match super::content::table_hierarchy_rows(binding, &records, collapsed_tree_rows) {
                     Some(rows) => {
                         rows.get(cursor.min(rows.len().saturating_sub(1)))
                             .and_then(|row| {
@@ -3332,10 +3447,11 @@ impl RyeOsCore {
             )
             .encode();
             let response = self.data.sources.get(&source_key)?;
-            let records = super::content::source_collection_for_section(section, response);
+            let mut records = super::content::source_collection_for_section(section, response);
+            records.truncate(self.data.source_row_limit().unwrap_or(usize::MAX));
             if cursor < flat.saturating_add(records.len()) {
                 let index = cursor - flat;
-                let record = (*records.get(index)?).clone();
+                let record = records.get(index)?.clone().into_owned();
                 return Some((
                     format!(
                         "{section_index}:{}",
@@ -3392,8 +3508,9 @@ fn projected_row_signatures(
     response: &serde_json::Value,
     start: usize,
     end: usize,
+    limit: Option<usize>,
 ) -> std::collections::BTreeMap<String, (String, Option<String>)> {
-    let records = super::content::source_collection(binding, response);
+    let (records, _) = super::content::source_collection_limited(binding, response, limit);
     let start = start.min(records.len());
     let end = end.min(records.len()).max(start);
     match binding.widget.as_str() {
@@ -3574,6 +3691,21 @@ fn resolve_field_params(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_wait_for_the_signed_bound_and_a_stated_absence_of_one_is_no_bound() {
+        use super::*;
+        let mut data = RyeOsDataState::default();
+        // Nothing loaded: the bound is not known, so no row is drawn.
+        assert_eq!(data.source_row_limit(), Some(0));
+        let mut wording = crate::ui::dto::RyeOsCoverageWordingDto::unit_test_default();
+        data.coverage_wording = Some(wording.clone());
+        assert_eq!(data.source_row_limit(), Some(500));
+        // Loaded wording that states no bound is a source with no bound.
+        wording.limits.source_rows = None;
+        data.coverage_wording = Some(wording);
+        assert_eq!(data.source_row_limit(), None);
+    }
+
     #[test]
     fn shared_widget_local_state_comes_from_exact_authored_binding_and_is_not_reset() {
         use super::*;
@@ -3970,6 +4102,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: Default::default(),
             }],
             ..Default::default()
@@ -4425,6 +4558,7 @@ mod tests {
                 project_path: None,
                 subject: super::super::binding::UiBindingSubject::Projectless,
                 posture: Default::default(),
+                seat_project: crate::ui::seat_project::UiSeatProject::Projectless,
                 binding_request_bounds: super::super::binding::UiBindingRequestBounds {
                     max_request_bytes: 4096,
                     max_input_bytes: 1024,

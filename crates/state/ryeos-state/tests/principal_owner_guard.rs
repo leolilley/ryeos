@@ -36,6 +36,10 @@ const SPEAKS_FOR_CALLERS: &[&str] = &[
     "crates/engine/ryeos-executor/src/execution/runner.rs",
     "crates/daemon/ryeos-app/src/worker_handoff.rs",
     "crates/daemon/ryeos-app/src/seat_authority.rs",
+    // A `remote_principal` is an admitted operator only if its key speaks for
+    // the node operator's owner (Review's ruling 2026-11-26): the one place
+    // ownership decides an operator-class answer.
+    "crates/daemon/ryeos-app/src/operator_authority.rs",
 ];
 
 /// The thread read rule asks speaks_for in exactly these arms of
@@ -190,5 +194,103 @@ fn every_head_advance_gets_its_advancer_from_the_resolver() {
         violations.is_empty(),
         "head advances must take their advancer from the ownership resolver:\n{}",
         violations.join("\n")
+    );
+}
+
+/// Production files that may call `ThreadWorkloadCeiling::node_root()`, the
+/// ceiling of a thread nothing bounds. Only a launch with no parent execution
+/// context is unbounded, so each entry is a root-launch site; every spawn from
+/// a running thread derives its ceiling from its parent's instead.
+const NODE_ROOT_CEILING_CALLERS: &[(&str, &str)] = &[
+    (
+        "crates/daemon/ryeos-app/src/callback_token.rs",
+        "`generate` mints the bearer of a root launch",
+    ),
+    (
+        "crates/daemon/ryeos-app/src/handler_context.rs",
+        "a service handler's root audit launch has no parent execution context",
+    ),
+    (
+        "crates/engine/ryeos-executor/src/dispatch.rs",
+        "`launch_ceiling` gives a launch with no parent context the root ceiling",
+    ),
+    (
+        "crates/engine/ryeos-executor/src/execution/launch.rs",
+        "`combine_launch_ceilings` gives a launch with neither a sealed nor an inherited ceiling the root ceiling",
+    ),
+];
+
+/// A source with its `#[cfg(test)]` items removed. Source is rustfmt-formatted,
+/// so a gated item ends at its own `;` or at the first line that closes at
+/// the attribute's indentation.
+fn without_cfg_test_items(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let mut kept = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim() != "#[cfg(test)]" {
+            kept.push_str(line);
+            kept.push('\n');
+            index += 1;
+            continue;
+        }
+        let indent = indent_of(line);
+        index += 1;
+        while index < lines.len() && lines[index].trim_start().starts_with("#[") {
+            index += 1;
+        }
+        if index < lines.len() && lines[index].trim_end().ends_with(';') {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < lines.len()
+            && !(indent_of(lines[index]) == indent && lines[index].trim_start().starts_with('}'))
+        {
+            index += 1;
+        }
+        index += 1;
+    }
+    kept
+}
+
+#[test]
+fn only_root_launch_sites_call_the_node_root_ceiling() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    let needle = concat!("ThreadWorkloadCeiling::", "node_root(");
+    let mut callers = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("source under the workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.contains("/tests/")
+            || relative.ends_with("tests.rs")
+            || relative.ends_with("_fixtures.rs")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if without_cfg_test_items(&text).contains(needle) {
+            callers.push(relative);
+        }
+    }
+    callers.sort();
+    let mut allowed: Vec<String> = NODE_ROOT_CEILING_CALLERS
+        .iter()
+        .map(|(file, _)| (*file).to_owned())
+        .collect();
+    allowed.sort();
+    assert_eq!(
+        callers, allowed,
+        "a production file calls ThreadWorkloadCeiling::node_root() outside the reviewed \
+         root-launch sites; a spawn from a running thread must narrow its parent's ceiling"
     );
 }

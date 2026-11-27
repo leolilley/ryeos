@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T23:03:18Z:2cb44f0ab2a6d30b8802d262b83fcbbe58df46c350c61f0c31adcb152c4dff1a:FPKBM9NMgJlusxPKk5N741c4AygcfCrLBPXLNcLkxxf+eSvz9Jvu3sVX5/uGiJKA2ypIRA50E8Q4zSyJcAhqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T11:14:51Z:010b71f267cf5c541c063b65d85da841ee03a069625b486550b0d8856f07023c:nY2IUyLFTmj3uSFNmbmDPT8FwQEcaqjyblYdZKvV4r7CSPAoHBp37UYW5D4tzkM5Joyekf/jjoZTOl0x81k8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.profile-sign
 availability: local
@@ -8,3 +8,5 @@ schema:
   profile: string
   key: string?
 description: "Sign an init profile in place with a publisher key."
+# Signing, publishing and node inspection are node-operator tools; a principal is served nothing.
+disclosure: {}

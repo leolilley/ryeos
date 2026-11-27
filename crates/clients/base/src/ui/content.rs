@@ -162,10 +162,15 @@ impl ItemAuthorship {
         }
     }
 
-    /// Signer label, or the trust word when the item has no signer.
+    /// Signer label, or the trust word when the item has no signer. An item
+    /// that is not trusted (untrusted, unendorsed or unsigned) always leads
+    /// with its trust word, so a signer's name never reads as admission.
     pub fn mark_tail(&self) -> String {
-        self.signer_label()
-            .unwrap_or_else(|| self.trust_word().to_owned())
+        match self.signer_label() {
+            Some(signer) if self.trust_class == "trusted_project" => signer,
+            Some(signer) => format!("{} \u{b7} {signer}", self.trust_word()),
+            None => self.trust_word().to_owned(),
+        }
     }
 }
 
@@ -618,11 +623,12 @@ pub struct SourceBinding {
     pub role: Option<String>,
     #[serde(default = "empty_object")]
     pub params: Value,
-    /// Path to the record array inside the source response (rows /
-    /// timeline). Absent = the whole response is the record (key_value /
-    /// text).
+    /// Where the records are inside the source response (rows / timeline): a
+    /// plain path to a record array, or a map form that turns an object's
+    /// entries into records. Absent = the whole response is the record
+    /// (key_value / text).
     #[serde(default)]
-    pub collection: Option<String>,
+    pub collection: Option<CollectionBinding>,
     /// Optional response path to a bounded collection-coverage statement.
     /// This is presentation metadata, never proof of authority or absence.
     #[serde(default)]
@@ -639,6 +645,196 @@ pub struct SourceBinding {
     pub activation: SourceActivation,
     #[serde(default)]
     pub requires_project: bool,
+    /// The result contract the view was written for, `ryeos.read.<name>/v<N>`.
+    /// A response from another contract is refused whole: it reads as a failed
+    /// source, never as rows the view was not written for.
+    #[serde(default, deserialize_with = "deserialize_contract")]
+    pub contract: Option<String>,
+}
+
+/// A source's declared result contract: the schema id a shared read envelope
+/// names, `ryeos.read.<dotted name>/v<N>`.
+fn deserialize_contract<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(contract) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let valid = contract.strip_prefix("ryeos.read.").is_some_and(|rest| {
+        rest.split_once("/v").is_some_and(|(name, version)| {
+            !name.is_empty()
+                && name.split('.').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                })
+                && !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit())
+        })
+    });
+    if !valid {
+        return Err(serde::de::Error::custom(
+            "contract must be a read schema id, `ryeos.read.<name>/v<N>`",
+        ));
+    }
+    Ok(Some(contract))
+}
+
+/// Where a source's records are. A plain string is a path into the response:
+/// an array gives one record per element (a single object is one detail
+/// record where a section allows it). The object form names a path whose
+/// value is a JSON object and gives one record per entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CollectionBinding {
+    Path(String),
+    Map(MapCollection),
+}
+
+/// The object form of a collection: each `(key, value)` entry of the object at
+/// `path` becomes one record. An object value is the record with the key added
+/// under `key_as`; a scalar value is the record `{ value, <key_as>: key }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapCollection {
+    pub path: String,
+    pub entries: MapEntries,
+    #[serde(deserialize_with = "deserialize_field_name")]
+    pub key_as: String,
+}
+
+/// The entry shapes a map collection may declare. Only `map` exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapEntries {
+    Map,
+}
+
+fn deserialize_field_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    if name.is_empty() || name.contains('.') {
+        return Err(serde::de::Error::custom(
+            "key_as must be a non-empty field name without dots",
+        ));
+    }
+    // A scalar entry is stored as `{ value, <key_as>: key }`: naming the key
+    // `value` would overwrite the entry's own value with its key.
+    if name == "value" {
+        return Err(serde::de::Error::custom(
+            "key_as may not be `value`: a scalar entry is stored under that name",
+        ));
+    }
+    Ok(name)
+}
+
+/// A stated condition of a map collection's source, shown to the person as
+/// signed wording. It is never an empty list posing as complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRowState {
+    /// The response has nothing at the collection path.
+    NotReported,
+    /// The response has a value at the path that is not an object.
+    WrongShape,
+    /// An entry already has a field named `key_as`; the source is refused.
+    KeyCollision,
+}
+
+impl SourceRowState {
+    /// The state code the signed coverage wording is keyed by.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotReported => "not_reported",
+            Self::WrongShape => "wrong_shape",
+            Self::KeyCollision => "key_collision",
+        }
+    }
+}
+
+impl CollectionBinding {
+    /// The response path the collection reads.
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(path) => path,
+            Self::Map(map) => &map.path,
+        }
+    }
+
+    /// The path when this is the plain-path form.
+    pub fn as_plain(&self) -> Option<&str> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Map(_) => None,
+        }
+    }
+}
+
+/// The records a collection resolves to, borrowed from the response where the
+/// response already holds them.
+enum CollectionRows<'a> {
+    Array(&'a [Value]),
+    Detail(&'a Value),
+    Entries(Vec<Value>),
+    Empty,
+}
+
+fn read_collection<'a>(
+    spec: &CollectionBinding,
+    response: &'a Value,
+) -> (CollectionRows<'a>, Option<SourceRowState>) {
+    match spec {
+        CollectionBinding::Path(path) => match field_path(response, path) {
+            Some(Value::Array(records)) => (CollectionRows::Array(records), None),
+            Some(value @ Value::Object(_)) => (CollectionRows::Detail(value), None),
+            _ => (CollectionRows::Empty, None),
+        },
+        CollectionBinding::Map(map) => match field_path(response, &map.path) {
+            None | Some(Value::Null) => (CollectionRows::Empty, Some(SourceRowState::NotReported)),
+            Some(Value::Object(entries)) => {
+                // Bytewise key order, whatever order the response arrived in.
+                let mut keys: Vec<&String> = entries.keys().collect();
+                keys.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                let mut rows = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let row = match &entries[key] {
+                        Value::Object(fields) => {
+                            if fields.contains_key(&map.key_as) {
+                                return (CollectionRows::Empty, Some(SourceRowState::KeyCollision));
+                            }
+                            let mut row = fields.clone();
+                            row.insert(map.key_as.clone(), Value::String(key.clone()));
+                            Value::Object(row)
+                        }
+                        scalar => {
+                            let mut row = serde_json::Map::new();
+                            row.insert("value".to_owned(), scalar.clone());
+                            row.insert(map.key_as.clone(), Value::String(key.clone()));
+                            Value::Object(row)
+                        }
+                    };
+                    rows.push(row);
+                }
+                (CollectionRows::Entries(rows), None)
+            }
+            Some(_) => (CollectionRows::Empty, Some(SourceRowState::WrongShape)),
+        },
+    }
+}
+
+/// The stated state of a map collection against a response, if it has one.
+/// A plain path or no collection never has a state.
+pub fn collection_state(
+    collection: Option<&CollectionBinding>,
+    response: &Value,
+) -> Option<SourceRowState> {
+    match collection {
+        Some(spec @ CollectionBinding::Map(_)) => read_collection(spec, response).1,
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,7 +859,7 @@ pub struct SectionBinding {
     pub title: String,
     pub source_channel: String,
     #[serde(default)]
-    pub collection: Option<String>,
+    pub collection: Option<CollectionBinding>,
     #[serde(default)]
     pub projection: Value,
     #[serde(default)]
@@ -840,7 +1036,15 @@ pub struct TableColumn {
     /// value (`directive_run` as `directive`). Applied before `present`, and
     /// `time_relative` reads its `yesterday` entry from the same map.
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Signed drop priority, `0..=15`: when a tile is too narrow, a column
+    /// with a lower value leaves before one with a higher value. `None` when
+    /// the column declares none, or the value is not an integer in range;
+    /// the column then leaves by its role's default order.
+    pub priority: Option<u8>,
 }
+
+/// The largest signed column priority the view kind schema admits.
+pub const COLUMN_PRIORITY_MAX: u8 = 15;
 
 /// Optional structural projection for a hierarchy-aware table. The source owns
 /// semantic ancestry; the client owns indentation, connectors, and local folds.
@@ -986,7 +1190,7 @@ fn present_time_date(value: &str) -> Option<String> {
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, role?, tone?, present?, fallback?}` (label defaults to the field
+/// `{label, field, role?, priority?, tone?, present?, fallback?}` (label defaults to the field
 /// path). A column missing a field is skipped; absent `columns` → empty (the
 /// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
@@ -1016,6 +1220,11 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("fallback")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        priority: col
+                            .get("priority")
+                            .and_then(Value::as_u64)
+                            .and_then(|priority| u8::try_from(priority).ok())
+                            .filter(|priority| *priority <= COLUMN_PRIORITY_MAX),
                         labels: col
                             .get("labels")
                             .and_then(Value::as_object)
@@ -1203,14 +1412,86 @@ pub fn expanded_detail(record: &Value, fields: &[String]) -> Vec<(String, String
 /// Pull the source collection named by a view binding. Rows, tables, and
 /// timelines all share this source shape; projection decides how each record
 /// is rendered after collection selection.
-pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a [Value] {
-    binding
-        .primary_source()
-        .and_then(|(_, source)| source.collection.as_deref())
-        .and_then(|path| field_path(response, path))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
+pub fn source_collection<'a>(
+    binding: &ViewBinding,
+    response: &'a Value,
+) -> std::borrow::Cow<'a, [Value]> {
+    use std::borrow::Cow;
+    let source = binding.primary_source().map(|(_, source)| source);
+    // A shared read envelope carries its own rows; no per-view path is needed,
+    // and a failed answer draws none.
+    if let Some(envelope) = super::read_envelope::read_envelope(response)
+        && (source.is_none_or(|source| source.collection.is_none())
+            || matches!(
+                envelope.state,
+                super::read_envelope::EnvelopeCoverageState::Failed
+                    | super::read_envelope::EnvelopeCoverageState::Unavailable
+            ))
+    {
+        return Cow::Borrowed(envelope.records());
+    }
+    let Some(spec) = source.and_then(|source| source.collection.as_ref()) else {
+        return Cow::Borrowed(&[]);
+    };
+    match read_collection(spec, response).0 {
+        CollectionRows::Array(records) => Cow::Borrowed(records),
+        CollectionRows::Entries(rows) => Cow::Owned(rows),
+        CollectionRows::Detail(_) | CollectionRows::Empty => Cow::Borrowed(&[]),
+    }
+}
+
+/// The rows a source holds beyond the shared row limit. `total` is how many
+/// rows exist; the first `limit` of them (array order, or key byte order for a
+/// map) are the ones kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowCut {
+    pub limit: usize,
+    pub total: usize,
+}
+
+/// `source_collection` with the shared row limit applied alike to an array and
+/// a map. Returns the kept rows and, when rows were cut, the cut.
+pub fn source_collection_limited<'a>(
+    binding: &ViewBinding,
+    response: &'a Value,
+    limit: Option<usize>,
+) -> (std::borrow::Cow<'a, [Value]>, Option<RowCut>) {
+    use std::borrow::Cow;
+    let rows = source_collection(binding, response);
+    match limit {
+        Some(limit) if rows.len() > limit => {
+            let total = rows.len();
+            let kept = match rows {
+                Cow::Borrowed(rows) => Cow::Borrowed(&rows[..limit]),
+                Cow::Owned(mut rows) => {
+                    rows.truncate(limit);
+                    Cow::Owned(rows)
+                }
+            };
+            (kept, Some(RowCut { limit, total }))
+        }
+        _ => (rows, None),
+    }
+}
+
+/// The cut, if any, the shared row limit makes to a section's rows.
+pub fn section_row_cut(
+    section: &SectionBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Option<RowCut> {
+    let limit = limit?;
+    let total = source_collection_for_section(section, response).len();
+    (total > limit).then_some(RowCut { limit, total })
+}
+
+/// The cut, if any, the shared row limit makes to a binding's primary source.
+pub fn source_row_cut(
+    binding: &ViewBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Option<RowCut> {
+    source_collection_limited(binding, response, limit).1
 }
 
 pub fn project_record_for_binding(binding: &ViewBinding, record: &Value) -> ProjectedRecord {
@@ -1296,8 +1577,18 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// record — one row — so a sections view can carry a singular status line
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    project_section_limited(section, response, None)
+}
+
+/// `project_section` with the shared row limit applied.
+pub fn project_section_limited(
+    section: &SectionBinding,
+    response: &Value,
+    limit: Option<usize>,
+) -> Vec<ProjectedRecord> {
     source_collection_for_section(section, response)
         .iter()
+        .take(limit.unwrap_or(usize::MAX))
         .map(|record| project_record(record, &section.projection))
         .collect()
 }
@@ -1305,21 +1596,34 @@ pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<Projec
 pub fn source_collection_for_section<'a>(
     section: &SectionBinding,
     response: &'a Value,
-) -> Vec<&'a Value> {
-    match section.collection.as_deref() {
+) -> Vec<std::borrow::Cow<'a, Value>> {
+    use std::borrow::Cow;
+    if let Some(envelope) = super::read_envelope::read_envelope(response)
+        && (section.collection.is_none()
+            || matches!(
+                envelope.state,
+                super::read_envelope::EnvelopeCoverageState::Failed
+                    | super::read_envelope::EnvelopeCoverageState::Unavailable
+            ))
+    {
+        return envelope.records().iter().map(Cow::Borrowed).collect();
+    }
+    match section.collection.as_ref() {
         // A `collection` path selects a sub-value of the response. An array is a
         // list source (one row per element); a single object is a detail source
         // (one row) — so a section can read a nested record (e.g. a thread's
         // `result`) out of a larger inspect response. A null/scalar (e.g.
         // `result` before the thread finishes) degrades to no rows, never a
         // raw-JSON dump — which is what projecting the whole response through a
-        // missing path would otherwise produce.
-        Some(path) => match field_path(response, path) {
-            Some(Value::Array(records)) => records.iter().collect(),
-            Some(value @ Value::Object(_)) => vec![value],
-            _ => Vec::new(),
+        // missing path would otherwise produce. The map form gives one row per
+        // entry; its stated conditions come from `collection_state`.
+        Some(spec) => match read_collection(spec, response).0 {
+            CollectionRows::Array(records) => records.iter().map(Cow::Borrowed).collect(),
+            CollectionRows::Detail(value) => vec![Cow::Borrowed(value)],
+            CollectionRows::Entries(rows) => rows.into_iter().map(Cow::Owned).collect(),
+            CollectionRows::Empty => Vec::new(),
         },
-        None => vec![response],
+        None => vec![Cow::Borrowed(response)],
     }
 }
 
@@ -1761,6 +2065,31 @@ mod local_projection_contract_tests {
                 serde_json::json!({"widget":"rows","input":{"id":"query","mode":"live_filter"}})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_column_priority_is_read_only_when_it_is_an_integer_in_range() {
+        let binding: ViewBinding = serde_json::from_value(serde_json::json!({
+            "widget": "table",
+            "projections": {"columns": [
+                {"field": "a", "priority": 0},
+                {"field": "b", "priority": 15},
+                {"field": "c", "priority": 16},
+                {"field": "d", "priority": -1},
+                {"field": "e", "priority": "3"},
+                {"field": "f", "priority": 2.5},
+                {"field": "g"}
+            ]}
+        }))
+        .unwrap();
+        let priorities: Vec<Option<u8>> = table_columns(&binding)
+            .iter()
+            .map(|column| column.priority)
+            .collect();
+        assert_eq!(
+            priorities,
+            [Some(0), Some(15), None, None, None, None, None]
         );
     }
 
@@ -2378,6 +2707,295 @@ mod tests {
         assert_eq!(relative("2026-11-12T09:12:00Z", 0), "09:12 · 12 Nov");
     }
 
+    fn map_binding(collection: Value) -> ViewBinding {
+        serde_json::from_value(json!({
+            "widget": "rows",
+            "sources": { "default": { "ref": "service:x", "collection": collection } },
+            "projections": {"primary": "name"},
+        }))
+        .unwrap()
+    }
+
+    fn map_form() -> Value {
+        json!({"path": "by_name", "entries": "map", "key_as": "name"})
+    }
+
+    #[test]
+    fn map_collection_makes_a_row_per_object_entry_in_key_byte_order() {
+        let binding = map_binding(map_form());
+        let response = json!({"by_name": {
+            "b": {"size": 2}, "B": {"size": 1}, "a": {"size": 3}
+        }});
+        let rows = source_collection(&binding, &response);
+        let names: Vec<_> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["B", "a", "b"]);
+        assert_eq!(rows[0], json!({"size": 1, "name": "B"}));
+        assert_eq!(
+            collection_state(
+                binding.primary_source().unwrap().1.collection.as_ref(),
+                &response
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn map_collection_scalar_entries_appear_under_value() {
+        let binding = map_binding(map_form());
+        let response = json!({"by_name": {"x": 1, "y": "two"}});
+        let rows = source_collection(&binding, &response);
+        assert_eq!(rows[0], json!({"value": 1, "name": "x"}));
+        assert_eq!(rows[1], json!({"value": "two", "name": "y"}));
+    }
+
+    #[test]
+    fn map_collection_absent_path_is_not_reported() {
+        let binding = map_binding(map_form());
+        let response = json!({"other": {}});
+        assert!(source_collection(&binding, &response).is_empty());
+        let collection = binding.primary_source().unwrap().1.collection.as_ref();
+        assert_eq!(
+            collection_state(collection, &response).map(SourceRowState::code),
+            Some("not_reported")
+        );
+    }
+
+    #[test]
+    fn a_map_key_may_not_be_named_value() {
+        let binding = |key_as: &str| {
+            serde_json::from_value::<CollectionBinding>(
+                json!({"path": "items", "entries": "map", "key_as": key_as}),
+            )
+        };
+        assert!(binding("name").is_ok());
+        assert!(binding("value").is_err());
+    }
+
+    #[test]
+    fn a_source_contract_is_a_read_schema_id() {
+        let source = |contract: serde_json::Value| {
+            serde_json::from_value::<SourceBinding>(
+                json!({"ref": "service:test/rows", "contract": contract}),
+            )
+        };
+        assert_eq!(
+            source(json!("ryeos.read.node.journal/v1"))
+                .unwrap()
+                .contract
+                .as_deref(),
+            Some("ryeos.read.node.journal/v1")
+        );
+        for bad in [
+            "node.journal/v1",
+            "ryeos.read./v1",
+            "ryeos.read.node.journal",
+            "ryeos.read.node.journal/v",
+            "ryeos.read.Node/v1",
+            "ryeos.read.node..journal/v1",
+        ] {
+            assert!(source(json!(bad)).is_err(), "{bad} is refused");
+        }
+        assert!(
+            serde_json::from_value::<SourceBinding>(json!({"ref": "service:test/rows"}))
+                .unwrap()
+                .contract
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn map_collection_non_object_is_wrong_shape() {
+        let binding = map_binding(map_form());
+        let collection = binding.primary_source().unwrap().1.collection.as_ref();
+        for value in [json!([1]), json!("s"), json!(3)] {
+            let response = json!({ "by_name": value });
+            assert!(source_collection(&binding, &response).is_empty());
+            assert_eq!(
+                collection_state(collection, &response).map(SourceRowState::code),
+                Some("wrong_shape")
+            );
+        }
+    }
+
+    #[test]
+    fn map_collection_key_collision_refuses_the_source() {
+        let binding = map_binding(map_form());
+        let response = json!({"by_name": {"a": {"size": 1}, "b": {"name": "own"}}});
+        assert!(source_collection(&binding, &response).is_empty());
+        let collection = binding.primary_source().unwrap().1.collection.as_ref();
+        assert_eq!(
+            collection_state(collection, &response).map(SourceRowState::code),
+            Some("key_collision")
+        );
+        // The response itself is untouched: the entry's own field survives.
+        assert_eq!(response["by_name"]["b"]["name"], "own");
+    }
+
+    #[test]
+    fn map_collection_form_is_closed() {
+        let parse = |value: Value| serde_json::from_value::<SourceBinding>(value);
+        let source = |collection: Value| json!({"ref": "service:x", "collection": collection});
+        assert!(parse(source(map_form())).is_ok());
+        assert!(parse(source(json!("threads"))).is_ok());
+        assert!(
+            parse(source(
+                json!({"path": "a", "entries": "map", "key_as": "k", "extra": 1})
+            ))
+            .is_err()
+        );
+        assert!(
+            parse(source(
+                json!({"path": "a", "entries": "list", "key_as": "k"})
+            ))
+            .is_err()
+        );
+        assert!(parse(source(json!({"path": "a", "entries": "map"}))).is_err());
+        assert!(parse(source(json!({"path": "a", "entries": "map", "key_as": ""}))).is_err());
+    }
+
+    #[test]
+    fn plain_string_collection_is_unchanged() {
+        let binding = map_binding(json!("threads"));
+        let response = json!({"threads": [{"name": "a"}], "n": {"name": "z"}});
+        assert_eq!(source_collection(&binding, &response).len(), 1);
+        let collection = binding.primary_source().unwrap().1.collection.as_ref();
+        assert_eq!(collection_state(collection, &json!({})), None);
+        assert_eq!(
+            collection.and_then(CollectionBinding::as_plain),
+            Some("threads")
+        );
+    }
+
+    #[test]
+    fn section_map_collection_projects_entry_rows() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "t", "source_channel": "default",
+            "collection": map_form(), "projection": {"primary": "name"}
+        }))
+        .unwrap();
+        let rows = project_section(&section, &json!({"by_name": {"k": {"v": 1}}}));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "k");
+    }
+
+    fn limited_rows(
+        binding: &ViewBinding,
+        response: &Value,
+        limit: usize,
+    ) -> (Vec<Value>, Option<RowCut>) {
+        let (rows, cut) = source_collection_limited(binding, response, Some(limit));
+        (rows.into_owned(), cut)
+    }
+
+    #[test]
+    fn row_limit_leaves_arrays_below_and_at_the_limit_whole() {
+        let binding = map_binding(json!("rows"));
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        let (rows, cut) = limited_rows(&binding, &response, 4);
+        assert_eq!((rows.len(), cut), (3, None));
+        let (rows, cut) = limited_rows(&binding, &response, 3);
+        assert_eq!((rows.len(), cut), (3, None));
+    }
+
+    #[test]
+    fn row_limit_cuts_an_array_and_says_how_many_exist() {
+        let binding = map_binding(json!("rows"));
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        let (rows, cut) = limited_rows(&binding, &response, 2);
+        assert_eq!(rows, vec![json!({"name": "a"}), json!({"name": "b"})]);
+        assert_eq!(cut, Some(RowCut { limit: 2, total: 3 }));
+    }
+
+    #[test]
+    fn row_limit_cuts_a_map_after_key_byte_order() {
+        let binding = map_binding(map_form());
+        let response = json!({"by_name": {"d": {}, "b": {}, "a": {}, "C": {}, "c": {}}});
+        let (rows, cut) = limited_rows(&binding, &response, 3);
+        let names: Vec<_> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["C", "a", "b"]);
+        assert_eq!(cut, Some(RowCut { limit: 3, total: 5 }));
+        let (rows, cut) = limited_rows(&binding, &response, 5);
+        assert_eq!((rows.len(), cut), (5, None));
+    }
+
+    #[test]
+    fn row_limit_applies_to_sections_and_no_limit_keeps_everything() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "t", "source_channel": "default",
+            "collection": "rows", "projection": {"primary": "name"}
+        }))
+        .unwrap();
+        let response = json!({"rows": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        assert_eq!(
+            project_section_limited(&section, &response, Some(2)).len(),
+            2
+        );
+        assert_eq!(project_section_limited(&section, &response, None).len(), 3);
+        assert_eq!(
+            section_row_cut(&section, &response, Some(2)),
+            Some(RowCut { limit: 2, total: 3 })
+        );
+        assert_eq!(section_row_cut(&section, &response, Some(3)), None);
+    }
+
+    fn envelope_response(state: &str) -> Value {
+        json!({
+            "schema": "ryeos.read.test.rows/v1", "as_of": "t", "revision": "rev1:a",
+            "coverage": {"state": state, "reason": null},
+            "rows": [{"name": "a"}, {"name": "b"}],
+            "page": {"next_cursor": null, "total": 2, "total_basis": "exact"},
+            "signers": {}
+        })
+    }
+
+    #[test]
+    fn an_envelope_source_reads_its_rows_without_a_collection_path() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "sources": { "default": { "ref": "service:x" } },
+        }))
+        .unwrap();
+        let response = envelope_response("observed");
+        assert_eq!(source_collection(&binding, &response).len(), 2);
+        // The older shape with no path still yields nothing.
+        assert!(source_collection(&binding, &json!({"rows": [{}]})).is_empty());
+        // A failed answer draws no rows.
+        assert!(source_collection(&binding, &envelope_response("failed")).is_empty());
+    }
+
+    #[test]
+    fn an_envelope_source_obeys_the_shared_row_limit() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "sources": { "default": { "ref": "service:x" } },
+        }))
+        .unwrap();
+        let response = envelope_response("complete");
+        let (rows, cut) = source_collection_limited(&binding, &response, Some(1));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(cut, Some(RowCut { limit: 1, total: 2 }));
+    }
+
+    #[test]
+    fn a_section_without_a_path_reads_envelope_rows_and_a_record_is_one_row() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "t", "source_channel": "default", "projection": {"primary": "name"}
+        }))
+        .unwrap();
+        assert_eq!(
+            project_section(&section, &envelope_response("complete")).len(),
+            2
+        );
+        assert!(project_section(&section, &envelope_response("failed")).is_empty());
+        let one = json!({
+            "schema": "ryeos.read.test.one/v1", "revision": "r",
+            "coverage": {"state": "complete"}, "record": {"name": "solo"}
+        });
+        let rows = project_section(&section, &one);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "solo");
+    }
+
     #[test]
     fn invalid_time_date_presentation_keeps_the_authored_value() {
         assert_eq!(
@@ -2621,6 +3239,26 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_signer_never_hides_the_trust_word() {
+        let authorship = |trust_class: &str| ItemAuthorship {
+            space: "project".into(),
+            trust_class: trust_class.into(),
+            item_ref: None,
+            signer: Some(ItemSigner {
+                fingerprint: "0123456789abcdef".into(),
+                name: Some("leo".into()),
+            }),
+            source_refs: Vec::new(),
+        };
+        assert_eq!(authorship("trusted_project").mark_tail(), "leo");
+        assert_eq!(
+            authorship("untrusted_project").mark_tail(),
+            "untrusted \u{b7} leo"
+        );
+        assert_eq!(authorship("unsigned").mark_tail(), "unsigned \u{b7} leo");
+    }
+
+    #[test]
     fn embedded_view_authorship_full_shape_parses() {
         let surface = json!({ "views": {
             "view:farm/project/field": {
@@ -2672,6 +3310,28 @@ mod tests {
         let binding = out.get("view:ryeos/threads").expect("present");
         assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
         assert_eq!(binding.authorship, None);
+    }
+
+    #[test]
+    fn a_view_with_a_refused_source_declaration_degrades_alone() {
+        let surface = json!({ "views": {
+            "view:test/good": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows", "collection": "rows"}}},
+            "view:test/key-named-value": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows",
+                "collection": {"path": "items", "entries": "map", "key_as": "value"}}}},
+            "view:test/bad-contract": { "widget": "rows", "sources": {"default": {
+                "ref": "service:test/rows", "contract": "node.journal"}}}
+        }});
+        let out = views_from_surface(Some(&surface));
+        assert!(out["view:test/good"].degraded.is_none());
+        for refused in ["view:test/key-named-value", "view:test/bad-contract"] {
+            let reason = out[refused].degraded.as_deref().expect("degraded");
+            assert!(
+                reason.starts_with("invalid view binding"),
+                "{refused}: {reason}"
+            );
+        }
     }
 
     #[test]
@@ -3154,16 +3814,24 @@ mod tests {
         assert!(view.get("affordances").is_none());
         let sections: Vec<SectionBinding> =
             serde_json::from_value(view["sections"].clone()).unwrap();
-        assert!(
-            sections
-                .iter()
-                .any(|section| section.collection.as_deref() == Some("remotes")
-                    && section.title.contains("not probed"))
-        );
+        assert!(sections.iter().any(|section| {
+            section
+                .collection
+                .as_ref()
+                .and_then(CollectionBinding::as_plain)
+                == Some("remotes")
+                && section.title.contains("not probed")
+        }));
         let invalid = json!({"name": "broken", "error": "invalid configuration", "repair_hint": "repair this entry"});
         let invalid_sections: Vec<_> = sections
             .iter()
-            .filter(|section| section.collection.as_deref() == Some("invalid_remotes"))
+            .filter(|section| {
+                section
+                    .collection
+                    .as_ref()
+                    .and_then(CollectionBinding::as_plain)
+                    == Some("invalid_remotes")
+            })
             .collect();
         assert_eq!(invalid_sections.len(), 2);
         let projected: Vec<_> = invalid_sections
@@ -3184,7 +3852,13 @@ mod tests {
         assert!(sections.iter().all(|section| section.activate.is_none()));
         let configured = sections
             .iter()
-            .find(|section| section.collection.as_deref() == Some("remotes"))
+            .find(|section| {
+                section
+                    .collection
+                    .as_ref()
+                    .and_then(CollectionBinding::as_plain)
+                    == Some("remotes")
+            })
             .unwrap();
         let fields = expand_fields_from_projection(&configured.projection);
         for field in [
@@ -3248,7 +3922,13 @@ mod tests {
                 serde_json::from_value(authored["sections"].clone()).unwrap();
             let section = sections
                 .iter()
-                .find(|section| section.collection.as_deref() == Some("outcome_coverage"))
+                .find(|section| {
+                    section
+                        .collection
+                        .as_ref()
+                        .and_then(CollectionBinding::as_plain)
+                        == Some("outcome_coverage")
+                })
                 .unwrap();
             assert!(section.activate.is_none());
             for (state, reason, status) in [
@@ -3296,7 +3976,13 @@ mod tests {
                 serde_json::from_value(authored["sections"].clone()).unwrap();
             let section = sections
                 .iter()
-                .find(|section| section.collection.as_deref() == Some("artifacts"))
+                .find(|section| {
+                    section
+                        .collection
+                        .as_ref()
+                        .and_then(CollectionBinding::as_plain)
+                        == Some("artifacts")
+                })
                 .unwrap();
             assert!(section.activate.is_none());
             assert_eq!(section.projection["identity"], "artifact_id");

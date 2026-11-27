@@ -13,7 +13,6 @@ use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_client_base::surface::opening::{SurfaceOpenRequest, SurfaceOpenSelection};
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
 
 use crate::browser_session::{AttachmentStoreError, BindingAttachmentCoordinate};
 use crate::handlers::ui_seat::seat_kind;
@@ -103,7 +102,6 @@ pub async fn handle_open_surface(
         &compile_context,
         &state,
         root.project_authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = super::ui_projects::completed_admission_append_limit(&state)?
@@ -158,6 +156,11 @@ pub async fn handle_open_surface(
                     root.project_authority.as_deref(),
                 )?;
             }
+            let seat_project = crate::seat_project::resolve_for_binding(
+                &state,
+                &binding,
+                &session.granted_caps,
+            )?;
             let published = state.state_store.with_exact_seat_action_if_mixed_cut(&admission.seat(), &admission.cut(), || {
                     ui.browser_sessions
                         .reconcile_presentation_mount_frontier(
@@ -171,7 +174,7 @@ pub async fn handle_open_surface(
                     if matches!(&request.placement, ryeos_client_base::surface::opening::SurfaceOpenPlacement::NewPresentation { .. }) {
                         admitted_result = Some(prepare_selected_document_at_cut(&state,&session,&producer,&request,&root_binding,
                             crate::browser_session::BindingAttachmentCandidate {
-                                registered_project_id:root.registered_project_id.clone(),compiled_binding:Arc::new(binding),presentation,project_authority:root.project_authority.clone(),
+                                registered_project_id:root.registered_project_id.clone(),compiled_binding:Arc::new(binding),presentation,project_authority:root.project_authority.clone(),seat_project,
                             },Vec::new(),None)?);
                         return Ok(());
                     }
@@ -191,6 +194,7 @@ pub async fn handle_open_surface(
                                     compiled_binding: Arc::new(binding),
                                     presentation,
                                     project_authority: root.project_authority.clone(),
+                                    seat_project,
                                 },
                                 Vec::new(),
                                 None,
@@ -224,6 +228,7 @@ pub async fn handle_open_surface(
                         compiled_binding: Arc::new(binding),
                         presentation,
                         project_authority: root.project_authority.clone(),
+                        seat_project,
                     },
                     &limits,
                     state.node_policy.generation_digest(),
@@ -615,20 +620,26 @@ pub async fn handle_detach(
     let Some(_attachment) = attachment else {
         return Ok(json!({"detached":false,"attachment":coordinate}));
     };
-    let owner = format!("session:{session_id}");
+    // The session holds its seats' leases; the key it was minted for launched
+    // them.
+    let holder = format!("session:{session_id}");
+    let launcher = ui
+        .browser_sessions
+        .live_session_principal(&session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
     let exact_client_ref = client_ref(&coordinate);
     // The lease table is keyed by every seat thread and queried without a
     // presentation limit, so cleanup cannot silently omit an older seat.
     for thread_id in state
         .state_store
-        .seat_leases_for_owner_client(&owner, &exact_client_ref)?
+        .seat_leases_for_owner_client(&holder, &exact_client_ref)?
     {
         let detail = state
             .state_store
             .get_thread(&thread_id)?
             .ok_or_else(|| HandlerError::Internal("leased seat thread disappeared".into()))?;
         if detail.kind != seat_kind(&state)?
-            || detail.requested_by.as_deref() != Some(owner.as_str())
+            || detail.requested_by.as_deref() != Some(launcher.as_str())
             || detail.executor_ref != exact_client_ref
         {
             return Err(HandlerError::Internal(
@@ -711,10 +722,14 @@ pub async fn handle_revise(
         &compile_context,
         &state,
         old.project_authority.as_deref(),
-        SeatClass::of_session(session.user_principal_id.as_deref()),
     )?;
     let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
-    if binding.binding_digest == from.binding_digest {
+    // The successor generation carries the project this seat states now. A
+    // change in that state alone, with the same compiled binding, still
+    // publishes a successor, so the chip updates on the next rebind.
+    let seat_project =
+        crate::seat_project::resolve_for_binding(&state, &binding, &session.granted_caps)?;
+    if binding.binding_digest == from.binding_digest && seat_project == old.seat_project {
         return Ok(json!({"revised":false,"attachment":from}));
     }
     let limits = crate::browser_session::PresentationLimits::from_policy(
@@ -760,6 +775,7 @@ pub async fn handle_revise(
                             compiled_binding: Arc::new(binding),
                             presentation,
                             project_authority: old.project_authority.clone(),
+                            seat_project,
                         },
                         limits.max_attachments,
                         state.node_policy.generation_digest(),

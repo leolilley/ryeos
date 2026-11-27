@@ -39,6 +39,26 @@ pub const MAX_WORKLOAD_CLIENT_IN_FLIGHT: u16 = 64;
 pub const MAX_WORKLOAD_CLIENT_INVOCATIONS_PER_BOOT: u32 = 1_000_000;
 pub const MAX_WORKLOAD_CLIENT_LIFETIME_SECONDS: u64 = 604_800;
 pub const MAX_WORKLOAD_CLIENT_ERROR_MESSAGE_BYTES: usize = 2_048;
+/// Most bytes of a collected child's result and error together. A larger
+/// result is refused with a typed code, never cut to fit.
+pub const MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES: usize = 256 * 1024;
+/// The one refusal for every collect request outside the grant: an ungranted
+/// operation, a child that was never given to this session, a child of another
+/// session, a descendant of a child, a child launched by another key, and a
+/// thread that does not exist. The message never tells these apart.
+pub const WORKLOAD_COLLECT_NOT_PERMITTED_CODE: &str = "workload_collect_not_permitted";
+pub const WORKLOAD_COLLECT_NOT_PERMITTED_MESSAGE: &str =
+    "the grant does not permit collecting this thread";
+/// A permitted collect whose child result exceeds its byte cap.
+pub const WORKLOAD_COLLECT_RESULT_TOO_LARGE_CODE: &str = "workload_collect_result_too_large";
+/// A permitted collect whose child output contains a secret value the node
+/// holds. The output is withheld whole; it is never cut or masked.
+pub const WORKLOAD_COLLECT_RESULT_WITHHELD_CODE: &str = "workload_collect_result_withheld";
+pub const WORKLOAD_COLLECT_RESULT_WITHHELD_MESSAGE: &str =
+    "the child's output matches a secret value the node holds and is withheld";
+/// Shortest secret the exact-match floor looks for. A shorter value would
+/// match ordinary text by chance, so it is not checked.
+pub const MIN_COLLECT_SECRET_FLOOR_BYTES: usize = 8;
 const MAX_WORKLOAD_CLIENT_ERROR_CODE_BYTES: usize = 128;
 const MAX_WORKLOAD_CLIENT_IDENTIFIER_BYTES: usize = 256;
 const MAX_WORKLOAD_CLIENT_BINDING_NAME_BYTES: usize = 128;
@@ -144,6 +164,16 @@ pub struct WorkloadClientExecutionCeiling {
     /// kind projection. This is an assertion and narrowing boundary, never an
     /// alternative grant authored by the worker environment.
     pub workspace_access: ryeos_engine::kind_registry::WorkspaceAccess,
+    /// Whether the session may launch this item as a detached child. Absent
+    /// means false. The effect classes and workspace access above are the
+    /// ceiling a detached child's own calls are bound by, sealed with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+    /// Whether the session may collect the result of a detached child it
+    /// launched from this item. Absent means false, and it is meaningful only
+    /// with `detached`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collect: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -356,6 +386,12 @@ pub fn validate_execution_ceilings(
             previous_call = Some(call);
         }
         validate_effect_classes(&execution.effect_classes, false)?;
+        if execution.collect && !execution.detached {
+            anyhow::bail!(
+                "workload-client execution `{}` allows collecting a detached child it cannot launch",
+                execution.item_ref
+            );
+        }
     }
     Ok(())
 }
@@ -418,6 +454,12 @@ impl WorkloadClientNodePolicy {
             anyhow::bail!("workload-client request exceeds target node policy");
         }
         for execution in &request.executions {
+            if execution.detached {
+                anyhow::bail!(
+                    "workload-client execution `{}` asks to be detached, which this node does not admit",
+                    execution.item_ref
+                );
+            }
             if execution.ref_bindings.len() > usize::from(self.max_ref_bindings_per_execution)
                 || execution.calls.len() > usize::from(self.max_calls_per_execution)
                 || execution
@@ -589,6 +631,15 @@ pub struct WorkloadClientExecuteRequest {
     pub call: Option<MethodCall>,
 }
 
+/// Read the result of one detached child this session launched. The id is
+/// the only input; which children a session may collect is decided by the
+/// daemon from its own records, never from this frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadClientCollectRequest {
+    pub child_thread_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "method",
@@ -598,6 +649,7 @@ pub struct WorkloadClientExecuteRequest {
 )]
 pub enum WorkloadClientOperation {
     Execute(WorkloadClientExecuteRequest),
+    Collect(WorkloadClientCollectRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -701,7 +753,18 @@ impl WorkloadClientRequestFrame {
             anyhow::bail!("workload-client protocol is not current");
         }
         validate_request_id(&self.request_id)?;
-        let WorkloadClientOperation::Execute(request) = &self.operation;
+        let request = match &self.operation {
+            WorkloadClientOperation::Execute(request) => request,
+            WorkloadClientOperation::Collect(collect) => {
+                crate::callback::validate_runtime_thread_id(&collect.child_thread_id)
+                    .map_err(|error| anyhow::anyhow!("workload-client collect: {error}"))?;
+                let encoded = serde_json::to_vec(self)?;
+                if encoded.is_empty() || encoded.len() > MAX_WORKLOAD_CLIENT_FRAME_BYTES {
+                    anyhow::bail!("workload-client request exceeds its byte bound");
+                }
+                return Ok(());
+            }
+        };
         ryeos_engine::canonical_ref::CanonicalRef::parse(&request.item_ref)
             .map_err(|error| anyhow::anyhow!("workload-client item ref is invalid: {error}"))?;
         if request.ref_bindings.len() > usize::from(MAX_WORKLOAD_CLIENT_REF_BINDINGS) {
@@ -727,11 +790,62 @@ pub enum WorkloadClientOutcome {
     Dispatched {
         response: crate::callback_contract::CallbackDispatchResponse,
     },
+    Collected {
+        child: WorkloadClientCollectedChild,
+    },
     Failed {
         code: String,
         message: String,
         retryable: bool,
     },
+}
+
+/// What a session may read of a detached child it launched: its status and,
+/// once terminal, its result. This is a fixed allow-list of the thread's own
+/// status and result record. It carries no project path, authority, capsule,
+/// lineage, metadata or artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadClientCollectedChild {
+    pub thread_id: String,
+    pub status: String,
+    pub kind: String,
+    pub item_ref: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    /// Present only once the child is terminal and has a recorded result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<WorkloadClientCollectedResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadClientCollectedResult {
+    pub outcome_code: Option<String>,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+}
+
+impl WorkloadClientCollectedChild {
+    /// Whether the child's result and error fit the per-call byte cap.
+    pub fn result_within_cap(&self) -> anyhow::Result<bool> {
+        let Some(result) = &self.result else {
+            return Ok(true);
+        };
+        let size =
+            serde_json::to_vec(&result.result)?.len() + serde_json::to_vec(&result.error)?.len();
+        Ok(size <= MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        crate::callback::validate_runtime_thread_id(&self.thread_id)
+            .map_err(|error| anyhow::anyhow!("workload-client collected child: {error}"))?;
+        if !self.result_within_cap()? {
+            anyhow::bail!("workload-client collected result exceeds its byte cap");
+        }
+        Ok(())
+    }
 }
 
 impl WorkloadClientOutcome {
@@ -762,6 +876,9 @@ impl WorkloadClientResponseFrame {
         validate_request_id(&self.request_id)?;
         if let WorkloadClientOutcome::Dispatched { response } = &self.outcome {
             response.dispatch.validate()?;
+        }
+        if let WorkloadClientOutcome::Collected { child } = &self.outcome {
+            child.validate()?;
         }
         if let WorkloadClientOutcome::Failed { code, message, .. } = &self.outcome
             && (code.is_empty()
@@ -798,6 +915,71 @@ pub fn validate_request_id(request_id: &str) -> anyhow::Result<()> {
 
 /// Produce error text accepted by the wire validator. The ceiling counts
 /// UTF-8 bytes, not characters; never split a code point or retain NUL.
+/// The exact-match secret floor on a child's output.
+///
+/// The child's output is the disclosure surface of a collect: whatever the
+/// child printed, the session can read. This is a floor under that surface,
+/// not a guarantee. It refuses output that contains, byte for byte, a secret
+/// value of at least [`MIN_COLLECT_SECRET_FLOOR_BYTES`] bytes: in the raw
+/// text of any string or key, in the compact serialized JSON (which catches a
+/// number and the JSON-escaped form of the value), and in the ASCII-escaped
+/// `\uXXXX` form of the value. It does not catch a secret that was encoded,
+/// hashed, split across fields or shortened, nor one that was never in
+/// `secrets`.
+pub fn value_contains_secret<S: AsRef<str>>(value: &Value, secrets: &[S]) -> bool {
+    let needles: Vec<String> = secrets
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|secret| secret.len() >= MIN_COLLECT_SECRET_FLOOR_BYTES)
+        .flat_map(secret_text_forms)
+        .collect();
+    if needles.is_empty() {
+        return false;
+    }
+    let contains_any = |text: &str| needles.iter().any(|needle| text.contains(needle.as_str()));
+    contains_any(&value.to_string()) || any_text(value, &contains_any)
+}
+
+/// The raw secret plus the JSON-escaped and ASCII-escaped forms of it.
+fn secret_text_forms(secret: &str) -> Vec<String> {
+    let mut forms = vec![secret.to_owned()];
+    if let Ok(quoted) = serde_json::to_string(secret) {
+        forms.push(quoted[1..quoted.len() - 1].to_owned());
+    }
+    if !secret.is_ascii() {
+        let mut lower = String::new();
+        let mut upper = String::new();
+        for character in secret.chars() {
+            if character.is_ascii() {
+                lower.push(character);
+                upper.push(character);
+            } else {
+                let mut units = [0u16; 2];
+                for unit in character.encode_utf16(&mut units).iter() {
+                    lower.push_str(&format!("\\u{unit:04x}"));
+                    upper.push_str(&format!("\\u{unit:04X}"));
+                }
+            }
+        }
+        forms.push(lower);
+        forms.push(upper);
+    }
+    forms.sort();
+    forms.dedup();
+    forms
+}
+
+fn any_text(value: &Value, test: &dyn Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(text) => test(text),
+        Value::Array(items) => items.iter().any(|item| any_text(item, test)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, field)| test(key) || any_text(field, test)),
+        _ => false,
+    }
+}
+
 pub fn bounded_error_message(message: &str) -> String {
     let mut result = String::new();
     for character in message.chars().filter(|character| *character != '\0') {
@@ -872,6 +1054,8 @@ mod tests {
             effect_classes: vec!["live".to_owned()],
             workspace_access:
                 ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            detached: false,
+            collect: false,
         }
     }
 
@@ -1231,6 +1415,204 @@ mod tests {
     }
 
     #[test]
+    fn node_policy_does_not_admit_a_detached_opt_in() {
+        let policy = WorkloadClientNodePolicy {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            delegation_cap_ceiling: vec!["ryeos.execute.*".to_owned()],
+            allowed_effect_classes: vec!["live".to_owned()],
+            allowed_workspace_access: vec![
+                ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            ],
+            max_executions: 1,
+            max_ref_bindings_per_execution: 0,
+            max_calls_per_execution: 1,
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        let plain = request(vec![execution("tool:project/check")]);
+        policy.admit_request(&plain).unwrap();
+        let mut opted_in = execution("tool:project/check");
+        opted_in.detached = true;
+        let error = policy.admit_request(&request(vec![opted_in])).unwrap_err();
+        assert!(error.to_string().contains("detached"), "{error:#}");
+    }
+
+    #[test]
+    fn detached_opt_in_is_absent_from_the_wire_unless_set() {
+        let plain = serde_json::to_value(execution("tool:project/check")).unwrap();
+        assert!(plain.get("detached").is_none());
+        let decoded: WorkloadClientExecutionCeiling = serde_json::from_value(plain).unwrap();
+        assert!(!decoded.detached);
+        let mut opted_in = execution("tool:project/check");
+        opted_in.detached = true;
+        let value = serde_json::to_value(&opted_in).unwrap();
+        assert_eq!(value["detached"], serde_json::json!(true));
+        let decoded: WorkloadClientExecutionCeiling = serde_json::from_value(value).unwrap();
+        assert!(decoded.detached);
+    }
+
+    const CHILD: &str = "T-0f3a9c1e-0000-4000-8000-000000000001";
+
+    fn collect_frame(child_thread_id: &str) -> WorkloadClientRequestFrame {
+        WorkloadClientRequestFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            operation: WorkloadClientOperation::Collect(WorkloadClientCollectRequest {
+                child_thread_id: child_thread_id.to_owned(),
+            }),
+        }
+    }
+
+    #[test]
+    fn collect_request_has_one_strict_wire_shape() {
+        let frame = collect_frame(CHILD);
+        frame.validate().unwrap();
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            value["operation"],
+            serde_json::json!({"method":"collect","request":{"child_thread_id":CHILD}})
+        );
+        let decoded: WorkloadClientRequestFrame = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded, frame);
+
+        // An unknown field is refused at the request, the operation and the
+        // frame.
+        let mut extra_request = value.clone();
+        extra_request["operation"]["request"]["parent_thread_id"] = serde_json::json!("T-x");
+        assert!(serde_json::from_value::<WorkloadClientRequestFrame>(extra_request).is_err());
+        let mut extra_operation = value.clone();
+        extra_operation["operation"]["session"] = serde_json::json!("T-x");
+        assert!(serde_json::from_value::<WorkloadClientRequestFrame>(extra_operation).is_err());
+        let mut extra_frame = value.clone();
+        extra_frame["source"] = serde_json::json!("cli");
+        assert!(serde_json::from_value::<WorkloadClientRequestFrame>(extra_frame).is_err());
+        // The id is required.
+        let mut missing = value;
+        missing["operation"]["request"] = serde_json::json!({});
+        assert!(serde_json::from_value::<WorkloadClientRequestFrame>(missing).is_err());
+    }
+
+    #[test]
+    fn collect_request_refuses_a_non_canonical_thread_id() {
+        let too_long = format!("T-{}", "a".repeat(200));
+        for bad in [
+            "",
+            "T-",
+            "child",
+            "T-has space",
+            "T-../escape",
+            "t-lowercase-prefix",
+            too_long.as_str(),
+        ] {
+            assert!(collect_frame(bad).validate().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn collect_result_is_bounded_and_never_cut_to_fit() {
+        let child = |result: Option<WorkloadClientCollectedResult>| WorkloadClientCollectedChild {
+            thread_id: CHILD.to_owned(),
+            status: "completed".to_owned(),
+            kind: "tool".to_owned(),
+            item_ref: "tool:project/check".to_owned(),
+            created_at: "2026-11-25T00:00:00Z".to_owned(),
+            started_at: None,
+            finished_at: None,
+            result,
+        };
+        // No result (a running child) always fits.
+        child(None).validate().unwrap();
+        let within = child(Some(WorkloadClientCollectedResult {
+            outcome_code: Some("ok".to_owned()),
+            result: Some(serde_json::json!("x".repeat(1024))),
+            error: None,
+        }));
+        within.validate().unwrap();
+        let oversize = child(Some(WorkloadClientCollectedResult {
+            outcome_code: None,
+            result: Some(serde_json::json!(
+                "x".repeat(MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES)
+            )),
+            error: None,
+        }));
+        assert!(!oversize.result_within_cap().unwrap());
+        assert!(oversize.validate().is_err());
+        // The cap covers the result and the error together.
+        let split = child(Some(WorkloadClientCollectedResult {
+            outcome_code: None,
+            result: Some(serde_json::json!(
+                "x".repeat(MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES / 2)
+            )),
+            error: Some(serde_json::json!(
+                "y".repeat(MAX_WORKLOAD_CLIENT_COLLECT_RESULT_BYTES / 2)
+            )),
+        }));
+        assert!(!split.result_within_cap().unwrap());
+        let frame = WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: WorkloadClientOutcome::Collected { child: oversize },
+        };
+        assert!(frame.validate().is_err());
+        let ok = WorkloadClientResponseFrame {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            request_id: "collect-1".to_owned(),
+            outcome: WorkloadClientOutcome::Collected { child: within },
+        };
+        ok.validate().unwrap();
+        assert!(!ok.outcome.succeeded());
+        // The response decoder is as strict as the request decoder.
+        let mut value = serde_json::to_value(&ok).unwrap();
+        value["outcome"]["child"]["project_root"] = serde_json::json!("/home/x");
+        assert!(serde_json::from_value::<WorkloadClientResponseFrame>(value).is_err());
+    }
+
+    #[test]
+    fn collect_opt_in_is_absent_from_the_wire_unless_set_and_needs_detach() {
+        let plain = serde_json::to_value(execution("tool:project/check")).unwrap();
+        assert!(plain.get("collect").is_none());
+        let mut collecting = execution("tool:project/check");
+        collecting.detached = true;
+        collecting.collect = true;
+        let value = serde_json::to_value(&collecting).unwrap();
+        assert_eq!(value["collect"], serde_json::json!(true));
+        let decoded: WorkloadClientExecutionCeiling = serde_json::from_value(value).unwrap();
+        assert!(decoded.collect);
+        validate_execution_ceilings(&[collecting.clone()]).unwrap();
+        // Collecting children an item cannot launch is not a grant.
+        collecting.detached = false;
+        assert!(validate_execution_ceilings(&[collecting]).is_err());
+    }
+
+    #[test]
+    fn node_policy_still_refuses_a_detached_collecting_execution() {
+        let policy = WorkloadClientNodePolicy {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            delegation_cap_ceiling: vec!["ryeos.execute.*".to_owned()],
+            allowed_effect_classes: vec!["live".to_owned()],
+            allowed_workspace_access: vec![
+                ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+            ],
+            max_executions: 1,
+            max_ref_bindings_per_execution: 0,
+            max_calls_per_execution: 1,
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        let mut collecting = execution("tool:project/check");
+        collecting.detached = true;
+        collecting.collect = true;
+        let error = policy
+            .admit_request(&request(vec![collecting]))
+            .unwrap_err();
+        assert!(error.to_string().contains("detached"), "{error:#}");
+    }
+
+    #[test]
     fn bounded_frame_refuses_declared_size_before_payload_read_or_allocation() {
         let mut input = std::io::Cursor::new(4097_u32.to_be_bytes());
         let error = read_frame_bounded::<_, serde_json::Value>(&mut input, 4096).unwrap_err();
@@ -1249,5 +1631,80 @@ mod tests {
             .collect();
         let error = request(vec![oversized]).validate().unwrap_err();
         assert!(error.to_string().contains("retained fact bound"));
+    }
+
+    #[test]
+    fn the_secret_floor_matches_raw_escaped_and_numeric_forms() {
+        let secret = "sk-live-0123456789";
+        let secrets = [secret.to_owned()];
+        // Raw inside a string, inside a nested key, and inside a number.
+        assert!(value_contains_secret(
+            &serde_json::json!({"a": [format!("prefix {secret} suffix")]}),
+            &secrets
+        ));
+        let mut keyed = serde_json::Map::new();
+        keyed.insert(secret.to_owned(), serde_json::json!(1));
+        assert!(value_contains_secret(&Value::Object(keyed), &secrets));
+        assert!(value_contains_secret(
+            &serde_json::json!({"n": 1234567890123_u64}),
+            &["1234567890123".to_owned()]
+        ));
+        // A result without it passes.
+        assert!(!value_contains_secret(
+            &serde_json::json!({"answer": 42, "text": "nothing here"}),
+            &secrets
+        ));
+        assert!(!value_contains_secret(&serde_json::json!(null), &secrets));
+        // The JSON-escaped form: the secret holds a quote and a backslash, and
+        // the child printed an already-serialized document that holds it.
+        let tricky = "pa\"ss\\word-1234".to_owned();
+        let doc = serde_json::json!({"echo": serde_json::to_string(&tricky).unwrap()});
+        assert!(value_contains_secret(&doc, std::slice::from_ref(&tricky)));
+    }
+
+    #[test]
+    fn the_secret_floor_matches_the_ascii_escaped_unicode_form() {
+        let secret = "clé-secrète-été".to_owned();
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": secret.clone()}),
+            std::slice::from_ref(&secret)
+        ));
+        let escaped = "cl\\u00e9-secr\\u00e8te-\\u00e9t\\u00e9";
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": escaped}),
+            std::slice::from_ref(&secret)
+        ));
+        let upper = escaped.replace("00e", "00E");
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": upper}),
+            std::slice::from_ref(&secret)
+        ));
+        // A supplementary-plane character is escaped as a surrogate pair.
+        let astral = "key-\u{1F511}-material".to_owned();
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": "key-\\ud83d\\udd11-material"}),
+            std::slice::from_ref(&astral)
+        ));
+    }
+
+    #[test]
+    fn the_secret_floor_skips_values_below_its_minimum_length() {
+        let short = "abc1234".to_owned();
+        assert_eq!(short.len(), MIN_COLLECT_SECRET_FLOOR_BYTES - 1);
+        assert!(!value_contains_secret(
+            &serde_json::json!({"x": "contains abc1234 text"}),
+            std::slice::from_ref(&short)
+        ));
+        let exact = "abc12345".to_owned();
+        assert_eq!(exact.len(), MIN_COLLECT_SECRET_FLOOR_BYTES);
+        assert!(value_contains_secret(
+            &serde_json::json!({"x": "contains abc12345 text"}),
+            std::slice::from_ref(&exact)
+        ));
+        // No secrets, or only short ones, never withholds anything.
+        assert!(!value_contains_secret::<String>(
+            &serde_json::json!("anything"),
+            &[]
+        ));
     }
 }

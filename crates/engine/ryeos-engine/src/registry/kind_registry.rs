@@ -1138,20 +1138,139 @@ pub struct EffectiveValidatorDecl {
     pub config: Value,
 }
 
+/// A fixed durable-effect declaration a kind makes for every subject it owns,
+/// instead of reading an authored field.
+///
+/// `none` is the preflight-only declaration "no direct tool-call effect of its
+/// own". It says nothing about effects performed by anything the subject later
+/// dispatches (each dispatched tool is judged against its own declaration) or
+/// by a model call a launch seals (judged at launch by the sealed external
+/// effect authority against the ceiling). It is never written into a capsule
+/// or receipt, which carry only `recorded` or `sealed`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectClassConstant {
+    #[serde(rename = "none")]
+    NoDirectEffect,
+    Recorded,
+    Sealed,
+    Live,
+}
+
+impl EffectClassConstant {
+    /// The class label an admitting list names, or `None` for `none`, which
+    /// is not a class.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::NoDirectEffect => None,
+            Self::Recorded => Some("recorded"),
+            Self::Sealed => Some("sealed"),
+            Self::Live => Some("live"),
+        }
+    }
+}
+
+/// Where a kind's durable-effect ceiling comes from: an authored field of the
+/// composed subject, or a fixed value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectClassSource {
+    Path(Vec<String>),
+    Constant(EffectClassConstant),
+}
+
 /// Signed mechanical projection of a subject's durable-effect ceiling.
 /// The path is kind-owned; generic dispatch code reads only the projected
-/// class vocabulary and never names the authored field.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+/// class vocabulary and never names the authored field. A declaration is
+/// either a `path` or a `constant`, never both and never neither; either
+/// mistake refuses the kind schema at load.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "EffectClassCeilingWire", into = "EffectClassCeilingWire")]
 pub struct EffectClassCeilingDecl {
-    pub path: Vec<String>,
+    pub source: EffectClassSource,
     /// The highest class this kind admits on the authored field alone. A
     /// subject that projects above it keeps its authored ceiling, but a
     /// request for a class above this cap is refused
     /// (`durable_effect_sealed_unqualified`) until qualification evidence for
     /// the subject exists. Absent, the projected class is admitted as is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Only a `path` declaration can carry it.
     pub unproven_max: Option<ryeos_effect_contract::EffectClass>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectClassCeilingWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    constant: Option<EffectClassConstant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unproven_max: Option<ryeos_effect_contract::EffectClass>,
+}
+
+impl TryFrom<EffectClassCeilingWire> for EffectClassCeilingDecl {
+    type Error = String;
+
+    fn try_from(wire: EffectClassCeilingWire) -> Result<Self, String> {
+        let source = match (wire.path, wire.constant) {
+            (Some(path), None) => EffectClassSource::Path(path),
+            (None, Some(constant)) => {
+                if wire.unproven_max.is_some() {
+                    return Err("`unproven_max` applies only to a `path` declaration".to_owned());
+                }
+                EffectClassSource::Constant(constant)
+            }
+            (Some(_), Some(_)) => {
+                return Err("`path` and `constant` are mutually exclusive".to_owned());
+            }
+            (None, None) => return Err("declares neither `path` nor `constant`".to_owned()),
+        };
+        Ok(Self {
+            source,
+            unproven_max: wire.unproven_max,
+        })
+    }
+}
+
+impl From<EffectClassCeilingDecl> for EffectClassCeilingWire {
+    fn from(decl: EffectClassCeilingDecl) -> Self {
+        let (path, constant) = match decl.source {
+            EffectClassSource::Path(path) => (Some(path), None),
+            EffectClassSource::Constant(constant) => (None, Some(constant)),
+        };
+        Self {
+            path,
+            constant,
+            unproven_max: decl.unproven_max,
+        }
+    }
+}
+
+/// A subject's durable-effect ceiling as the kind projects it. Preflight-only:
+/// it is never persisted, hashed or sealed, and `Class` is the only form that
+/// reaches the capsule/receipt vocabulary.
+///
+/// `Undeclared` (no declaration on the kind, or the declared path absent on
+/// the item) and a declared `Live` are different facts that act alike for an
+/// inline call and differ under a thread ceiling, which refuses the former.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectedEffectClass {
+    #[default]
+    Undeclared,
+    NoDirectEffect,
+    Class(ryeos_effect_contract::EffectClass),
+    Live,
+}
+
+impl ProjectedEffectClass {
+    /// The durable class a capsule or receipt may name for this subject.
+    pub fn durable_class(self) -> Option<ryeos_effect_contract::EffectClass> {
+        match self {
+            Self::Class(class) => Some(class),
+            Self::Undeclared | Self::NoDirectEffect | Self::Live => None,
+        }
+    }
 }
 
 /// Workspace relationship selected by an exact signed child definition.
@@ -1168,12 +1287,78 @@ pub enum WorkspaceAccess {
     SharedExclusive,
 }
 
+/// A fixed workspace declaration a kind makes for every subject it owns.
+/// `none` means "no direct workspace use of its own", nothing wider: whatever
+/// the subject dispatches is judged against that target's own declaration.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum WorkspaceAccessConstant {
+    #[serde(rename = "none")]
+    NoDirect,
+}
+
+/// Where a kind's workspace access comes from: an authored field of the
+/// composed subject, or a fixed value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceAccessSource {
+    Path(Vec<String>),
+    Constant(WorkspaceAccessConstant),
+}
+
 /// Kind-owned mechanical projection of [`WorkspaceAccess`]. The engine never
-/// names a tool, provider, worker, or authored field directly.
+/// names a tool, provider, worker, or authored field directly. A declaration
+/// is either a `path` or a `constant`, never both and never neither.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "WorkspaceAccessWire", into = "WorkspaceAccessWire")]
+pub struct WorkspaceAccessDecl {
+    pub source: WorkspaceAccessSource,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceAccessDecl {
-    pub path: Vec<String>,
+struct WorkspaceAccessWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    constant: Option<WorkspaceAccessConstant>,
+}
+
+impl TryFrom<WorkspaceAccessWire> for WorkspaceAccessDecl {
+    type Error = String;
+
+    fn try_from(wire: WorkspaceAccessWire) -> Result<Self, String> {
+        let source = match (wire.path, wire.constant) {
+            (Some(path), None) => WorkspaceAccessSource::Path(path),
+            (None, Some(constant)) => WorkspaceAccessSource::Constant(constant),
+            (Some(_), Some(_)) => {
+                return Err("`path` and `constant` are mutually exclusive".to_owned());
+            }
+            (None, None) => return Err("declares neither `path` nor `constant`".to_owned()),
+        };
+        Ok(Self { source })
+    }
+}
+
+impl From<WorkspaceAccessDecl> for WorkspaceAccessWire {
+    fn from(decl: WorkspaceAccessDecl) -> Self {
+        let (path, constant) = match decl.source {
+            WorkspaceAccessSource::Path(path) => (Some(path), None),
+            WorkspaceAccessSource::Constant(constant) => (None, Some(constant)),
+        };
+        Self { path, constant }
+    }
+}
+
+/// A subject's workspace relationship as the kind projects it. Preflight-only.
+/// `Undeclared` is deny-all for workload-delegated access and is refused under
+/// a thread ceiling; `NoDirect` is a declared absence of direct workspace use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectedWorkspaceAccess {
+    #[default]
+    Undeclared,
+    NoDirect,
+    Access(WorkspaceAccess),
 }
 
 /// Signed mechanical projection of whether a subject declares the
@@ -1738,16 +1923,16 @@ impl ExecutionSchema {
             }
         }
         let effect = match self.effect_class_ceiling.as_ref() {
-            Some(effect) => lookup(&effect.path)
-                .map(|value| {
-                    value.as_str().map(str::to_owned).ok_or_else(|| {
-                        refused(format!(
-                            "effect class `{}` is not a string",
-                            effect.path.join(".")
-                        ))
+            Some(effect) => match &effect.source {
+                EffectClassSource::Path(path) => lookup(path)
+                    .map(|value| {
+                        value.as_str().map(str::to_owned).ok_or_else(|| {
+                            refused(format!("effect class `{}` is not a string", path.join(".")))
+                        })
                     })
-                })
-                .transpose()?,
+                    .transpose()?,
+                EffectClassSource::Constant(constant) => constant.label().map(str::to_owned),
+            },
             None => None,
         };
         if let Some(effect) = effect
@@ -1843,22 +2028,30 @@ impl ExecutionSchema {
     pub fn project_workspace_access(
         &self,
         composed: &Value,
-    ) -> Result<Option<WorkspaceAccess>, EngineError> {
+    ) -> Result<ProjectedWorkspaceAccess, EngineError> {
         let Some(declaration) = self.workspace_access.as_ref() else {
-            return Ok(None);
+            return Ok(ProjectedWorkspaceAccess::Undeclared);
+        };
+        let path = match &declaration.source {
+            WorkspaceAccessSource::Constant(WorkspaceAccessConstant::NoDirect) => {
+                return Ok(ProjectedWorkspaceAccess::NoDirect);
+            }
+            WorkspaceAccessSource::Path(path) => path,
         };
         let mut value = composed;
-        for segment in &declaration.path {
+        for segment in path {
             let Some(next) = value.get(segment) else {
-                return Ok(None);
+                return Ok(ProjectedWorkspaceAccess::Undeclared);
             };
             value = next;
         }
         match value.as_str() {
-            Some("immutable_current_generation") => {
-                Ok(Some(WorkspaceAccess::ImmutableCurrentGeneration))
-            }
-            Some("shared_exclusive") => Ok(Some(WorkspaceAccess::SharedExclusive)),
+            Some("immutable_current_generation") => Ok(ProjectedWorkspaceAccess::Access(
+                WorkspaceAccess::ImmutableCurrentGeneration,
+            )),
+            Some("shared_exclusive") => Ok(ProjectedWorkspaceAccess::Access(
+                WorkspaceAccess::SharedExclusive,
+            )),
             Some(other) => Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "signed workspace-access projection contains unknown value `{other}`"
@@ -1867,7 +2060,7 @@ impl ExecutionSchema {
             None => Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "signed workspace-access projection `{}` resolved to a non-string value",
-                    declaration.path.join(".")
+                    path.join(".")
                 ),
             }),
         }
@@ -2050,6 +2243,25 @@ pub struct KindSchema {
     /// Whether a runtime may author or remove items of this kind through the
     /// daemon-mediated authoring callback. Absent means it may.
     pub runtime_authoring: RuntimeAuthoring,
+    /// Whether a standing endorsement may name this kind. Absent means it may
+    /// not: a standing endorsement trusts everything the authoring key signs
+    /// of the kind, which is safe only for kinds that never execute or act.
+    pub standing_endorsement: StandingEndorsement,
+}
+
+/// The signed, kind-owned answer to whether a standing endorsement may name
+/// the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandingEndorsement {
+    /// No standing endorsement may name the kind; an operator approves its
+    /// items one change at a time, by digest.
+    #[default]
+    Refused,
+    /// An operator may endorse the kind as a standing grant: its items carry
+    /// no process, tool or invocation, so trusting them in bulk acts on
+    /// nothing.
+    Allowed,
 }
 
 /// The signed, kind-owned answer to whether a runtime callback may write items
@@ -2408,6 +2620,17 @@ impl KindRegistry {
     /// Cache-key fingerprint. Changes when kind schema config changes.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// The kinds whose signed schema allows a standing endorsement. The
+    /// answer comes only from this registry, which is the node's installed and
+    /// verified one.
+    pub fn standing_endorsement_kinds(&self) -> Vec<String> {
+        self.schemas
+            .iter()
+            .filter(|(_, schema)| schema.standing_endorsement == StandingEndorsement::Allowed)
+            .map(|(kind, _)| kind.clone())
+            .collect()
     }
 
     /// All registered kind names.
@@ -2829,6 +3052,16 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
         _ => RuntimeAuthoring::default(),
     };
+    let standing_endorsement = match data.get("standing_endorsement") {
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<StandingEndorsement>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `standing_endorsement`: {error}"),
+                }
+            })?
+        }
+        _ => StandingEndorsement::default(),
+    };
     let root_executable = execution
         .as_ref()
         .and_then(|execution| execution.thread_profile.as_ref())
@@ -2874,6 +3107,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         launch_trust,
         project_shadowing,
         runtime_authoring,
+        standing_endorsement,
     })
 }
 
@@ -2943,6 +3177,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "launch_trust",
     "project_shadowing",
     "runtime_authoring",
+    "standing_endorsement",
     "thread_profile",
 ];
 
@@ -3727,11 +3962,8 @@ fn parse_execution_schema(
                         "{display}: invalid execution.effect_class_ceiling declaration: {error}"
                     ),
                 })?;
-            if declaration.path.is_empty()
-                || declaration
-                    .path
-                    .iter()
-                    .any(|segment| segment.trim().is_empty())
+            if let EffectClassSource::Path(path) = &declaration.source
+                && (path.is_empty() || path.iter().any(|segment| segment.trim().is_empty()))
             {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
@@ -3752,11 +3984,11 @@ fn parse_execution_schema(
                         "{display}: invalid execution.workspace_access declaration: {error}"
                     ),
                 })?;
-            if declaration.path.is_empty()
-                || declaration
-                    .path
-                    .iter()
-                    .any(|segment| segment.trim().is_empty() || segment.contains('.'))
+            if let WorkspaceAccessSource::Path(path) = &declaration.source
+                && (path.is_empty()
+                    || path
+                        .iter()
+                        .any(|segment| segment.trim().is_empty() || segment.contains('.')))
             {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
@@ -5385,6 +5617,39 @@ formats:
     }
 
     #[test]
+    fn standing_endorsement_defaults_to_refused_and_a_kind_can_allow_it() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let allowing = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nstanding_endorsement: allowed\n";
+        sign_and_write_schema(&tmp, "note", allowing, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry.get("directive").unwrap().standing_endorsement,
+            StandingEndorsement::Refused
+        );
+        assert_eq!(
+            registry.get("note").unwrap().standing_endorsement,
+            StandingEndorsement::Allowed
+        );
+    }
+
+    #[test]
+    fn standing_endorsement_with_an_unknown_value_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let bad = "location:\n  directory: notes\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nstanding_endorsement: sometimes\n";
+        sign_and_write_schema(&tmp, "note", bad, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains("standing_endorsement"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn runtime_authoring_with_an_unknown_value_is_refused() {
         let tmp = tempdir();
         let sk = test_signing_key();
@@ -6697,7 +6962,10 @@ execution:
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         let ceiling = exec.effect_class_ceiling.expect("ceiling declared");
-        assert_eq!(ceiling.path, vec!["effects".to_owned()]);
+        assert_eq!(
+            ceiling.source,
+            EffectClassSource::Path(vec!["effects".to_owned()])
+        );
         assert_eq!(
             ceiling.unproven_max,
             Some(ryeos_effect_contract::EffectClass::Recorded)
@@ -6737,6 +7005,276 @@ execution:
                 other => panic!("{unknown}: unexpected error {other:?}"),
             }
         }
+    }
+
+    const NONE_EXECUTION_HEAD: &str = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+";
+
+    fn parse_declaration(key: &str, body: &str) -> Result<ExecutionSchema, EngineError> {
+        let yaml = format!("{NONE_EXECUTION_HEAD}  {key}:\n{body}");
+        Ok(parse_exec(&yaml)?.expect("execution present"))
+    }
+
+    fn assert_refused(key: &str, body: &str, expected: &str) {
+        match parse_declaration(key, body) {
+            Err(EngineError::SchemaLoaderError { reason }) => {
+                assert!(
+                    reason.contains(&format!("invalid execution.{key} declaration"))
+                        && reason.contains(expected),
+                    "{key} {body:?}: {reason}"
+                );
+            }
+            other => panic!("{key} {body:?}: expected a typed load refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_class_ceiling_accepts_a_constant_form() {
+        for (value, expected) in [
+            ("none", EffectClassConstant::NoDirectEffect),
+            ("recorded", EffectClassConstant::Recorded),
+            ("sealed", EffectClassConstant::Sealed),
+            ("live", EffectClassConstant::Live),
+        ] {
+            let execution =
+                parse_declaration("effect_class_ceiling", &format!("    constant: {value}\n"))
+                    .unwrap();
+            let decl = execution.effect_class_ceiling.expect("declared");
+            assert_eq!(decl.source, EffectClassSource::Constant(expected));
+            assert_eq!(decl.unproven_max, None);
+        }
+    }
+
+    #[test]
+    fn workspace_access_accepts_the_none_constant() {
+        let execution = parse_declaration("workspace_access", "    constant: none\n").unwrap();
+        let decl = execution.workspace_access.clone().expect("declared");
+        assert_eq!(
+            decl.source,
+            WorkspaceAccessSource::Constant(WorkspaceAccessConstant::NoDirect)
+        );
+        assert_eq!(
+            execution
+                .project_workspace_access(&serde_json::json!({}))
+                .unwrap(),
+            ProjectedWorkspaceAccess::NoDirect
+        );
+    }
+
+    #[test]
+    fn constant_declarations_refuse_malformed_forms_typed_at_load() {
+        // Both `path` and `constant`.
+        assert_refused(
+            "effect_class_ceiling",
+            "    path: [effects]\n    constant: none\n",
+            "mutually exclusive",
+        );
+        assert_refused(
+            "workspace_access",
+            "    path: [workspace_access]\n    constant: none\n",
+            "mutually exclusive",
+        );
+        // Neither.
+        assert_refused("effect_class_ceiling", "    {}\n", "neither");
+        assert_refused("workspace_access", "    {}\n", "neither");
+        // An unknown constant, and one the vocabulary does not have for the
+        // surface.
+        assert_refused("effect_class_ceiling", "    constant: bogus\n", "bogus");
+        assert_refused("workspace_access", "    constant: bogus\n", "bogus");
+        assert_refused(
+            "workspace_access",
+            "    constant: shared_exclusive\n",
+            "shared_exclusive",
+        );
+        // A null constant is not a declaration.
+        assert_refused("effect_class_ceiling", "    constant: null\n", "neither");
+        // `unproven_max` belongs to a path declaration.
+        assert_refused(
+            "effect_class_ceiling",
+            "    constant: none\n    unproven_max: recorded\n",
+            "unproven_max",
+        );
+        // Unknown keys stay refused.
+        assert_refused(
+            "effect_class_ceiling",
+            "    constant: none\n    extra: 1\n",
+            "extra",
+        );
+        assert_refused(
+            "workspace_access",
+            "    constant: none\n    default: none\n",
+            "default",
+        );
+    }
+
+    #[test]
+    fn a_malformed_declaration_is_a_load_error_never_an_absent_one() {
+        // Absent means undeclared; a present but malformed declaration must
+        // refuse the schema rather than collapse to absence.
+        for (key, body) in [
+            ("effect_class_ceiling", "    constant: none\n    path: []\n"),
+            ("effect_class_ceiling", "    constant: NONE\n"),
+            ("workspace_access", "    constant: \"\"\n"),
+            ("workspace_access", "    constant: [none]\n"),
+        ] {
+            assert!(parse_declaration(key, body).is_err(), "{key} {body:?}");
+        }
+        let undeclared = parse_exec(NONE_EXECUTION_HEAD).unwrap().unwrap();
+        assert!(undeclared.effect_class_ceiling.is_none());
+        assert!(undeclared.workspace_access.is_none());
+        assert_eq!(
+            undeclared
+                .project_workspace_access(&serde_json::json!({}))
+                .unwrap(),
+            ProjectedWorkspaceAccess::Undeclared
+        );
+    }
+
+    #[test]
+    fn a_path_declaration_projects_undeclared_when_absent_and_never_reads_none_from_an_item() {
+        let execution =
+            parse_declaration("workspace_access", "    path: [workspace_access]\n").unwrap();
+        assert_eq!(
+            execution
+                .project_workspace_access(&serde_json::json!({}))
+                .unwrap(),
+            ProjectedWorkspaceAccess::Undeclared
+        );
+        assert_eq!(
+            execution
+                .project_workspace_access(
+                    &serde_json::json!({"workspace_access": "immutable_current_generation"})
+                )
+                .unwrap(),
+            ProjectedWorkspaceAccess::Access(WorkspaceAccess::ImmutableCurrentGeneration)
+        );
+        // `none` is the kind's declaration, never an authored item value.
+        assert!(
+            execution
+                .project_workspace_access(&serde_json::json!({"workspace_access": "none"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn declarations_round_trip_through_their_wire_form() {
+        let yaml = "\
+path: [effects]
+unproven_max: recorded
+";
+        let decl: EffectClassCeilingDecl = serde_yaml::from_str(yaml).unwrap();
+        let back = serde_yaml::to_string(&decl).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<EffectClassCeilingDecl>(&back).unwrap(),
+            decl
+        );
+        let decl: EffectClassCeilingDecl = serde_yaml::from_str("constant: none\n").unwrap();
+        assert_eq!(
+            serde_yaml::to_string(&decl).unwrap().trim(),
+            "constant: none"
+        );
+        let decl: WorkspaceAccessDecl = serde_yaml::from_str("constant: none\n").unwrap();
+        assert_eq!(
+            serde_yaml::to_string(&decl).unwrap().trim(),
+            "constant: none"
+        );
+    }
+
+    const NONE_KIND_SCHEMA: &str = "\
+location:
+  directory: directives
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  effect_class_ceiling:
+    constant: none
+  workspace_access:
+    constant: none
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+";
+
+    const PLAIN_KIND_SCHEMA: &str = "\
+location:
+  directory: directives
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+";
+
+    #[test]
+    fn a_kind_schema_declaring_none_loads_only_from_a_trusted_signer() {
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+
+        let trusted = tempdir();
+        sign_and_write_schema(&trusted, "directive", NONE_KIND_SCHEMA, &sk);
+        let registry = KindRegistry::load_base(std::slice::from_ref(&trusted), &ts).unwrap();
+        let execution = registry
+            .get("directive")
+            .and_then(|schema| schema.execution.as_ref())
+            .expect("execution declared");
+        assert_eq!(
+            execution.effect_class_ceiling.as_ref().unwrap().source,
+            EffectClassSource::Constant(EffectClassConstant::NoDirectEffect)
+        );
+
+        // A signer outside the trust store is refused before the declaration
+        // is read.
+        let untrusted = tempdir();
+        let other = SigningKey::from_bytes(&[7u8; 32]);
+        sign_and_write_schema(&untrusted, "directive", NONE_KIND_SCHEMA, &other);
+        let error = KindRegistry::load_base(&[untrusted], &ts).unwrap_err();
+        assert!(
+            matches!(error, EngineError::UntrustedSigner { .. }),
+            "{error:?}"
+        );
+
+        // An unsigned schema is refused too.
+        let unsigned = tempdir();
+        let kind_dir = unsigned.join("directive");
+        fs::create_dir_all(&kind_dir).unwrap();
+        fs::write(
+            kind_dir.join("directive.kind-schema.yaml"),
+            NONE_KIND_SCHEMA,
+        )
+        .unwrap();
+        let error = KindRegistry::load_base(&[unsigned], &ts).unwrap_err();
+        assert!(
+            matches!(error, EngineError::SignatureMissing { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_later_root_cannot_redefine_a_kind_to_declare_none() {
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let first = tempdir();
+        sign_and_write_schema(&first, "directive", PLAIN_KIND_SCHEMA, &sk);
+        let later = tempdir();
+        sign_and_write_schema(&later, "directive", NONE_KIND_SCHEMA, &sk);
+        let registry = KindRegistry::load_base(&[first, later], &ts).unwrap();
+        let execution = registry
+            .get("directive")
+            .and_then(|schema| schema.execution.as_ref())
+            .expect("execution declared");
+        assert!(execution.effect_class_ceiling.is_none());
+        assert!(execution.workspace_access.is_none());
     }
 
     #[test]
