@@ -1505,12 +1505,16 @@ jobs:
           log="$RUNNER_TEMP/long-e2e.log"
           cargo test -p ryeosd --locked --features scheduling,model-provider-setup \
             --test capacity_rollover_e2e -- --ignored --exact \
-            twenty_one_rollovers_renew_the_epoch_without_exhausting --test-threads 1 2>&1 | tee "$log"
+            twenty_one_rollovers_renew_the_epoch_without_exhausting --test-threads 1 --nocapture 2>&1 | tee "$log"
           [[ "${PIPESTATUS[0]}" == 0 ]] || { echo "FAIL: the rollover test failed" >&2; exit 1; }
           if grep -qi 'skipped' "$log"; then
             echo "FAIL: the rollover test printed a skip, so the proof did not run" >&2; exit 1
           fi
           grep -q '^test result: ok\. 1 passed; 0 failed' "$log" || { echo "FAIL: expected exactly one passed test" >&2; exit 1; }
+          # Twenty-one 150 s service windows take about fifty minutes; a pass that
+          # finished in minutes did not run the loop.
+          seconds="$(sed -n 's/^test result: ok\. 1 passed.*finished in \([0-9.]*\)s$/\1/p' "$log" | tail -n 1)"
+          awk -v s="${seconds:-0}" 'BEGIN { exit !(s >= 1800) }' || { echo "FAIL: the test finished in ${seconds:-none}s, under 1800s: the rollover loop did not run" >&2; exit 1; }
 
   test:
     name: Workspace tests
