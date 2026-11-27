@@ -148,7 +148,11 @@ mod tests {
 
     #[test]
     fn a_floor_that_cannot_be_built_refuses_the_caller() {
-        let refused = floor_for(false, || anyhow::bail!("store unreadable")).unwrap_err();
+        // The floor holds secret values and is never Debug, so the refusal
+        // is matched out rather than unwrapped.
+        let Err(refused) = floor_for(false, || anyhow::bail!("store unreadable")) else {
+            panic!("a floor that cannot be built must refuse the caller");
+        };
         match refused {
             RouteDispatchError::Structured {
                 code, status, body, ..

@@ -1578,6 +1578,7 @@ mod tests {
                     json: None,
                 },
                 default_response_bytes_max(),
+                None,
             )
             .unwrap_err()
             .to_string();
