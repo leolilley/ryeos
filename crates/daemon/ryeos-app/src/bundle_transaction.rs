@@ -272,8 +272,30 @@ impl BundleTransaction {
                 } else if journal.phase == BundlePhase::Activated {
                     anyhow::bail!("activated bundle transaction target digest mismatch");
                 } else if operation == BundleOperation::Replace {
-                    // Prepared replacement did not activate: preserve the old complete
-                    // registered generation and discard only the staged candidate.
+                    // The target is not the journal's generation. Either the
+                    // exchange was never made (the staging path still holds the
+                    // journal's generation and the target is the previous one),
+                    // or it was made and the moved tree then changed (the
+                    // staging path holds the previous generation). Only the
+                    // staging path's digest tells them apart.
+                    let staging = journal
+                        .staging_path
+                        .as_deref()
+                        .context("replace transaction has no staging path")?;
+                    if !staging.is_dir() {
+                        anyhow::bail!(
+                            "prepared replacement matches neither generation: the target differs from the journal and its staging path is missing"
+                        );
+                    }
+                    if tree_digest(staging)? != expected {
+                        // The exchange was made: put the previous generation
+                        // back; the changed tree then sits at the staging path
+                        // and is removed below.
+                        lillux::atomic_exchange_paths(&self.target, staging)
+                            .context("swap the previous generation back into place")?;
+                    }
+                    // Otherwise nothing was activated: preserve the previous
+                    // registered generation and discard the staged candidate.
                 } else {
                     self.remove_registration()?;
                     lillux::remove_dir_all_durable(&self.target)?;

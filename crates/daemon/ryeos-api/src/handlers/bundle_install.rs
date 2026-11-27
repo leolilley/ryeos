@@ -2029,6 +2029,51 @@ mod tests {
     }
 
     #[test]
+    fn an_unrecorded_undo_of_a_replacement_reconciles_back_to_the_previous_generation() {
+        // The exchange was made, the moved tree was then changed, and the undo
+        // could not even be recorded: the journal is still prepared, the target
+        // holds the changed tree and the staging path holds the previous
+        // generation. Reconciliation must put the previous generation back
+        // under its registration, not discard it.
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _bundles, target, key) = atomic_fixture(tmp.path());
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("new.txt"), b"new").unwrap();
+        let registration = tmp.path().join(".ai/node/bundles/demo.yaml");
+        fs::create_dir_all(registration.parent().unwrap()).unwrap();
+        fs::write(&registration, b"previous registration").unwrap();
+        let registry_lock =
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = acquire(tmp.path(), &registry_lock);
+
+        MARK_FAULT.with(|fault| fault.set(true));
+        let _ = replace_dir_atomic(
+            &src,
+            &target,
+            false,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |_| Ok(()),
+            |moved| {
+                fs::write(moved.join("new.txt"), b"changed")?;
+                anyhow::bail!("refused")
+            },
+        )
+        .expect_err("refused");
+        MARK_FAULT.with(|fault| fault.set(false));
+        // Nothing was undone: the changed tree is in the target.
+        assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"changed");
+
+        transaction.reconcile(&key).unwrap();
+        assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
+        assert!(!target.join("new.txt").exists());
+        assert_eq!(fs::read(&registration).unwrap(), b"previous registration");
+        assert_eq!(transaction.reconcile(&key).unwrap(), None);
+    }
+
+    #[test]
     fn a_failed_undo_of_a_replacement_reconciles_back_to_the_previous_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let (src, _bundles, target, key) = atomic_fixture(tmp.path());
