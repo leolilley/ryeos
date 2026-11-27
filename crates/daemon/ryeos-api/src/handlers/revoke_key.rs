@@ -313,6 +313,7 @@ mod tests {
             "2026-01-01T00:00:00Z",
             &ryeos_node_runtime::identity::GrantTerms {
                 expires_at: GrantExpiry::At(4_000_000_000),
+                offline_constraints: Vec::new(),
                 authorized_by: AuthorizedBy::principal_request(granted_by, None),
             },
             state.identity.signing_key(),

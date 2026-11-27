@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, bail, ensure};
-use ryeos_node_runtime::identity::{NodeIdentity, OFFLINE_OPERATION_SCOPE_PREFIX};
+use ryeos_node_runtime::identity::{
+    NodeIdentity, OFFLINE_OPERATION_SCOPE_PREFIX, OfflineConstraint,
+};
 use ryeos_node_runtime::state_lock::StateLock;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -180,6 +182,14 @@ pub struct OperationSpec {
     pub authority_bearing: bool,
     /// Only the node's local operator may sign it.
     pub local_signer_only: bool,
+    /// A delegated grant must carry at least one constraint for this
+    /// operation's scope, or the request is refused: an unconstrained grant
+    /// can never apply it.
+    pub requires_grant_constraint: bool,
+    /// The closed set of JSON pointers into the request's arguments that a
+    /// grant constraint on this operation may bind. A constraint on any other
+    /// pointer is refused at issue and at check.
+    pub bindable_arguments: &'static [&'static str],
     /// Applied alone in its startup: nothing is applied before it in the same
     /// startup, and nothing after.
     pub alone: bool,
@@ -216,12 +226,15 @@ fn arguments_of<T: DeserializeOwned>(request: &RequestBody) -> Result<()> {
 }
 
 const NO_INPUTS: &[InputSlot] = &[];
+const NO_BINDABLE_ARGUMENTS: &[&str] = &[];
 
 static OPERATIONS: &[OperationSpec] = &[
     OperationSpec {
         id: "node.reset.policy-generation",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_POLICY_GENERATION],
@@ -243,6 +256,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.policy-apply",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "policy",
@@ -264,6 +279,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.compose",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[
             InputSlot {
@@ -316,6 +333,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.qualification-session-compose",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[
             InputSlot {
@@ -348,6 +367,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.snapshot-compose",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[
             InputSlot {
@@ -380,6 +401,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.snapshot-qualification-compose",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[
             InputSlot {
@@ -413,6 +436,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.recompose",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "consumer_verifiers",
@@ -434,6 +459,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.external-execution.retire",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_RUNTIME_SNAPSHOTS, FACT_EXTERNAL_EXECUTION],
@@ -451,6 +478,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.capacity.reissue",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -473,6 +502,8 @@ static OPERATIONS: &[OperationSpec] = &[
         // node's own operator may request it and no delegation can cover it.
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -490,6 +521,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.capacity.reanchor",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -507,6 +540,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.allow-restart",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_RESTART_INHIBITION],
@@ -524,6 +559,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.reset.execution-history",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -541,6 +578,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.reset.execution-history-scratch",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -558,6 +597,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.reset.replay-indexes",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -575,6 +616,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.reset.external-content-bindings",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -592,6 +635,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.large-objects.purge-quarantine",
         authority_bearing: false,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -609,6 +654,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.authorize-client",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -630,6 +677,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.remote.pin",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "descriptor",
@@ -655,6 +704,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.bundle.replace",
         authority_bearing: true,
         local_signer_only: false,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "archive",
@@ -680,6 +731,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.bundle-state.export",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -701,6 +754,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.bundle-state.import",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "archive",
@@ -726,6 +781,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.bundle-state.remove",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -750,6 +807,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.reset.authorization",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: true,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -770,6 +829,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.authorization.revoke",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -794,6 +855,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.trust.pin",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "signer",
@@ -819,6 +882,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.trust.scope",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -840,6 +905,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.trust.retire",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -861,6 +928,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.trust.revoke",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -882,6 +951,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.trust.succeed",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "succession",
@@ -903,6 +974,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.operator.rotate",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: true,
         inputs: &[
             InputSlot {
@@ -933,6 +1006,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.authoring.rotate",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: &[InputSlot {
             name: "succession",
@@ -954,6 +1029,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.project.register",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
@@ -975,6 +1052,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.project.unregister",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
@@ -996,6 +1075,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.key.link",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: true,
+        bindable_arguments: &["/link/body/key"],
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -1017,6 +1098,8 @@ static OPERATIONS: &[OperationSpec] = &[
         id: "node.key.unlink",
         authority_bearing: true,
         local_signer_only: true,
+        requires_grant_constraint: false,
+        bindable_arguments: NO_BINDABLE_ARGUMENTS,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -1043,6 +1126,32 @@ pub fn operations() -> &'static [OperationSpec] {
 
 pub fn lookup(id: &str) -> Option<&'static OperationSpec> {
     OPERATIONS.iter().find(|spec| spec.id == id)
+}
+
+/// Check the constraints of a grant about to be issued against this table:
+/// each names a known operation's scope, and binds only a pointer that
+/// operation lets a grant bind. The grant writer checks the constraints'
+/// shape; the table, which only this crate sees, decides what may be bound.
+pub fn validate_grant_constraints(constraints: &[OfflineConstraint]) -> Result<()> {
+    for constraint in constraints {
+        let Some(spec) = operations()
+            .iter()
+            .find(|spec| spec.scope() == constraint.scope)
+        else {
+            bail!(
+                "offline constraint scope `{}` names no operation of this node",
+                constraint.scope
+            );
+        };
+        ensure!(
+            spec.bindable_arguments
+                .contains(&constraint.argument.as_str()),
+            "operation `{}` does not let a grant bind `{}`",
+            spec.id,
+            constraint.argument
+        );
+    }
+    Ok(())
 }
 
 /// Checks that hold for the table itself; run by a test and before the first
@@ -1083,6 +1192,18 @@ pub fn validate_table() -> Result<()> {
                 spec.id
             );
         }
+        for pointer in spec.bindable_arguments {
+            ensure!(
+                ryeos_node_runtime::identity::is_valid_json_pointer(pointer),
+                "operation `{}` lists bindable argument `{pointer}`, which is not a JSON pointer",
+                spec.id
+            );
+        }
+        ensure!(
+            !spec.requires_grant_constraint || !spec.bindable_arguments.is_empty(),
+            "operation `{}` requires a grant constraint but lets a grant bind nothing",
+            spec.id
+        );
         if spec.local_signer_only && !spec.authority_bearing {
             bail!(
                 "operation `{}` is local-signer-only without being authority-bearing",
@@ -1100,6 +1221,44 @@ mod tests {
     #[test]
     fn the_table_is_well_formed() {
         validate_table().unwrap();
+    }
+
+    fn constraint(scope: &str, argument: &str) -> OfflineConstraint {
+        OfflineConstraint {
+            scope: scope.to_owned(),
+            argument: argument.to_owned(),
+            equals: "fp:x".to_owned(),
+            max_uses: 1,
+            not_after: None,
+        }
+    }
+
+    #[test]
+    fn a_grant_may_bind_only_a_pointer_the_operation_lists() {
+        let link = "ryeos.offline.node.key.link";
+        validate_grant_constraints(&[constraint(link, "/link/body/key")]).unwrap();
+        assert!(validate_grant_constraints(&[constraint(link, "/link/body/principal")]).is_err());
+        assert!(validate_grant_constraints(&[constraint(link, "/link")]).is_err());
+        assert!(
+            validate_grant_constraints(&[constraint(
+                "ryeos.offline.node.allow-restart",
+                "/anything"
+            )])
+            .is_err()
+        );
+        assert!(
+            validate_grant_constraints(&[constraint("ryeos.offline.node.nope", "/x")]).is_err()
+        );
+    }
+
+    #[test]
+    fn only_key_link_requires_a_grant_constraint() {
+        let required: Vec<_> = operations()
+            .iter()
+            .filter(|spec| spec.requires_grant_constraint)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(required, ["node.key.link"]);
     }
 
     #[test]

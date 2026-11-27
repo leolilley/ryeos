@@ -112,6 +112,7 @@ pub(crate) fn issuance_terms(
         .map_err(lifetime_refusal)?;
     Ok(GrantTerms {
         expires_at,
+        offline_constraints: Vec::new(),
         authorized_by,
     })
 }

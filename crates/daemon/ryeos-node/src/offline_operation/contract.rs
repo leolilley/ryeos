@@ -394,6 +394,11 @@ pub enum RefusalReason {
     LocalSignerOnly,
     /// Authority-bearing, and the node's signed profile does not delegate it.
     NotDelegable,
+    /// The operation requires a constrained grant and the grant carries no
+    /// constraint for its scope.
+    GrantConstraintMissing,
+    /// A constraint on the grant does not hold for the request.
+    GrantConstraintViolated,
     Expired,
     FromTheFuture,
     InvalidLifetime,
@@ -429,6 +434,8 @@ impl RefusalReason {
             Self::ScopeNotGranted => "scope_not_granted",
             Self::LocalSignerOnly => "local_signer_only",
             Self::NotDelegable => "not_delegable",
+            Self::GrantConstraintMissing => "grant_constraint_missing",
+            Self::GrantConstraintViolated => "grant_constraint_violated",
             Self::Expired => "expired",
             Self::FromTheFuture => "from_the_future",
             Self::InvalidLifetime => "invalid_lifetime",

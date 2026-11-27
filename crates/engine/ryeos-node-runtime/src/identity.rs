@@ -482,11 +482,89 @@ impl AuthorizedBy {
     }
 }
 
+/// A narrowing of one exact offline scope on a grant: the operation it names
+/// may be applied under the grant only while the request's `argument` (a JSON
+/// pointer into the request's arguments) equals `equals`, at most `max_uses`
+/// times, and until `not_after`. A constraint only narrows; it never widens
+/// what the exact scope allows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineConstraint {
+    /// The exact offline scope this constraint narrows.
+    pub scope: String,
+    /// JSON pointer (RFC 6901) into the request's arguments.
+    pub argument: String,
+    /// The exact string the pointed-at argument must equal.
+    pub equals: String,
+    /// Most requests that may be applied under the grant for this operation.
+    pub max_uses: u32,
+    /// Unix seconds after which the constraint no longer admits a request;
+    /// tighter than the grant's own expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<u64>,
+}
+
+/// Whether `pointer` is a non-empty RFC 6901 JSON pointer: it starts with `/`
+/// and every `~` is the start of `~0` or `~1`.
+pub fn is_valid_json_pointer(pointer: &str) -> bool {
+    if !pointer.starts_with('/') {
+        return false;
+    }
+    let mut chars = pointer.chars();
+    while let Some(c) = chars.next() {
+        if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check the constraints of a grant about to be written, against the grant's
+/// own scopes: each names one exact offline scope that the grant also names,
+/// points with a valid JSON pointer, allows at least one use, and no
+/// (scope, argument) pair repeats. Which pointers an operation lets a grant
+/// bind is the operation table's rule, checked by the node that owns the table.
+pub fn validate_offline_constraints(
+    constraints: &[OfflineConstraint],
+    scopes: &[String],
+) -> Result<()> {
+    for (index, constraint) in constraints.iter().enumerate() {
+        let scope = &constraint.scope;
+        if !scope.starts_with(OFFLINE_OPERATION_SCOPE_PREFIX) || scope.contains('*') {
+            bail!("offline constraint scope `{scope}` is not an exact offline-operation scope");
+        }
+        if !scopes.iter().any(|granted| granted == scope) {
+            bail!("offline constraint scope `{scope}` is not named in the grant's scopes");
+        }
+        if !is_valid_json_pointer(&constraint.argument) {
+            bail!(
+                "offline constraint argument `{}` is not a JSON pointer",
+                constraint.argument
+            );
+        }
+        if constraint.max_uses == 0 {
+            bail!("offline constraint on `{scope}` must allow at least one use");
+        }
+        if constraints[..index]
+            .iter()
+            .any(|earlier| earlier.scope == *scope && earlier.argument == constraint.argument)
+        {
+            bail!(
+                "offline constraint on `{scope}` binds `{}` twice",
+                constraint.argument
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The lifetime and provenance every grant is issued with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantTerms {
     pub expires_at: GrantExpiry,
     pub authorized_by: AuthorizedBy,
+    /// Per-operation argument constraints on the grant's offline scopes.
+    pub offline_constraints: Vec<OfflineConstraint>,
 }
 
 impl GrantTerms {
@@ -496,6 +574,7 @@ impl GrantTerms {
         Self {
             expires_at: GrantExpiry::Never,
             authorized_by,
+            offline_constraints: Vec::new(),
         }
     }
 
@@ -505,6 +584,7 @@ impl GrantTerms {
         Self {
             expires_at: GrantExpiry::At(4_102_444_800),
             authorized_by: AuthorizedBy::principal_request(&"9".repeat(64), None),
+            offline_constraints: Vec::new(),
         }
     }
 }
@@ -659,8 +739,10 @@ struct AuthorizedKeyGrantBody<'a> {
     granted_by: &'a str,
     created_at: &'a str,
     expires_at: String,
-    // A table, so it stays last in the serialized body.
+    // Tables, so they stay last in the serialized body.
     authorized_by: &'a AuthorizedBy,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    offline_constraints: &'a [OfflineConstraint],
 }
 
 /// Just enough of any grant body, current or stale, to name why a stale grant
@@ -687,6 +769,8 @@ struct RetainedAuthorizedKeyGrantBody {
     created_at: String,
     expires_at: String,
     authorized_by: AuthorizedBy,
+    #[serde(default)]
+    offline_constraints: Vec<OfflineConstraint>,
 }
 
 /// One node-signed authorized-key grant after exact descriptor-relative read,
@@ -712,6 +796,8 @@ pub struct VerifiedAuthorizedKeyGrant {
     pub created_at: String,
     pub expires_at: GrantExpiry,
     pub authorized_by: AuthorizedBy,
+    /// Argument constraints narrowing the grant's exact offline scopes.
+    pub offline_constraints: Vec<OfflineConstraint>,
 }
 
 impl VerifiedAuthorizedKeyGrant {
@@ -944,6 +1030,7 @@ fn load_grant_ignoring_revocation(
         bail!("authorized-key grant audit fields must not be empty");
     }
     grant.authorized_by.validate()?;
+    validate_offline_constraints(&grant.offline_constraints, &grant.scopes)?;
     let expires_at = GrantExpiry::from_grant_text(&grant.expires_at)?;
     Ok(Some(VerifiedAuthorizedKeyGrant {
         public_key,
@@ -957,6 +1044,7 @@ fn load_grant_ignoring_revocation(
         created_at: grant.created_at,
         expires_at,
         authorized_by: grant.authorized_by,
+        offline_constraints: grant.offline_constraints,
     }))
 }
 
@@ -1189,6 +1277,7 @@ fn render_authorized_key_toml_for_subject(
         bail!("authorized-key audit fields must not be empty");
     }
     terms.authorized_by.validate()?;
+    validate_offline_constraints(&terms.offline_constraints, scopes)?;
 
     let (principal_class, origin_site_id) = match subject {
         AuthorizedKeySubject::LocalClient => ("local_client", None),
@@ -1217,6 +1306,7 @@ fn render_authorized_key_toml_for_subject(
         created_at,
         expires_at: terms.expires_at.to_grant_text(),
         authorized_by: &terms.authorized_by,
+        offline_constraints: &terms.offline_constraints,
     })
     .context("serialize authorized-key grant")?;
 
@@ -1395,6 +1485,18 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
         principal_class: requested_class,
         origin_site_id: requested_origin_site_id.map(str::to_owned),
     };
+    // A merge keeps the incumbent's constraints and adds the requested ones;
+    // a replacement carries exactly the requested ones.
+    let mut final_terms = terms.clone();
+    if merge && let Some(existing) = existing.as_ref() {
+        let mut constraints = existing.offline_constraints.clone();
+        for constraint in &terms.offline_constraints {
+            if !constraints.contains(constraint) {
+                constraints.push(constraint.clone());
+            }
+        }
+        final_terms.offline_constraints = constraints;
+    }
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
         public_key_b64,
@@ -1402,7 +1504,7 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
         label,
         granted_by,
         created_at,
-        terms,
+        &final_terms,
         node_identity.signing_key(),
         wildcard,
         subject,
@@ -1527,6 +1629,12 @@ pub fn renew_authorized_key_toml(
     };
     let public_key_b64 =
         base64::engine::general_purpose::STANDARD.encode(existing.public_key.as_bytes());
+    // Renewal re-dates a grant; it never changes what the grant is
+    // constrained to.
+    let carried_terms = GrantTerms {
+        offline_constraints: existing.offline_constraints.clone(),
+        ..terms.clone()
+    };
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
         &public_key_b64,
@@ -1534,7 +1642,7 @@ pub fn renew_authorized_key_toml(
         &existing.owner,
         &existing.granted_by,
         &existing.created_at,
-        terms,
+        &carried_terms,
         node_identity.signing_key(),
         WildcardPolicy::Reject,
         subject,
@@ -2486,7 +2594,41 @@ mod tests {
                 &granter_fingerprint(),
                 Some("c".repeat(64)),
             ),
+            offline_constraints: Vec::new(),
         }
+    }
+
+    const LINK_SCOPE: &str = "ryeos.offline.node.key.link";
+
+    fn link_constraint(equals: &str) -> OfflineConstraint {
+        OfflineConstraint {
+            scope: LINK_SCOPE.to_owned(),
+            argument: "/link/body/key".to_owned(),
+            equals: equals.to_owned(),
+            max_uses: 1,
+            not_after: Some(1_900_000_000),
+        }
+    }
+
+    fn issue_constrained(
+        fx: &GrantFixture,
+        scopes: &[String],
+        constraints: Vec<OfflineConstraint>,
+    ) -> Result<std::path::PathBuf> {
+        create_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &fx.public_key,
+            scopes,
+            "grantee",
+            &granter_fingerprint(),
+            "2026-01-01T00:00:00Z",
+            &GrantTerms {
+                offline_constraints: constraints,
+                ..terms_expiring(2_000_000_000)
+            },
+            fx.node.signing_key(),
+        )
     }
 
     impl GrantFixture {
@@ -2716,6 +2858,7 @@ mod tests {
             &GrantTerms {
                 expires_at: GrantExpiry::At(5_000),
                 authorized_by: renewer,
+                offline_constraints: Vec::new(),
             },
             &fx.node,
         )
@@ -2732,6 +2875,94 @@ mod tests {
             grant.authorized_by.request_digest.as_deref(),
             Some("d".repeat(64).as_str())
         );
+    }
+
+    #[test]
+    fn an_offline_constraint_round_trips_through_issue_and_load() {
+        let fx = grant_fixture();
+        let constraint = link_constraint(&format!("fp:{}", "b".repeat(64)));
+        issue_constrained(&fx, &[LINK_SCOPE.to_owned()], vec![constraint.clone()]).unwrap();
+        let grant = load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.offline_constraints, [constraint]);
+    }
+
+    #[test]
+    fn a_grant_without_constraints_writes_no_constraint_table() {
+        let fx = grant_fixture();
+        let path = issue_constrained(&fx, &[LINK_SCOPE.to_owned()], Vec::new()).unwrap();
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("offline_constraints")
+        );
+        let grant = load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert!(grant.offline_constraints.is_empty());
+    }
+
+    #[test]
+    fn malformed_offline_constraints_are_refused_at_issue() {
+        let fx = grant_fixture();
+        let scopes = [LINK_SCOPE.to_owned()];
+        let good = link_constraint("fp:x");
+        let cases = [
+            OfflineConstraint {
+                scope: "ryeos.execute.service.vault/list".to_owned(),
+                ..good.clone()
+            },
+            OfflineConstraint {
+                scope: "ryeos.offline.node.*".to_owned(),
+                ..good.clone()
+            },
+            OfflineConstraint {
+                scope: "ryeos.offline.node.allow-restart".to_owned(),
+                ..good.clone()
+            },
+            OfflineConstraint {
+                argument: "link/body/key".to_owned(),
+                ..good.clone()
+            },
+            OfflineConstraint {
+                argument: "/a~2".to_owned(),
+                ..good.clone()
+            },
+            OfflineConstraint {
+                max_uses: 0,
+                ..good.clone()
+            },
+        ];
+        for case in cases {
+            assert!(
+                issue_constrained(&fx, &scopes, vec![case.clone()]).is_err(),
+                "{case:?}"
+            );
+        }
+        assert!(issue_constrained(&fx, &scopes, vec![good.clone(), good]).is_err());
+        assert!(!grant_path(&fx).exists());
+    }
+
+    #[test]
+    fn renewal_keeps_the_offline_constraints() {
+        let fx = grant_fixture();
+        let constraint = link_constraint(&format!("fp:{}", "b".repeat(64)));
+        issue_constrained(&fx, &[LINK_SCOPE.to_owned()], vec![constraint.clone()]).unwrap();
+        renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &granter_fingerprint(),
+            false,
+            &terms_expiring(2_100_000_000),
+            &fx.node,
+        )
+        .unwrap();
+        let grant = load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.expires_at, GrantExpiry::At(2_100_000_000));
+        assert_eq!(grant.offline_constraints, [constraint]);
     }
 
     #[test]

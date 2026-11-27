@@ -82,6 +82,7 @@ fn plant_grant(
         "2026-01-01T00:00:00Z",
         &GrantTerms {
             expires_at: GrantExpiry::At(4_102_444_800),
+            offline_constraints: Vec::new(),
             authorized_by: AuthorizedBy::principal_request(&granter, None),
         },
         &fixture.node,

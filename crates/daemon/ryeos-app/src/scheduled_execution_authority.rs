@@ -550,6 +550,7 @@ mod tests {
             "2026-11-13T00:00:00Z",
             &ryeos_node_runtime::identity::GrantTerms {
                 expires_at: ryeos_node_runtime::identity::GrantExpiry::At(1_000),
+                offline_constraints: Vec::new(),
                 authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
                     &format!("fp:{}", "99".repeat(32)),
                     None,

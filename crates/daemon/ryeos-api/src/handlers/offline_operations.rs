@@ -71,7 +71,9 @@ fn refusal_error(refusal: Refusal) -> HandlerError {
         | RefusalReason::OriginMismatch
         | RefusalReason::ScopeNotGranted
         | RefusalReason::LocalSignerOnly
-        | RefusalReason::NotDelegable => 403,
+        | RefusalReason::NotDelegable
+        | RefusalReason::GrantConstraintMissing
+        | RefusalReason::GrantConstraintViolated => 403,
         RefusalReason::Expired
         | RefusalReason::FromTheFuture
         | RefusalReason::Replayed

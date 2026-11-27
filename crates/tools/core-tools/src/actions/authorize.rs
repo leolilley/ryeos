@@ -196,6 +196,7 @@ pub fn authorize_client_terms(
             lillux::time::unix_secs_now(),
         )?,
         authorized_by,
+        offline_constraints: Vec::new(),
     })
 }
 

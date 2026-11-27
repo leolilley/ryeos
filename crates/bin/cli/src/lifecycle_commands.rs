@@ -7608,6 +7608,7 @@ mod tests {
                 created_at: "2026-01-01T00:00:00Z".to_owned(),
                 expires_at,
                 authorized_by: AuthorizedBy::principal_request(&"a".repeat(64), None),
+                offline_constraints: Vec::new(),
             })),
         }
     }

@@ -1532,7 +1532,10 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
             &ctx.request.signer_fingerprint,
             Some(ctx.request_digest.to_owned()),
         ),
+        offline_constraints: Vec::new(),
     };
+    // The table decides which arguments a grant may bind.
+    super::table::validate_grant_constraints(&terms.offline_constraints)?;
     let subject = match arguments.class {
         GrantClass::RemoteNode => ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode {
             origin_site_id: &arguments.origin_site_id,

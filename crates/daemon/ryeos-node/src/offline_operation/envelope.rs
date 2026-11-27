@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use lillux::crypto::VerifyingKey;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::{
-    AuthorizedKeyPrincipalClass, NodeIdentity, VerifiedAuthorizedKeyGrant,
+    AuthorizedKeyPrincipalClass, NodeIdentity, OfflineConstraint, VerifiedAuthorizedKeyGrant,
     load_verified_authorized_key, matches_only_by_wildcard,
 };
 
@@ -62,6 +62,75 @@ pub struct Envelope<'a> {
     /// Check the request's time window. A continuation of an application that
     /// began inside its window is not checked against the clock again.
     pub enforce_clock: bool,
+}
+
+/// The constraints a delegated grant carries for one operation. When the
+/// operation requires a constraint the grant must carry at least one for
+/// `scope`; every constraint for `scope` must then hold: it binds a pointer
+/// the operation lists, the pointed-at argument is the string it names, and
+/// its own `not_after` has not passed at `now`. A constraint only narrows, so
+/// an operation that does not require one is still narrowed by any the grant
+/// carries.
+fn check_grant_constraints(
+    requires_constraint: bool,
+    bindable_arguments: &[&str],
+    scope: &str,
+    constraints: &[OfflineConstraint],
+    arguments: &serde_json::Value,
+    now: u64,
+) -> Result<(), Refusal> {
+    let mut applicable = constraints
+        .iter()
+        .filter(|constraint| constraint.scope == scope)
+        .peekable();
+    if applicable.peek().is_none() {
+        if requires_constraint {
+            return refuse(
+                RefusalReason::GrantConstraintMissing,
+                format!(
+                    "the grant carries no constraint for the scope `{scope}`, which requires one"
+                ),
+            );
+        }
+        return Ok(());
+    }
+    for constraint in applicable {
+        if !bindable_arguments.contains(&constraint.argument.as_str()) {
+            return refuse(
+                RefusalReason::GrantConstraintViolated,
+                format!(
+                    "the grant binds `{}`, which `{scope}` does not let a grant bind",
+                    constraint.argument
+                ),
+            );
+        }
+        if constraint
+            .not_after
+            .is_some_and(|not_after| now > not_after)
+        {
+            return refuse(
+                RefusalReason::GrantConstraintViolated,
+                format!(
+                    "the grant's constraint on `{}` for `{scope}` has expired",
+                    constraint.argument
+                ),
+            );
+        }
+        let held = arguments
+            .pointer(&constraint.argument)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == constraint.equals);
+        if !held {
+            return refuse(
+                RefusalReason::GrantConstraintViolated,
+                format!(
+                    "the request's `{}` is not the value the grant binds for `{scope}`",
+                    constraint.argument
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn refuse<T>(reason: RefusalReason, detail: impl Into<String>) -> Result<T, Refusal> {
@@ -136,6 +205,14 @@ impl Envelope<'_> {
                     format!("`{}` may be signed only by the local operator", spec.id),
                 );
             }
+            check_grant_constraints(
+                spec.requires_grant_constraint,
+                spec.bindable_arguments,
+                &spec.scope(),
+                &grant.offline_constraints,
+                &body.arguments,
+                self.now,
+            )?;
             if spec.authority_bearing {
                 match delegated_remote_operations(self.app_root) {
                     Ok(delegated) if delegated.contains(spec.id) => {}
@@ -383,4 +460,116 @@ pub fn wildcard_only_grants(app_root: &Path, node: &NodeIdentity) -> Vec<Wildcar
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const SCOPE: &str = "ryeos.offline.node.key.link";
+    const BINDABLE: &[&str] = &["/link/body/key"];
+
+    fn constraint(equals: &str, not_after: Option<u64>) -> OfflineConstraint {
+        OfflineConstraint {
+            scope: SCOPE.to_owned(),
+            argument: "/link/body/key".to_owned(),
+            equals: equals.to_owned(),
+            max_uses: 1,
+            not_after,
+        }
+    }
+
+    fn check(
+        requires: bool,
+        constraints: &[OfflineConstraint],
+        arguments: &serde_json::Value,
+        now: u64,
+    ) -> Result<(), Refusal> {
+        check_grant_constraints(requires, BINDABLE, SCOPE, constraints, arguments, now)
+    }
+
+    fn reason(result: Result<(), Refusal>) -> RefusalReason {
+        result.unwrap_err().reason
+    }
+
+    #[test]
+    fn a_grant_without_a_constraint_is_refused_where_one_is_required() {
+        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
+        assert_eq!(
+            reason(check(true, &[], &arguments, 10)),
+            RefusalReason::GrantConstraintMissing
+        );
+        let other_scope = OfflineConstraint {
+            scope: "ryeos.offline.node.allow-restart".to_owned(),
+            ..constraint("fp:a", None)
+        };
+        assert_eq!(
+            reason(check(true, &[other_scope], &arguments, 10)),
+            RefusalReason::GrantConstraintMissing
+        );
+        check(false, &[], &arguments, 10).unwrap();
+    }
+
+    #[test]
+    fn a_constraint_admits_only_the_bound_argument() {
+        let constraints = [constraint("fp:a", None)];
+        check(
+            true,
+            &constraints,
+            &json!({ "link": { "body": { "key": "fp:a" } } }),
+            10,
+        )
+        .unwrap();
+        for arguments in [
+            json!({ "link": { "body": { "key": "fp:b" } } }),
+            json!({ "link": { "body": {} } }),
+            json!({ "link": { "body": { "key": 7 } } }),
+            json!({}),
+        ] {
+            assert_eq!(
+                reason(check(true, &constraints, &arguments, 10)),
+                RefusalReason::GrantConstraintViolated,
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_constraint_is_refused() {
+        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
+        let constraints = [constraint("fp:a", Some(100))];
+        check(true, &constraints, &arguments, 100).unwrap();
+        assert_eq!(
+            reason(check(true, &constraints, &arguments, 101)),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn every_constraint_for_the_scope_must_hold() {
+        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
+        let constraints = [constraint("fp:a", None), constraint("fp:b", None)];
+        assert_eq!(
+            reason(check(true, &constraints, &arguments, 10)),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn a_constraint_on_an_unbindable_pointer_never_holds() {
+        let unbindable = OfflineConstraint {
+            argument: "/link/body/principal".to_owned(),
+            ..constraint("pid:x", None)
+        };
+        assert_eq!(
+            reason(check(
+                true,
+                &[unbindable],
+                &json!({ "link": { "body": { "principal": "pid:x" } } }),
+                10
+            )),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
 }
