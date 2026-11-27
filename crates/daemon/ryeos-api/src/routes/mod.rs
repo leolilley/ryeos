@@ -278,10 +278,6 @@ pub fn build_route_table_or_bail(
     })
 }
 
-pub fn swap(state: &crate::api_state::ApiState, new_table: Arc<RouteTable>) {
-    state.route_table.store(new_table);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
