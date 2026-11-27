@@ -195,7 +195,7 @@ if command -v script >/dev/null 2>&1; then
     pty_timeout=30
     pty_status=0
     TERM=xterm RYEOS_TTY=auto timeout "$pty_timeout" script -qec \
-        "bash -c \"source '$helper'; ryeos_term_init; ryeos_term_begin RUN pty; ryeos_term_cleanup\"" \
+        "bash -c \"source '$helper'; ryeos_term_init; ryeos_term_begin RUN pty; ryeos_term_cleanup; sleep 100\"" \
         "$tmp/pty" >/dev/null </dev/null || pty_status=$?
     if [[ "$pty_status" == 124 ]]; then
         printf 'FAIL: the pty case did not finish within %s seconds (script hung)\n' "$pty_timeout" >&2
