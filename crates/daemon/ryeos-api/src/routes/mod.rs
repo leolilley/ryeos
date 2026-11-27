@@ -296,7 +296,10 @@ mod tests {
             methods: methods.iter().map(|s| s.to_string()).collect(),
             auth: auth.to_string(),
             auth_config: None,
-            limits: RawLimits::default(),
+            limits: RawLimits {
+                body_bytes_max: 0,
+                ..RawLimits::default()
+            },
             response: RawResponseSpec {
                 mode: mode.to_string(),
                 source: None,
@@ -343,7 +346,8 @@ mod tests {
 
     #[test]
     fn hook_prefix_allowed_for_config_routes() {
-        let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
+        // A keyless static route serves GET only; the path prefix is what is tested.
+        let raw = make_raw("r1", "/hook/stripe", &["GET"], "none", "static");
         let table =
             build_table(&[raw]).expect("/hook/* must be admitted by the route table builder");
         assert_eq!(table.all.len(), 1);

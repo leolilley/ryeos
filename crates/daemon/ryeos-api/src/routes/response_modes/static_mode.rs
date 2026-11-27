@@ -60,7 +60,7 @@ impl StaticMode {
 /// Compiled static source — either inline (body_b64) or embedded asset.
 enum CompiledStaticSource {
     /// Inline body decoded from `body_b64` at compile time.
-    Inline { body: Vec<u8> },
+    Inline { body: Vec<u8>, etag: String },
     /// Embedded asset resolved at dispatch time by path.
     EmbeddedAsset {
         path_template: PathTemplate,
@@ -271,6 +271,7 @@ impl ResponseMode for StaticMode {
         &self,
         raw: &RawRouteSpec,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
+        refuse_unsafe_keyless(raw)?;
         if raw.request.body == RawRequestBody::ObjectsPutV1 {
             return Err(RouteConfigError::InvalidResponseSpec {
                 id: raw.id.clone(),
@@ -323,7 +324,8 @@ impl ResponseMode for StaticMode {
                         reason: format!("body_b64 is not valid base64: {e}"),
                     })?;
 
-                CompiledStaticSource::Inline { body }
+                let etag = format!("\"{}\"", lillux::cas::sha256_hex(&body));
+                CompiledStaticSource::Inline { body, etag }
             }
             Some(source_name) => {
                 // Look up the source name in the provider registry.
@@ -402,6 +404,56 @@ impl ResponseMode for StaticMode {
     }
 }
 
+/// A static route anyone may call (`auth: none`) serves its signed bytes and
+/// nothing else: GET or HEAD only, no request body, nothing executed and no
+/// authority lent.
+fn refuse_unsafe_keyless(raw: &RawRouteSpec) -> Result<(), RouteConfigError> {
+    if raw.auth != "none" {
+        return Ok(());
+    }
+    let refuse = |reason: String| {
+        Err(RouteConfigError::InvalidResponseSpec {
+            id: raw.id.clone(),
+            mode: "static".into(),
+            reason: format!("a keyless static route {reason}"),
+        })
+    };
+    let mut methods: Vec<&String> = raw.methods.iter().collect();
+    methods.sort();
+    if let Some(method) = methods
+        .iter()
+        .find(|method| !matches!(method.as_str(), "GET" | "HEAD"))
+    {
+        return refuse(format!("accepts only GET and HEAD, not {method}"));
+    }
+    if raw.request.body != RawRequestBody::None || raw.limits.body_bytes_max != 0 {
+        return refuse("accepts no request body (request.body none, body_bytes_max 0)".into());
+    }
+    if raw.execute.is_some() {
+        return refuse("executes nothing".into());
+    }
+    if raw.authority.is_some() {
+        return refuse("lends no authority".into());
+    }
+    Ok(())
+}
+
+/// Headers every static body carries, inline or embedded.
+fn harden(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(CSP_VALUE),
+    );
+}
+
 #[axum::async_trait]
 impl CompiledResponseMode for CompiledStaticMode {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -414,17 +466,29 @@ impl CompiledResponseMode for CompiledStaticMode {
         ctx: RouteDispatchContext,
     ) -> Result<Response, RouteDispatchError> {
         match &self.source {
-            CompiledStaticSource::Inline { body } => {
+            CompiledStaticSource::Inline { body, etag } => {
+                if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH)
+                    && inm.to_str().is_ok_and(|inm| inm == etag)
+                {
+                    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+                    resp.headers_mut()
+                        .insert(header::ETAG, HeaderValue::from_str(etag).expect("hex etag"));
+                    return Ok(resp);
+                }
                 let mut resp = ranged_response(
                     self.status,
                     std::borrow::Cow::Owned(body.clone()),
                     &ctx.request_parts.headers,
-                    None,
+                    Some(etag),
                     true,
                 );
+                let headers = resp.headers_mut();
                 if let Some(ref ct) = self.content_type {
-                    resp.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
+                    headers.insert(header::CONTENT_TYPE, ct.clone());
                 }
+                headers.insert(header::ETAG, HeaderValue::from_str(etag).expect("hex etag"));
+                headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                harden(headers);
                 Ok(resp)
             }
             CompiledStaticSource::EmbeddedAsset {
@@ -481,12 +545,7 @@ impl CompiledResponseMode for CompiledStaticMode {
                 headers.insert(header::CONTENT_TYPE, ct);
                 headers.insert(header::ETAG, etag.parse().unwrap());
                 headers.insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
-                headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
-                headers.insert(header::REFERRER_POLICY, "same-origin".parse().unwrap());
-                headers.insert(
-                    header::HeaderName::from_static("content-security-policy"),
-                    CSP_VALUE.parse().unwrap(),
-                );
+                harden(headers);
                 Ok(resp)
             }
         }
@@ -550,7 +609,10 @@ mod tests {
             methods: ["GET".to_string()].into_iter().collect(),
             auth: "none".to_string(),
             auth_config: None,
-            limits: RawLimits::default(),
+            limits: RawLimits {
+                body_bytes_max: 0,
+                ..RawLimits::default()
+            },
             response: RawResponseSpec {
                 mode: "static".to_string(),
                 source: None,
@@ -579,7 +641,10 @@ mod tests {
             methods: ["GET".to_string()].into_iter().collect(),
             auth: "none".to_string(),
             auth_config: None,
-            limits: RawLimits::default(),
+            limits: RawLimits {
+                body_bytes_max: 0,
+                ..RawLimits::default()
+            },
             response: RawResponseSpec {
                 mode: "static".to_string(),
                 source: Some("asset_source".to_string()),
@@ -927,5 +992,51 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
         assert_eq!(body_of(response).await, BODY);
+    }
+
+    #[test]
+    fn a_keyless_static_route_serves_only_its_signed_bytes() {
+        let mode = mode_with_provider();
+        let base = || make_raw(Some(200), Some("text/plain"), Some("aGVsbG8="));
+        assert!(mode.compile(&base()).is_ok());
+
+        let mut post = base();
+        post.methods = ["GET".to_string(), "POST".to_string()]
+            .into_iter()
+            .collect();
+        let mut head = base();
+        head.methods = ["GET".to_string(), "HEAD".to_string()]
+            .into_iter()
+            .collect();
+        assert!(mode.compile(&head).is_ok(), "GET and HEAD are allowed");
+        let mut body_limit = base();
+        body_limit.limits.body_bytes_max = 1;
+        let mut body = base();
+        body.request.body = RawRequestBody::Json;
+        let mut authority = base();
+        authority.authority = Some(ryeos_app::route_raw::RawRouteAuthority {
+            capabilities: Vec::new(),
+        });
+        for (case, raw) in [
+            ("POST", post),
+            ("a body limit", body_limit),
+            ("a request body", body),
+            ("an authority block", authority),
+        ] {
+            let error = mode
+                .compile(&raw)
+                .err()
+                .unwrap_or_else(|| panic!("{case} compiled"));
+            assert!(
+                error.to_string().contains("a keyless static route"),
+                "{case}: {error}"
+            );
+        }
+
+        // A route that names its caller is not bound by the keyless rules.
+        let mut keyed = base();
+        keyed.auth = "browser_session".into();
+        keyed.limits.body_bytes_max = 1;
+        assert!(mode.compile(&keyed).is_ok());
     }
 }
