@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T16:16:04Z:dda3458e3dd2ad9e5570f710b2c88441866658f6a044d9b90688ff9ee5690798:Yi5QkPBOG50Atxoj/pXU8v3yWDTKTIyyyX+M+CMRywJh41Gahrn3NqOYwOAylJJatAJxijrQXSeElE9thsiyCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:16:40Z:afc0a5eacec2233fcde5b52aa7461bde6d5c9fb93c7492c3975777031ee072a8:ptd7dYH7IREXRWlkUtmxW0vaoThfXWpmcPaKYzAATBAhYdqaftiQeXd+/5rd0JVkqpGjZ2b37ShbiNkJW7fZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -14,7 +14,7 @@
 #                        `host setup` runs (required; G-4's table says which)
 #     --throwaway        confirms, never replaces, the G-4 check: a build whose manifest
 #                        says build_profile other than release (a test build carries the
-#                        Claude Code stub driver) installs only when the track's own G-4
+#                        Claude Code stub driver; an absent or unknown value is refused) installs only when the track's own G-4
 #                        row exists, is marked throwaway and names that profile in its
 #                        Build profile cell, and this flag is also given
 #     --bundle-trust     also pass each staged bundle's PUBLISHER_TRUST.toml that
@@ -104,8 +104,14 @@ else
     manifest="$prefix/BUILD-SOURCE.json"
 fi
 [[ -r $manifest ]] || { echo "rm-node-up: cannot read the build manifest $manifest" >&2; exit 1; }
-build_profile="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("build_profile","release"))' "$manifest")"
-[[ $build_profile =~ ^[a-z][a-z-]*$ ]] || { echo "rm-node-up: bad build_profile in $manifest" >&2; exit 1; }
+build_profile="$(python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])).get("build_profile"); print(v if isinstance(v,str) else "")' "$manifest")"
+# Typed: only the exact words release and test are known; an absent or any other
+# value is refused, never read as release.
+case $build_profile in
+    release|test) ;;
+    "") echo "rm-node-up: refusing: the build manifest $manifest has no build_profile (a build that does not say what it is is not installed)" >&2; exit 3 ;;
+    *) echo "rm-node-up: refusing: unknown build_profile '$build_profile' in $manifest" >&2; exit 3 ;;
+esac
 if [[ $build_profile != release ]]; then
     # The track's own G-4 row decides, as data: it must exist, be marked
     # throwaway, and name this build profile in its Build profile cell (the last
