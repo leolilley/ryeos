@@ -76,6 +76,26 @@ fn coded_refusal(error: anyhow::Error, fallback: &str, status: u16) -> HandlerEr
     refusal(&code, status, format!("{error:#}"))
 }
 
+/// A revision is announced only on a request made to this node directly, by
+/// a fingerprinted key: never a forwarded or delegated one, whatever key it
+/// carries. Which checkout the key may name is admission's question.
+fn require_direct_call(ctx: &HandlerContext) -> HandlerResult<()> {
+    ctx.require_verified()?;
+    if ctx.authenticated_origin_site_id.is_some() || ctx.delegated_via.is_some() {
+        return Err(HandlerError::Forbidden(
+            "a revision is announced only on a request made to this node directly, not a forwarded one"
+                .into(),
+        ));
+    }
+    ctx.fingerprint
+        .strip_prefix("fp:")
+        .filter(|value| lillux::valid_hash(value))
+        .map(|_| ())
+        .ok_or_else(|| {
+            HandlerError::BadRequest("the caller is not a fingerprinted principal".into())
+        })
+}
+
 /// The admitted canonical root and its project key.
 fn project_root(root: PathBuf, project_path: &str) -> HandlerResult<(PathBuf, String)> {
     if !root.join(ryeos_engine::AI_DIR).is_dir() {
@@ -222,7 +242,7 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
-    ctx.require_verified()?;
+    require_direct_call(&ctx)?;
     if req.item_refs.len() > MAX_ITEM_REFS {
         return Err(HandlerError::BadRequest(format!(
             "a request names at most {MAX_ITEM_REFS} items"

@@ -309,3 +309,38 @@ async fn remote_pull_is_the_operators_alone_and_touches_no_path_for_anyone_else(
         );
     }
 }
+
+/// A revision is announced only on a request made to this node directly.
+/// Admission alone would let the operator's own key, forwarded from another
+/// of its nodes, name any checkout; items/revised refuses the forwarded
+/// request before the path is admitted.
+#[tokio::test]
+async fn items_revised_refuses_a_forwarded_request_even_from_the_operators_key() {
+    let (_tmp, _owner, state) = test_state::build_test_state();
+    let state = Arc::new(state);
+    let operator_key =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap()
+            .principal_id();
+    let forwarded_operator = HandlerContext::new_with_authority(
+        operator_key,
+        vec!["*".to_owned()],
+        true,
+        Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
+        Some(format!("site:{}", "c".repeat(64))),
+    );
+    let project = tempfile::TempDir::new().unwrap();
+    let error = call(
+        state,
+        "items.revised",
+        forwarded_operator,
+        json!({
+            "project_path": project.path().to_str().unwrap(),
+            "item_refs": ["tool:fixture/a"],
+        }),
+    )
+    .await
+    .expect_err("a forwarded request is refused");
+    let text = format!("{error:#}");
+    assert!(text.contains("not a forwarded one"), "{text}");
+}
