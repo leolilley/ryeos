@@ -97,3 +97,40 @@ async fn a_non_operator_seat_with_no_project_reads_no_directory_it_names() {
         );
     }
 }
+
+/// `items/list` and `item/inspect` follow the same rule: a seat of another key
+/// with no project of its own is refused a project path, however real the
+/// directory.
+#[tokio::test]
+async fn a_non_operator_seat_with_no_project_lists_and_inspects_no_project_it_names() {
+    let (_tmp, _owner, state) = test_state::build_test_state();
+    let folder = tempfile::TempDir::new().unwrap();
+    let project_path = folder.path().canonicalize().unwrap().display().to_string();
+    let seat = projectless_seat(&state, STRANGER);
+    let state = Arc::new(state);
+
+    let list = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        seat.clone(),
+        ryeos_ui::handlers::ui_items::handle_items_list(
+            json!({ "kind": "knowledge", "project_path": project_path }),
+            seat_context(),
+            state.clone(),
+        ),
+    )
+    .await;
+    let inspect = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        seat,
+        ryeos_ui::handlers::ui_items::handle_item_inspect(
+            json!({ "canonical_ref": "knowledge:x/y", "project_path": project_path }),
+            seat_context(),
+            state,
+        ),
+    )
+    .await;
+
+    for (what, result) in [("list", list), ("inspect", inspect)] {
+        let error = result.expect_err(&format!("items {what} must refuse a non-operator seat"));
+        let text = format!("{error:#}");
+        assert!(text.contains("no_project_bound"), "items {what}: {text}");
+    }
+}
