@@ -356,13 +356,14 @@ fn receipt_count(b: &DaemonHarness) -> usize {
         .unwrap_or(0)
 }
 
+fn registration_path(b: &DaemonHarness, name: &str) -> PathBuf {
+    b.state_path
+        .join(".ai/node/bundles")
+        .join(format!("{name}.yaml"))
+}
+
 fn registration_text(b: &DaemonHarness, name: &str) -> String {
-    std::fs::read_to_string(
-        b.state_path
-            .join(".ai/node/bundles")
-            .join(format!("{name}.yaml")),
-    )
-    .expect("the registration")
+    std::fs::read_to_string(registration_path(b, name)).expect("the registration")
 }
 
 fn staging_area_entries(b: &DaemonHarness) -> Vec<String> {
@@ -373,6 +374,25 @@ fn staging_area_entries(b: &DaemonHarness) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Run a stopped-node service (`ryeosd run-service`) against `b`'s state.
+fn run_stopped_service(b: &DaemonHarness, service: &str, params: &str) -> std::process::Output {
+    std::process::Command::new(common::ryeosd_binary())
+        .env("RUST_MIN_STACK", "4194304")
+        .arg("--app-root")
+        .arg(&b.state_path)
+        .arg("--uds-path")
+        .arg(&b.uds_path)
+        .arg("run-service")
+        .arg(service)
+        .arg("--params")
+        .arg(params)
+        .env("HOSTNAME", "testhost")
+        .env("RYEOS_APP_ROOT", &b.state_path)
+        .env("HOME", b.user_space.path())
+        .output()
+        .expect("run ryeosd run-service")
 }
 
 fn copy_all(from: &Path, to: &Path) {
@@ -850,4 +870,58 @@ async fn a_laned_bundle_whose_tree_changed_after_apply_is_skipped_and_the_node_s
             .iter()
             .any(|record| record.name == ITEMS_BUNDLE && record.lane.is_some())
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skipped_laned_bundle_is_removed_through_bundle_remove_and_the_node_boots_again() {
+    let (a, a_fixture) = start_publisher_with_items_bundle().await;
+    let (mut b, _b_fixture) = start_puller().await;
+    let publication = publish_bundle(&a, &a_fixture, ITEMS_BUNDLE, 0x76).await;
+    let (digest, _) = pull(&b, &publication).await;
+    let result = apply(&mut b, &arguments(&b, ITEMS_BUNDLE, &digest)).await;
+    assert_eq!(result["outcome"], "applied", "{result:#}");
+
+    // The installed tree gains a native executable directory, and the node
+    // restarts: the bundle is registered, laned, and not loaded.
+    let installed_tree = b.state_path.join(".ai/bundles").join(ITEMS_BUNDLE);
+    std::fs::create_dir_all(installed_tree.join("bin")).expect("create bin");
+    std::fs::write(installed_tree.join("bin/tool"), b"x").expect("write bin/tool");
+    b.restart().await.expect("the node boots with it skipped");
+    assert!(!is_installed(&listing(&b).await, ITEMS_BUNDLE));
+    assert!(registration_path(&b, ITEMS_BUNDLE).is_file());
+
+    // The only way out is the stopped-node removal, which names the bundle,
+    // passes prospective admission without it, and reseals the registrations.
+    b.stop_gracefully().await.expect("stop the node");
+    let removed = run_stopped_service(
+        &b,
+        "service:bundle/remove",
+        &format!("{{\"name\":\"{ITEMS_BUNDLE}\"}}"),
+    );
+    assert!(
+        removed.status.success(),
+        "bundle.remove failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!installed_tree.exists(), "the tree should be gone");
+    assert!(
+        !registration_path(&b, ITEMS_BUNDLE).exists(),
+        "the registration should be gone"
+    );
+
+    // The registrations were resealed, so the node boots, with the rest loaded.
+    b.respawn_with(|_| {}).await.expect("the node boots again");
+    let listed = listing(&b).await;
+    assert!(!is_installed(&listed, ITEMS_BUNDLE), "{listed:#}");
+    assert!(is_installed(&listed, "core"), "{listed:#}");
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(&b.state_path)
+        .expect("load the node trust registry");
+    let (_, skipped) = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root: &b.state_path,
+        trust_store: &trust,
+    }
+    .load_bundle_section_reporting_skipped()
+    .expect("load the bundle section");
+    assert!(skipped.is_empty(), "{skipped:?}");
 }
