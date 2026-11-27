@@ -432,6 +432,39 @@ fn confirm_recorded_service_terminal(
     Ok(())
 }
 
+/// [`disclose_service_result`] with the floor of the node's own secrets. The
+/// floor is read only for a caller other than the operator. When it cannot be
+/// built the answer is refused, never served unchecked.
+fn disclose_node_service_result(
+    state: &AppState,
+    class: ryeos_node_runtime::disclosure::DisclosureClass,
+    disclosure: Option<&ryeos_node_runtime::disclosure::ServiceDisclosure>,
+    result: Result<Value>,
+) -> Result<Value> {
+    if class.is_operator() {
+        return disclose_service_result(
+            class,
+            disclosure,
+            result,
+            &ryeos_app::secret_floor::SecretFloor::from_values(Vec::new()),
+        );
+    }
+    match ryeos_app::secret_floor::SecretFloor::for_node(state) {
+        Ok(floor) => disclose_service_result(class, disclosure, result, &floor),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "secret floor unavailable; service outcome withheld from a non-operator caller"
+            );
+            Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                ryeos_app::secret_floor::SECRET_FLOOR_WITHHELD,
+                403,
+                "the answer was withheld from this caller",
+            )))
+        }
+    }
+}
+
 /// What the caller of a service receives of its outcome. The operator gets
 /// the outcome whole. Any other caller gets the item's declared tier of an
 /// answer, or a refusal when the item declares none, and a failure shows only
@@ -441,11 +474,16 @@ fn disclose_service_result(
     class: ryeos_node_runtime::disclosure::DisclosureClass,
     disclosure: Option<&ryeos_node_runtime::disclosure::ServiceDisclosure>,
     result: Result<Value>,
+    floor: &ryeos_app::secret_floor::SecretFloor,
 ) -> Result<Value> {
     use ryeos_app::handler_error::HandlerError;
     if class.is_operator() {
         return result;
     }
+    // Whatever a non-operator caller is about to receive passes the floor
+    // last: an answer is checked after its tier is projected, and a failure
+    // is checked as the text it will show.
+    let withheld = |error: HandlerError| anyhow::Error::new(error);
     match result {
         Ok(value) => ryeos_node_runtime::disclosure::shape_result(
             class,
@@ -467,64 +505,77 @@ fn disclose_service_result(
                     "retryable": false,
                 }),
             })
-        }),
+        })
+        .and_then(|shaped| floor.withhold(shaped).map_err(withheld)),
         Err(error) => {
             if error
                 .downcast_ref::<crate::dispatch_error::DispatchError>()
                 .is_some()
             {
+                // A dispatch failure keeps its own variant and text, so the
+                // text passes the floor before it is returned.
+                floor
+                    .withhold(Value::String(format!("{error:#}")))
+                    .map_err(withheld)?;
                 return Err(error);
             }
             tracing::warn!(
                 error = %format!("{error:#}"),
                 "service failure withheld from a non-operator caller"
             );
-            Err(
-                match ryeos_app::handler_error::extract_handler_error(&error) {
-                    Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
-                    // A message that begins with a stable `code:` keeps that
-                    // code and its status; the rest of the sentence is
-                    // withheld. A message with no code is replaced by a fixed
-                    // sentence of the same status.
-                    Some(HandlerError::Forbidden(message)) => coded_or_fixed(
-                        &message,
-                        403,
-                        HandlerError::Forbidden("the service refused the request".to_owned()),
-                    ),
-                    Some(HandlerError::BadRequest(message)) => coded_or_fixed(
-                        &message,
-                        400,
-                        HandlerError::BadRequest("the request was not valid".to_owned()),
-                    ),
-                    Some(HandlerError::Conflict(message)) => coded_or_fixed(
-                        &message,
-                        409,
-                        HandlerError::Conflict(
-                            "the request conflicts with current state".to_owned(),
-                        ),
-                    ),
-                    // A typed refusal keeps its code and status, which are
-                    // part of the contract a client branches on. Its body
-                    // can carry a path or a key, so only the stable code, the
-                    // retry flag and a fixed sentence reach a non-operator.
-                    Some(HandlerError::Structured { code, status, body }) => {
-                        anyhow::Error::new(HandlerError::Structured {
-                            body: redact_refusal_body(&body),
-                            code,
-                            status,
-                        })
-                    }
-                    _ => {
-                        let (code, sentence) =
-                            ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
-                        anyhow::Error::new(HandlerError::Structured {
-                            status: 500,
-                            body: serde_json::json!({"error": {"code": code, "message": sentence}}),
-                            code,
-                        })
-                    }
-                },
-            )
+            let shown = match ryeos_app::handler_error::extract_handler_error(&error) {
+                Some(HandlerError::NotFound) => anyhow::Error::new(HandlerError::NotFound),
+                // A message that begins with a stable `code:` keeps that
+                // code and its status; the rest of the sentence is
+                // withheld. A message with no code is replaced by a fixed
+                // sentence of the same status.
+                Some(HandlerError::Forbidden(message)) => coded_or_fixed(
+                    &message,
+                    403,
+                    HandlerError::Forbidden("the service refused the request".to_owned()),
+                ),
+                Some(HandlerError::BadRequest(message)) => coded_or_fixed(
+                    &message,
+                    400,
+                    HandlerError::BadRequest("the request was not valid".to_owned()),
+                ),
+                Some(HandlerError::Conflict(message)) => coded_or_fixed(
+                    &message,
+                    409,
+                    HandlerError::Conflict("the request conflicts with current state".to_owned()),
+                ),
+                // A typed refusal keeps its code and status, which are
+                // part of the contract a client branches on. Its body
+                // can carry a path or a key, so only the stable code, the
+                // retry flag and a fixed sentence reach a non-operator.
+                Some(HandlerError::Structured { code, status, body }) => {
+                    let body = redact_refusal_body(&body);
+                    // The code is handler-authored text: it passes too.
+                    floor
+                        .withhold(serde_json::json!([&code, &body]))
+                        .map_err(withheld)?;
+                    anyhow::Error::new(HandlerError::Structured { body, code, status })
+                }
+                _ => {
+                    let (code, sentence) =
+                        ryeos_node_runtime::disclosure::redacted_failure(&format!("{error:#}"));
+                    // The code is cut from the failure's own text.
+                    floor
+                        .withhold(Value::String(code.clone()))
+                        .map_err(withheld)?;
+                    anyhow::Error::new(HandlerError::Structured {
+                        status: 500,
+                        body: serde_json::json!({"error": {"code": code, "message": sentence}}),
+                        code,
+                    })
+                }
+            };
+            // A code can be cut from the failure's own text, so what the
+            // caller will see passes the floor in the end.
+            floor
+                .withhold(Value::String(format!("{shown:#}")))
+                .map_err(withheld)?;
+            Err(shown)
         }
     }
 }
@@ -1331,7 +1382,8 @@ pub async fn execute_service_verified(
             .await;
             // Shaped before it is recorded, so the durable result and the
             // caller's answer are the same disclosed value.
-            let dispatch_result = disclose_service_result(
+            let dispatch_result = disclose_node_service_result(
+                &task_state,
                 disclosure_class,
                 task_disclosure.as_ref(),
                 dispatch_result,
@@ -1419,7 +1471,7 @@ pub async fn execute_service_verified(
             .clone();
         let result = handler(params, hctx, Arc::new(state.clone())).await;
         drop(handler);
-        disclose_service_result(disclosure_class, disclosure.as_ref(), result)
+        disclose_node_service_result(&state, disclosure_class, disclosure.as_ref(), result)
     };
 
     let value = dispatch_result.map_err(|e| {
@@ -1480,6 +1532,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn no_floor() -> ryeos_app::secret_floor::SecretFloor {
+        ryeos_app::secret_floor::SecretFloor::from_values(vec![])
+    }
+
     fn principal_tier(pointers: &[&str]) -> ryeos_node_runtime::disclosure::ServiceDisclosure {
         ryeos_node_runtime::disclosure::ServiceDisclosure::parse(&serde_json::json!({
             "principal": pointers,
@@ -1497,16 +1553,24 @@ mod tests {
             "items": [{"name": "a", "path": "/etc/passwd"}],
             "added_later": 1,
         });
-        let shaped =
-            disclose_service_result(DisclosureClass::Principal, Some(&tier), Ok(answer.clone()))
-                .unwrap();
+        let shaped = disclose_service_result(
+            DisclosureClass::Principal,
+            Some(&tier),
+            Ok(answer.clone()),
+            &no_floor(),
+        )
+        .unwrap();
         assert_eq!(
             shaped,
             serde_json::json!({"id": "x", "items": [{"name": "a"}]})
         );
-        let operator =
-            disclose_service_result(DisclosureClass::Operator, Some(&tier), Ok(answer.clone()))
-                .unwrap();
+        let operator = disclose_service_result(
+            DisclosureClass::Operator,
+            Some(&tier),
+            Ok(answer.clone()),
+            &no_floor(),
+        )
+        .unwrap();
         assert_eq!(operator, answer);
     }
 
@@ -1514,8 +1578,13 @@ mod tests {
     fn a_service_without_a_block_is_refused_to_a_principal_but_not_the_operator() {
         use ryeos_node_runtime::disclosure::DisclosureClass;
         let answer = serde_json::json!({"id": "x"});
-        let refused = disclose_service_result(DisclosureClass::Principal, None, Ok(answer.clone()))
-            .unwrap_err();
+        let refused = disclose_service_result(
+            DisclosureClass::Principal,
+            None,
+            Ok(answer.clone()),
+            &no_floor(),
+        )
+        .unwrap_err();
         // The refusal is typed: a 403 that keeps its stable `read_*` code.
         assert!(matches!(
             ryeos_app::handler_error::extract_handler_error(&refused),
@@ -1523,7 +1592,13 @@ mod tests {
                 if code == "read_not_disclosable"
         ));
         assert_eq!(
-            disclose_service_result(DisclosureClass::Operator, None, Ok(answer.clone())).unwrap(),
+            disclose_service_result(
+                DisclosureClass::Operator,
+                None,
+                Ok(answer.clone()),
+                &no_floor()
+            )
+            .unwrap(),
             answer
         );
     }
@@ -1545,6 +1620,7 @@ mod tests {
                     }),
                 },
             )),
+            &no_floor(),
         )
         .unwrap_err();
         match ryeos_app::handler_error::extract_handler_error(&refused) {
@@ -1565,6 +1641,7 @@ mod tests {
                 DisclosureClass::Principal,
                 None,
                 Err(anyhow::Error::new(error)),
+                &no_floor(),
             )
             .unwrap_err()
         };
@@ -1629,6 +1706,7 @@ mod tests {
                         body: serde_json::json!({"outcome": outcome, "detail": "/srv/private"}),
                     },
                 )),
+                &no_floor(),
             )
             .unwrap_err();
             match ryeos_app::handler_error::extract_handler_error(&refused) {
@@ -1660,11 +1738,97 @@ mod tests {
             Err(anyhow::anyhow!(
                 "read_failed: could not read /home/someone/secret"
             )),
+            &no_floor(),
         )
         .unwrap_err();
         let shown = format!("{failed:#}");
         assert!(!shown.contains("/home/someone"), "{shown}");
         assert!(!shown.contains("secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_principal_answer_holding_a_node_secret_is_refused_without_it() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let tier = principal_tier(&["/id", "/note"]);
+        let answer = serde_json::json!({"id": "x", "note": format!("token {SECRET}")});
+        let refused = disclose_service_result(
+            DisclosureClass::Principal,
+            Some(&tier),
+            Ok(answer.clone()),
+            &floor,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&refused),
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, status: 403, .. })
+                if code == ryeos_app::secret_floor::SECRET_FLOOR_WITHHELD
+        ));
+        assert!(!format!("{refused:#}").contains(SECRET));
+        assert!(!format!("{refused:?}").contains(SECRET));
+        // The operator receives the same answer unchanged.
+        assert_eq!(
+            disclose_service_result(
+                DisclosureClass::Operator,
+                Some(&tier),
+                Ok(answer.clone()),
+                &floor
+            )
+            .unwrap(),
+            answer
+        );
+        // A principal answer without the secret is unchanged.
+        let clean = serde_json::json!({"id": "x", "note": "fine"});
+        assert_eq!(
+            disclose_service_result(
+                DisclosureClass::Principal,
+                Some(&tier),
+                Ok(clean.clone()),
+                &floor
+            )
+            .unwrap(),
+            clean
+        );
+    }
+
+    #[test]
+    fn a_secret_only_in_a_projected_away_field_does_not_refuse() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let tier = principal_tier(&["/id"]);
+        let answer = serde_json::json!({"id": "x", "hidden": SECRET});
+        assert_eq!(
+            disclose_service_result(DisclosureClass::Principal, Some(&tier), Ok(answer), &floor)
+                .unwrap(),
+            serde_json::json!({"id": "x"})
+        );
+    }
+
+    #[test]
+    fn a_dispatch_failure_text_holding_a_node_secret_is_refused_to_a_principal() {
+        use ryeos_node_runtime::disclosure::DisclosureClass;
+        const SECRET: &str = "sk-live-0123456789";
+        let floor = ryeos_app::secret_floor::SecretFloor::from_values(vec![SECRET.to_owned()]);
+        let failed = disclose_service_result(
+            DisclosureClass::Principal,
+            None,
+            Err(anyhow::Error::new(
+                crate::dispatch_error::DispatchError::MethodInvalidArg {
+                    method: "m".to_owned(),
+                    reason: format!("bad {SECRET}"),
+                },
+            )),
+            &floor,
+        )
+        .unwrap_err();
+        assert!(!format!("{failed:#}").contains(SECRET));
+        assert!(matches!(
+            ryeos_app::handler_error::extract_handler_error(&failed),
+            Some(ryeos_app::handler_error::HandlerError::Structured { code, .. })
+                if code == ryeos_app::secret_floor::SECRET_FLOOR_WITHHELD
+        ));
     }
 
     #[test]
