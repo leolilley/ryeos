@@ -30,6 +30,7 @@ pub mod bundle_release;
 pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
 pub mod bundle_smoke;
+pub mod bundle_stage_clear;
 pub mod bundle_verify;
 pub mod commands_dispatch;
 pub mod commands_get;
@@ -314,6 +315,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_pull::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    bundle_stage_clear::DESCRIPTOR,
     trust_list::LIST_DESCRIPTOR,
     records::GET_DESCRIPTOR,
     records::LIST_DESCRIPTOR,

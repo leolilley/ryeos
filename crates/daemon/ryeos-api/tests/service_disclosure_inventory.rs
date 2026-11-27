@@ -119,6 +119,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/remove",
     "bundle/sign",
     "bundle/smoke",
+    "bundle/stage-clear",
     "bundle/verify",
     "credential-profiles/abandon-login",
     "credential-profiles/delete",
@@ -1065,7 +1066,7 @@ fn the_gate_scan_skips_test_modules_and_flags_ungated_production_writes() {
     assert_eq!(ungated_measurement_writes(file_module), vec![5]);
 }
 
-/// The publication services are operator acts and operator bookkeeping. An
+/// The publication services and the stage clear are operator acts and operator bookkeeping. An
 /// empty `disclosure: {}` is not a grant: a principal or an unauthenticated
 /// caller is shaped to an empty answer and never sees the result. Their
 /// capability requirement is separate and unchanged.
@@ -1075,6 +1076,7 @@ fn the_publication_services_disclose_nothing_to_a_non_operator() {
     let all = services();
     for name in [
         "bundle/pull",
+        "bundle/stage-clear",
         "publication/freeze",
         "publication/list",
         "publication/publish",

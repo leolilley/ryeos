@@ -33,6 +33,7 @@
 //! admit.
 
 pub mod apply;
+pub mod clear;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -133,6 +134,8 @@ pub enum StagingRefusal {
     KeyCount { limit: usize },
     /// The stage's own content is not acceptable.
     Invalid(String),
+    /// An operator named a stage the area does not hold.
+    NotFound(String),
     /// The staging area could not be read or written.
     Store(String),
 }
@@ -145,17 +148,20 @@ impl StagingRefusal {
             Self::KeyBytes { .. } => "bundle_stage_key_bytes_cap",
             Self::KeyCount { .. } => "bundle_stage_key_count_cap",
             Self::Invalid(_) => "bundle_stage_invalid",
+            Self::NotFound(_) => "bundle_stage_not_found",
             Self::Store(_) => "bundle_stage_store_failed",
         }
     }
 
     /// 507 when the node as a whole is full, 429 when the requesting key has
-    /// used its own share, 422 for unacceptable content, 500 for a store fault.
+    /// used its own share, 422 for unacceptable content, 404 for a stage that
+    /// is not there, 500 for a store fault.
     pub fn status(&self) -> u16 {
         match self {
             Self::NodeBytes { .. } | Self::NodeCount { .. } => 507,
             Self::KeyBytes { .. } | Self::KeyCount { .. } => 429,
             Self::Invalid(_) => 422,
+            Self::NotFound(_) => 404,
             Self::Store(_) => 500,
         }
     }
@@ -196,6 +202,7 @@ impl std::fmt::Display for StagingRefusal {
                 "this key already has {limit} stages, the per-key cap. Nothing was staged"
             ),
             Self::Invalid(reason) | Self::Store(reason) => f.write_str(reason),
+            Self::NotFound(digest) => write!(f, "the node holds no stage {digest}"),
         }
     }
 }
