@@ -53,6 +53,63 @@ pub struct Request {
 
 /// Refuse a staged bundle generation that strands an installed binding the
 /// operator did not name, as a typed HTTP 409.
+/// A public route that a running node's policy does not name is not served.
+pub(crate) const PUBLIC_ROUTE_NOT_NAMED: &str = "public_route_not_named";
+/// A route signed public must be keyless and static.
+pub(crate) const PUBLIC_ROUTE_NOT_KEYLESS_STATIC: &str = "public_route_not_keyless_static";
+
+/// Refuse a bundle whose routes signed `public: true` the node would not
+/// serve: one that is not keyless and static (the boot table refuses it), or
+/// one the node's current `public_routes` policy does not name. Every such
+/// route is named in the refusal; an incomplete list is refused whole.
+fn refuse_unadmitted_public_routes(
+    routes: &[ryeos_app::route_raw::RawRouteSpec],
+    candidate_root: &Path,
+    policy: &ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy,
+) -> Result<()> {
+    let candidate: Vec<&ryeos_app::route_raw::RawRouteSpec> = routes
+        .iter()
+        .filter(|route| route.public && route.source_file.starts_with(candidate_root))
+        .collect();
+    let mut not_keyless_static: Vec<String> = candidate
+        .iter()
+        .filter(|route| route.auth != "none" || route.response.mode != "static")
+        .map(|route| route.id.clone())
+        .collect();
+    not_keyless_static.sort();
+    if !not_keyless_static.is_empty() {
+        return Err(ryeos_app::handler_error::HandlerError::Structured {
+            code: PUBLIC_ROUTE_NOT_KEYLESS_STATIC.to_owned(),
+            status: 422,
+            body: serde_json::json!({
+                "code": PUBLIC_ROUTE_NOT_KEYLESS_STATIC,
+                "error": "these routes are signed public but are not keyless static routes, so a node refuses its route table with them",
+                "routes": not_keyless_static,
+            }),
+        }
+        .into());
+    }
+    let mut not_named: Vec<String> = candidate
+        .iter()
+        .filter(|route| policy.limits_for(&route.id).is_none())
+        .map(|route| route.id.clone())
+        .collect();
+    not_named.sort();
+    if !not_named.is_empty() {
+        return Err(ryeos_app::handler_error::HandlerError::Structured {
+            code: PUBLIC_ROUTE_NOT_NAMED.to_owned(),
+            status: 422,
+            body: serde_json::json!({
+                "code": PUBLIC_ROUTE_NOT_NAMED,
+                "error": "these routes are signed public, and this node's public_routes policy does not name them; name every one with its limits before installing the bundle",
+                "routes": not_named,
+            }),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn check_staged_bindings(
     admitted: &AdmittedStaging,
     node_trust_store: &TrustStore,
@@ -615,6 +672,18 @@ pub(crate) fn admit_completed_staging(
     prospective_validator
         .validate(&snapshot)
         .context("prospective bundle set would fail composed node-config admission")?;
+    let candidate_root = plan
+        .bundles
+        .get(bundle_name)
+        .map(|bundle| bundle.source.root_path().clone())
+        .with_context(|| format!("the prospective plan has no bundle `{bundle_name}`"))?;
+    refuse_unadmitted_public_routes(
+        &snapshot.routes,
+        &candidate_root,
+        policy_snapshot.require::<
+            ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy,
+        >()?,
+    )?;
     let prospective_roots: Vec<PathBuf> = plan
         .bundles
         .values()
@@ -1318,6 +1387,98 @@ mod tests {
         assert_eq!(
             fs::read(target.join(".ai/bin/x86_64-unknown-linux-gnu/web")).unwrap(),
             b"new"
+        );
+    }
+
+    fn public_route(id: &str, root: &str) -> ryeos_app::route_raw::RawRouteSpec {
+        let mut raw: ryeos_app::route_raw::RawRouteSpec = serde_yaml::from_str(&format!(
+            "id: {id}\npath: /{id}\nmethods: [GET]\nauth: none\nlimits:\n  body_bytes_max: 0\nresponse:\n  mode: static\n  status: 200\n  content_type: text/plain\n  body_b64: aGVsbG8=\npublic: true\n"
+        ))
+        .unwrap();
+        raw.source_file = std::path::PathBuf::from(format!("{root}/.ai/node/routes/{id}.yaml"));
+        raw
+    }
+
+    fn naming(
+        ids: &[&str],
+    ) -> ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy {
+        use ryeos_node_runtime::node_policy::sections::public_routes::{
+            PublicRouteLimits, PublicRoutesPolicy,
+        };
+        let mut policy = PublicRoutesPolicy::as_shipped();
+        for id in ids {
+            policy.routes.insert(
+                (*id).to_owned(),
+                PublicRouteLimits {
+                    daily_bytes: 1,
+                    concurrent_max: 1,
+                },
+            );
+        }
+        policy
+    }
+
+    fn refusal(error: &anyhow::Error) -> (String, serde_json::Value) {
+        let Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) =
+            ryeos_app::handler_error::extract_handler_error(error)
+        else {
+            panic!("typed refusal: {error:#}");
+        };
+        assert_eq!(status, 422);
+        (code, body)
+    }
+
+    #[test]
+    fn a_bundle_installs_only_when_every_public_route_is_named() {
+        let candidate = Path::new("/stage/public-page");
+        let routes = vec![
+            public_route("public/front", "/stage/public-page"),
+            public_route("public/assets/style", "/stage/public-page"),
+            // Another bundle's left-out public route does not block this one.
+            public_route("public/other", "/node/.ai/bundles/other"),
+        ];
+
+        refuse_unadmitted_public_routes(
+            &routes,
+            candidate,
+            &naming(&["public/front", "public/assets/style"]),
+        )
+        .expect("every public route of the bundle is named");
+
+        let partial =
+            refuse_unadmitted_public_routes(&routes, candidate, &naming(&["public/front"]))
+                .unwrap_err();
+        let (code, body) = refusal(&partial);
+        assert_eq!(code, PUBLIC_ROUTE_NOT_NAMED);
+        assert_eq!(body["routes"], serde_json::json!(["public/assets/style"]));
+
+        let none = refuse_unadmitted_public_routes(&routes, candidate, &naming(&[])).unwrap_err();
+        let (code, body) = refusal(&none);
+        assert_eq!(code, PUBLIC_ROUTE_NOT_NAMED);
+        assert_eq!(
+            body["routes"],
+            serde_json::json!(["public/assets/style", "public/front"])
+        );
+    }
+
+    #[test]
+    fn a_bundle_whose_public_route_is_keyed_or_not_static_is_refused() {
+        let candidate = Path::new("/stage/public-page");
+        let mut keyed = public_route("public/front", "/stage/public-page");
+        keyed.auth = "browser_session".into();
+        let mut json = public_route("public/data", "/stage/public-page");
+        json.response.mode = "json".into();
+        let error = refuse_unadmitted_public_routes(
+            &[keyed, json],
+            candidate,
+            &naming(&["public/front", "public/data"]),
+        )
+        .unwrap_err();
+        let (code, body) = refusal(&error);
+        assert_eq!(code, PUBLIC_ROUTE_NOT_KEYLESS_STATIC);
+        assert_eq!(
+            body["routes"],
+            serde_json::json!(["public/data", "public/front"])
         );
     }
 }
