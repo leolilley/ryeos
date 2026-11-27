@@ -97,15 +97,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ))
     })?;
 
-    let project_root = req.project_path.map(std::path::PathBuf::from);
-    if let Some(root) = project_root.as_deref() {
-        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
-            &canonical,
-            &state.config.app_root,
-        )
-        .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
-    }
+    // The project path names a live directory the item is resolved from, so
+    // it is admitted like any other live project path: the operator keeps its
+    // own answers, any other key only at a root registered to an owner it
+    // speaks for.
+    let project_root = match req.project_path.as_deref() {
+        Some(requested) => Some(
+            ryeos_app::live_project_path::admit_handler_live_path(
+                &state,
+                &ctx,
+                std::path::Path::new(requested),
+            )?
+            .canonical,
+        ),
+        None => None,
+    };
 
     let signer_project = match project_root.as_deref() {
         Some(root) => ryeos_app::project_registry::live_logical_project(
