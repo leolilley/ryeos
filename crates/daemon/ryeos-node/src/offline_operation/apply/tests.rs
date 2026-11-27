@@ -2180,10 +2180,12 @@ fn no_grant_path_links_a_key_without_the_operators_own_signature_or_a_constraint
     body.signer_fingerprint = fingerprint(&stranger);
     let refusal = check_at(&fx, &SignedRequest::sign(body, &stranger).unwrap()).unwrap_err();
     assert_eq!(refusal.reason, RefusalReason::UnknownSigner);
-    // A remote operator whose grant names the scope and carries no
-    // constraint for it.
+    // A remote principal whose grant names the scope, carries no constraint
+    // and was not asked for by the operator's side. The operator check runs
+    // before the constraint check, so this is the refusal; the missing
+    // constraint on its own is covered in the envelope tests.
     let (key, digest) = fx.remote_principal(&[LINK_SCOPE], SITE, WildcardPolicy::Reject);
     let body = fx.remote_body(&key, &digest, SITE, "node.key.link");
     let refusal = check_at(&fx, &SignedRequest::sign(body, &key).unwrap()).unwrap_err();
-    assert_eq!(refusal.reason, RefusalReason::GrantConstraintMissing);
+    assert_eq!(refusal.reason, RefusalReason::KeyLinkGrantNotOperatorIssued);
 }
