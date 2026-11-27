@@ -165,7 +165,7 @@ fn current_policy_generation(app_root: &Path) -> String {
     loaded.unwrap_or_else(|_| "unreadable".to_owned())
 }
 
-const APPLIED_NOTE: &str = "the tree digest was recomputed from the install's own copy and again after it was moved into place; signers were verified against the trust store as it stands at apply; the offer window (not_after) is not checked at apply; the stage's policy generation is recorded beside the current one and neither is compared";
+const APPLIED_NOTE: &str = "the tree digest was recomputed from the install's own copy and again after it was moved into place; signers were verified against the trust store as it stands at apply; the offer window (not_after) is not checked at apply; the stage's policy generation is recorded beside the current one and neither is compared, except that a stage in the publication lane is audited, and its lifts are derived, from the publication_lane policy as it stands at apply";
 
 pub(super) fn bundle_apply_staged(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: BundleApplyStagedArguments = ctx.arguments()?;
@@ -294,8 +294,8 @@ fn apply(ctx: &HandlerContext<'_>, arguments: &BundleApplyStagedArguments) -> Re
         )));
     };
     let stage = area.read_for_apply(&arguments.staged_digest, &verifying)?;
-    // `stage.evidence` holds the evidence bytes that were verified. A lane
-    // audit reads those bytes and never the files again; nothing uses them yet.
+    // `stage.evidence` holds the evidence bytes that were verified. The lane
+    // audit reads those bytes and never the files again.
     if stage.record.bundle_name != arguments.name {
         return Err(anyhow::Error::new(ApplyRefusal::new(
             ApplyRefusalCode::StageNameMismatch,
@@ -311,6 +311,7 @@ fn apply(ctx: &HandlerContext<'_>, arguments: &BundleApplyStagedArguments) -> Re
         state_lock: ctx.state_lock,
         node: ctx.node,
         staged: &stage.bundle,
+        evidence: &stage.evidence,
         replace: arguments.replace,
     })?;
 
@@ -346,6 +347,9 @@ fn apply(ctx: &HandlerContext<'_>, arguments: &BundleApplyStagedArguments) -> Re
         "stage_policy_generation": stage.record.policy_generation,
         "current_policy_generation": current_policy_generation(ctx.app_root),
         "stage_removed": stage_removed,
+        // What the publication lane admitted and lifted, as the node's policy
+        // stood at this apply; null for a stage that is not in the lane.
+        "lane": report.get("lane").cloned().unwrap_or(Value::Null),
         "note": APPLIED_NOTE,
     }))
 }

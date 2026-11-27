@@ -33,10 +33,19 @@ pub enum BundlePhase {
 /// bundle transactions, without publishing them. The caller supplies the
 /// explicit node key whose public half is already pinned by current node
 /// trust; no operator or daemon-global key is discovered here.
+///
+/// The registration written here carries no lane marker, so it is refused for
+/// a name whose current registration has one: a laned bundle is never
+/// re-registered through this path.
 pub fn prepare_signed_bundle_registration(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
     installed_target: &Path,
     node_signing_key: &Path,
 ) -> Result<Vec<u8>> {
+    if let Some(name) = installed_target.file_name().and_then(|name| name.to_str()) {
+        refuse_laned_replacement(app_root, trust_store, name)?;
+    }
     let target = installed_target
         .to_str()
         .context("bundle registration target is not UTF-8")?;
@@ -57,6 +66,39 @@ pub fn prepare_signed_bundle_registration(
         "path": target,
     }))?;
     Ok(lillux::signature::sign_content(&yaml, &key, "#", None).into_bytes())
+}
+
+/// Refuse to replace or re-register a bundle whose current registration
+/// carries a lane marker. A laned bundle can only be removed; the typed refusal
+/// `bundle_lane_not_replaceable` (409) says so. A name with no registration
+/// passes. The registrations are read through the verified bundle bootstrap
+/// loader, so an unsigned or foreign-signed file is an error, not a pass.
+pub fn refuse_laned_replacement(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    name: &str,
+) -> Result<()> {
+    let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store,
+    }
+    .load_bundle_section()
+    .context("load current bundle registrations to check lane markers")?;
+    if let Some(lane) = records
+        .iter()
+        .find(|record| record.name == name)
+        .and_then(|record| record.lane.as_ref())
+    {
+        return Err(anyhow::Error::new(crate::handler_error::typed_refusal(
+            "bundle_lane_not_replaceable",
+            409,
+            format!(
+                "bundle '{name}' is in the {} lane and cannot be replaced or updated in place; remove it and pull the publication again",
+                lane.name
+            ),
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

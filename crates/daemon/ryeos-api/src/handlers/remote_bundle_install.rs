@@ -302,6 +302,28 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         uses_kinds: verified_manifest.manifest.uses_kinds.clone(),
     };
 
+    // A stage from a publication is audited by the lane's own rules before
+    // anything is committed, so a bundle no lane would admit stages nothing.
+    // Staging confers nothing: the audit runs again at apply, with the policy
+    // as it stands then, and the stage records no lift.
+    let predicted_lifts = if origin.source.kind == staging::SOURCE_PUBLICATION {
+        let grants = super::stage_lane::grants_from_snapshot(&state.node_policy, bundle_name)
+            .map_err(|error| {
+                anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                    "publication_lane_unavailable",
+                    503,
+                    format!("this node's publication_lane policy: {error:#}"),
+                ))
+            })?;
+        super::stage_lane::audit_tree(&tree, bundle_name, &state.engine.kinds, &grants)?;
+        Some(super::stage_lane::predicted_lifts(
+            &state.node_policy,
+            bundle_name,
+        ))
+    } else {
+        None
+    };
+
     let record = staging::StagingRecord {
         schema: staging::STAGING_SCHEMA.to_owned(),
         bundle_name: bundle_name.to_owned(),
@@ -320,7 +342,7 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         .commit(temp, record, &origin.evidence, &caps, node_key)
         .map_err(stage_refusal)?;
 
-    Ok(serde_json::json!({
+    let mut answer = serde_json::json!({
         "bundle_name": bundle_name,
         "status": staging::STATUS_STAGED,
         "installed": false,
@@ -330,7 +352,11 @@ pub(crate) async fn stage_entries<S: BlobSource>(
         "already_staged": committed.already_staged,
         "declared": declared,
         "receipt": staging::STAGED_RECEIPT,
-    }))
+    });
+    if let (Some(lifts), Some(object)) = (predicted_lifts, answer.as_object_mut()) {
+        object.insert("predicted_lifts".to_owned(), lifts);
+    }
+    Ok(answer)
 }
 
 /// Reconcile one bundle transaction while the caller holds its lock. Visible

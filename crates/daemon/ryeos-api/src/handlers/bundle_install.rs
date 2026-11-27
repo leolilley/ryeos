@@ -26,6 +26,23 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+/// What admission needs to check a bundle that arrived through a publication:
+/// its lane marker, this node's kinds, and what the node's `publication_lane`
+/// policy admits for it.
+pub(crate) struct LaneAdmission<'a> {
+    pub marker: &'a ryeos_engine::trust::BundleLane,
+    pub kinds: &'a ryeos_engine::kind_registry::KindRegistry,
+    pub grants: ryeos_bundle::lane::LaneGrants,
+}
+
+/// The lane an install registers its bundle in: the marker the node signs into
+/// the registration, and what the policy admits for the bundle.
+#[derive(Debug, Clone)]
+pub struct LaneInstall {
+    pub marker: ryeos_engine::trust::BundleLane,
+    pub grants: ryeos_bundle::lane::LaneGrants,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -97,6 +114,8 @@ pub struct InstallAuthority<'a> {
     /// The node's signing key, which signs the bundle registration.
     pub node_signing_key: &'a lillux::crypto::SigningKey,
     pub node_trust_store: &'a TrustStore,
+    /// The node's kind registry, which the lane audit reads activations from.
+    pub kinds: &'a ryeos_engine::kind_registry::KindRegistry,
     pub prospective_validator: &'a ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     pub isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     /// The state lock the registration reseal is published under.
@@ -126,6 +145,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             app_root: &state.config.app_root,
             node_signing_key: state.identity.signing_key(),
             node_trust_store: &state.engine.node_trust_store,
+            kinds: &state.engine.kinds,
             prospective_validator: &prospective_validator,
             isolation: Arc::clone(&state.isolation),
             state_lock: &state.controller_lifetime,
@@ -180,6 +200,9 @@ pub struct InstallChecks<'a> {
     /// Maps a failure of node admission of the staging copy to the error this
     /// install reports.
     pub admission_error: &'a dyn Fn(anyhow::Error) -> anyhow::Error,
+    /// The lane the bundle is registered in, with what admits it. `None` is a
+    /// native install.
+    pub lane: Option<LaneInstall>,
 }
 
 fn no_check(_: &Path) -> Result<()> {
@@ -198,6 +221,7 @@ impl InstallChecks<'static> {
             activated: &no_check,
             converged: &no_check,
             admission_error: &keep_error,
+            lane: None,
         }
     }
 }
@@ -211,6 +235,9 @@ struct InstallEnv<'a> {
     generation_changed: &'a dyn Fn(&str),
     /// Admit the completed staging copy; returns the bindings it invalidates.
     admit: &'a dyn Fn(&Path, bool) -> Result<Vec<ryeos_app::node_config::coherence::BindingRef>>,
+    /// Refuse replacing the named bundle when its registration is in a lane.
+    /// Runs under the registry lock, where the installed set is read.
+    refuse_replace: &'a dyn Fn(&str) -> Result<()>,
     /// Reseal the init completion over the changed registration set.
     seal: &'a dyn Fn() -> Result<()>,
 }
@@ -227,6 +254,18 @@ pub fn install_with_checks(
     authority: &InstallAuthority<'_>,
     checks: &InstallChecks<'_>,
 ) -> Result<Value> {
+    let lane_admission = checks.lane.as_ref().map(|lane| LaneAdmission {
+        marker: &lane.marker,
+        kinds: authority.kinds,
+        grants: lane.grants.clone(),
+    });
+    let refuse_replace = |name: &str| {
+        ryeos_app::bundle_transaction::refuse_laned_replacement(
+            authority.app_root,
+            authority.node_trust_store,
+            name,
+        )
+    };
     let admit = |staging: &Path, replace: bool| {
         let admitted = admit_completed_staging(
             authority.app_root,
@@ -236,6 +275,7 @@ pub fn install_with_checks(
             authority.node_trust_store,
             authority.prospective_validator,
             Arc::clone(&authority.isolation),
+            lane_admission.as_ref(),
         )
         .context("admission refused completed install staging tree")?;
         check_staged_bindings(
@@ -258,6 +298,7 @@ pub fn install_with_checks(
             node_signing_key: authority.node_signing_key,
             generation_changed: authority.generation_changed,
             admit: &admit,
+            refuse_replace: &refuse_replace,
             seal: &seal,
         },
         checks,
@@ -336,13 +377,21 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
         }));
     }
 
+    if replaced {
+        (env.refuse_replace)(&req.name)?;
+    }
+
     // Trust comes only from the node's persistent trust store. Admission runs
     // against the completed staging tree below, never the mutable source tree.
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
-    let registration = serde_json::json!({ "kind": "node", "path": target });
+    let mut registration = serde_json::json!({ "kind": "node", "path": target });
+    if let Some(lane) = &checks.lane {
+        registration["lane"] =
+            serde_json::to_value(&lane.marker).context("serialize bundle lane marker")?;
+    }
     let mut invalidated_bindings = Vec::new();
     let verify_staged = |staging: &Path,
                          replace: bool|
@@ -442,6 +491,7 @@ fn install_core(req: &Request, env: &InstallEnv<'_>, checks: &InstallChecks<'_>)
 /// the error chain; anything else is a fault of the environment.
 pub fn install_staged(
     staged: &ryeos_node::bundle_staging::StagedBundle,
+    evidence: &std::collections::BTreeMap<String, Vec<u8>>,
     replace: bool,
     authority: &InstallAuthority<'_>,
 ) -> Result<Value> {
@@ -449,6 +499,10 @@ pub fn install_staged(
 
     let name = staged.record.bundle_name.as_str();
     let expected = staged.record.tree_digest.as_str();
+    // A stage from a publication is installed in the publication lane, under
+    // what the policy admits as it stands now. Everything the lane needs is
+    // re-derived from the evidence bytes the verified stage returned.
+    let lane = super::stage_lane::prepare_apply_lane(staged, evidence, authority)?;
     let limits = ryeos_node::bundle_staging::TreeLimits {
         max_files: super::bundle_export::MAX_EXPORTED_BUNDLE_FILES,
         max_bytes: super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES,
@@ -461,10 +515,10 @@ pub fn install_staged(
         // only directories no group or other can write.
         lillux::set_tree_directory_modes(copy).context("set the install copy's directory modes")?;
         verify_copy(copy, ApplyRefusalCode::TreeDigestMismatch)?;
-        // slice 3: the publication-lane audit runs here, on this copy, between
-        // the digest check and node admission. It reads the evidence bytes the
-        // verified stage returned (`stage.evidence`), never the evidence files
-        // again.
+        // The publication-lane audit runs on this same copy as the first step
+        // of admission, after the digest check above: the tree that is
+        // audited is the tree that is activated. It takes its inputs from
+        // `stage.evidence` (see `prepare_apply_lane`), never from the files.
         Ok(())
     };
     let activated_check = |target: &Path| -> Result<()> {
@@ -495,6 +549,11 @@ pub fn install_staged(
     let admission_error = |error: anyhow::Error| -> anyhow::Error {
         if ApplyRefusal::find(&error).is_some() {
             error
+        } else if super::stage_lane::is_lane_audit_refusal(&error) {
+            anyhow::Error::new(ApplyRefusal::new(
+                ApplyRefusalCode::LaneRefused,
+                format!("{error:#}"),
+            ))
         } else {
             anyhow::Error::new(ApplyRefusal::new(
                 ApplyRefusalCode::AdmissionRefused,
@@ -520,8 +579,18 @@ pub fn install_staged(
             activated: &activated_check,
             converged: &converged_check,
             admission_error: &admission_error,
+            lane: lane.clone(),
         },
     );
+    let result = result.map(|mut report| {
+        if let (Some(lane), Some(object)) = (&lane, report.as_object_mut()) {
+            object.insert(
+                "lane".to_owned(),
+                super::stage_lane::applied_lane_report(lane),
+            );
+        }
+        report
+    });
     result.map_err(
         |error| match error.downcast_ref::<BundleAlreadyInstalledError>() {
             Some(installed) => anyhow::Error::new(ApplyRefusal::new(
@@ -531,7 +600,18 @@ pub fn install_staged(
                     installed.name()
                 ),
             )),
-            None => error,
+            None => match ryeos_app::handler_error::extract_handler_error(&error) {
+                // A laned bundle is only removed, never replaced.
+                Some(crate::handler_error::HandlerError::Structured { code, .. })
+                    if code == "bundle_lane_not_replaceable" =>
+                {
+                    anyhow::Error::new(ApplyRefusal::new(
+                        ApplyRefusalCode::LaneNameRefused,
+                        format!("{error:#}"),
+                    ))
+                }
+                _ => error,
+            },
         },
     )
 }
@@ -856,7 +936,27 @@ pub(crate) fn admit_completed_staging(
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    lane: Option<&LaneAdmission<'_>>,
 ) -> Result<AdmittedStaging> {
+    if let Some(admission) = lane {
+        // A laned bundle is checked against this node's kinds and its
+        // publication_lane policy before anything else looks at the tree.
+        // This is the install's own completed copy: the tree that is audited
+        // is the tree that is activated.
+        ryeos_bundle::lane::audit_installed_lane_bundle(
+            staging,
+            bundle_name,
+            admission.kinds,
+            &admission.grants,
+        )
+        .map_err(|refusal| {
+            anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                refusal.code(),
+                422,
+                refusal.to_string(),
+            ))
+        })?;
+    }
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is
@@ -895,6 +995,7 @@ pub(crate) fn admit_completed_staging(
                 }
                 Ok(ryeos_node_runtime::node_config_source::BundleRecord {
                     name: name.clone(),
+                    lane: lane.map(|admission| admission.marker.clone()),
                     path: bundle.source.root_path().clone(),
                     source_file: app_root
                         .join(ryeos_engine::AI_DIR)
@@ -2194,6 +2295,7 @@ mod tests {
                 node_signing_key: &key,
                 generation_changed: &|_| {},
                 admit: &no_admission,
+                refuse_replace: &|_| Ok(()),
                 seal: &seal,
             },
             &InstallChecks::none(),
@@ -2237,6 +2339,7 @@ mod tests {
                 node_signing_key: key,
                 generation_changed: &|_| {},
                 admit: &no_admission,
+                refuse_replace: &|_| Ok(()),
                 seal: &seal,
             },
             &InstallChecks {

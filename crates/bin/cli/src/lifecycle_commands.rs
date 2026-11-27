@@ -3468,6 +3468,43 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
                     }),
                 ));
+                for record in &snapshot.bundles {
+                    if let Some(lane) = &record.lane {
+                        checks.push(check(
+                            &format!("bundle_lane:{}", record.name),
+                            OK,
+                            serde_json::json!({
+                                "lane": lane.name,
+                                "publisher_fingerprint": lane.publisher_fingerprint,
+                                "node_fingerprint": lane.node_fingerprint,
+                                "record_hash": lane.record_hash,
+                                "note": "installed from a publication, not a release; no release evidence chain exists for this bundle",
+                            }),
+                        ));
+                    }
+                }
+                if let Ok(trust) =
+                    ryeos_engine::trust::TrustStore::load_node_registry(&config.app_root)
+                    && let Ok((_, skipped)) =
+                        (ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+                            app_root: &config.app_root,
+                            trust_store: &trust,
+                        })
+                        .load_bundle_section_reporting_skipped()
+                {
+                    for bundle in skipped {
+                        checks.push(check(
+                            "bundle_lane_tree_changed",
+                            FAIL,
+                            serde_json::json!({
+                                "bundle": bundle.name,
+                                "code": bundle.code,
+                                "error": bundle.message,
+                                "note": "this publication-lane bundle does not pass what this node admits and is not loaded; remove it and pull the publication again",
+                            }),
+                        ));
+                    }
+                }
                 if !args.no_bundles {
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:52:06Z:0d0ae46f5a87a208fce4b1c8dbac0f6233ae53934962c8dac496454830080ea1:SUCmC5rAG+5pdoAUTeoG3pzqd+9+k6M9jmc0naMl18+WK0f9AA+wjbBdh/mWxI7IiQ7I/idP5G92TN1F9t8XCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T04:25:49Z:a15470bde84f20028f0ea3b4e8968c9146d53477cadf7b44f9371b1f4217213a:RQG0583HevTJNW7xmG/iXFr66XxfLCuW/qADjKnfigN2EePE1Wjad8nJbYm1xwG9xdsIp/UqHR5rToXORdKLBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -179,6 +179,25 @@ policies:
     # Most /published requests worked at once, node-wide; one past it is
     # answered publication_busy before any read.
     max_in_flight: 16
+  publication_lane:
+    schema: 1
+    # What a bundle pulled from a publication may carry. admit_activations
+    # accepts only `invoked`, meaning items that act only when a caller invokes
+    # them, under that caller's own grants. named_bundles lifts more for one
+    # bundle by name, namely `kinds` (exact node-loaded kinds) and `facets`
+    # (manifest declarations a policy can lift). Nothing else can be lifted.
+    admit_activations: [invoked]
+    # The manifest facets an operator may lift for a named bundle. Only these
+    # five exist to lift; provided kinds, the operator vault, state homes,
+    # route capabilities, isolation backends, external providers and adapters,
+    # bin trees and executors can never be listed.
+    liftable_facets:
+      - bundle_events
+      - item_authoring
+      - owns_namespaces
+      - project_snapshots
+      - runtime_vault
+    named_bundles: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
