@@ -50,6 +50,12 @@ pub struct AuthorizeClientRequest {
     /// node's authorization policy. Above that maximum: refused.
     #[serde(default)]
     pub lifetime_secs: Option<u64>,
+    /// Exact-argument constraints on the grant's offline-operation scopes, a
+    /// JSON array of `{scope, argument, equals, max_uses, not_after?}`. Only
+    /// the node's local operator may ask for them, and not together with
+    /// `merge_scopes`.
+    #[serde(default)]
+    pub offline_bind: Option<String>,
 }
 
 fn default_authorize_client_label() -> String {
@@ -107,6 +113,26 @@ impl AuthorizeClientRequest {
         if !local_operator {
             ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
         }
+        let offline_constraints = match self.offline_bind.as_deref() {
+            None => Vec::new(),
+            Some(text) => {
+                if !local_operator {
+                    bail!("offline_bind may only be asked for by the node's local operator");
+                }
+                if self.merge_scopes {
+                    bail!("offline_bind replaces a grant's constraints and cannot be merged");
+                }
+                let constraints: Vec<ryeos_node_runtime::identity::OfflineConstraint> =
+                    serde_json::from_str(text).context(
+                        "offline_bind must be a JSON array of {scope, argument, equals, max_uses, not_after?}",
+                    )?;
+                ryeos_node_runtime::identity::validate_offline_constraints(
+                    &constraints,
+                    &scopes,
+                )?;
+                constraints
+            }
+        };
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
                 AuthorizeClientSubject::RemotePrincipal { origin_site_id }
@@ -124,6 +150,7 @@ impl AuthorizeClientRequest {
             merge: self.merge_scopes,
             subject,
             allow_semantic_conversion: self.allow_semantic_conversion,
+            offline_constraints,
         })
     }
 }
@@ -161,6 +188,8 @@ pub struct AuthorizeClientParams {
     /// origin constraint. Operationally this is valid only with the daemon
     /// stopped; ordinary scope updates leave it false.
     pub allow_semantic_conversion: bool,
+    /// Exact-argument constraints the grant is issued with.
+    pub offline_constraints: Vec<ryeos_node_runtime::identity::OfflineConstraint>,
 }
 
 impl AuthorizeClientParams {
@@ -196,7 +225,7 @@ pub fn authorize_client_terms(
             lillux::time::unix_secs_now(),
         )?,
         authorized_by,
-        offline_constraints: Vec::new(),
+        offline_constraints: params.offline_constraints.clone(),
     })
 }
 
@@ -762,6 +791,50 @@ admission_enabled: {admission_enabled}
         assert!(err.to_string().contains("system_space_dir"));
     }
 
+    fn bind_request(offline_bind: Option<&str>, merge_scopes: bool) -> AuthorizeClientRequest {
+        let key = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        AuthorizeClientRequest {
+            public_key: base64::engine::general_purpose::STANDARD.encode(key.to_bytes()),
+            scopes: "ryeos.offline.node.key.link".to_owned(),
+            label: "x".to_owned(),
+            merge_scopes,
+            origin_site_id: Some("site:source".to_owned()),
+            remote_node_origin_site_id: None,
+            allow_semantic_conversion: false,
+            lifetime_secs: None,
+            offline_bind: offline_bind.map(str::to_owned),
+        }
+    }
+
+    const LINK_BIND: &str = r#"[{"scope":"ryeos.offline.node.key.link","argument":"/link/body/key","equals":"fp:abc","max_uses":1,"not_after":4102444800}]"#;
+
+    #[test]
+    fn offline_bind_reaches_the_grant_terms_for_the_local_operator_only() {
+        let params = bind_request(Some(LINK_BIND), false)
+            .into_params_as_local_operator(PathBuf::from("/x"))
+            .unwrap();
+        assert_eq!(params.offline_constraints.len(), 1);
+        assert_eq!(params.offline_constraints[0].equals, "fp:abc");
+        assert!(
+            bind_request(Some(LINK_BIND), false)
+                .into_params(PathBuf::from("/x"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn offline_bind_refuses_merge_and_malformed_or_foreign_constraints() {
+        let local = |request: AuthorizeClientRequest| {
+            request.into_params_as_local_operator(PathBuf::from("/x"))
+        };
+        assert!(local(bind_request(Some(LINK_BIND), true)).is_err());
+        assert!(local(bind_request(Some("not json"), false)).is_err());
+        let other_scope = LINK_BIND.replace("node.key.link", "node.other");
+        assert!(local(bind_request(Some(&other_scope), false)).is_err());
+        let no_uses = LINK_BIND.replace("\"max_uses\":1", "\"max_uses\":0");
+        assert!(local(bind_request(Some(&no_uses), false)).is_err());
+    }
+
     #[test]
     fn authorize_client_can_emit_exact_scope_remote_principal_grant() {
         let tmp = tempfile::tempdir().unwrap();
@@ -779,6 +852,7 @@ admission_enabled: {admission_enabled}
                     origin_site_id: "site:source".to_owned(),
                 },
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -805,6 +879,7 @@ admission_enabled: {admission_enabled}
                 merge: false,
                 subject: AuthorizeClientSubject::LocalClient,
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -824,6 +899,7 @@ admission_enabled: {admission_enabled}
                     origin_site_id: "site:source".to_owned(),
                 },
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -845,6 +921,7 @@ admission_enabled: {admission_enabled}
                     origin_site_id: "site:source".to_owned(),
                 },
                 allow_semantic_conversion: true,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -870,6 +947,7 @@ admission_enabled: {admission_enabled}
                 merge: false,
                 subject: AuthorizeClientSubject::LocalClient,
                 allow_semantic_conversion: true,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -898,6 +976,7 @@ admission_enabled: {admission_enabled}
                 merge: false,
                 subject: subject.clone(),
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -914,6 +993,7 @@ admission_enabled: {admission_enabled}
                 merge: true,
                 subject,
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -941,6 +1021,7 @@ admission_enabled: {admission_enabled}
                     origin_site_id: "site:different".to_owned(),
                 },
                 allow_semantic_conversion: false,
+                offline_constraints: Vec::new(),
             },
             &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         )
@@ -1008,6 +1089,7 @@ admission_enabled: {admission_enabled}
             remote_node_origin_site_id: None,
             allow_semantic_conversion: false,
             lifetime_secs: None,
+            offline_bind: None,
         }
     }
 

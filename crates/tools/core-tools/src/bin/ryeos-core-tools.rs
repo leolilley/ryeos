@@ -285,6 +285,13 @@ enum Cmd {
         /// node's authorization policy; a larger value is refused.
         #[arg(long)]
         lifetime_secs: Option<u64>,
+
+        /// Exact-argument constraints on the grant's offline-operation
+        /// scopes: a JSON array of {scope, argument, equals, max_uses,
+        /// not_after?}. Replaces the grant's constraints; not with
+        /// --merge-scopes.
+        #[arg(long)]
+        offline_bind: Option<String>,
     },
 
     /// Author (create or upsert) a signed project item through the daemon
@@ -587,6 +594,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             remote_node_origin_site_id,
             allow_semantic_conversion,
             lifetime_secs,
+            offline_bind,
         } => run_authorize_client(
             app_root,
             public_key,
@@ -597,6 +605,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             remote_node_origin_site_id,
             allow_semantic_conversion,
             lifetime_secs,
+            offline_bind,
             cli.stdin_json,
         ),
         Cmd::AuthorItem {
@@ -1710,6 +1719,8 @@ struct AuthorizeClientStdinParams {
     allow_semantic_conversion: bool,
     #[serde(default)]
     lifetime_secs: Option<u64>,
+    #[serde(default)]
+    offline_bind: Option<String>,
 }
 
 fn default_authorize_client_label() -> String {
@@ -1726,6 +1737,7 @@ fn run_authorize_client(
     remote_node_origin_site_id: Option<String>,
     allow_semantic_conversion: bool,
     lifetime_secs: Option<u64>,
+    offline_bind: Option<String>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_core_tools::actions::authorize::{
@@ -1744,6 +1756,7 @@ fn run_authorize_client(
             value.remote_node_origin_site_id,
             value.allow_semantic_conversion,
             value.lifetime_secs,
+            value.offline_bind,
         )
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
@@ -1761,6 +1774,7 @@ fn run_authorize_client(
             remote_node_origin_site_id,
             allow_semantic_conversion,
             lifetime_secs,
+            offline_bind,
         )
     };
 
@@ -1774,6 +1788,7 @@ fn run_authorize_client(
         remote_node_origin_site_id,
         allow_semantic_conversion,
         lifetime_secs,
+        offline_bind,
     ) = params;
 
     let app_root = resolve_app_root(app_root)?;
@@ -1793,6 +1808,7 @@ fn run_authorize_client(
         remote_node_origin_site_id,
         allow_semantic_conversion,
         lifetime_secs,
+        offline_bind,
     }
     .into_params_as_local_operator(app_root)?;
     if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
