@@ -8510,13 +8510,15 @@ runtime_authority:
     fn a_projection_preview_judges_project_mint_on_its_requesting_key() {
         use ryeos_app::runtime_capability_admission::ProjectMint;
         let app_root = tempdir();
-        let operator_sk = SigningKey::from_bytes(&[37u8; 32]);
-        let operator_fp = lillux::sha256_hex(operator_sk.verifying_key().as_bytes());
-        ryeos_node_runtime::operator_identity::test_support::write_genesis(
-            &app_root,
-            &operator_fp,
-            &operator_sk,
-        );
+        // A node with its public identity and a pinned operator: the genesis
+        // alone does not establish an operator.
+        let node =
+            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node.pem")).unwrap();
+        node.write_public_identity(&ryeos_engine::trust::node_public_identity_path(&app_root))
+            .unwrap();
+        let operator =
+            ryeos_node_runtime::operator_identity::test_support::install_operator(&app_root, &node);
+        let operator_fp = operator.fingerprint().to_owned();
         let bundle = tempdir().join("example-bundle");
         fs::create_dir_all(bundle.join(ryeos_engine::AI_DIR)).unwrap();
         let ctx = test_execution_context(bundle);
