@@ -35,11 +35,46 @@ pub struct ColumnSpec {
     pub not_null: bool,
 }
 
+/// What a table holds, which decides what a version cut does with it. Every
+/// table declares one: a `TableSpec` literal without `class` does not compile,
+/// so a table added later cannot be forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreClass {
+    /// Keys, trust, the configuration of a credential and the anchors the
+    /// node's own records chain from: never cut.
+    Identity,
+    /// A person's own work or record: kept across a cut and exported per
+    /// person. Each row names the owner of the work it belongs to in
+    /// [`OWNER_COLUMN`], fixed when that work was admitted.
+    History,
+    /// Live coordination, leases, claims, recovery and delivery state: drained
+    /// or abandoned at a cut, never exported.
+    Work,
+    /// Rebuildable from signed data: a cut loses it honestly and it is rebuilt.
+    Derived,
+}
+
+/// The column a [`StoreClass::History`] table carries: the principal id of the
+/// owner of the work the row belongs to, set by the writer in the same
+/// statement as the row. Existing `owner_principal` columns hold the acting
+/// key's fingerprint, record which key acted, and are never converted to this.
+pub const OWNER_COLUMN: &str = "owner_principal_id";
+
 /// A table declaration.
 #[derive(Debug, Clone)]
 pub struct TableSpec {
     pub name: &'static str,
+    pub class: StoreClass,
     pub columns: &'static [ColumnSpec],
+}
+
+impl TableSpec {
+    /// Whether the table declares the owner column.
+    pub fn has_owner_column(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| column.name == OWNER_COLUMN)
+    }
 }
 
 /// An index declaration.
@@ -61,6 +96,19 @@ pub struct SchemaSpec {
     /// Expected index set (does NOT include autoindexes from
     /// PK/UNIQUE constraints — those are ignored automatically).
     pub indexes: &'static [IndexSpec],
+}
+
+impl SchemaSpec {
+    /// The `History` tables that do not carry [`OWNER_COLUMN`] (a cut needs an
+    /// owner on every history row, and a row with none counts as another
+    /// principal's, so a store's own test asserts this is empty).
+    pub fn history_tables_without_owner(&self) -> Vec<&'static str> {
+        self.tables
+            .iter()
+            .filter(|table| table.class == StoreClass::History && !table.has_owner_column())
+            .map(|table| table.name)
+            .collect()
+    }
 }
 
 /// Verify that an existing SQLite file exactly matches the spec.
@@ -1577,5 +1625,68 @@ mod refusal_layer_tests {
             "{later_contention:#}"
         );
         assert!(format!("{later_fact:#}").contains("schema reference open"));
+    }
+}
+
+#[cfg(test)]
+mod store_class_tests {
+    use super::*;
+
+    const OWNER: ColumnSpec = ColumnSpec {
+        name: OWNER_COLUMN,
+        col_type: "TEXT",
+        pk: false,
+        not_null: true,
+    };
+    const OTHER: ColumnSpec = ColumnSpec {
+        name: "owner_principal",
+        col_type: "TEXT",
+        pk: false,
+        not_null: true,
+    };
+    static SPEC: SchemaSpec = SchemaSpec {
+        application_id: 1,
+        tables: &[
+            TableSpec {
+                name: "history_with_owner",
+                class: StoreClass::History,
+                columns: &[OWNER],
+            },
+            TableSpec {
+                name: "history_with_only_a_fingerprint_column",
+                class: StoreClass::History,
+                columns: &[OTHER],
+            },
+            TableSpec {
+                name: "work_without_owner",
+                class: StoreClass::Work,
+                columns: &[OTHER],
+            },
+            TableSpec {
+                name: "derived_without_owner",
+                class: StoreClass::Derived,
+                columns: &[],
+            },
+        ],
+        indexes: &[],
+    };
+
+    #[test]
+    fn a_history_table_needs_the_principal_id_column_and_a_fingerprint_column_is_not_one() {
+        assert_eq!(
+            SPEC.history_tables_without_owner(),
+            vec!["history_with_only_a_fingerprint_column"]
+        );
+    }
+
+    #[test]
+    fn only_history_tables_are_held_to_the_owner_rule() {
+        assert!(!SPEC.tables[2].has_owner_column());
+        assert!(
+            SPEC.tables
+                .iter()
+                .filter(|table| table.class != StoreClass::History)
+                .all(|table| !SPEC.history_tables_without_owner().contains(&table.name))
+        );
     }
 }
