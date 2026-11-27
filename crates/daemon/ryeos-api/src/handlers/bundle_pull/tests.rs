@@ -776,3 +776,81 @@ async fn allow_internal_accepts_a_proxied_position() {
         .unwrap_err();
     assert_eq!(refusal.code(), "publication_fetch_failed", "{refusal}");
 }
+
+#[test]
+fn a_refused_stage_keeps_its_typed_code_through_classify() {
+    let refusal = ryeos_node::bundle_staging::StagingRefusal::NodeCount { limit: 64 };
+    let error = anyhow::Error::new(super::super::remote_bundle_install::stage_refusal_error(
+        &refusal,
+    ));
+    let HandlerError::Structured { code, status, .. } = classify(error) else {
+        panic!("a structured refusal");
+    };
+    assert_eq!(code, "bundle_stage_node_count_cap");
+    assert_eq!(status, 507);
+}
+
+#[test]
+fn a_manifest_in_the_old_format_is_refused_with_a_typed_code() {
+    let mut manifest = manifest_for("demo", BODY);
+    manifest.schema = ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED.to_owned();
+    let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+    let refused = verify(&published, NOW).unwrap_err();
+    assert_eq!(refused.code(), "publication_format_unsupported");
+    assert!(refused.to_string().contains("not read"));
+}
+
+#[test]
+fn a_manifest_entry_with_another_mode_is_refused() {
+    for mode in [0o600, 0o664, 0o4755] {
+        let mut manifest = manifest_for("demo", BODY);
+        manifest.entries[0].mode = mode;
+        let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+        let refused = verify(&published, NOW).unwrap_err();
+        assert_eq!(refused.code(), "publication_manifest_mismatch", "{mode:#o}");
+    }
+}
+
+#[test]
+fn core_is_never_pulled() {
+    let refusal = refuse_core_name("core").unwrap_err();
+    assert!(
+        format!("{refusal:?}").contains("bundle_core_never_pulled"),
+        "{refusal:?}"
+    );
+    refuse_core_name("core-extras").unwrap();
+}
+
+#[test]
+fn the_lane_receipt_says_only_what_the_node_enforces() {
+    let default = lane_receipt(
+        &"a".repeat(64),
+        &"b".repeat(64),
+        &ryeos_bundle::lane::LaneGrants::invoked_only(),
+    );
+    assert!(
+        default.starts_with("From a publication, not a release. Publisher fp:"),
+        "{default}"
+    );
+    assert!(default.contains(&format!("node fp:{} served them", "b".repeat(64))));
+    assert!(default.contains("items that act only when invoked, under the caller's own grants"));
+    assert!(!default.contains("kinds ["), "{default}");
+    assert!(
+        default.ends_with("is not checked when a stage is applied."),
+        "{default}"
+    );
+
+    let named = lane_receipt(
+        &"a".repeat(64),
+        &"b".repeat(64),
+        &ryeos_bundle::lane::LaneGrants {
+            invoked: true,
+            kinds: vec!["service".to_string()],
+            facets: vec![ryeos_bundle::lane::Facet::BundleEvents],
+        },
+    );
+    assert!(
+        named.contains("kinds [service], facets [bundle_events]"),
+        "{named}"
+    );
+}

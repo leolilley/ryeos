@@ -317,13 +317,13 @@ fn load_registered_generation_under_lock(
         app_root,
         trust_store: &trust_store,
     };
-    let records = loader
-        .load_bundle_section()
+    let (records, skipped) = loader
+        .load_bundle_section_reporting_skipped()
         .context("load bundle registrations for isolation backend resolution")?;
     let generation = Arc::new(VerifiedBundleGeneration::capture(records, &trust_store)?);
     generation
         .checked(&trust_store, || {
-            validate_installed_bundle_plan(app_root, &generation, &trust_store)
+            validate_installed_bundle_plan(app_root, &generation, &skipped, &trust_store)
         })
         .context("admit installed bundle graph for isolation composition")?;
     let policy_table = crate::node_policy::NodePolicyTable::new();
@@ -1047,15 +1047,27 @@ pub fn admit_node_bundle_roots(
 /// roots, while `ryeos-bundle` performs the signed-manifest and BundlePlan
 /// checks. Comparing both views prevents startup from validating one registry
 /// generation and constructing the engine from another.
+/// Check the installed bundle graph boot will load. `skipped_lane_bundles`
+/// are the laned bundles the bootstrap loader's lane audit left out: they are
+/// not in `generation`, so they leave the manifest planner's view too. Any
+/// other difference between the two views refuses.
 pub fn validate_installed_bundle_plan(
     app_root: &std::path::Path,
     generation: &VerifiedBundleGeneration,
+    skipped_lane_bundles: &[crate::bundle_bootstrap::SkippedLaneBundle],
     node_trust_store: &TrustStore,
 ) -> Result<ryeos_bundle::plan::BundlePlan> {
     let bundle_records = generation.records();
-    let installed =
+    let installed: Vec<_> =
         ryeos_bundle::installed::load_installed_plan_inputs_with_trust(app_root, node_trust_store)
-            .context("load signed installed bundle manifests")?;
+            .context("load signed installed bundle manifests")?
+            .into_iter()
+            .filter(|input| {
+                !skipped_lane_bundles
+                    .iter()
+                    .any(|skipped| skipped.name == input.name)
+            })
+            .collect();
     if installed.len() != bundle_records.len() {
         anyhow::bail!(
             "installed bundle registry views disagree: node config loaded {} record(s), manifest planner loaded {}",

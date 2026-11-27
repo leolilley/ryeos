@@ -1,5 +1,7 @@
-# ryeos:signed:2026-11-24T01:26:02Z:7a03a7ca66392d4f63ec5e8727f84e6facc82716dbca11476cadf8e5b1fdb2f1:QJdic6uNb/Cl6jDgylPwRLcXJMiOBBmia5vYLxB7234Ra5YoSBVEEhuqWSfe4RJKOAxnm6KTMUT9BnFurpWxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:14:00Z:7f9d5606efa4731e7bcac95f35947b9bfecc8c67401b0cc257aad9133c8951fe:wOoDaj2TyT656UdV9z/T5g6CCKVIU5j/GT69utUiN9/26gCunw3QbY8plN1b6GZ91+JMH3Yj8CxQUvItkl6FCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
+# Items of this kind act only when a caller invokes them, under that caller's own grants.
+activation: invoked
 # A standing endorsement may name this kind (knowledge items are text: nothing in one runs or invokes).
 # Kinds that run or invoke are endorsed one change at a time.
 standing_endorsement: allowed
