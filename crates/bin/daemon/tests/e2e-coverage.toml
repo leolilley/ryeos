@@ -321,6 +321,10 @@ paths = ["crates/bin/daemon/src/startup.rs", "crates/daemon/ryeos-api/src/publis
 covers = ["ryeos-api", "ryeos-engine", "ryeos-http-egress", "ryeos-node"]
 paths = ["crates/daemon/ryeos-api/src/handlers/bundle_pull.rs", "crates/daemon/ryeos-api/src/handlers/bundle_pull/**", "crates/daemon/ryeos-api/src/handlers/remote_bundle_install.rs", "crates/daemon/ryeos-api/src/published.rs"]
 
+[tests.publication_pull_cli_e2e]
+covers = ["ryeos-api", "ryeos-cli", "ryeos-client-transport", "ryeos-engine", "ryeos-http-egress", "ryeos-node"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_pull.rs", "crates/daemon/ryeos-api/src/handlers/bundle_pull/**", "crates/daemon/ryeos-api/src/published.rs"]
+
 [tests.python_runtime_contract]
 covers = ["ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowledge-runtime"]
 
