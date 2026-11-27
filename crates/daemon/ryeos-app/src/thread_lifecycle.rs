@@ -4129,7 +4129,10 @@ impl ThreadLifecycleService {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
-            owner: None,
+            owner: crate::project_owner::admitting_owner_in(
+                &self.engine.trust_store,
+                request.requested_by.as_deref(),
+            ),
         };
 
         let publication = self

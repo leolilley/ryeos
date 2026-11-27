@@ -22,6 +22,18 @@ pub fn owner_for_in(trust: &TrustStore, key: &str) -> Result<ResolvedOwner> {
     trust.owner_for(key).map_err(|refusal| anyhow!("{refusal}"))
 }
 
+/// The owner a root admission stamps into its `thread_created` event: the
+/// principal `requested_by` acts for, from `trust`. `None` when the admission
+/// names no acting key or the key has no resolvable owner (a node-started
+/// root, a store without the registry). Until every root source supplies an
+/// owner (a schedule firing copies its registrant's, a recovery the recovered
+/// run's) the birth stays unstamped for those; the stamping build refuses an
+/// unstamped birth outright (rulings 1.59), so this is the interim, not the end.
+pub fn admitting_owner_in(trust: &TrustStore, requested_by: Option<&str>) -> Option<PrincipalId> {
+    let key = requested_by?;
+    owner_for_in(trust, key).ok().map(|owner| owner.principal)
+}
+
 /// [`owner_for_in`] against the running node's registry.
 pub fn owner_for(state: &crate::state::AppState, key: &str) -> Result<ResolvedOwner> {
     owner_for_in(&state.engine.trust_store, key)
@@ -217,6 +229,43 @@ mod tests {
             format!("{refused:#}").starts_with("remote_owner_changed"),
             "{refused:#}"
         );
+    }
+
+    #[test]
+    fn a_root_admission_takes_the_owner_the_acting_key_resolves_to() {
+        let node = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let root = SigningKey::from_bytes(&[2u8; 32]);
+        let successor = SigningKey::from_bytes(&[3u8; 32]);
+        let root_fp = compute_fingerprint(&root.verifying_key());
+        let successor_fp = compute_fingerprint(&successor.verifying_key());
+        let succeeded = TrustEvent {
+            schema: "x".into(),
+            seq: 1,
+            previous: None,
+            kind: TrustEventKind::Succeeded,
+            signer: successor_fp.clone(),
+            record_digest: String::new(),
+            request_digest: String::new(),
+            operator: String::new(),
+            predecessor: Some(root_fp.clone()),
+        };
+        let trust = TrustStore::from_registry(
+            node,
+            vec![
+                record(&root, SignerStatus::Retired),
+                record(&successor, SignerStatus::Active),
+            ],
+        )
+        .unwrap()
+        .with_succession_chain(std::slice::from_ref(&succeeded));
+        // The rotated successor stamps its chain root's principal, not its own.
+        assert_eq!(
+            admitting_owner_in(&trust, Some(&successor_fp)),
+            Some(solo(&root_fp))
+        );
+        // No acting key, or a key the registry does not know: nothing to stamp.
+        assert_eq!(admitting_owner_in(&trust, None), None);
+        assert_eq!(admitting_owner_in(&trust, Some(&"f".repeat(64))), None);
     }
 
     /// A store that never loaded the node's registry cannot say whose
