@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T02:38:30Z:7fb9d76ef98ba2f4cd5e5b69c82afb104cb9c7c9ea53f3f6811ea8a08dc1918a:BMqEmAVVDxOBE9+GnMBHoWvE/nItPJEmDKPZ6NuYAoTNgsRAePMFcaVnuYy3GwJIGB5ZjkRPluw4j8Tnpt48Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T23:17:01Z:6d169fd0d51e3b9d61c164ae7d95808537ced471f580b09ab3807a78f53aea03:8um45RT3ecFEmPoK4mjtKCTO5OYkHCmxpfM6XMfx/QhVBFTN7kMx9LN3F5TLPq0rizpe9ex8zDvYjAJvxZUrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -88,11 +88,16 @@ Instructions for the runtime.
   full reserved maximum. It is separate from `effects`, which concerns record
   and replay of the answer.
 
-Only runtime limits are enforced; prose instructions such as "call the tool
-once" are not. Set `limits.tool_calls` (and `limits.turns`) to bound a run, and
-set `return_nudge` (`true`, or a custom message) so a small open model is told
-to return its result after a tool call instead of re-querying until the turn
-limit.
+What the runtime enforces is its limits and the checks a directive signs;
+prose instructions such as "call the tool once" are advice, and a model may
+ignore them. Set `limits.tool_calls` (and `limits.turns`) to bound a run. A
+`return_nudge` (`true`, or a custom message) is advice too: it gives one
+corrective turn and then the run still completes. To hold a model to a method,
+declare a `finish_check` hook (see the hooks section of the directives guide):
+a reply with no tool call then ends the run only when the check accepts it, and
+a check that cannot be satisfied ends the run failed. A check that reads files
+the model itself wrote can be satisfied by files the model wrote, so a check
+must read something the model cannot produce by saying so.
 
 Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.
 

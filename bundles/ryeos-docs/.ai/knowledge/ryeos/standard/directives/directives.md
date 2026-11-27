@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-23T02:38:30Z:25b110acd310cf91a93708845e68253b7b130484aeae92fb81fd0c5a75849118:QyGxtg3DaOkNqij7OLak+XdVlXL2XLYdaVblBMOvqDaANwoICrtiRHl6atHrMkESxzIv539jwai73vUzqEruCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T23:17:01Z:36bc7ecfd23bad330fa77e795c207fbc8f828e03db75a3d9bd1e3bf9f0e5e023:ga3f9haKCnQEvWE/BiIiNukWAx2yuSR4+5f4kO44MLg8inh6NHa7gv2JSPzN79OVfoL6YxKoJkGqeVaiPWgJBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -233,7 +233,7 @@ are appended after the parent's.
 
 Directive frontmatter may declare `hooks` for `after_step`, `continuation`,
 `provider_error`, `context_pressure`, `before_tool`, `after_tool`,
-`turn_incomplete` and `idle`.
+`turn_incomplete`, `idle` and `finish_check`.
 Each hook has `id`, `event`, required `result`, optional `condition`, and
 `action`. `discard` and `observation` are observers; `control` is accepted only
 where the signed event and layer permit directive control.
@@ -285,6 +285,46 @@ past it the turn's remaining observations are skipped and warned about once.
 After a crash an event can fire again (at least once). These events ship with the
 directive kind-schema; a runtime older than the schema never fires them, so a
 hook on one is silently inert until the runtime is updated with it.
+
+### Finish checks and reminders
+
+A directive may sign what the model is told. Two result kinds carry signed
+text: `verdict` and `notice`. A hook that declares either also declares `steer`:
+a per-run `limit` and a map of `texts`. The hook's action never returns text.
+It returns one key of that map, and the runtime shows the model the signed text
+with only these slots filled, each by a value the runtime computed: `{turn}`,
+`{attempt}` and `{remaining}`. Any other field, value or key in the action's
+result fails the run (`finish_check_invalid`). A text is at most 4096 bytes, a
+key is lowercase letters, digits and `_`, and an infrastructure-layer hook
+cannot declare either kind. A configured (policy) hook takes its texts only
+from the operator's signed node policy.
+
+`finish_check` fires when the model replies with no tool call and the run would
+finish, after any pending operator input is folded. Its only result is
+`verdict`, and its `event` root is `turn`, `attempt` and `rejections_left`: it
+never carries the reply. The action returns `{verdict: accept}` or
+`{verdict: reject, reason: <key>}`.
+
+- A rejection appends the signed text as a durable harness input of kind
+  `finish_check_turn_<turn>_attempt_<n>` and takes another turn. The model's
+  reply stays in the conversation. `limit` (1 to 16) is a total for the run, not
+  a streak; a rejection never adds a turn, time or spend the limits did not
+  allow, and a limit that ends the run first records its own code.
+- Past `limit` the run ends failed with `finish_check_retries_exhausted`. A
+  check that cannot run ends it `finish_check_failed`. Neither ever settles as a
+  success, and a finish check is never advisory.
+- The check runs under the directive's admitted capabilities and gains none. It
+  decides from what it can read. A check that reads files the model wrote can be
+  satisfied by files the model wrote; write the check to read something the
+  model cannot produce by claiming it.
+
+`notice` may be declared on `after_step` and `continuation`. The action returns
+`{notice: <key>}`; the signed text is appended as a harness input of kind
+`notice_turn_<turn>_seq_<n>` and shown with the next request. `limit` (1 to 64)
+is the most reminders given in the run; past it a reminder is dropped with a
+warning. A reminder is advice: it never changes how the run ends. Both kinds are
+counted from the run's recorded history, so a restart neither repeats nor loses
+one.
 
 Authored hook inheritance is atomic. Omitting `hooks` inherits the nearest
 ancestor's complete list. `hooks: []` clears it. A declared non-empty list
