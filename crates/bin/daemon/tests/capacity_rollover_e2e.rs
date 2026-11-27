@@ -463,7 +463,7 @@ fn shorten_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Resul
 #[ignore = "runs about an hour of real service windows; set RYEOS_LONG_E2E=1 and run with --ignored"]
 async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
     if std::env::var("RYEOS_LONG_E2E").as_deref() != Ok("1") {
-        eprintln!("RYEOS_LONG_E2E is not 1; skipping the long rollover loop");
+        eprintln!("skipped: RYEOS_LONG_E2E is not 1, so the long rollover loop did not run");
         return;
     }
     let (mut harness, _fixture) = DaemonHarness::start_fast_with(
