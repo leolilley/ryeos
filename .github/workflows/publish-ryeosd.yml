@@ -475,70 +475,49 @@ jobs:
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Release construction targets: ${TARGETS:-none}"
 
-      # Bake evaluates all requested targets in one BuildKit solve. Their
-      # shared `published` stage therefore compiles and signs exactly once.
-      - name: Build release archive and attested image candidates once
-        id: release-build
-        if: ${{ !inputs.dry_run && steps.release-plan.outputs.targets != '' }}
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        env:
-          # Image targets declare max provenance explicitly. Suppress the
-          # action's implicit attestation on the local archive exporter.
-          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
-          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
-        with:
-          source: .
-          files: ./docker-bake.release.hcl
-          targets: ${{ steps.release-plan.outputs.targets }}
-          vars: |
-            VERSION=${{ needs.qualify.outputs.version }}
-            SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
-            VCS_REF=${{ needs.qualify.outputs.source_sha }}
-            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-            ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
-            WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
-            NODE_BINARIES_ARTIFACT_DIR=${{ runner.temp }}/ryeos-node-binaries-artifacts
-            STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
-            CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
-            LOCAL_INFERENCE_TAG=${{ steps.resolve-images.outputs.local_inference_candidate_tag }}
-            HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
-
-      # Rehearsal (decision 42: a dry run never touches the official key). The
-      # development key is a tracked file in the repository; the images build
-      # from the development publication stage, which checks the bundle trust
-      # documents against the development trust document, and export nothing.
-      # This step names no secret.
+      # Rehearsal key (decision 42: a dry run never touches the official key).
+      # The development key is a tracked file in the repository. The step that
+      # reads it runs only in a rehearsal and names no secret; the bake below
+      # takes the official secret only when `!inputs.dry_run` holds, so a
+      # rehearsal's expression never evaluates the secrets context.
       - name: Select the rehearsal's development signing key
+        id: rehearsal-key
         if: ${{ inputs.dry_run }}
         run: |
           {
-            echo 'RYEOS_PUBLISHER_KEY<<RYEOS_DEV_KEY_EOF'
+            echo 'pem<<RYEOS_DEV_KEY_EOF'
             cat .dev-keys/PUBLISHER_DEV.pem
             echo 'RYEOS_DEV_KEY_EOF'
-          } >> "$GITHUB_ENV"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Rehearse the image builds with the development key
-        id: release-rehearsal-build
-        if: ${{ inputs.dry_run && steps.release-plan.outputs.targets != '' }}
+      # Bake evaluates all requested targets in one BuildKit solve. Their
+      # shared `published` stage therefore compiles and signs exactly once.
+      # A rehearsal signs with the development key, builds the images from the
+      # development publication stage (checked against the development trust
+      # document), exports nothing, and builds no archive: the archives come
+      # from the official stage, whose packaging gate refuses a development
+      # signer.
+      - name: Build release archive and attested image candidates once
+        id: release-build
+        if: steps.release-plan.outputs.targets != ''
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           # Image targets declare max provenance explicitly. Suppress the
           # action's implicit attestation on the local archive exporter.
           BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+          RYEOS_PUBLISHER_KEY: ${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || steps.rehearsal-key.outputs.pem }}
         with:
           source: .
           files: ./docker-bake.release.hcl
           targets: ${{ steps.release-plan.outputs.targets }}
-          # A rehearsal builds every image so each build-time check runs, but
-          # exports none of them to a registry.
           set: |
-            standard.output=type=cacheonly
-            central-host.output=type=cacheonly
-            local-inference.output=type=cacheonly
-            hosted-workflow.output=type=cacheonly
-            *.args.PUBLICATION_STAGE=development-publication
-            *.args.CONTAINED_PUBLICATION_STAGE=development-publication
-            *.args.PUBLISHER_OWNER=RyeOS Development
+            ${{ inputs.dry_run && 'standard.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'central-host.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'local-inference.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'hosted-workflow.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && '*.args.PUBLICATION_STAGE=development-publication' || '' }}
+            ${{ inputs.dry_run && '*.args.CONTAINED_PUBLICATION_STAGE=development-publication' || '' }}
+            ${{ inputs.dry_run && '*.args.PUBLISHER_OWNER=RyeOS Development' || '' }}
           vars: |
             VERSION=${{ needs.qualify.outputs.version }}
             SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-27T06:04:20Z:3270cc251a5d29f4cb2f576e62bd1b2fcac3150ee56f07bee7124fa08ba64c50:POAlrKnh1WLNdpT/fpoAR0/eq8mJkb0dEU3Hp8naiL6c/8nfvW6D+4fMgIhxDZYJCRoQV3kiZ+ADf9xkOnydAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:30:33Z:4b3df7b61cbc02097a1ac7ac873f80240a17042099762fca99a2168dee9bd381:mZiAfju2v0KR0Mbzu50EIBal9otkX70cTK1lE7EC9t1bNcVup++ZeTVzLVbArk0L7XGGehQ7ITm2/Yq+xrwTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
 #   version: "1.0.0"
@@ -35,7 +35,9 @@ inputs. For each such file this check holds:
    truthy).
 6. A rehearsal never touches the official publisher key (Leo, decision 42):
    every step or job that names `secrets.RYEOS_PUBLISHER_KEY` carries
-   `!inputs.dry_run`, and no workflow-level line names it. A workflow that
+   `!inputs.dry_run`, or reads it only as the short-circuit expression
+   `${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || ... }}`, and no
+   workflow-level line names it. A workflow that
    bakes images must also select `.dev-keys/PUBLISHER_DEV.pem` and the
    `development-publication` stage for its rehearsal, so the rehearsal signs
    with the development key and is checked against the development trust
@@ -59,6 +61,10 @@ from pathlib import Path
 WORKFLOW_DIR = ".github/workflows"
 
 OFFICIAL_KEY = "secrets.RYEOS_PUBLISHER_KEY"
+# A read inside a step that also runs in a rehearsal is allowed only as the
+# short-circuit `${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || ... }}`,
+# whose secrets context is never evaluated when dry_run is true.
+GUARDED_KEY = re.compile(r"\$\{\{\s*!inputs\.dry_run\s*&&\s*secrets\.RYEOS_PUBLISHER_KEY\s*\|\|")
 
 # Operations that write outside the runner. Closed: extend it with a new kind
 # of publishing step, with a fixture in self_test.
@@ -219,7 +225,8 @@ def check_text(name, text):
         for step in steps:
             body = "\n".join(step)
             gated = "!inputs.dry_run" in _step_if(step) or "!inputs.dry_run" in job_if
-            if OFFICIAL_KEY in body and not gated:
+            unguarded = [l for l in step if OFFICIAL_KEY in l and not GUARDED_KEY.search(l)]
+            if unguarded and not gated:
                 title = next((l.strip() for l in step if "name:" in l or "uses:" in l), step[0].strip())
                 failures.append(
                     f"job `{jname}`: ungated read of {OFFICIAL_KEY}: {title}; a rehearsal never "
@@ -295,6 +302,7 @@ def _alterations(text):
     out["ungated registry login"] = (_extra_job(text, "      - uses: docker/login-action@abc # v3\n"), "ungated publishing step (registry login)")
     out["bake not cacheonly"] = (text.replace("cacheonly", "registry"), "ungated publishing step (bake)")
     out["ungated official key read"] = (_extra_job(text, "      - name: Key\n        env:\n          K: ${{ secrets.RYEOS_PUBLISHER_KEY }}\n        run: true\n"), "ungated read of secrets.RYEOS_PUBLISHER_KEY")
+    out["official key expression not short-circuited"] = (text.replace("!inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY ||", "secrets.RYEOS_PUBLISHER_KEY ||"), "ungated read of secrets.RYEOS_PUBLISHER_KEY")
     out["official key in workflow env"] = (text.replace("\njobs:\n", "\nenv:\n  K: ${{ secrets.RYEOS_PUBLISHER_KEY }}\n\njobs:\n", 1), "a workflow-level line names")
     out["rehearsal without the development key"] = (text.replace(".dev-keys/PUBLISHER_DEV.pem", ".dev-keys/other.pem"), "must rehearse with")
     out["job without needs"] = (text.rstrip("\n") + "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", "has no `needs`")
