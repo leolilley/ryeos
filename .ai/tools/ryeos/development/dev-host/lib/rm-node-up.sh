@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:06:44Z:3eb968d9e567a77ebbf4b23434c471a602106bd20e53e189cfcfc5b0dbff6962:IJb2sCQMWi+OfmFJjrugEly/s6Ssb+EchxpLvQEJhIvR3Iz6yILapyuf9gukNnlgzXdqML/WrpdK/H7cRZ/QBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:26:51Z:b5d3dc1fed0dced90b73ebce0abb40ccb711903f657fcc0b89546df9e7418924:irj25Y2NW9rAt87ewkiqdNCZeYq/sXeO+nLrgi2js+Vf9kE5QaK59/+zFcQ1Ou8m4CjjuULOFFNyASHzUeTBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -108,9 +108,21 @@ PY
         done < <(find "$prefix/share/ryeos" -name PUBLISHER_TRUST.toml | sort)
     fi
     printf '%s trust-file %s sha256 %s\n' "$(date -u +%FT%TZ)" "$dev_trust" "$(sha256sum "$dev_trust" | cut -d' ' -f1)" >> "$log"
+    # A fresh node binds to the substrate it runs on. For a native install that is
+    # the same measurement scripts/pkg/install-local-direct.sh makes: sha256 over
+    # the protocol line and the sha256 of each required binary, protocol 1.
+    substrate_digest="$({
+        printf '%s\n' 'ryeos/native-substrate/v1'
+        for binary in ryeosd ryeos; do
+            [[ -f "$prefix/bin/$binary" && ! -L "$prefix/bin/$binary" ]] || { echo "rm-node-up: $prefix/bin/$binary is missing" >&2; exit 1; }
+            printf '%s %s\n' "$binary" "$(sha256sum -- "$prefix/bin/$binary" | cut -d' ' -f1)"
+        done
+    } | sha256sum | cut -d' ' -f1)"
+    printf '%s substrate-digest sha256:%s protocol 1\n' "$(date -u +%FT%TZ)" "$substrate_digest" >> "$log"
     "$ryeos" init --non-interactive \
         --source "$prefix/share/ryeos" \
         "${trust_args[@]}" \
+        --substrate-image-digest "sha256:$substrate_digest" --substrate-protocol 1 \
         --node-profile "$profile" --host-class "$class" \
         --bind "$bind" --app-root "$app_root" </dev/null
     mark initialised
