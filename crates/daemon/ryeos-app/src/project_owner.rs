@@ -23,15 +23,22 @@ pub fn owner_for_in(trust: &TrustStore, key: &str) -> Result<ResolvedOwner> {
 }
 
 /// The owner a root admission stamps into its `thread_created` event: the
-/// principal `requested_by` acts for, from `trust`. `None` when the admission
-/// names no acting key or the key has no resolvable owner (a node-started
-/// root, a store without the registry). Until every root source supplies an
-/// owner (a schedule firing copies its registrant's, a recovery the recovered
-/// run's) the birth stays unstamped for those; the stamping build refuses an
-/// unstamped birth outright (rulings 1.59), so this is the interim, not the end.
-pub fn admitting_owner_in(trust: &TrustStore, requested_by: Option<&str>) -> Option<PrincipalId> {
-    let key = requested_by?;
-    owner_for_in(trust, key).ok().map(|owner| owner.principal)
+/// principal `requested_by` acts for, from `trust`. `Ok(None)` only when the
+/// admission names no acting key (a node-started root), which stays unstamped
+/// until its source (a schedule's registrant, a recovered run) supplies an
+/// owner; the stamping build refuses an unstamped birth outright (rulings
+/// 1.59), so that is the interim, not the end. An acting key whose owner
+/// cannot be resolved (a store without the registry, a corrupt chain, a
+/// retired or revoked key) refuses the admission with the resolver's own
+/// refusal: a root is never admitted unstamped because the lookup failed.
+pub fn admitting_owner_in(
+    trust: &TrustStore,
+    requested_by: Option<&str>,
+) -> Result<Option<PrincipalId>> {
+    let Some(key) = requested_by else {
+        return Ok(None);
+    };
+    owner_for_in(trust, key).map(|owner| Some(owner.principal))
 }
 
 /// [`owner_for_in`] against the running node's registry.
@@ -260,21 +267,33 @@ mod tests {
         .with_succession_chain(std::slice::from_ref(&succeeded));
         // The rotated successor stamps its chain root's principal, not its own.
         assert_eq!(
-            admitting_owner_in(&trust, Some(&successor_fp)),
+            admitting_owner_in(&trust, Some(&successor_fp)).unwrap(),
             Some(solo(&root_fp))
         );
         // No acting key: nothing to stamp. A key the registry has no record of
         // acts for its own solo principal, as the resolver says everywhere.
-        assert_eq!(admitting_owner_in(&trust, None), None);
+        assert_eq!(admitting_owner_in(&trust, None).unwrap(), None);
         let stranger = "f".repeat(64);
         assert_eq!(
-            admitting_owner_in(&trust, Some(&stranger)),
+            admitting_owner_in(&trust, Some(&stranger)).unwrap(),
             Some(solo(&stranger))
         );
-        // A store that never loaded the registry resolves nothing.
+        // A store that never loaded the registry cannot resolve an acting key:
+        // the admission is refused with the resolver's refusal, never admitted
+        // unstamped.
+        let refused = admitting_owner_in(&TrustStore::empty(), Some(&successor_fp)).unwrap_err();
         assert_eq!(
-            admitting_owner_in(&TrustStore::empty(), Some(&successor_fp)),
-            None
+            format!("{refused:#}"),
+            TrustStore::empty()
+                .owner_for(&successor_fp)
+                .unwrap_err()
+                .to_string()
+        );
+        // A retired key does not admit either (owner_key_not_active).
+        let retired = admitting_owner_in(&trust, Some(&root_fp)).unwrap_err();
+        assert!(
+            format!("{retired:#}").contains("owner_key_not_active"),
+            "{retired:#}"
         );
     }
 

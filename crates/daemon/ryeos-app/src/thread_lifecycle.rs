@@ -4108,6 +4108,10 @@ impl ThreadLifecycleService {
             bail!("fresh root project authority does not exactly match its sealed admission");
         }
         let project_authority = admission.project_authority().clone();
+        let owner = crate::project_owner::admitting_owner_in(
+            &self.engine.trust_store,
+            request.requested_by.as_deref(),
+        )?;
         let thread_record = NewThreadRecord {
             thread_id: thread_id.to_string(),
             chain_root_id: thread_id.to_string(),
@@ -4129,10 +4133,7 @@ impl ThreadLifecycleService {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
-            owner: crate::project_owner::admitting_owner_in(
-                &self.engine.trust_store,
-                request.requested_by.as_deref(),
-            ),
+            owner,
         };
 
         let publication = self
