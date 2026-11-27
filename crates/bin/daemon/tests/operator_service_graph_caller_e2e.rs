@@ -210,6 +210,36 @@ async fn step_failure_text(h: &DaemonHarness, key: &SigningKey, body: &Value) ->
             text.push_str(error);
         }
     }
+    // The graph reports a failed step as a summary naming the child thread
+    // the step ran in; the refusal itself is that child's outcome, read as
+    // the same requesting key.
+    let children: Vec<String> = text
+        .split("child_thread_id=")
+        .skip(1)
+        .filter_map(|rest| {
+            let id: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            (!id.is_empty()).then_some(id)
+        })
+        .collect();
+    for child in children {
+        let (_, child_thread) = post_as(
+            h,
+            key,
+            "/execute",
+            json!({
+                "item_ref": "service:threads/get",
+                "ref_bindings": {},
+                "parameters": {"thread_id": child},
+                "execution_policy": ExecutionPolicy::projectless(ExecutionResponse::Wait),
+            }),
+        )
+        .await;
+        text.push('\n');
+        text.push_str(&child_thread.to_string());
+    }
     text
 }
 
