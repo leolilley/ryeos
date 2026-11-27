@@ -4694,10 +4694,9 @@ async fn run(
             // `service:system/routes`.
             let route_diagnostics = Arc::new(ryeos_app::route_diagnostics::RouteDiagnostics::new());
             {
-                let table = &route_table;
                 route_diagnostics.publish(
-                    table.fingerprint.clone(),
-                    ryeos_api::routes::route_diagnostic_entries(&table),
+                    route_table.fingerprint.clone(),
+                    ryeos_api::routes::route_diagnostic_entries(&route_table),
                 );
             }
 
