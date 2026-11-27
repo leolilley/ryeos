@@ -278,7 +278,7 @@ async fn an_operator_only_service_step_run_by_the_operator_succeeds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_operator_only_service_step_run_by_a_non_operator_is_refused_as_a_non_operator() {
-    let (h, _fixture, project) = start_node().await;
+    let (mut h, _fixture, project) = start_node().await;
     let second = second_key();
 
     let (status, body) = run_graph_as(&h, &second, project.path()).await;
@@ -293,7 +293,16 @@ async fn an_operator_only_service_step_run_by_a_non_operator_is_refused_as_a_non
         Some(false),
         "the non-operator's operator-only service step must fail: {body:#}"
     );
-    let text = step_failure_text(&h, &second, &body).await;
+    // A non-operator never sees a failure's own text (its outcome is
+    // `handler_error`, with the reason withheld), so the refusal is read where
+    // the node records it: the daemon's own log of the withheld failure.
+    let mut text = step_failure_text(&h, &second, &body).await;
+    text.push('\n');
+    text.push_str(&h.drain_stderr_nonblocking().await);
+    assert!(
+        text.contains("handler_error"),
+        "the non-operator's step must end as a handler error: {text}"
+    );
     assert!(
         names_an_operator_refusal(&text),
         "the step must be refused as a non-operator: {text}"
