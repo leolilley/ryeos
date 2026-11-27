@@ -18,18 +18,24 @@ spec.loader.exec_module(declared)
 CANDIDATE = "a" * 64
 BASE = "b" * 64
 DIGEST = "c" * 64
+REF = "config:ryeos/core/evaluate/checks"
 
 
 def run(project, checks, digest=DIGEST):
-    config = None if checks is None else {"digest": digest, "checks": checks}
     return declared.evaluate(
         {
             "candidate_snapshot_hash": CANDIDATE,
             "base_snapshot_hash": BASE,
-            "checks_config": config,
+            "base_config": base_config(checks, digest),
         },
         project,
     )
+
+
+def base_config(checks, digest=DIGEST, trusted=True, reason=None):
+    if checks is None:
+        return {"ref": REF, "trusted": False, "digest": None, "value": None, "reason": reason or "absent"}
+    return {"ref": REF, "trusted": trusted, "digest": digest, "value": {"checks": checks}, "reason": reason}
 
 
 def outcome(result, check_id):
@@ -71,7 +77,7 @@ class DeclaredEvaluator(unittest.TestCase):
             {
                 "candidate_snapshot_hash": CANDIDATE,
                 "base_snapshot_hash": BASE,
-                "checks_config": {"checks": [{"id": "x", "kind": "path_exists", "path": "data.json"}]},
+                "base_config": {"ref": REF, "trusted": True, "digest": None, "value": {"checks": [{"id": "x", "kind": "path_exists", "path": "data.json"}]}},
             },
             self.root,
         )
@@ -176,6 +182,21 @@ class DeclaredEvaluator(unittest.TestCase):
             result = run(self.root, [{"id": "p", "kind": "path_exists", "path": path}])
             self.assertIs(result["accepted"], False, path)
 
+    def test_an_untrusted_config_declares_nothing_and_says_why(self):
+        untrusted = base_config(
+            [{"id": "x", "kind": "path_exists", "path": "data.json"}],
+            trusted=False,
+            reason="the config's signer is not trusted for this project",
+        )
+        result = declared.evaluate(
+            {"candidate_snapshot_hash": CANDIDATE, "base_snapshot_hash": BASE, "base_config": untrusted},
+            self.root,
+        )
+        self.assertIs(result["accepted"], False)
+        self.assertEqual(result["evidence"]["checks_declared"], 0)
+        self.assertIn("not trusted", result["evidence"]["reason"])
+        self.assertEqual(result["evidence"]["config_ref"], REF)
+
     def test_a_candidate_cannot_declare_its_own_checks(self):
         (self.root / ".ai/config/ryeos/core/evaluate").mkdir(parents=True)
         (self.root / ".ai/config/ryeos/core/evaluate/checks.yaml").write_text(
@@ -198,7 +219,7 @@ class DeclaredEvaluator(unittest.TestCase):
             {
                 "candidate_snapshot_hash": CANDIDATE,
                 "base_snapshot_hash": CANDIDATE,
-                "checks_config": {"digest": DIGEST, "checks": [{"id": "x", "kind": "path_exists", "path": "data.json"}]},
+                "base_config": base_config([{"id": "x", "kind": "path_exists", "path": "data.json"}]),
             },
             self.root,
         )

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T17:24:45Z:3b7fd0d064abf23d2fc6eedbb3670cc6641b85c7f0d1a3d2141c86b1dbe89413:NRs//DbT2XkOPJAucCNyWJXgUdhRrrh7YkSipZO+aCP28hnWmqA7/lKaDp/v9qbegD3jtRumsjmk9hLY97raBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T17:26:42Z:0c0082f5fa1d9a7b71635bd612ac614063db681d499dbea99cf08a93da796dd8:FXgn+CHNSLJatdntEvpd5ymh2p+thrwlzOSE52wjamwRZR8xH5yujmn28cfkGzKshCiEiJBudQs2v5i65qG4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/core/evaluate
 #   version: "1.0.0"
@@ -14,15 +14,18 @@
 #     properties:
 #       candidate_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
 #       base_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
-#       checks_config: {type: [object, "null"]}
+#       base_config: {type: [object, "null"]}
 #     required: [candidate_snapshot_hash, base_snapshot_hash]
 #     additionalProperties: false
 """Evaluate one frozen candidate against the checks its project declared.
 
-The checks arrive as `checks_config`, already read and verified from the base
-snapshot by the daemon: `{"digest": <sha256 of the signed config>, "checks":
-[...]}`. This tool never reads a checks file from the candidate, which is
-untrusted. It executes nothing from the candidate. Every read of the candidate
+The checks arrive as `base_config`, read from the base snapshot by the daemon
+and sealed into this launch's parameters: `{"ref": <config ref>, "trusted":
+<bool>, "digest": <sha256 of the signed config's bytes or null>, "value":
+{"checks": [...]} or null, "reason": <why not trusted, when it is not>}`. The
+daemon sets `trusted` only for a config its trust rules accept (the project's
+trusted key, or an authoring key's per-digest endorsement). This tool never
+reads a checks file from the candidate, which is untrusted. It executes nothing from the candidate. Every read of the candidate
 opens each path component without following links, so a symlink anywhere on a
 checked path fails that check. No checks declared (absent config, an untrusted
 signer, an empty list, an invalid config) never accepts.
@@ -265,12 +268,14 @@ KINDS = {
 }
 
 
-def declared_checks(config):
+def declared_checks(base_config):
     """The validated checks, or (None, reason) when nothing usable is declared."""
-    if not isinstance(config, dict):
-        return None, "no checks declared"
-    digest = config.get("digest")
-    checks = config.get("checks")
+    if not isinstance(base_config, dict) or base_config.get("trusted") is not True:
+        reason = base_config.get("reason") if isinstance(base_config, dict) else None
+        return None, clean(reason) if isinstance(reason, str) and reason else "no trusted checks config in the base snapshot"
+    digest = base_config.get("digest")
+    value = base_config.get("value")
+    checks = value.get("checks") if isinstance(value, dict) else None
     if not isinstance(digest, str) or not HASH.fullmatch(digest):
         return None, "checks config has no valid digest"
     if not isinstance(checks, list) or not checks:
@@ -295,8 +300,9 @@ def declared_checks(config):
 def evaluate(request: dict, project: Path) -> dict:
     candidate = request["candidate_snapshot_hash"]
     base = request["base_snapshot_hash"]
-    config = request.get("checks_config")
+    config = request.get("base_config")
     digest = config.get("digest") if isinstance(config, dict) else None
+    config_ref = config.get("ref") if isinstance(config, dict) and isinstance(config.get("ref"), str) else None
     structural = (
         bool(HASH.fullmatch(candidate))
         and bool(HASH.fullmatch(base))
@@ -314,6 +320,7 @@ def evaluate(request: dict, project: Path) -> dict:
         result["evidence"] = {
             "scope": SCOPE_NONE,
             "reason": "the candidate view is not a distinct, readable generation",
+            "config_ref": config_ref,
             "config_digest": digest,
             "checks_declared": 0,
             "checks": [],
@@ -324,6 +331,7 @@ def evaluate(request: dict, project: Path) -> dict:
         result["evidence"] = {
             "scope": SCOPE_NONE,
             "reason": reason,
+            "config_ref": config_ref,
             "config_digest": digest if isinstance(digest, str) and HASH.fullmatch(digest) else None,
             "checks_declared": 0,
             "checks": [],
@@ -346,6 +354,7 @@ def evaluate(request: dict, project: Path) -> dict:
     result["evidence"] = {
         "scope": SCOPE_RAN,
         "reason": "every declared check passed" if result["accepted"] else "a declared check failed",
+        "config_ref": config_ref,
         "config_digest": digest,
         "checks_digest": hashlib.sha256(
             json.dumps(checks, sort_keys=True, separators=(",", ":")).encode()

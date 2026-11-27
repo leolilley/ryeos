@@ -7504,6 +7504,12 @@ pub struct StartCandidateEvaluationRequest {
     evaluator_parameters: Value,
     #[serde(default)]
     evaluator_ref_bindings: BTreeMap<String, String>,
+    /// A config item of the project whose bytes the daemon reads from the
+    /// BASE snapshot (never the candidate), judges under the project's
+    /// trust rules and seals into the evaluator's parameters as
+    /// `base_config`. Absent means the evaluator receives no such parameter.
+    #[serde(default)]
+    evaluator_base_config_ref: Option<String>,
     /// Required when the evaluated generation was produced by a separate
     /// candidate-integration operation. Direct worker candidates omit it.
     #[serde(default)]
@@ -7545,6 +7551,7 @@ struct CandidateOperationLaunchRequest {
     pre_reserved_thread_id: Option<String>,
     purpose: ryeos_app::thread_lifecycle::CandidateOperationPurpose,
     integration: Option<CandidateIntegrationCoordinate>,
+    base_config_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7657,6 +7664,7 @@ async fn start_candidate_evaluation(
             pre_reserved_thread_id: None,
             purpose: ryeos_app::thread_lifecycle::CandidateOperationPurpose::Evaluate,
             integration: req.integration,
+            base_config_ref: req.evaluator_base_config_ref,
         },
         ctx,
         state,
@@ -7740,11 +7748,82 @@ async fn start_candidate_integration(
                 accepted_evaluation_hash: req.accepted_evaluation_hash,
             },
             integration: None,
+            base_config_ref: None,
         },
         ctx,
         state,
     )
     .await
+}
+
+/// The evaluator parameter the daemon alone sets: the base snapshot's config,
+/// as the daemon read and judged it. A caller cannot supply it.
+const BASE_CONFIG_PARAMETER: &str = "base_config";
+
+/// What the daemon learned reading one config item from the base snapshot.
+struct BaseConfigFacts {
+    kind: String,
+    trusted: bool,
+    content_hash: String,
+    composed_value: Value,
+}
+
+/// The sealed testimony for a base config. An unreadable, wrongly kinded or
+/// untrusted config is sealed explicitly as untrusted with its reason, never
+/// omitted, so the evaluator can only ever find "no checks declared".
+fn base_config_testimony(config_ref: &str, read: Result<BaseConfigFacts, String>) -> Value {
+    let untrusted = |reason: String| {
+        json!({
+            "ref": config_ref,
+            "trusted": false,
+            "digest": Value::Null,
+            "value": Value::Null,
+            "reason": reason,
+        })
+    };
+    match read {
+        Err(reason) => untrusted(reason),
+        Ok(facts) if facts.kind != "config" => {
+            untrusted("the ref does not name a config item".into())
+        }
+        Ok(facts) if !facts.trusted => {
+            untrusted("the config is not trusted under the project's signer rules".into())
+        }
+        Ok(facts) => json!({
+            "ref": config_ref,
+            "trusted": true,
+            "digest": facts.content_hash,
+            "value": facts.composed_value,
+            "reason": Value::Null,
+        }),
+    }
+}
+
+/// A caller never names `base_config`; the daemon sets it, or it is absent.
+fn refuse_reserved_base_config(parameters: &Value) -> Result<(), HandlerError> {
+    if parameters
+        .as_object()
+        .is_some_and(|object| object.contains_key(BASE_CONFIG_PARAMETER))
+    {
+        return Err(HandlerError::BadRequest(format!(
+            "evaluator parameters may not name `{BASE_CONFIG_PARAMETER}`: the daemon alone seals it from the base snapshot"
+        )));
+    }
+    if !(parameters.is_null() || parameters.is_object()) {
+        return Err(HandlerError::BadRequest(
+            "evaluator parameters must be an object".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn seal_base_config(parameters: Value, testimony: Value) -> Value {
+    let mut object = match parameters {
+        Value::Object(object) => object,
+        _ => serde_json::Map::new(),
+    };
+    object.insert(BASE_CONFIG_PARAMETER.to_owned(), testimony);
+    Value::Object(object)
 }
 
 async fn start_candidate_operation(
@@ -7754,6 +7833,17 @@ async fn start_candidate_operation(
 ) -> Result<Value, HandlerError> {
     ctx.require_verified()?;
     authorize_candidate_operation_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
+    refuse_reserved_base_config(&req.parameters)?;
+    if req.base_config_ref.is_some()
+        && !matches!(
+            &req.purpose,
+            ryeos_app::thread_lifecycle::CandidateOperationPurpose::Evaluate
+        )
+    {
+        return Err(HandlerError::BadRequest(
+            "only a candidate evaluation reads a base config".into(),
+        ));
+    }
     let session = owned_session(&state, &ctx, &req.chain_root_id)?;
     let verified_source = match &req.purpose {
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Evaluate => {
@@ -8053,6 +8143,44 @@ async fn start_candidate_operation(
         scheduled_fire: None,
         validate_only: false,
     };
+    // The checks come from the BASE generation only, resolved with the base's
+    // own engine, plan context and signer project: a candidate that edits its
+    // own copy of the config changes nothing the evaluator is given.
+    let parameters = match &req.base_config_ref {
+        None => req.parameters.clone(),
+        Some(config_ref) => {
+            let read = ryeos_engine::canonical_ref::CanonicalRef::parse(config_ref)
+                .map_err(|error| error.to_string())
+                .and_then(|item_ref| {
+                    base.request_engine
+                        .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                            logical_project: base_plan_context.logical_project.clone(),
+                            item_ref,
+                            expected_kind: None,
+                            project_root: Some(base.effective_path.clone()),
+                            subject_resolution_authority: base_plan_context
+                                .subject_resolution_authority
+                                .clone(),
+                        })
+                        .map_err(|error| error.to_string())
+                })
+                .map(|item| BaseConfigFacts {
+                    trusted: item.trusted
+                        && matches!(
+                            item.trust_class,
+                            ryeos_engine::resolution::TrustClass::TrustedBundle
+                                | ryeos_engine::resolution::TrustClass::TrustedProject
+                        ),
+                    kind: item.kind,
+                    content_hash: item.source.content_hash,
+                    composed_value: item.composed_value,
+                });
+            seal_base_config(
+                req.parameters.clone(),
+                base_config_testimony(config_ref, read),
+            )
+        }
+    };
     let base_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
         &base.request_engine,
         &base_plan_context,
@@ -8146,7 +8274,7 @@ async fn start_candidate_operation(
             project_path: candidate.effective_path.clone(),
             request_engine: base.request_engine.clone(),
             provenance: candidate_provenance.clone(),
-            parameters: req.parameters.clone(),
+            parameters: parameters.clone(),
             ref_bindings: req.ref_bindings.clone(),
             product_selections: Vec::new(),
             principal_id: session.owner_principal.clone(),
@@ -8202,7 +8330,7 @@ async fn start_candidate_operation(
     let (mut task, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
         &state,
         parsed_item_ref,
-        req.parameters,
+        parameters,
         session.owner_principal.clone(),
         effective_caps,
         reserved_thread_id.clone(),
@@ -11581,6 +11709,88 @@ mod evaluator_contract_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        BaseConfigFacts, base_config_testimony, refuse_reserved_base_config, seal_base_config,
+    };
+    use serde_json::json;
+
+    fn facts(kind: &str, trusted: bool, hash: &str) -> BaseConfigFacts {
+        BaseConfigFacts {
+            kind: kind.to_owned(),
+            trusted,
+            content_hash: hash.to_owned(),
+            composed_value: json!({"checks": [{"id": "a", "kind": "path_exists", "path": "x"}]}),
+        }
+    }
+
+    #[test]
+    fn a_trusted_base_config_is_sealed_with_its_digest_and_value() {
+        let testimony = base_config_testimony(
+            "config:p/checks",
+            Ok(facts("config", true, &"d".repeat(64))),
+        );
+        assert_eq!(testimony["trusted"], json!(true));
+        assert_eq!(testimony["digest"], json!("d".repeat(64)));
+        assert_eq!(testimony["ref"], json!("config:p/checks"));
+        assert!(testimony["value"]["checks"].is_array());
+    }
+
+    #[test]
+    fn an_untrusted_unreadable_or_wrongly_kinded_base_config_seals_no_checks() {
+        for read in [
+            Ok(facts("config", false, &"d".repeat(64))),
+            Ok(facts("tool", true, &"d".repeat(64))),
+            Err("the item was not found".to_owned()),
+        ] {
+            let testimony = base_config_testimony("config:p/checks", read);
+            assert_eq!(testimony["trusted"], json!(false));
+            assert!(testimony["digest"].is_null());
+            assert!(testimony["value"].is_null());
+            assert!(
+                testimony["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn the_sealed_parameters_change_when_the_base_config_changes() {
+        let parameters = json!({"candidate_snapshot_hash": "a", "base_snapshot_hash": "b"});
+        let first = seal_base_config(
+            parameters.clone(),
+            base_config_testimony(
+                "config:p/checks",
+                Ok(facts("config", true, &"1".repeat(64))),
+            ),
+        );
+        let second = seal_base_config(
+            parameters.clone(),
+            base_config_testimony(
+                "config:p/checks",
+                Ok(facts("config", true, &"2".repeat(64))),
+            ),
+        );
+        let untrusted = seal_base_config(
+            parameters,
+            base_config_testimony(
+                "config:p/checks",
+                Ok(facts("config", false, &"1".repeat(64))),
+            ),
+        );
+        // The admitted parameters digest is a function of these exact values.
+        assert_ne!(first, second);
+        assert_ne!(first, untrusted);
+        assert_eq!(first["candidate_snapshot_hash"], json!("a"));
+    }
+
+    #[test]
+    fn a_caller_cannot_supply_the_base_config_parameter() {
+        assert!(refuse_reserved_base_config(&json!({"base_config": {"trusted": true}})).is_err());
+        assert!(refuse_reserved_base_config(&json!(["not", "an", "object"])).is_err());
+        refuse_reserved_base_config(&json!({"candidate_snapshot_hash": "a"})).unwrap();
+        refuse_reserved_base_config(&serde_json::Value::Null).unwrap();
+    }
 
     #[test]
     fn candidate_publication_pairing_accepts_each_admitted_pairing_and_only_exact_fences() {
