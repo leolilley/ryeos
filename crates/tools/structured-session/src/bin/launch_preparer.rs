@@ -1576,7 +1576,15 @@ mod tests {
                 validated.subject_projection_contract, "ryeos.credential.delivered_secret.v1",
                 "{file}"
             );
-            assert!(!validated.has_external_content, "{file}");
+            assert!(validated.has_external_content, "{file}");
+            assert!(
+                matches!(
+                    validated.process_environment.get("CLAUDE_CODE_EXECUTABLE"),
+                    Some(AuthoredWorkerEnvironmentValue::RealizationPath { realization_id, .. })
+                        if realization_id == "claude-code"
+                ),
+                "{file}: the executable is a path inside the pinned realization"
+            );
             assert!(validated.workload_client.is_none(), "{file}");
             // Exactly this environment's credentials are delivered secrets,
             // each under its own name; the adapter's settings are literals.

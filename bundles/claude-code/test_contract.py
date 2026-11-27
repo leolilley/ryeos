@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-26T02:47:10Z:6d6b89621227ff05600dbd02465833fab953c0e00ba4593a3cf445e5b8b2883e:C32iKfss5bidwR1l0w1yat/A6VE4mYnOiVbL3lHri7sgN+r1xsqTk3GPsNQUYXyo2OwxfW4Sedm2HiXIu0uBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:11:42Z:7eb43ab8a943027e3a1bca74fdd3c85b080f3ffb79997ddbb2559d42936ab11a:MmAkIrX12tJCYGulRZklYrRwotvV3QhXUBzJowsbMHBVs+o9xMwgNlib/lQdNfhGRFRysF7StSSf+p/4xJUqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
@@ -47,6 +47,41 @@ EXECUTIONS = {
     "bounded-turn-continue": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-continue.yaml",
 }
 ACTIVATION_DOC = BUNDLE / ".ai/knowledge/claude-code/hosted-activation.md"
+CLAUDE_FILE_SHA256 = "a2df1f41bb00250992926420d0063f89b127cb81abdd284dbefb80c50ff1d026"
+CLAUDE_FILE_SIZE = 402325736
+CLAUDE_CHUNK_BYTES = 64 * 1024 * 1024
+CLAUDE_CHUNK_HASHES = [
+    "181d6da95c5b5a897d986bd0b35442bcb6a74cdfb2857c6dba25c9901c56bff3",
+    "86bf61b011f1a599b46667265fdb22a88b95770771a33278d8745f1124255232",
+    "1474427f31bd7125e8a68ff7c80bf100497e87db72a26d5488dfdb6bc81a890e",
+    "cabe81ac9ee72fbdadc2bbc473d456caec38136046c85232017a38769b7f3339",
+    "b990428d2148d389c75c7fa9c6de7c1c523314a053cfbb0e5ba032d6679ccb71",
+    "48dd30f7c98d37c8c67593186fc0d37576c9a073d4775913435811fc5f3f361a",
+]
+
+
+def claude_manifest_digest() -> str:
+    manifest = {
+        "schema": "ryeos.external_content.large.v2",
+        "kind": "external_large_content_manifest",
+        "entries": [
+            {"path": "bin", "kind": "dir"},
+            {
+                "path": "bin/claude",
+                "kind": "file",
+                "mode": 0o755,
+                "file_sha256": CLAUDE_FILE_SHA256,
+                "size": CLAUDE_FILE_SIZE,
+                "chunk_size": CLAUDE_CHUNK_BYTES,
+                "chunk_hashes": CLAUDE_CHUNK_HASHES,
+            },
+        ],
+        "entry_count": 2,
+        "total_bytes": CLAUDE_FILE_SIZE,
+    }
+    return hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
 
 TOP_LEVEL_KEYS = {
     "schema_version", "external_candidate", "transport", "http_sse",
@@ -276,10 +311,56 @@ class ClaudeCodeContractTests(unittest.TestCase):
             self.assertEqual(set(delivered), set(names), name)
             for variable, value in delivered.items():
                 self.assertEqual(value, {"kind": "delivered_secret", "name": variable}, name)
-            # Everything else is a plain literal: no other kind may carry a value.
+            # Everything else is a plain literal, except Claude Code's own
+            # executable: a file inside the pinned realization.
             for variable, value in variables.items():
-                if variable not in delivered:
+                if variable == "CLAUDE_CODE_EXECUTABLE":
+                    self.assertEqual(
+                        value,
+                        {
+                            "kind": "realization_path",
+                            "realization_id": "claude-code",
+                            "relative_path": "bin/claude",
+                            "path_kind": "file",
+                        },
+                        name,
+                    )
+                elif variable not in delivered:
                     self.assertEqual(value.get("kind"), "literal", f"{name}: {variable}")
+
+    def test_claude_code_executable_is_pinned_by_digest_in_every_environment(self) -> None:
+        # The environment's tree digest is the digest of the large-content
+        # manifest the activation produces: directory `bin` and the one file
+        # `bin/claude`, named by its whole-file sha256 and 64 MiB chunk
+        # hashes. The chunk hashes are not authored here; they are carried
+        # by the recorded manifest below, and the activation refuses any
+        # download whose bytes differ from the pinned archive and member
+        # digests, so a wrong digest here fails activation, never launch.
+        for name in ENVIRONMENTS:
+            environment = load_yaml(BUNDLE / f".ai/config/claude-code/environments/{name}.yaml")
+            activation = load_yaml(BUNDLE / f".ai/config/claude-code/activation/{name}.yaml")
+            self.assertEqual(activation["schema"], "ryeos.external_content_activation.v3", name)
+            self.assertEqual(activation["consumer_ref"], f"config:claude-code/environments/{name}")
+            (source,) = activation["sources"]
+            self.assertEqual(source["archive_format"], "tar_gzip", name)
+            self.assertEqual(len(source["sha256"]), 64, name)
+            members = {member["path"]: member for member in source["members"]}
+            claude = members["package/claude"]
+            self.assertEqual(claude["disposition"], "import", name)
+            self.assertTrue(claude["executable"], name)
+            self.assertEqual(claude["sha256"], CLAUDE_FILE_SHA256, name)
+            (component,) = activation["components"]
+            self.assertEqual(component["storage"], "large_content", name)
+            self.assertEqual(
+                component["shape"]["members"],
+                [{"source": source["id"], "member": "package/claude", "target": "bin/claude"}],
+                name,
+            )
+            (declared,) = environment["external_content"]
+            self.assertEqual(declared["id"], component["id"], name)
+            self.assertEqual(declared["kind"], "tree", name)
+            self.assertEqual(declared["mode"], "pinned", name)
+            self.assertEqual(declared["digest"], claude_manifest_digest(), name)
 
     def test_executions_select_their_route_sets_without_durable_requirements(self) -> None:
         for name, path in EXECUTIONS.items():

@@ -1,9 +1,16 @@
-# ryeos:signed:2026-11-16T12:47:54Z:eb269677edd96ef290e34d19d8ccccd69b76e1ccd47f52c5ee3b84669541a89c:REtPTgYnT2xwEE4aExCztw7kdHPqIIKAaNGujdBHmn4eNOtOtKEVLyVwRqZT0KvyR9YlnxofCZJ+S2CtsOEuAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:11:42Z:4e14bd430574f4466c91f1bda10ac075ba26f5698c18c35de8f4205171cd2112:OpOsZRIRyYgMovg+6c7q4DrAZszTQ5bDO2qHUqdC6KfIRR9oLbR+0eAJdQIDWFI6BWp9nFsZ4uLHQnkStvVKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: claude-code/environments
 schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:claude-code/hosted
-external_content: []
+external_content:
+  - id: claude-code
+    kind: tree
+    mode: pinned
+    digest: 62482dfb3250a8cf07db098e367b70fa2ef33a5163039fc54bce966d717002db
+    metadata_hint: anthropic-claude-code-v2.1.332-linux-x64
+    mount_root: execution_runtime
+    mount: environment/claude-code
 configuration:
   executable_search: []
   # The model key and the gateway address are host-provided values. Only their
@@ -16,12 +23,14 @@ configuration:
       kind: delivered_secret
       name: ANTHROPIC_BASE_URL
     # Claude Code's own executable (not the workload executable, which is the
-    # adapter). This is a placeholder absolute path: replace it with the path
-    # the node's Claude Code install or realization is served at. The adapter
-    # refuses to start a session when the path does not name a file.
+    # adapter): the file `bin/claude` of the pinned, activated `claude-code`
+    # tree above. Activate it with
+    # `ryeos external-content activate config:claude-code/activation/<name> online`.
     CLAUDE_CODE_EXECUTABLE:
-      kind: literal
-      value: /path/to/claude-code/bin/claude
+      kind: realization_path
+      realization_id: claude-code
+      relative_path: bin/claude
+      path_kind: file
     # The signed MCP server list the adapter writes as Claude Code's only MCP
     # configuration. Empty: no MCP server is reachable.
     CLAUDE_CODE_MCP_CONFIG:
