@@ -76,29 +76,8 @@ fn coded_refusal(error: anyhow::Error, fallback: &str, status: u16) -> HandlerEr
     refusal(&code, status, format!("{error:#}"))
 }
 
-fn require_operator_call(ctx: &HandlerContext) -> HandlerResult<()> {
-    ctx.require_verified()?;
-    if ctx.authenticated_origin_site_id.is_some() || ctx.delegated_via.is_some() {
-        return Err(HandlerError::Forbidden(
-            "a revision is announced only on the node's own operator's request, not a forwarded one"
-                .into(),
-        ));
-    }
-    ctx.fingerprint
-        .strip_prefix("fp:")
-        .filter(|value| lillux::valid_hash(value))
-        .map(|_| ())
-        .ok_or_else(|| {
-            HandlerError::BadRequest("the caller is not a fingerprinted principal".into())
-        })
-}
-
-fn project_root(project_path: &str) -> HandlerResult<(PathBuf, String)> {
-    let root = std::fs::canonicalize(project_path).map_err(|error| {
-        HandlerError::BadRequest(format!(
-            "project_path `{project_path}` is not readable: {error}"
-        ))
-    })?;
+/// The admitted canonical root and its project key.
+fn project_root(root: PathBuf, project_path: &str) -> HandlerResult<(PathBuf, String)> {
     if !root.join(ryeos_engine::AI_DIR).is_dir() {
         return Err(HandlerError::BadRequest(format!(
             "`{project_path}` is not a project: it has no {} directory",
@@ -243,7 +222,7 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
-    require_operator_call(&ctx)?;
+    ctx.require_verified()?;
     if req.item_refs.len() > MAX_ITEM_REFS {
         return Err(HandlerError::BadRequest(format!(
             "a request names at most {MAX_ITEM_REFS} items"
@@ -256,10 +235,18 @@ pub async fn handle(
                 .into(),
         ));
     }
+    // The project path names a live directory on the host, so it is admitted
+    // like any other live project path.
+    let admitted = ryeos_app::live_project_path::admit_handler_live_path(
+        &state,
+        &ctx,
+        Path::new(&req.project_path),
+    )?
+    .canonical;
     let work_state = state.clone();
     let caller = ctx.fingerprint.clone();
     let events = tokio::task::spawn_blocking(move || {
-        let (root, project) = project_root(&req.project_path)?;
+        let (root, project) = project_root(admitted, &req.project_path)?;
         match req.endorsement.as_deref() {
             Some(digest) => endorsed_changes(&work_state, &root, &project, &caller, digest),
             None => recorded_changes(&work_state, &root, &project, &req.item_refs),

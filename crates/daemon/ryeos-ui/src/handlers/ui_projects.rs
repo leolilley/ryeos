@@ -2028,33 +2028,32 @@ pub(crate) fn authorize_launch_project(
     state: &AppState,
     requested_root: &str,
 ) -> Result<(lillux::PinnedDirectory, Option<String>)> {
-    let requested = canonical_project_root(requested_root, &state.config.app_root)?;
-    let authority = lillux::PinnedDirectory::open(&requested)?
-        .context("authorized UI project root disappeared")?;
-    if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
-        let store = PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)?;
-        let registered_project_id = store
-            .load_projects()?
-            .projects
-            .into_iter()
-            .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
-            .map(|project| project.local_id);
-        return Ok((authority, registered_project_id));
-    }
-
     // Only the node's operator names a project root for a seat. A path in a
     // request is never project authority, and registering a project is the
     // operator's act, so a non-operator key has no registered project to
-    // launch into: refuse, whatever path it names.
-    Err(HandlerError::Structured {
-        code: "project_seat_operator_only".into(),
-        status: 403,
-        body: serde_json::json!({
-            "code": "project_seat_operator_only",
-            "error": "a project root can be named for a seat only by the node's operator; this key has no registered project",
-        }),
+    // launch into: refuse, whatever path it names, before the path is touched.
+    if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_err() {
+        return Err(HandlerError::Structured {
+            code: "project_seat_operator_only".into(),
+            status: 403,
+            body: serde_json::json!({
+                "code": "project_seat_operator_only",
+                "error": "a project root can be named for a seat only by the node's operator; this key has no registered project",
+            }),
+        }
+        .into());
     }
-    .into())
+    let requested = canonical_project_root(requested_root, &state.config.app_root)?;
+    let authority = lillux::PinnedDirectory::open(&requested)?
+        .context("authorized UI project root disappeared")?;
+    let store = PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)?;
+    let registered_project_id = store
+        .load_projects()?
+        .projects
+        .into_iter()
+        .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+        .map(|project| project.local_id);
+    Ok((authority, registered_project_id))
 }
 
 /// Revalidate a registered launch project after binding compilation and keep

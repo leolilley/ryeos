@@ -299,12 +299,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "project.apply-snapshot handler entered"
     );
 
-    let project_path = canonical_existing_project_path(&req.project_path)?;
-    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
-        &project_path,
-        &state.config.app_root,
-    )
-    .map_err(|refusal| ryeos_app::handler_error::HandlerError::Forbidden(refusal.to_string()))?;
+    // The caller-named directory is written into, so it is admitted before
+    // anything else touches it. Admission also refuses node-internal roots.
+    let admitted = ryeos_app::live_project_path::admit_handler_live_path(
+        &state,
+        &ctx,
+        Path::new(&req.project_path),
+    )?;
+    let project_path = admitted.canonical;
     let canonical_project_path = project_path
         .to_str()
         .ok_or_else(|| {
@@ -315,8 +317,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             )
         })?
         .to_owned();
-    let project_directory = lillux::PinnedDirectory::open(&project_path)?
-        .ok_or_else(|| anyhow!("canonical project directory disappeared"))?;
+    let project_directory = admitted.directory;
     project_directory.ensure_path_binding()?;
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
     let apply_lock = project_apply_lock(&project_hash);
@@ -923,40 +924,6 @@ pub(crate) fn project_apply_lock(project_hash: &str) -> Arc<tokio::sync::Mutex<(
     let lock = Arc::new(tokio::sync::Mutex::new(()));
     locks.insert(project_hash.to_owned(), Arc::downgrade(&lock));
     lock
-}
-
-/// Shared by project handlers: absolute, canonicalized, existing
-/// directory — fail loud otherwise.
-pub(crate) fn canonical_existing_project_path(project_path: &str) -> Result<PathBuf> {
-    let path = Path::new(project_path);
-    if !path.is_absolute() {
-        return Err(typed_refusal(
-            "project_path_not_absolute",
-            400,
-            format!("project_path '{}' is not absolute", project_path),
-        )
-        .into());
-    }
-    let canonical = path.canonicalize().map_err(|error| {
-        let message = format!(
-            "cannot canonicalize project_path '{}'; ensure it exists",
-            project_path
-        );
-        if error.kind() == std::io::ErrorKind::NotFound {
-            anyhow::Error::from(typed_refusal("project_path_not_found", 404, message))
-        } else {
-            anyhow::Error::new(error).context(message)
-        }
-    })?;
-    if !canonical.is_dir() {
-        return Err(typed_refusal(
-            "project_path_not_directory",
-            400,
-            format!("project_path '{}' is not a directory", canonical.display()),
-        )
-        .into());
-    }
-    Ok(canonical)
 }
 
 pub(crate) fn snapshot_history_contains(cas: &CasStore, head: &str, wanted: &str) -> Result<bool> {
