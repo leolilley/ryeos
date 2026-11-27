@@ -64,27 +64,40 @@ pub struct Envelope<'a> {
     pub enforce_clock: bool,
 }
 
+/// `fp:` and the bare fingerprint, normalised to the bare form.
+fn bare_fingerprint(text: &str) -> &str {
+    text.strip_prefix("fp:").unwrap_or(text)
+}
+
 /// The constraints a delegated grant carries for one operation. When the
 /// operation requires a constraint the grant must carry at least one for
-/// `scope`; every constraint for `scope` must then hold: it binds a pointer
-/// the operation lists, the pointed-at argument is the string it names, and
-/// its own `not_after` has not passed at `now`. A constraint only narrows, so
-/// an operation that does not require one is still narrowed by any the grant
-/// carries.
+/// `spec`'s scope; every constraint for that scope must then hold: it binds a
+/// pointer the operation lists, the pointed-at argument is the string it
+/// names, and its own `not_after` has not passed at `now`. A constraint only
+/// narrows, so an operation that does not require one is still narrowed by
+/// any the grant carries.
+///
+/// An operation with a `single_use_grant` also needs every constraint to
+/// allow exactly one use and to name a `not_after`, which `not_after_ceiling`
+/// (an absolute Unix time, when the node has one) may not exceed. An operation
+/// with a `signer_bound_argument` needs that argument to name the request's
+/// own signer, and one constraint to bind exactly that pointer.
 fn check_grant_constraints(
-    requires_constraint: bool,
-    bindable_arguments: &[&str],
-    scope: &str,
+    spec: &OperationSpec,
     constraints: &[OfflineConstraint],
     arguments: &serde_json::Value,
+    signer_fingerprint: &str,
     now: u64,
+    not_after_ceiling: Option<u64>,
 ) -> Result<(), Refusal> {
+    let scope = spec.scope();
+    let scope = scope.as_str();
     let mut applicable = constraints
         .iter()
         .filter(|constraint| constraint.scope == scope)
         .peekable();
     if applicable.peek().is_none() {
-        if requires_constraint {
+        if spec.requires_grant_constraint {
             return refuse(
                 RefusalReason::GrantConstraintMissing,
                 format!(
@@ -94,8 +107,26 @@ fn check_grant_constraints(
         }
         return Ok(());
     }
+    if let Some(pointer) = spec.signer_bound_argument {
+        let names_signer = arguments
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| bare_fingerprint(value) == bare_fingerprint(signer_fingerprint));
+        if !names_signer {
+            return refuse(
+                RefusalReason::SignerBoundArgumentMismatch,
+                format!(
+                    "the request's `{pointer}` is not the signer's own key, which `{scope}` requires"
+                ),
+            );
+        }
+    }
+    let mut binds_signer_pointer = false;
     for constraint in applicable {
-        if !bindable_arguments.contains(&constraint.argument.as_str()) {
+        if !spec
+            .bindable_arguments
+            .contains(&constraint.argument.as_str())
+        {
             return refuse(
                 RefusalReason::GrantConstraintViolated,
                 format!(
@@ -103,6 +134,36 @@ fn check_grant_constraints(
                     constraint.argument
                 ),
             );
+        }
+        binds_signer_pointer |= spec.signer_bound_argument == Some(constraint.argument.as_str());
+        if spec.single_use_grant {
+            if constraint.max_uses != 1 {
+                return refuse(
+                    RefusalReason::GrantConstraintViolated,
+                    format!(
+                        "`{scope}` takes only a single-use grant; the constraint on `{}` allows {} uses",
+                        constraint.argument, constraint.max_uses
+                    ),
+                );
+            }
+            let Some(not_after) = constraint.not_after else {
+                return refuse(
+                    RefusalReason::GrantConstraintViolated,
+                    format!(
+                        "`{scope}` takes only a grant whose constraint on `{}` names a not_after",
+                        constraint.argument
+                    ),
+                );
+            };
+            if not_after_ceiling.is_some_and(|ceiling| not_after > ceiling) {
+                return refuse(
+                    RefusalReason::GrantConstraintViolated,
+                    format!(
+                        "the grant's constraint on `{}` for `{scope}` lasts longer than this node allows",
+                        constraint.argument
+                    ),
+                );
+            }
         }
         if constraint
             .not_after
@@ -130,7 +191,26 @@ fn check_grant_constraints(
             );
         }
     }
+    if let Some(pointer) = spec.signer_bound_argument
+        && !binds_signer_pointer
+    {
+        return refuse(
+            RefusalReason::GrantConstraintMissing,
+            format!("no constraint of the grant binds `{pointer}` for the scope `{scope}`"),
+        );
+    }
     Ok(())
+}
+
+/// The fewest uses any constraint of the grant allows for `scope`, which is
+/// how many uses the grant has for it; `None` when it carries no constraint
+/// for the scope.
+pub(super) fn smallest_max_uses(constraints: &[OfflineConstraint], scope: &str) -> Option<u32> {
+    constraints
+        .iter()
+        .filter(|constraint| constraint.scope == scope)
+        .map(|constraint| constraint.max_uses)
+        .min()
 }
 
 fn refuse<T>(reason: RefusalReason, detail: impl Into<String>) -> Result<T, Refusal> {
@@ -206,13 +286,16 @@ impl Envelope<'_> {
                 );
             }
             check_grant_constraints(
-                spec.requires_grant_constraint,
-                spec.bindable_arguments,
-                &spec.scope(),
+                spec,
                 &grant.offline_constraints,
                 &body.arguments,
+                &body.signer_fingerprint,
                 self.now,
+                self.grant_not_after_ceiling(),
             )?;
+            if spec.operator_issued_grant {
+                self.check_issued_by_operator_owner(&grant)?;
+            }
             if spec.authority_bearing {
                 match delegated_remote_operations(self.app_root) {
                     Ok(delegated) if delegated.contains(spec.id) => {}
@@ -243,9 +326,50 @@ impl Envelope<'_> {
         check_shape(spec, body)
     }
 
+    /// The latest `not_after`, as an absolute Unix time, a single-use grant's
+    /// constraint may carry. This is where the node's own bound on how far
+    /// ahead a delegated grant may reach plugs in: it is node data, and no
+    /// such data exists yet, so no bound is applied.
+    fn grant_not_after_ceiling(&self) -> Option<u64> {
+        None
+    }
+
+    /// The grant must have been asked for by an active key of the principal
+    /// that owns the node's operator key: only the operator's own side may
+    /// delegate the right to join a key to the operator.
+    fn check_issued_by_operator_owner(
+        &self,
+        grant: &VerifiedAuthorizedKeyGrant,
+    ) -> Result<(), Refusal> {
+        let reason = RefusalReason::KeyLinkGrantNotOperatorIssued;
+        let operator = local_operator(self.app_root).map_err(|error| {
+            Refusal::retryable(
+                reason,
+                format!("the local operator identity cannot be read: {error:#}"),
+            )
+        })?;
+        let Some((operator_fingerprint, _)) = operator else {
+            return refuse(reason, "this node has no operator to have issued the grant");
+        };
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(self.app_root).map_err(
+            |error| {
+                Refusal::retryable(
+                    reason,
+                    format!("the node's signer registry cannot be read: {error}"),
+                )
+            },
+        )?;
+        crate::key_link::ensure_issued_by_operator_owner(
+            &trust,
+            &operator_fingerprint,
+            &grant.authorized_by.principal,
+        )
+        .or_else(|detail| refuse(reason, detail))
+    }
+
     /// The signer's grant, or `None` for the local operator, whose authority
     /// is the key on this node's volume.
-    fn admit_signer(
+    pub(super) fn admit_signer(
         &self,
         request: &SignedRequest,
     ) -> Result<Option<VerifiedAuthorizedKeyGrant>, Refusal> {
@@ -468,25 +592,44 @@ mod tests {
     use serde_json::json;
 
     const SCOPE: &str = "ryeos.offline.node.key.link";
-    const BINDABLE: &[&str] = &["/link/body/key"];
+    const POINTER: &str = "/link/body/key";
+
+    fn signer() -> String {
+        "ab".repeat(32)
+    }
+
+    fn signer_key() -> String {
+        format!("fp:{}", signer())
+    }
 
     fn constraint(equals: &str, not_after: Option<u64>) -> OfflineConstraint {
         OfflineConstraint {
             scope: SCOPE.to_owned(),
-            argument: "/link/body/key".to_owned(),
+            argument: POINTER.to_owned(),
             equals: equals.to_owned(),
             max_uses: 1,
             not_after,
         }
     }
 
+    fn arguments_for(key: &str) -> serde_json::Value {
+        json!({ "link": { "body": { "key": key } } })
+    }
+
+    /// The constraints against `node.key.link`, signed by `signer()`.
     fn check(
-        requires: bool,
         constraints: &[OfflineConstraint],
         arguments: &serde_json::Value,
         now: u64,
     ) -> Result<(), Refusal> {
-        check_grant_constraints(requires, BINDABLE, SCOPE, constraints, arguments, now)
+        check_grant_constraints(
+            lookup("node.key.link").unwrap(),
+            constraints,
+            arguments,
+            &signer(),
+            now,
+            None,
+        )
     }
 
     fn reason(result: Result<(), Refusal>) -> RefusalReason {
@@ -495,63 +638,127 @@ mod tests {
 
     #[test]
     fn a_grant_without_a_constraint_is_refused_where_one_is_required() {
-        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
+        let arguments = arguments_for(&signer_key());
         assert_eq!(
-            reason(check(true, &[], &arguments, 10)),
+            reason(check(&[], &arguments, 10)),
             RefusalReason::GrantConstraintMissing
         );
         let other_scope = OfflineConstraint {
             scope: "ryeos.offline.node.allow-restart".to_owned(),
-            ..constraint("fp:a", None)
+            ..constraint(&signer_key(), Some(100))
         };
         assert_eq!(
-            reason(check(true, &[other_scope], &arguments, 10)),
+            reason(check(&[other_scope], &arguments, 10)),
             RefusalReason::GrantConstraintMissing
         );
-        check(false, &[], &arguments, 10).unwrap();
+        check_grant_constraints(
+            lookup("node.allow-restart").unwrap(),
+            &[],
+            &arguments,
+            &signer(),
+            10,
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
-    fn a_constraint_admits_only_the_bound_argument() {
-        let constraints = [constraint("fp:a", None)];
+    fn the_signer_bound_argument_must_name_the_signers_own_key() {
+        let constraints = [constraint(&signer_key(), Some(100))];
+        check(&constraints, &arguments_for(&signer_key()), 10).unwrap();
+        // The bare fingerprint names the same key.
         check(
-            true,
-            &constraints,
-            &json!({ "link": { "body": { "key": "fp:a" } } }),
+            &[constraint(&signer(), Some(100))],
+            &arguments_for(&signer()),
             10,
         )
         .unwrap();
+        let other = format!("fp:{}", "cd".repeat(32));
         for arguments in [
-            json!({ "link": { "body": { "key": "fp:b" } } }),
+            arguments_for(&other),
             json!({ "link": { "body": {} } }),
             json!({ "link": { "body": { "key": 7 } } }),
             json!({}),
         ] {
+            // Even a grant that binds exactly that other key does not admit it.
             assert_eq!(
-                reason(check(true, &constraints, &arguments, 10)),
-                RefusalReason::GrantConstraintViolated,
+                reason(check(&[constraint(&other, Some(100))], &arguments, 10)),
+                RefusalReason::SignerBoundArgumentMismatch,
                 "{arguments}"
             );
         }
     }
 
     #[test]
-    fn an_expired_constraint_is_refused() {
-        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
-        let constraints = [constraint("fp:a", Some(100))];
-        check(true, &constraints, &arguments, 100).unwrap();
+    fn a_constraint_admits_only_the_bound_argument() {
+        let other = format!("fp:{}", "cd".repeat(32));
         assert_eq!(
-            reason(check(true, &constraints, &arguments, 101)),
+            reason(check(
+                &[constraint(&other, Some(100))],
+                &arguments_for(&signer_key()),
+                10
+            )),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn an_expired_constraint_is_refused() {
+        let arguments = arguments_for(&signer_key());
+        let constraints = [constraint(&signer_key(), Some(100))];
+        check(&constraints, &arguments, 100).unwrap();
+        assert_eq!(
+            reason(check(&constraints, &arguments, 101)),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn a_single_use_operation_refuses_many_uses_and_a_missing_not_after() {
+        let arguments = arguments_for(&signer_key());
+        let mut many = constraint(&signer_key(), Some(100));
+        many.max_uses = 2;
+        assert_eq!(
+            reason(check(&[many], &arguments, 10)),
+            RefusalReason::GrantConstraintViolated
+        );
+        assert_eq!(
+            reason(check(&[constraint(&signer_key(), None)], &arguments, 10)),
+            RefusalReason::GrantConstraintViolated
+        );
+    }
+
+    #[test]
+    fn the_not_after_ceiling_bounds_a_single_use_constraint() {
+        let arguments = arguments_for(&signer_key());
+        let constraints = [constraint(&signer_key(), Some(100))];
+        let with_ceiling = |ceiling| {
+            check_grant_constraints(
+                lookup("node.key.link").unwrap(),
+                &constraints,
+                &arguments,
+                &signer(),
+                10,
+                ceiling,
+            )
+        };
+        with_ceiling(Some(100)).unwrap();
+        assert_eq!(
+            reason(with_ceiling(Some(99))),
             RefusalReason::GrantConstraintViolated
         );
     }
 
     #[test]
     fn every_constraint_for_the_scope_must_hold() {
-        let arguments = json!({ "link": { "body": { "key": "fp:a" } } });
-        let constraints = [constraint("fp:a", None), constraint("fp:b", None)];
+        let arguments = arguments_for(&signer_key());
+        let other = format!("fp:{}", "cd".repeat(32));
+        let constraints = [
+            constraint(&signer_key(), Some(100)),
+            constraint(&other, Some(100)),
+        ];
         assert_eq!(
-            reason(check(true, &constraints, &arguments, 10)),
+            reason(check(&constraints, &arguments, 10)),
             RefusalReason::GrantConstraintViolated
         );
     }
@@ -560,16 +767,20 @@ mod tests {
     fn a_constraint_on_an_unbindable_pointer_never_holds() {
         let unbindable = OfflineConstraint {
             argument: "/link/body/principal".to_owned(),
-            ..constraint("pid:x", None)
+            ..constraint("pid:x", Some(100))
         };
         assert_eq!(
-            reason(check(
-                true,
-                &[unbindable],
-                &json!({ "link": { "body": { "principal": "pid:x" } } }),
-                10
-            )),
+            reason(check(&[unbindable], &arguments_for(&signer_key()), 10)),
             RefusalReason::GrantConstraintViolated
         );
+    }
+
+    #[test]
+    fn the_uses_a_grant_has_are_the_smallest_any_constraint_allows() {
+        let mut two = constraint(&signer_key(), Some(100));
+        two.max_uses = 2;
+        let constraints = [two, constraint(&signer_key(), Some(100))];
+        assert_eq!(smallest_max_uses(&constraints, SCOPE), Some(1));
+        assert_eq!(smallest_max_uses(&constraints, "other"), None);
     }
 }

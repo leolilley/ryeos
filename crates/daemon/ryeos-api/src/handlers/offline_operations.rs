@@ -73,7 +73,10 @@ fn refusal_error(refusal: Refusal) -> HandlerError {
         | RefusalReason::LocalSignerOnly
         | RefusalReason::NotDelegable
         | RefusalReason::GrantConstraintMissing
-        | RefusalReason::GrantConstraintViolated => 403,
+        | RefusalReason::GrantConstraintViolated
+        | RefusalReason::SignerBoundArgumentMismatch
+        | RefusalReason::GrantUsesExhausted
+        | RefusalReason::KeyLinkGrantNotOperatorIssued => 403,
         RefusalReason::Expired
         | RefusalReason::FromTheFuture
         | RefusalReason::Replayed
@@ -281,6 +284,15 @@ mod tests {
         assert_eq!(refusal_status(RefusalReason::Expired), 409);
         assert_eq!(refusal_status(RefusalReason::StaleLedgerHead), 409);
         assert_eq!(refusal_status(RefusalReason::Malformed), 400);
+        assert_eq!(
+            refusal_status(RefusalReason::SignerBoundArgumentMismatch),
+            403
+        );
+        assert_eq!(refusal_status(RefusalReason::GrantUsesExhausted), 403);
+        assert_eq!(
+            refusal_status(RefusalReason::KeyLinkGrantNotOperatorIssued),
+            403
+        );
     }
 
     #[test]

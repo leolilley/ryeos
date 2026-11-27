@@ -1800,14 +1800,21 @@ pub(super) fn key_link(ctx: &HandlerContext<'_>) -> Result<Value> {
     arguments.validate()?;
     let trust = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
         .map_err(|error| anyhow::anyhow!("load the node signer registry: {error}"))?;
-    let outcome = crate::key_link::link_key(
-        ctx.app_root,
-        ctx.node,
-        &trust,
-        arguments.link,
-        lillux::time::unix_secs_now(),
-    )?;
-    Ok(serde_json::to_value(outcome)?)
+    // A delegated request names the grant it was signed under, and the
+    // receipt records it.
+    let grant_digest = ctx.request.signer_grant_digest.clone();
+    let linked_at = lillux::time::unix_secs_now();
+    let outcome =
+        crate::key_link::link_key(ctx.app_root, ctx.node, &trust, arguments.link, linked_at)?;
+    let linked_key = outcome.key.clone();
+    let mut receipt = serde_json::to_value(outcome)?;
+    let fields = receipt
+        .as_object_mut()
+        .context("the link outcome is not a JSON object")?;
+    fields.insert("grant_digest".to_owned(), json!(grant_digest));
+    fields.insert("linked_key".to_owned(), json!(linked_key));
+    fields.insert("linked_at".to_owned(), json!(linked_at));
+    Ok(receipt)
 }
 
 pub(super) fn key_unlink(ctx: &HandlerContext<'_>) -> Result<Value> {

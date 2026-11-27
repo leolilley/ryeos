@@ -190,6 +190,18 @@ pub struct OperationSpec {
     /// grant constraint on this operation may bind. A constraint on any other
     /// pointer is refused at issue and at check.
     pub bindable_arguments: &'static [&'static str],
+    /// The pointer of an argument that must name the request's own signer
+    /// (`fp:` and the signer's fingerprint) when the request is delegated, so
+    /// a grant can never be used to act on a key other than the holder's. At
+    /// least one constraint for the scope must bind exactly this pointer.
+    pub signer_bound_argument: Option<&'static str>,
+    /// Every constraint a grant carries for this operation's scope allows
+    /// exactly one use and names a `not_after`: the grant is consumed by the
+    /// one request it was made for.
+    pub single_use_grant: bool,
+    /// A delegated request may use only a grant issued by an active key of
+    /// the principal that owns the node's operator key.
+    pub operator_issued_grant: bool,
     /// Applied alone in its startup: nothing is applied before it in the same
     /// startup, and nothing after.
     pub alone: bool,
@@ -235,6 +247,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_POLICY_GENERATION],
@@ -258,6 +273,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "policy",
@@ -281,6 +299,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[
             InputSlot {
@@ -335,6 +356,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[
             InputSlot {
@@ -369,6 +393,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[
             InputSlot {
@@ -403,6 +430,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[
             InputSlot {
@@ -438,6 +468,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "consumer_verifiers",
@@ -461,6 +494,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_RUNTIME_SNAPSHOTS, FACT_EXTERNAL_EXECUTION],
@@ -480,6 +516,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -504,6 +543,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -523,6 +565,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -542,6 +587,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_RESTART_INHIBITION],
@@ -561,6 +609,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -580,6 +631,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -599,6 +653,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -618,6 +675,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -637,6 +697,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -656,6 +719,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -679,6 +745,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "descriptor",
@@ -706,6 +775,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: false,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "archive",
@@ -733,6 +805,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -756,6 +831,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "archive",
@@ -783,6 +861,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[],
@@ -809,6 +890,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: true,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -831,6 +915,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_AUTHORIZED_KEYS],
@@ -857,6 +944,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "signer",
@@ -884,6 +974,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -907,6 +1000,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -930,6 +1026,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -953,6 +1052,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "succession",
@@ -976,6 +1078,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: true,
         inputs: &[
             InputSlot {
@@ -1008,6 +1113,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: &[InputSlot {
             name: "succession",
@@ -1031,6 +1139,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
@@ -1054,6 +1165,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
@@ -1074,9 +1188,12 @@ static OPERATIONS: &[OperationSpec] = &[
     OperationSpec {
         id: "node.key.link",
         authority_bearing: true,
-        local_signer_only: true,
+        local_signer_only: false,
         requires_grant_constraint: true,
         bindable_arguments: &["/link/body/key"],
+        signer_bound_argument: Some("/link/body/key"),
+        single_use_grant: true,
+        operator_issued_grant: true,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -1100,6 +1217,9 @@ static OPERATIONS: &[OperationSpec] = &[
         local_signer_only: true,
         requires_grant_constraint: false,
         bindable_arguments: NO_BINDABLE_ARGUMENTS,
+        signer_bound_argument: None,
+        single_use_grant: false,
+        operator_issued_grant: false,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_TRUST_REGISTRY],
@@ -1150,6 +1270,43 @@ pub fn validate_grant_constraints(constraints: &[OfflineConstraint]) -> Result<(
             spec.id,
             constraint.argument
         );
+        ensure!(
+            constraint.max_uses > 0,
+            "offline constraint on `{}` allows no use at all",
+            spec.id
+        );
+        if spec.single_use_grant {
+            ensure!(
+                constraint.max_uses == 1,
+                "operation `{}` takes only a single-use grant, and the constraint on `{}` allows {} uses",
+                spec.id,
+                constraint.argument,
+                constraint.max_uses
+            );
+            ensure!(
+                constraint.not_after.is_some(),
+                "operation `{}` takes only a grant whose constraint on `{}` names a `not_after`",
+                spec.id,
+                constraint.argument
+            );
+        }
+    }
+    for spec in operations()
+        .iter()
+        .filter(|spec| spec.requires_grant_constraint)
+    {
+        let scope = spec.scope();
+        let mut for_scope = constraints
+            .iter()
+            .filter(|constraint| constraint.scope == scope)
+            .peekable();
+        if let (Some(pointer), true) = (spec.signer_bound_argument, for_scope.peek().is_some()) {
+            ensure!(
+                for_scope.any(|constraint| constraint.argument == pointer),
+                "operation `{}` takes only a grant with a constraint binding `{pointer}`, the argument that names the signer's own key",
+                spec.id
+            );
+        }
     }
     Ok(())
 }
@@ -1162,6 +1319,19 @@ pub fn validate_table() -> Result<()> {
         ensure!(
             seen.insert(spec.id),
             "operation `{}` is listed twice",
+            spec.id
+        );
+        if let Some(pointer) = spec.signer_bound_argument {
+            ensure!(
+                spec.requires_grant_constraint && spec.bindable_arguments.contains(&pointer),
+                "operation `{}` binds the signer at `{pointer}`, which it must require and list as bindable",
+                spec.id
+            );
+        }
+        ensure!(
+            !(spec.single_use_grant || spec.operator_issued_grant)
+                || spec.requires_grant_constraint,
+            "operation `{}` restricts its grants without requiring a constraint",
             spec.id
         );
         ensure!(
@@ -1229,8 +1399,22 @@ mod tests {
             argument: argument.to_owned(),
             equals: "fp:x".to_owned(),
             max_uses: 1,
-            not_after: None,
+            not_after: Some(2_000_000_000),
         }
+    }
+
+    #[test]
+    fn a_key_link_grant_is_single_use_and_expiring() {
+        let link = "ryeos.offline.node.key.link";
+        let mut many = constraint(link, "/link/body/key");
+        many.max_uses = 2;
+        assert!(validate_grant_constraints(&[many]).is_err());
+        let mut forever = constraint(link, "/link/body/key");
+        forever.not_after = None;
+        assert!(validate_grant_constraints(&[forever]).is_err());
+        let mut none = constraint(link, "/link/body/key");
+        none.max_uses = 0;
+        assert!(validate_grant_constraints(&[none]).is_err());
     }
 
     #[test]
@@ -1398,15 +1582,28 @@ mod tests {
         );
     }
 
-    /// A link into the node operator's owner can be created only by the
-    /// node's own operator signing the request: a delegated signer's grant is
-    /// not the operator's consent, so neither link operation is delegable.
+    /// Unlinking stays with the node's local operator. Linking is delegable
+    /// only through a grant bound to the one key it links, which must be the
+    /// grant holder's own.
     #[test]
-    fn key_link_operations_are_local_signer_only_and_never_delegable() {
-        for id in ["node.key.link", "node.key.unlink"] {
-            let spec = lookup(id).unwrap();
-            assert!(spec.local_signer_only && spec.authority_bearing, "{id}");
-            assert!(spec.preconditions.contains(&FACT_TRUST_REGISTRY), "{id}");
+    fn only_key_unlink_is_local_signer_only_and_key_link_binds_the_signer() {
+        let unlink = lookup("node.key.unlink").unwrap();
+        assert!(unlink.local_signer_only && unlink.authority_bearing);
+        assert!(unlink.preconditions.contains(&FACT_TRUST_REGISTRY));
+        let link = lookup("node.key.link").unwrap();
+        assert!(!link.local_signer_only && link.authority_bearing);
+        assert!(link.requires_grant_constraint);
+        assert!(link.single_use_grant && link.operator_issued_grant);
+        assert_eq!(link.signer_bound_argument, Some("/link/body/key"));
+        assert!(link.bindable_arguments.contains(&"/link/body/key"));
+        assert!(link.preconditions.contains(&FACT_TRUST_REGISTRY));
+        for spec in operations().iter().filter(|spec| spec.id != link.id) {
+            assert!(spec.signer_bound_argument.is_none(), "{}", spec.id);
+            assert!(
+                !spec.single_use_grant && !spec.operator_issued_grant,
+                "{}",
+                spec.id
+            );
         }
     }
 
@@ -1414,7 +1611,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 19);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 18);
     }
 
     #[test]

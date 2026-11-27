@@ -2060,3 +2060,77 @@ fn revoke_refuses_unknown_fingerprint_typed() {
         report.stopped
     );
 }
+
+// ── Delegated key linking: grants, uses and nodes ────────────────────────
+
+const LINK_SCOPE: &str = "ryeos.offline.node.key.link";
+
+fn check_at(fx: &Fixture, request: &SignedRequest) -> Result<(), Refusal> {
+    Envelope {
+        app_root: fx.path(),
+        node: &fx.node,
+        now: lillux::time::unix_secs_now(),
+        enforce_clock: false,
+    }
+    .check(request)
+}
+
+#[test]
+fn a_one_use_grant_is_spent_by_one_request_and_a_resumed_request_spends_nothing() {
+    let fx = fixture();
+    let grant = lillux::sha256_hex(b"grant");
+    let first = lillux::sha256_hex(b"first");
+    let second = lillux::sha256_hex(b"second");
+    let spend = |request: &str| {
+        spend_grant_use(fx.path(), &fx.node, &grant, request, LINK_SCOPE, 1).unwrap()
+    };
+    assert!(matches!(spend(&first), Ok(Claim::Claimed)));
+    // The request recovered after stopping half-way finds its own record.
+    assert!(matches!(spend(&first), Ok(Claim::Resumed)));
+    let refused = spend(&second).unwrap_err();
+    assert_eq!(refused.reason, RefusalReason::GrantUsesExhausted);
+    assert_eq!(refused.reason.code(), "grant_uses_exhausted");
+    // The refused request left no record, and the first still resumes.
+    assert!(matches!(spend(&first), Ok(Claim::Resumed)));
+}
+
+#[test]
+fn a_grant_made_for_one_node_is_refused_by_another() {
+    let node_a = fixture();
+    let node_b = fixture();
+    let (key, digest) = node_a.remote_principal(&[LINK_SCOPE], SITE, WildcardPolicy::Reject);
+    // Node B is handed node A's grant file and a request signed under it.
+    let directory = authorized_keys_dir(node_b.path());
+    std::fs::create_dir_all(&directory).unwrap();
+    let name = format!("{}.toml", fingerprint(&key));
+    std::fs::copy(
+        authorized_keys_dir(node_a.path()).join(&name),
+        directory.join(&name),
+    )
+    .unwrap();
+    let body = node_b.remote_body(&key, &digest, SITE, "node.key.link");
+    let request = SignedRequest::sign(body, &key).unwrap();
+    // The grant is signed by node A, so node B cannot verify it.
+    let refusal = check_at(&node_b, &request).unwrap_err();
+    assert_eq!(refusal.reason, RefusalReason::UnknownSigner);
+    // The same request is refused by node A as being for another node.
+    let refusal = check_at(&node_a, &request).unwrap_err();
+    assert_eq!(refusal.reason, RefusalReason::WrongNode);
+}
+
+#[test]
+fn no_grant_path_links_a_key_without_the_operators_own_signature_or_a_constraint() {
+    let fx = fixture();
+    // A key with no grant at all, signing as itself.
+    let stranger = lillux::crypto::generate_signing_key();
+    let mut body = fx.body("node.key.link", json!({}));
+    body.signer_fingerprint = fingerprint(&stranger);
+    let refusal = check_at(&fx, &SignedRequest::sign(body, &stranger).unwrap()).unwrap_err();
+    assert_eq!(refusal.reason, RefusalReason::UnknownSigner);
+    // A remote operator whose grant names the scope and carries no
+    // constraint for it.
+    let (key, digest) = fx.remote_principal(&[LINK_SCOPE], SITE, WildcardPolicy::Reject);
+    let body = fx.remote_body(&key, &digest, SITE, "node.key.link");
+    let refusal = check_at(&fx, &SignedRequest::sign(body, &key).unwrap()).unwrap_err();
+    assert_eq!(refusal.reason, RefusalReason::GrantConstraintMissing);
+}

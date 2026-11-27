@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use lillux::crypto::SigningKey;
 use ryeos_engine::roots::RuntimeRoot;
+use ryeos_node_runtime::grant_use_ledger::{
+    Claim, GrantUseError, claim_use, complete_use, grant_uses_dir,
+};
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 use serde_json::{Value, json};
@@ -34,7 +37,9 @@ use super::contract::{
     DEFAULT_REQUEST_LIFETIME_SECS, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody,
     SignedReceipt, SignedRequest, bound_result,
 };
-use super::envelope::{Envelope, WildcardGrant, wildcard_only_grants};
+use super::envelope::{
+    Envelope, WildcardGrant, authorized_keys_dir, smallest_max_uses, wildcard_only_grants,
+};
 use super::facts::{FACT_LEDGER_HEAD, MANDATORY_FACTS, NodeFacts, measure};
 use super::host::OfflineHost;
 use super::store::{Pending, Phase, Read, Store};
@@ -359,6 +364,40 @@ fn stuck_refusal(attempts: u32, phase: Option<Phase>, error: Option<&str>) -> Re
         detail.push_str(&format!(": {error}"));
     }
     Refusal::new(RefusalReason::Stuck, detail)
+}
+
+/// Spend one use of the grant `grant_digest` for the request `request_digest`
+/// in the node-signed ledger beside the grant directory, before the effect.
+/// The ledger takes its own lock for the check and the write, so concurrent
+/// appliers cannot spend more than `max_uses` between them. A request that
+/// already holds a record is `Resumed` and spends nothing more. The outer
+/// error is a ledger that cannot be read or written; the inner refusal is a
+/// grant with no uses left.
+pub(super) fn spend_grant_use(
+    app_root: &Path,
+    node: &NodeIdentity,
+    grant_digest: &str,
+    request_digest: &str,
+    scope: &str,
+    max_uses: u32,
+) -> Result<std::result::Result<Claim, Refusal>> {
+    match claim_use(
+        &grant_uses_dir(&authorized_keys_dir(app_root)),
+        grant_digest,
+        request_digest,
+        scope,
+        max_uses,
+        node,
+    ) {
+        Ok(claim) => Ok(Ok(claim)),
+        Err(error) => match error.downcast_ref::<GrantUseError>() {
+            Some(exhausted) => Ok(Err(Refusal::new(
+                RefusalReason::GrantUsesExhausted,
+                exhausted.to_string(),
+            ))),
+            None => Err(error),
+        },
+    }
 }
 
 impl<'a> Applier<'a> {
@@ -1045,6 +1084,13 @@ impl<'a> Applier<'a> {
                 started_at: lillux::time::iso8601_now(),
             },
         };
+        // A delegated request under a constrained grant spends one of the
+        // grant's uses before the effect. A request recovered after stopping
+        // half-way holds its record already and spends nothing more.
+        let claimed = match self.claim_grant_use(spec, candidate) {
+            Ok(claimed) => claimed,
+            Err(outcome) => return Ok(outcome),
+        };
         if persists && let Err(error) = self.store.save_pending(&pending) {
             return Ok(Attempt::Failed(error));
         }
@@ -1086,6 +1132,20 @@ impl<'a> Applier<'a> {
                 return Ok(Attempt::Failed(error));
             }
         };
+        if let Some(grant_digest) = claimed
+            && let Err(error) = complete_use(
+                &grant_uses_dir(&authorized_keys_dir(self.app_root)),
+                &grant_digest,
+                &candidate.digest,
+                self.node,
+            )
+        {
+            // The use stays counted as claimed, which is as spent as it gets.
+            self.note(format!(
+                "the use of grant {grant_digest} by {} was not marked completed: {error:#}",
+                candidate.digest
+            ));
+        }
         if persists && let Err(error) = self.release(candidate, true) {
             // The receipt is in the ledger; what is left is cleaned at the
             // next startup.
@@ -1099,6 +1159,48 @@ impl<'a> Applier<'a> {
             operation: spec.id,
             authority_bearing: spec.authority_bearing,
         })
+    }
+
+    /// Spend a use of the grant the request was signed under, when the
+    /// operation requires a constrained grant. The grant digest is returned
+    /// when a use is held, to be marked completed after the effect. The
+    /// error side is the attempt's own outcome: a refusal, or a failure to
+    /// reach the ledger.
+    fn claim_grant_use(
+        &self,
+        spec: &OperationSpec,
+        candidate: &Candidate,
+    ) -> std::result::Result<Option<String>, Attempt> {
+        let Some(grant_digest) = &candidate.request.body.signer_grant_digest else {
+            return Ok(None);
+        };
+        if !spec.requires_grant_constraint {
+            return Ok(None);
+        }
+        let grant = match self.envelope(false).admit_signer(&candidate.request) {
+            Ok(Some(grant)) => grant,
+            Ok(None) => return Ok(None),
+            Err(refusal) => return Err(Attempt::Refused(refusal)),
+        };
+        let scope = spec.scope();
+        let Some(max_uses) = smallest_max_uses(&grant.offline_constraints, &scope) else {
+            return Err(Attempt::Refused(Refusal::new(
+                RefusalReason::GrantConstraintMissing,
+                format!("the grant carries no constraint for the scope `{scope}`"),
+            )));
+        };
+        match spend_grant_use(
+            self.app_root,
+            self.node,
+            grant_digest,
+            &candidate.digest,
+            &scope,
+            max_uses,
+        ) {
+            Ok(Ok(Claim::Claimed | Claim::Resumed)) => Ok(Some(grant_digest.clone())),
+            Ok(Err(refusal)) => Err(Attempt::Refused(refusal)),
+            Err(error) => Err(Attempt::Failed(error)),
+        }
     }
 
     /// Measure every fact the request pins and compare.

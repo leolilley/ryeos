@@ -399,6 +399,13 @@ pub enum RefusalReason {
     GrantConstraintMissing,
     /// A constraint on the grant does not hold for the request.
     GrantConstraintViolated,
+    /// The argument that must name the request's own signer names another key.
+    SignerBoundArgumentMismatch,
+    /// The grant has no uses left.
+    GrantUsesExhausted,
+    /// The grant was not issued by an active key of the principal that owns
+    /// the node's operator key.
+    KeyLinkGrantNotOperatorIssued,
     Expired,
     FromTheFuture,
     InvalidLifetime,
@@ -436,6 +443,9 @@ impl RefusalReason {
             Self::NotDelegable => "not_delegable",
             Self::GrantConstraintMissing => "grant_constraint_missing",
             Self::GrantConstraintViolated => "grant_constraint_violated",
+            Self::SignerBoundArgumentMismatch => "signer_bound_argument_mismatch",
+            Self::GrantUsesExhausted => "grant_uses_exhausted",
+            Self::KeyLinkGrantNotOperatorIssued => "key_link_grant_not_operator_issued",
             Self::Expired => "expired",
             Self::FromTheFuture => "from_the_future",
             Self::InvalidLifetime => "invalid_lifetime",

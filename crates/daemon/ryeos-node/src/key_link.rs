@@ -189,6 +189,33 @@ pub fn link_key(
     Ok(outcome)
 }
 
+/// Whether `issuer` (the key that asked for a delegated grant, `fp:<hex>` or
+/// bare hex) is an active key of the principal that owns the operator key,
+/// through its own record rather than a link. The error is a detail string
+/// beginning `key_link_grant_not_operator_issued`.
+pub fn ensure_issued_by_operator_owner(
+    trust: &TrustStore,
+    operator_fingerprint: &str,
+    issuer: &str,
+) -> std::result::Result<(), String> {
+    const CODE: &str = "key_link_grant_not_operator_issued";
+    let bare = |text: &str| text.strip_prefix("fp:").unwrap_or(text).to_owned();
+    let operator_owner = trust
+        .owner_for(&bare(operator_fingerprint))
+        .map_err(|refusal| format!("{CODE}: the operator key owns nothing here: {refusal}"))?;
+    let issuer_owner = trust
+        .owner_for(&bare(issuer))
+        .map_err(|refusal| format!("{CODE}: the grant's issuer owns nothing here: {refusal}"))?;
+    if issuer_owner.principal != operator_owner.principal
+        || matches!(issuer_owner.via, OwnerVia::Linked { .. })
+    {
+        return Err(format!(
+            "{CODE}: {issuer} does not act for the operator's principal through its own record"
+        ));
+    }
+    Ok(())
+}
+
 /// Withdraw links by writing id-keyed tombstones. `revoked_by` is
 /// `fp:<operator key>`. Idempotent: a link already tombstoned is reported,
 /// not rewritten.
@@ -373,6 +400,30 @@ mod tests {
         )
         .unwrap();
         assert!(!again.newly_linked);
+    }
+
+    #[test]
+    fn a_grant_is_operator_issued_only_by_a_key_of_the_operators_principal() {
+        let rig = rig();
+        let (operator, stranger, unknown) = (key(1), key(5), key(9));
+        let trust = store(
+            &rig,
+            vec![
+                operator_record(&operator, SignerStatus::Active),
+                operator_record(&stranger, SignerStatus::Active),
+            ],
+            &[],
+        );
+        let operator_fp = fp(&operator);
+        ensure_issued_by_operator_owner(&trust, &operator_fp, &operator_fp).unwrap();
+        for issuer in [fp(&stranger), fp(&unknown)] {
+            let detail =
+                ensure_issued_by_operator_owner(&trust, &operator_fp, &issuer).unwrap_err();
+            assert!(
+                detail.starts_with("key_link_grant_not_operator_issued"),
+                "{detail}"
+            );
+        }
     }
 
     #[test]
