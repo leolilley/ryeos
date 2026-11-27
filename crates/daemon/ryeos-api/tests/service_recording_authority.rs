@@ -271,6 +271,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
     let api_state = ApiState {
         app: publication.app().clone(),
         route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: Some(publication),
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };
@@ -339,6 +340,7 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
     let api_state = ApiState {
         app: Arc::new(state.clone()),
         route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: None,
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };

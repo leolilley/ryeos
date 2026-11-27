@@ -315,7 +315,7 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 
 [tests.public_route_gating_e2e]
 covers = ["ryeos-cli", "ryeos-ui"]
-paths = ["crates/daemon/ryeos-api/src/handlers/system_routes.rs", "crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/route_diagnostics.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
+paths = ["crates/daemon/ryeos-api/src/handlers/system_routes.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/route_diagnostics.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
 
 [tests.public_route_install_e2e]
 covers = ["ryeos-bundle"]

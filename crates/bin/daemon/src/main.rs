@@ -5562,6 +5562,13 @@ async fn run(
                 app: publication.app().clone(),
                 publication: Some(publication.clone()),
                 route_table,
+                public_routes: Arc::new(
+                    ryeos_api::routes::public_limits::PublicRouteLimiter::build(
+                        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
+                        &public_routes,
+                        lillux::time::timestamp_millis(),
+                    ),
+                ),
                 webhook_dedupe,
             };
 

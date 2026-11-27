@@ -39,12 +39,21 @@ fn plant_public_route(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
 /// Replace the node-signed `public_routes` section, as
 /// `ryeos node policy-apply public_routes` would on a stopped node.
 fn write_public_routes(state_path: &Path, node: &SigningKey, names: &[&str]) -> anyhow::Result<()> {
+    write_public_routes_with_cap(state_path, node, names, 1_048_576)
+}
+
+fn write_public_routes_with_cap(
+    state_path: &Path,
+    node: &SigningKey,
+    names: &[&str],
+    daily_bytes: u64,
+) -> anyhow::Result<()> {
     let routes: serde_json::Map<String, Value> = names
         .iter()
         .map(|id| {
             (
                 (*id).to_owned(),
-                json!({ "daily_bytes": 1_048_576, "concurrent_max": 4 }),
+                json!({ "daily_bytes": daily_bytes, "concurrent_max": 4 }),
             )
         })
         .collect();
@@ -167,4 +176,46 @@ async fn a_public_route_the_policy_stops_naming_is_not_served_and_the_node_says_
     assert_eq!(row["status"], "warning", "{row:#}");
     assert_eq!(row["detail"]["code"], "public_route_not_named", "{row:#}");
     assert_eq!(row["detail"]["skipped"][0]["id"], ROUTE_ID, "{row:#}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_route_answers_429_with_its_code_alone_once_its_day_is_spent() {
+    // Room for one page and not two.
+    let cap = BODY.len() as u64 + BODY.len() as u64 / 2;
+    let (h, _fixture): (DaemonHarness, FastFixture) = DaemonHarness::start_fast_with(
+        |state_path, _, fixture| {
+            register_config_fixture_bundle(state_path, "fixture-public-page", fixture, |root| {
+                plant_public_route(root, &fixture.publisher)
+            })?;
+            write_public_routes_with_cap(state_path, &fixture.node, &[ROUTE_ID], cap)
+        },
+        |_| {},
+    )
+    .await
+    .expect("start the node with a small public-route cap");
+
+    let first = fetch(&h, ROUTE_PATH).await;
+    assert_eq!(first.status, 200);
+    assert_eq!(first.body, BODY.as_bytes());
+
+    let refused = fetch(&h, ROUTE_PATH).await;
+    assert_eq!(refused.status, 429);
+    let body: Value = serde_json::from_slice(&refused.body).expect("a JSON refusal");
+    assert_eq!(body, json!({ "code": "public_route_quota_exhausted" }));
+    assert!(
+        refused
+            .headers
+            .iter()
+            .any(|(name, _)| name == "retry-after"),
+        "{:?}",
+        refused.headers
+    );
+    assert!(
+        !refused.headers.iter().any(|(name, _)| name == "set-cookie"),
+        "{:?}",
+        refused.headers
+    );
+
+    // Other routes are not limited by the public route's day.
+    assert_eq!(fetch(&h, "/ui").await.status, 200);
 }
