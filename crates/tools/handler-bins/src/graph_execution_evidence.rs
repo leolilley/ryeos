@@ -777,6 +777,7 @@ mod tests {
             event: "graph_started".into(),
             result: ryeos_engine::hooks::HookResultMode::Discard,
             condition: ryeos_runtime::ExpressionCondition::Absent,
+            steer: None,
             action: json!({"item_id":"tool:test/probe-dynamic-products","ref_bindings":{},"params":{}}),
         });
         plan.operator.dispatch_caps = vec!["ryeos.execute.tool.test/probe-dynamic-products".into()];

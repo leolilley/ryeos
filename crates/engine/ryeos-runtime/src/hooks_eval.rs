@@ -8,7 +8,7 @@ use crate::envelope::{
     RuntimeCost, normalize_hook_observation, validate_hook_observation_action,
 };
 use crate::expression::{EvaluationLimits, EvaluationSession};
-use crate::hooks_loader::{CompiledHook, HookResultMode};
+use crate::hooks_loader::{CompiledHook, HookResultMode, HookSteer};
 
 pub type HookDispatcher = Box<
     dyn Fn(
@@ -24,7 +24,71 @@ pub type HookDispatcher = Box<
 #[derive(Debug)]
 pub struct HookRunResult {
     pub control: Option<Value>,
+    /// What each `verdict` or `notice` hook that ran said, in hook order.
+    pub steers: Vec<SteerResult>,
     pub cost: Option<RuntimeCost>,
+}
+
+/// One `verdict` or `notice` hook's answer, already checked against the
+/// signed words of the hook that gave it. The text a model is shown is
+/// `steer.render(key, ..)`; nothing a hook's action returned is ever text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerResult {
+    pub hook_id: String,
+    pub mode: HookResultMode,
+    /// A `verdict` hook's answer: whether it rejects the finish. Always false
+    /// for a `notice`.
+    pub reject: bool,
+    /// The key of the signed text a rejection or a notice names.
+    pub key: Option<String>,
+    pub steer: HookSteer,
+}
+
+/// Read the value a `verdict` or `notice` hook's action returned. The value
+/// has exactly one shape: `{verdict: "accept"}`, `{verdict: "reject", reason:
+/// <key>}` or `{notice: <key>}`, every key naming a signed text of the hook;
+/// any other field, value or key is refused.
+pub fn read_steer_result(
+    mode: HookResultMode,
+    value: &Value,
+    steer: &HookSteer,
+) -> Result<(bool, Option<String>), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "result must be an object".to_string())?;
+    let string_of = |field: &str| -> Result<String, String> {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("result `{field}` must be a string"))
+    };
+    let key_checked = |key: String| -> Result<String, String> {
+        if steer.texts.contains_key(&key) {
+            Ok(key)
+        } else {
+            Err(format!(
+                "result names `{key}`, which is not a signed text of the hook"
+            ))
+        }
+    };
+    match mode {
+        HookResultMode::Verdict => match string_of("verdict")?.as_str() {
+            "accept" if object.len() == 1 => Ok((false, None)),
+            "reject" if object.len() == 2 => Ok((true, Some(key_checked(string_of("reason")?)?))),
+            "accept" | "reject" => {
+                Err("a verdict holds `verdict` and, for a rejection only, `reason`".to_string())
+            }
+            other => Err(format!(
+                "verdict `{other}` is neither `accept` nor `reject`"
+            )),
+        },
+        HookResultMode::Notice if object.len() == 1 => {
+            Ok((false, Some(key_checked(string_of("notice")?)?)))
+        }
+        HookResultMode::Notice => Err("a notice holds `notice` and nothing else".to_string()),
+        _ => Err(format!("result mode `{}` carries no steer", mode.as_str())),
+    }
 }
 
 /// A hook run failed after zero or more hook children had already executed.
@@ -85,6 +149,7 @@ pub async fn run_hooks(
     })?;
     let context_hash = lillux::sha256_hex(canonical_context.as_bytes());
     let mut control_result: Option<Value> = None;
+    let mut steers: Vec<SteerResult> = Vec::new();
     let evaluation_limits = EvaluationLimits::default();
 
     for (idx, hook) in hooks.iter().enumerate() {
@@ -213,6 +278,30 @@ pub async fn run_hooks(
                     control_result = Some(dispatched.value);
                 }
             }
+            HookResultMode::Verdict | HookResultMode::Notice => {
+                let steer = hook
+                    .steer()
+                    .expect("a verdict or notice hook is compiled with its steer");
+                let (reject, key) = read_steer_result(hook.result_mode(), &dispatched.value, steer)
+                    .map_err(|error| {
+                        HookRunError::new(
+                            HookRunErrorKind::Integrity,
+                            format!(
+                                "hook[{idx}] (id={}): {} result rejected: {error}",
+                                hook.id(),
+                                hook.result_mode().as_str()
+                            ),
+                            &aggregate_cost,
+                        )
+                    })?;
+                steers.push(SteerResult {
+                    hook_id: hook.id().to_string(),
+                    mode: hook.result_mode(),
+                    reject,
+                    key,
+                    steer: steer.clone(),
+                });
+            }
             HookResultMode::Observation => {
                 normalize_hook_observation(dispatched.value).map_err(|error| {
                     HookRunError::new(
@@ -230,6 +319,7 @@ pub async fn run_hooks(
 
     Ok(HookRunResult {
         control: control_result,
+        steers,
         cost: aggregate_cost,
     })
 }
@@ -252,6 +342,7 @@ mod tests {
             event: event.to_string(),
             result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: json!({
                 "primary": "execute",
                 "item_id": "tool:test/noop",
@@ -510,6 +601,7 @@ mod tests {
             event: "continuation".to_string(),
             result: HookResultMode::Observation,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: json!({
                 "item_id": "tool:test/evidence",
                 "params": {"payload": "${event.payload}"}
@@ -615,6 +707,7 @@ mod tests {
             event: "continuation".to_string(),
             result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: json!({
                 "primary": "execute",
                 "item_id": "directive:test/hook",
@@ -647,6 +740,7 @@ mod tests {
             event: "continuation".to_string(),
             result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: json!({
                 "primary": "execute",
                 "item_id": "directive:test/hook",
@@ -892,5 +986,57 @@ mod tests {
         assert_eq!(error.kind, HookRunErrorKind::Accounting);
         assert_eq!(error.cost.as_ref().unwrap().input_tokens, i64::MAX as u64);
         assert!(error.contains("cost accumulation failed"));
+    }
+
+    fn steer_with(keys: &[&str]) -> HookSteer {
+        HookSteer {
+            limit: 3,
+            texts: keys
+                .iter()
+                .map(|key| ((*key).to_string(), format!("text for {key}")))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_steer_result_has_one_shape_and_names_only_signed_keys() {
+        let steer = steer_with(&["unread", "empty"]);
+        let verdict = HookResultMode::Verdict;
+        assert_eq!(
+            read_steer_result(verdict, &json!({"verdict": "accept"}), &steer),
+            Ok((false, None))
+        );
+        assert_eq!(
+            read_steer_result(
+                verdict,
+                &json!({"verdict": "reject", "reason": "unread"}),
+                &steer
+            ),
+            Ok((true, Some("unread".to_string())))
+        );
+        for bad in [
+            json!({"verdict": "reject"}),
+            json!({"verdict": "reject", "reason": "invented"}),
+            json!({"verdict": "reject", "reason": "unread", "text": "free"}),
+            json!({"verdict": "accept", "reason": "unread"}),
+            json!({"verdict": "maybe"}),
+            json!({"verdict": true}),
+            json!("accept"),
+            json!({}),
+        ] {
+            assert!(read_steer_result(verdict, &bad, &steer).is_err(), "{bad}");
+        }
+        let notice = HookResultMode::Notice;
+        assert_eq!(
+            read_steer_result(notice, &json!({"notice": "empty"}), &steer),
+            Ok((false, Some("empty".to_string())))
+        );
+        for bad in [
+            json!({"notice": "invented"}),
+            json!({"notice": "empty", "text": "free"}),
+            json!({"text": "free"}),
+        ] {
+            assert!(read_steer_result(notice, &bad, &steer).is_err(), "{bad}");
+        }
     }
 }

@@ -134,6 +134,132 @@ pub struct HookDefinition {
     #[serde(default, skip_serializing_if = "ExpressionCondition::is_absent")]
     pub condition: ExpressionCondition,
     pub action: Value,
+    /// The signed words and bound of a `verdict` or `notice` hook; absent on
+    /// every other result mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<HookSteer>,
+}
+
+/// What a `verdict` or `notice` hook may say to the model, signed with the
+/// hook that declares it. A result of the hook's action names a key of `texts`
+/// and nothing else, so no text from a tool or a model reaches the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookSteer {
+    /// Per run: the most finishes a `verdict` hook may reject, or the most
+    /// reminders a `notice` hook may give.
+    pub limit: u32,
+    /// Key to text. A text may hold only the slots in [`STEER_SLOTS`].
+    pub texts: BTreeMap<String, String>,
+}
+
+/// The slots a steer text may hold, each filled by the runtime from values it
+/// computed itself: the provider turn, the position of this rejection or
+/// reminder in the run, and how many remain.
+pub const STEER_SLOTS: [&str; 3] = ["turn", "attempt", "remaining"];
+pub const MAX_VERDICT_REJECTIONS: u32 = 16;
+pub const MAX_NOTICES: u32 = 64;
+pub const MAX_STEER_TEXTS: usize = 32;
+pub const MAX_STEER_KEY_BYTES: usize = 64;
+pub const MAX_STEER_TEXT_BYTES: usize = 4096;
+
+impl HookSteer {
+    /// Whether the bound, the keys and every text are admissible for a hook
+    /// declaring `result`.
+    pub fn validate(&self, result: HookResultMode, hook_id: &str) -> Result<(), HookPlanError> {
+        let ceiling = match result {
+            HookResultMode::Verdict => MAX_VERDICT_REJECTIONS,
+            HookResultMode::Notice => MAX_NOTICES,
+            _ => {
+                return Err(HookPlanError(format!(
+                    "hook `{hook_id}` declares `steer` but its result `{}` takes none",
+                    result.as_str()
+                )));
+            }
+        };
+        if self.limit == 0 || self.limit > ceiling {
+            return Err(HookPlanError(format!(
+                "hook `{hook_id}` steer limit must be 1..={ceiling}"
+            )));
+        }
+        if self.texts.is_empty() || self.texts.len() > MAX_STEER_TEXTS {
+            return Err(HookPlanError(format!(
+                "hook `{hook_id}` must declare 1..={MAX_STEER_TEXTS} steer texts"
+            )));
+        }
+        for (key, text) in &self.texts {
+            let key_ok = !key.is_empty()
+                && key.len() <= MAX_STEER_KEY_BYTES
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !key_ok {
+                return Err(HookPlanError(format!(
+                    "hook `{hook_id}` steer key `{key}` must be 1..={MAX_STEER_KEY_BYTES} bytes of a-z, 0-9, _"
+                )));
+            }
+            if text.trim().is_empty() || text.len() > MAX_STEER_TEXT_BYTES {
+                return Err(HookPlanError(format!(
+                    "hook `{hook_id}` steer text `{key}` must be 1..={MAX_STEER_TEXT_BYTES} bytes"
+                )));
+            }
+            if text.chars().any(|c| c.is_control() && c != '\n') {
+                return Err(HookPlanError(format!(
+                    "hook `{hook_id}` steer text `{key}` holds a control character"
+                )));
+            }
+            let mut rest = text.as_str();
+            let mut bare = String::with_capacity(text.len());
+            while let Some(open) = rest.find('{') {
+                bare.push_str(&rest[..open]);
+                let tail = &rest[open + 1..];
+                let Some(close) = tail.find('}') else {
+                    return Err(HookPlanError(format!(
+                        "hook `{hook_id}` steer text `{key}` has an unclosed slot"
+                    )));
+                };
+                if !STEER_SLOTS.contains(&&tail[..close]) {
+                    return Err(HookPlanError(format!(
+                        "hook `{hook_id}` steer text `{key}` names slot `{}`; allowed: {}",
+                        &tail[..close],
+                        STEER_SLOTS.join(", ")
+                    )));
+                }
+                rest = &tail[close + 1..];
+            }
+            bare.push_str(rest);
+            if bare.contains('}') {
+                return Err(HookPlanError(format!(
+                    "hook `{hook_id}` steer text `{key}` has a stray `}}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The text of `key` with each slot filled, or `None` for an unknown key.
+    pub fn render(&self, key: &str, turn: u32, attempt: u32, remaining: u32) -> Option<String> {
+        let text = self.texts.get(key)?;
+        Some(
+            text.replace("{turn}", &turn.to_string())
+                .replace("{attempt}", &attempt.to_string())
+                .replace("{remaining}", &remaining.to_string()),
+        )
+    }
+}
+
+/// A hook declaring `verdict` or `notice` must carry a steer, and no other
+/// hook may.
+pub fn validate_hook_steer(hook: &HookDefinition) -> Result<(), HookPlanError> {
+    match (&hook.steer, hook.result) {
+        (Some(steer), result) => steer.validate(result, &hook.id),
+        (None, HookResultMode::Verdict | HookResultMode::Notice) => Err(HookPlanError(format!(
+            "hook `{}` declares result `{}` and must declare `steer`",
+            hook.id,
+            hook.result.as_str()
+        ))),
+        (None, _) => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -142,6 +268,10 @@ pub enum HookResultMode {
     Discard,
     Control,
     Observation,
+    /// Accepts or rejects a finish; a rejection names a signed text.
+    Verdict,
+    /// Names a signed reminder for the next request.
+    Notice,
 }
 
 impl HookResultMode {
@@ -150,6 +280,8 @@ impl HookResultMode {
             Self::Discard => "discard",
             Self::Control => "control",
             Self::Observation => "observation",
+            Self::Verdict => "verdict",
+            Self::Notice => "notice",
         }
     }
 }
@@ -370,6 +502,7 @@ impl EffectiveHookPlan {
                     )));
                 }
                 validate_layer_result(layer, hook.result, &hook.id)?;
+                validate_hook_steer(hook)?;
             }
         }
         if hook_count > MAX_EFFECTIVE_HOOKS {
@@ -513,6 +646,8 @@ struct ConfiguredHookDefinitionWire {
     #[serde(default)]
     condition: ExpressionCondition,
     action: Value,
+    #[serde(default)]
+    steer: Option<HookSteer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,13 +832,18 @@ fn layer_from_wire(
             if let Err(error) = validate_layer_result(layer, hook.result, &hook.id) {
                 return Some(Err(error));
             }
-            (hook.target.kind == owner_kind).then_some(Ok(HookDefinition {
+            let definition = HookDefinition {
                 id: hook.id,
                 event: hook.target.event,
                 result: hook.result,
                 condition: hook.condition,
                 action: hook.action,
-            }))
+                steer: hook.steer,
+            };
+            if let Err(error) = validate_hook_steer(&definition) {
+                return Some(Err(error));
+            }
+            (hook.target.kind == owner_kind).then_some(Ok(definition))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(EffectiveHookLayer {
@@ -784,9 +924,15 @@ fn validate_layer_result(
     result: HookResultMode,
     hook_id: &str,
 ) -> Result<(), HookPlanError> {
-    if layer.is_observer_only() && result == HookResultMode::Control {
+    if layer.is_observer_only()
+        && matches!(
+            result,
+            HookResultMode::Control | HookResultMode::Verdict | HookResultMode::Notice
+        )
+    {
         return Err(HookPlanError(format!(
-            "infrastructure hook `{hook_id}` cannot declare control"
+            "infrastructure hook `{hook_id}` cannot declare {}",
+            result.as_str()
         )));
     }
     Ok(())

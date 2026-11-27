@@ -1232,6 +1232,7 @@ mod tests {
             event: "graph_started".to_string(),
             result: HookResultMode::Observation,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: serde_json::json!({"item_id": "tool:test/audit"}),
         };
         let mut graph = composed_graph();

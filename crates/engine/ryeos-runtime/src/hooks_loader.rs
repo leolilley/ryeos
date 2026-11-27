@@ -9,7 +9,9 @@ use crate::expression::{
     compile_condition_for,
 };
 
-pub use ryeos_engine::hooks::{ExpressionCondition, HookDefinition, HookLayer, HookResultMode};
+pub use ryeos_engine::hooks::{
+    ExpressionCondition, HookDefinition, HookLayer, HookResultMode, HookSteer, validate_hook_steer,
+};
 
 /// Every hook source modeled by the runtime. The runtime owner fills
 /// `authored`; the remaining layers come from verified configured roots.
@@ -154,6 +156,7 @@ pub struct CompiledHook {
     event: String,
     layer: HookLayer,
     result: HookResultMode,
+    steer: Option<HookSteer>,
     condition: CompiledHookCondition,
     action: CompiledActionTemplate,
     references: ReferenceSet,
@@ -175,6 +178,11 @@ impl CompiledHook {
 
     pub fn result_mode(&self) -> HookResultMode {
         self.result
+    }
+
+    /// The signed words and bound of a `verdict` or `notice` hook.
+    pub fn steer(&self) -> Option<&HookSteer> {
+        self.steer.as_ref()
     }
 
     pub fn condition(&self) -> &CompiledHookCondition {
@@ -315,6 +323,7 @@ pub fn compile_hooks(
             result,
             condition: source_condition,
             action: source_action,
+            steer,
         } = layered.definition;
         if let Some(previous_layer) = ids.insert(id.clone(), layered.layer) {
             return Err(HookCompilationError::hook(
@@ -331,14 +340,33 @@ pub fn compile_hooks(
         let schema = by_event.get(event.as_str()).copied().ok_or_else(|| {
             HookCompilationError::hook(index, &id, &event, "event has no HookContextSchema")
         })?;
-        if layered.layer.is_observer_only() && result == HookResultMode::Control {
+        if layered.layer.is_observer_only()
+            && matches!(
+                result,
+                HookResultMode::Control | HookResultMode::Verdict | HookResultMode::Notice
+            )
+        {
             return Err(HookCompilationError::hook(
                 index,
                 &id,
                 &event,
-                "infrastructure hooks cannot declare result `control`",
+                format!(
+                    "infrastructure hooks cannot declare result `{}`",
+                    result.as_str()
+                ),
             ));
         }
+        let steer_check = HookDefinition {
+            id: id.clone(),
+            event: event.clone(),
+            result,
+            condition: ExpressionCondition::Absent,
+            action: serde_json::Value::Null,
+            steer,
+        };
+        validate_hook_steer(&steer_check)
+            .map_err(|error| HookCompilationError::hook(index, &id, &event, error.0))?;
+        let steer = steer_check.steer;
         let condition_field = format!("hook[{index}] (id={id}).condition");
         let condition =
             compile_condition(source_condition, &condition_field, limits).map_err(|error| {
@@ -372,6 +400,7 @@ pub fn compile_hooks(
             event,
             layer: layered.layer,
             result,
+            steer,
             condition,
             action,
             references,
@@ -428,6 +457,7 @@ mod tests {
             event: event.to_string(),
             result: HookResultMode::Discard,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action: serde_json::json!({"item_id": "tool:test/noop"}),
         };
         let mut sources = HookSources {
@@ -493,6 +523,7 @@ mod tests {
                     event: "after_step".to_string(),
                     result: HookResultMode::Control,
                     condition: ExpressionCondition::Absent,
+                    steer: None,
                     action: serde_json::json!({"item_id": "tool:test/noop"}),
                 }],
                 ..HookSources::default()

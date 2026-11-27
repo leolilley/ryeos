@@ -219,6 +219,7 @@ mod tests {
                     event: "tool_started".into(),
                     result: ryeos_engine::hooks::HookResultMode::Discard,
                     condition: ryeos_engine::hooks::ExpressionCondition::Absent,
+                    steer: None,
                     action: json!({"item_id":"tool:test/hidden"}),
                 }],
                 dispatch_caps: vec!["ryeos.execute.tool.test/hidden".into()],

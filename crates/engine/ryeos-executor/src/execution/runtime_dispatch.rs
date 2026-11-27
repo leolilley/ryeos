@@ -1390,11 +1390,17 @@ fn validate_hook_result_policy(
     action: &ryeos_runtime::callback::ActionPayload,
 ) -> Result<()> {
     if hook.layer.is_observer_only()
-        && hook.result_mode == ryeos_runtime::hooks_loader::HookResultMode::Control
+        && matches!(
+            hook.result_mode,
+            ryeos_runtime::hooks_loader::HookResultMode::Control
+                | ryeos_runtime::hooks_loader::HookResultMode::Verdict
+                | ryeos_runtime::hooks_loader::HookResultMode::Notice
+        )
     {
-        return Err(hook_integrity(
-            "infrastructure hooks cannot declare result `control`",
-        ));
+        return Err(hook_integrity(format!(
+            "infrastructure hooks cannot declare result `{}`",
+            hook.result_mode.as_str()
+        )));
     }
     if hook.result_mode == ryeos_runtime::hooks_loader::HookResultMode::Observation {
         ryeos_runtime::envelope::validate_hook_observation_action(&serde_json::json!({

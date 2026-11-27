@@ -575,6 +575,7 @@ mod tests {
             event: event.to_string(),
             result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action,
         }
     }

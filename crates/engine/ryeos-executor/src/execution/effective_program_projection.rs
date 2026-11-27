@@ -920,6 +920,7 @@ mod tests {
             event: "graph_completed".to_string(),
             result: HookResultMode::Observation,
             condition: ExpressionCondition::Absent,
+            steer: None,
             action,
         };
         EffectiveHookPlan {
