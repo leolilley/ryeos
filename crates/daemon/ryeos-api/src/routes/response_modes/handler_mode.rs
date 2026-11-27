@@ -1120,6 +1120,7 @@ mod tests {
             request: RawRequest::default(),
             source_file: PathBuf::from("/tmp/ryeos-email/.ai/node/routes/click.yaml"),
             authority: None,
+            public: false,
         }
     }
 

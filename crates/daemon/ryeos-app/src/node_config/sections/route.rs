@@ -25,6 +25,7 @@ impl CompiledNodeConfigItem for RawRouteSpec {
         target.push_route(*self);
         Ok(())
     }
+    public: false,
 }
 
 impl NodeConfigSection for RouteSection {

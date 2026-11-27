@@ -73,6 +73,7 @@ fn route(file: &str) -> ryeos_app::route_raw::RawRouteSpec {
         .join(file);
     serde_yaml::from_str(&std::fs::read_to_string(&path).expect("read shipped route"))
         .expect("parse shipped route")
+    public: false,
 }
 
 /// A state whose policy is `body`, with one live browser session.

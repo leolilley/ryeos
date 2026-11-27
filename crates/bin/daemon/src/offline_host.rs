@@ -91,12 +91,18 @@ impl OfflineHost for DaemonOfflineHost<'_> {
         // The node's configuration composed exactly as `run-service` composes
         // it for a stopped-node `bundle/install`, so the replacement is
         // verified as a local `bundle install --replace` is.
-        let (engine, _, _, isolation, _) =
+        let (engine, _, policy, isolation, _) =
             ryeosd::bootstrap::load_node_config_two_phase_standalone(&config, provider_environment)
                 .context("compose the node's configuration to verify the replacement bundle")?;
+        let public_routes = Arc::new(
+            policy
+                .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                .clone(),
+        );
         let validator = crate::prospective_node_config_validator(
             Arc::new(ryeos_ui::UiState::new()),
             Arc::clone(&engine),
+            public_routes,
         );
         let lease = request.state_lock.retain();
         ryeos_api::handlers::bundle_install::replace_from_archive(

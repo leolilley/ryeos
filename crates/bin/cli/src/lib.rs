@@ -10,6 +10,7 @@ mod codex_device_login;
 pub mod daemon_preflight;
 pub mod dispatcher;
 mod doctor_external_status;
+mod doctor_public_routes;
 pub mod effective_metadata;
 pub mod error;
 pub mod exec_stream;

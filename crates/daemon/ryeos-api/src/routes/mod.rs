@@ -280,6 +280,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from(format!("/test/{id}.yaml")),
             authority: None,
+            public: false,
         }
     }
 
