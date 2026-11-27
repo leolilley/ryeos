@@ -43,6 +43,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
         tables: &[
             sqlite_schema::TableSpec {
                 name: "schedule_specs",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "schedule_id",
@@ -144,6 +145,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "schedule_fires",
+                class: sqlite_schema::StoreClass::History,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "fire_id",
@@ -233,6 +235,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "schedule_cursors",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "schedule_id",
@@ -274,6 +277,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "scheduler_projection_state",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "projection_name",
@@ -291,6 +295,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "schedule_fire_outbox",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "sequence",
