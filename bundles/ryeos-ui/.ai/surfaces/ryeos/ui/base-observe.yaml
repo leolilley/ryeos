@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:59Z:69f9c3b1bd6d52612f87b7eafc65f68a7208783fb83efd2080b4f83a46377b0a:g6VX/CH4fSnR6yDjhLifWFtymkiGzGhXyGrqYHqNkeLHqgzNueOrbsUSjTYrI0ADHI91W3SRDbHIbzMc0+CqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T22:29:07Z:0d5d2578f35ea8188314bf3a92da5c5fa30a861b6059fd1ec391e898143554f6:KxzihSxDdOq1lCu6VL4IaapH4k8jSTomji8XeQcJd3WmefFp/I2DSA8I3Sj24SGwBnb19Aov5GWxTk3ITcuUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
 version: "3.0.0"
@@ -11,13 +11,31 @@ chip:
 
 capabilities:
   sources:
-    - ryeos.execute.service.ui/ryeos-ui/*
+    - ryeos.execute.service.bundle/list
+    - ryeos.execute.service.commands/list
     - ryeos.execute.service.node/status
     - ryeos.execute.service.projects/list
-    - ryeos.execute.service.events/chain_replay
-    - ryeos.execute.service.worker-executions/approvals
-    - ryeos.execute.service.bundle/list
     - ryeos.execute.service.scheduler/list
+    - ryeos.execute.service.worker-executions/approvals
+    - ryeos.execute.service.ui/ryeos-ui/config/get
+    - ryeos.execute.service.ui/ryeos-ui/execution/occurrence
+    - ryeos.execute.service.ui/ryeos-ui/field/execution
+    - ryeos.execute.service.ui/ryeos-ui/files/read
+    - ryeos.execute.service.ui/ryeos-ui/files/tree
+    - ryeos.execute.service.ui/ryeos-ui/gc/status
+    - ryeos.execute.service.ui/ryeos-ui/items/list
+    - ryeos.execute.service.ui/ryeos-ui/node/activity
+    - ryeos.execute.service.ui/ryeos-ui/node/usage
+    - ryeos.execute.service.ui/ryeos-ui/remotes/list
+    - ryeos.execute.service.ui/ryeos-ui/thread/inspect
+    - ryeos.execute.service.ui/ryeos-ui/thread/tree
+    - ryeos.execute.service.ui/ryeos-ui/threads/list
+    - ryeos.execute.service.ui/ryeos-ui/timeline/raw
+    - ryeos.execute.service.ui/ryeos-ui/timeline/thread
+    - ryeos.execute.service.ui/ryeos-ui/work/approval-history
+    - ryeos.execute.service.ui/ryeos-ui/work/attention
+    - ryeos.execute.service.ui/ryeos-ui/work/candidate
+    - ryeos.execute.service.ui/ryeos-ui/work/list
   affordances: []
 
 view_sets:

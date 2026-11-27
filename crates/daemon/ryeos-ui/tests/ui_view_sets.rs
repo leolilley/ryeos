@@ -100,6 +100,36 @@ fn yaml_value(path: &Path) -> Value {
         .unwrap_or_else(|error| panic!("{} does not parse: {error}", path.display()))
 }
 
+/// A Surface's ceiling lists exactly the services its views bind: opening it
+/// refuses no source or act for being outside the ceiling. An observation
+/// Surface keeps an empty act lane, so its views' acts are refused for that
+/// and only that.
+#[tokio::test]
+async fn narrowed_surfaces_refuse_no_view_source_as_outside_their_ceiling() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    for surface_ref in ["surface:ryeos/ui/base-observe"] {
+        let (session_id, _ctx, _producer, coordinate) =
+            test_state::live_presentation_with_surface(&state, surface_ref).await;
+        let attachment = attachment(&state, &session_id, &coordinate.binding_attachment_id);
+        let refused: Vec<_> = attachment
+            .compiled_binding
+            .binding
+            .attenuated
+            .iter()
+            .filter(|entry| {
+                entry
+                    .reason
+                    .contains(ryeos_ui::compiled_binding::REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING)
+                    && !entry.coordinate.starts_with("affordance:")
+            })
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "{surface_ref}: sources refused by the ceiling: {refused:?}"
+        );
+    }
+}
+
 /// Each shipped Surface opens with the very compositions its inline list
 /// declared, in the same order, and every view they arrange is in the
 /// binding's admitted closure. The binding names exactly the view sets the
