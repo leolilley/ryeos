@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 /// `#[cfg(test)]` earlier in a file is not the end of its production code). The seventh is a substring of the third, as the
 /// scan counts text.
 const EXPECTED: &[(&str, usize)] = &[
-    ("require_admitted_operator(", 75),
-    ("disclosure_class_for(", 10),
+    ("require_admitted_operator(", 76),
+    ("disclosure_class_for(", 11),
     ("admitted_operator_authority_digest(", 11),
     ("admitted_operator_authority_for_principal(", 10),
     ("admitted_binding_owner_authority_for_principal(", 1),
