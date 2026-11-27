@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-13T11:09:13Z:85617756aa22ba1d0946d66f6af5c18bcf44debc71d3613973f2dcabc72f5296:p4VP1i3QBPAgNhxS7R1ehWnle6LbsoLUAaaaBwzoVggJs08xcCnxJDX/6S5wEtS9DBTzND7LFo9ZbiP/BbUiBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T07:02:00Z:22c06d7508e06c08621839f84c4180808aae3936fe18a06661839ff8c75e4400:0GQ6D2pf7L7kSLg+kIoInSOY2et6NIpQWe5uyZLnth7gm4ee3YF07kUYketiizIw9+VpGFW66yn8oo5tlZFOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
 title: RyeOS Platform Direction and Future Design Map
 description: Complete ownership, maturity and trigger map for the application-platform direction and its future mechanisms and consumers
 entry_type: reference
-version: "1.7.0"
+version: "1.8.0"
 ```
 
 # RyeOS platform direction and future design map
@@ -23,6 +23,18 @@ Independent publication and broader execution extend that experience through
 their own qualified contracts. Existing clients and authoring paths need not
 wait for every later mechanism. The direction document owns these outcomes;
 individual notes own their mechanisms and branch-specific dependencies.
+
+## The roadmap governs these notes (27 Nov 2026)
+
+These notes were reconciled on 2026-10-06. Every "deferred", "trigger-gated" and
+"waits for" status in them, and every maturity label below that says a mechanism
+is held back, is out of date: the full public roadmap builds every item in its
+place in the order, and a milestone only orders the work (Leo, 27 Nov 2026).
+Where a note and the roadmap disagree about whether or when something is built,
+the roadmap governs; where a note says what the code does, the code governs. Each
+note is corrected and re-signed by the thread working in its area, after reading
+the code; until then read its status words as "built in its place in the order".
+A claim that a mechanism exists is checked against the code before it is relied on.
 
 ## Reading and status rules
 
