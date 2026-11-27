@@ -17,8 +17,8 @@ name: Remote node build
 # Inputs beyond the bundle set:
 #   build_profile=release (default)  what ships. `test` is release optimisation
 #                          plus the claude-code adapter's test-only stub driver;
-#                          it is for throwaway test nodes only, and the manifest
-#                          records a non-release profile as `build_profile`.
+#                          it is for throwaway test nodes only. The manifest always
+#                          records `build_profile`, release included.
 #   base=runner (default)  build on the ubuntu-latest runner itself; binaries
 #                          link against the runner's glibc (2.39).
 #   base=bookworm          run the populate (and so every Rust build) inside the
@@ -254,13 +254,13 @@ jobs:
           (cd "$stage/target/release" && sha256sum -- *) > "$stage/binaries.sha256"
           jq -n --arg sha "$sha" --arg set "$BUNDLE_SET" --arg ref "$GITHUB_REF_NAME" \
             --arg run "$GITHUB_RUN_ID" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --rawfile sums "$stage/binaries.sha256" \
-            '{commit:$sha, bundle_set:$set, ref:$ref, run_id:$run, built_utc:$built,
+            --arg profile "$BUILD_PROFILE" --rawfile sums "$stage/binaries.sha256" \
+            '{commit:$sha, bundle_set:$set, build_profile:$profile, ref:$ref, run_id:$run, built_utc:$built,
               binaries:($sums | split("\n") | map(select(length>0) | split("  ") | {(.[1]): .[0]}) | add)}' \
             > "$stage/manifest.json"
-          if [[ "$BASE" != runner || -n "$EXTRA_BINS" || "$BUILD_PROFILE" != release ]]; then
-            jq --arg base "$BASE" --arg extra "$EXTRA_BINS" --arg profile "$BUILD_PROFILE" \
-              '. + {base:$base, build_profile:$profile, extra_bins:($extra | split(" ") | map(select(length>0)))}' \
+          if [[ "$BASE" != runner || -n "$EXTRA_BINS" ]]; then
+            jq --arg base "$BASE" --arg extra "$EXTRA_BINS" \
+              '. + {base:$base, extra_bins:($extra | split(" ") | map(select(length>0)))}' \
               "$stage/manifest.json" > "$stage/manifest.new"
             mv "$stage/manifest.new" "$stage/manifest.json"
           fi
