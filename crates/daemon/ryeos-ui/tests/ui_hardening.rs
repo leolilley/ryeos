@@ -444,6 +444,7 @@ async fn usage_observes_only_signed_subjects_owned_by_projectless_caller() {
                         node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                     },
                 }),
+                owner: None,
             })
             .unwrap();
     }
@@ -515,6 +516,7 @@ async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
                         node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                     },
                 }),
+                owner: None,
             })
             .unwrap();
     }
@@ -652,6 +654,7 @@ async fn activity_of_a_project_seat_excludes_collaborator_and_other_project_thre
                         node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                     },
                 }),
+                owner: None,
             })
             .unwrap();
     }
@@ -759,6 +762,7 @@ async fn activity_reports_windowed_usage_for_seat_attributed_launches() {
                         node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                     },
                 }),
+                owner: None,
             })
             .unwrap();
         state

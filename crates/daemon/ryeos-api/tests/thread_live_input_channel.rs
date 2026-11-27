@@ -59,6 +59,7 @@ fn create_running_directive(state: &AppState, thread_id: &str, requested_by: &st
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: Some(captured_policy()),
+        owner: None,
     };
     state
         .state_store

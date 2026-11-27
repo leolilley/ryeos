@@ -948,6 +948,7 @@ pub mod budget_test_support {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(sealed.captured_history_policy().clone()),
+            owner: None,
         };
         state
             .state_store
@@ -1097,6 +1098,7 @@ pub mod budget_test_support {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(sealed.captured_history_policy().clone()),
+            owner: None,
         };
         state
             .state_store

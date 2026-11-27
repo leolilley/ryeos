@@ -2627,6 +2627,7 @@ pub(crate) mod tests {
                 },
             }),
         }
+        owner: None,
     }
 
     #[cfg(target_os = "linux")]

@@ -3820,6 +3820,7 @@ mod tests {
             usage_subject_asserted_by: None,
             captured_history_policy,
         }
+        owner: None,
     }
 
     /// Build a running parent "P" with a captured ResumeContext, then its REAL
@@ -5037,6 +5038,7 @@ mod tests {
                 usage_subject: params.usage_subject,
                 usage_subject_asserted_by: params.usage_subject_asserted_by,
                 captured_history_policy: params.captured_history_policy,
+                owner: None,
             })
             .unwrap();
         arm_waiting_follow(&state, "wk-nomarker", "T-C");
@@ -7997,6 +7999,7 @@ mod tests {
                     usage_subject: None,
                     usage_subject_asserted_by: None,
                     captured_history_policy: None,
+                    owner: None,
                 },
                 "T-pred",
                 "T-pred",

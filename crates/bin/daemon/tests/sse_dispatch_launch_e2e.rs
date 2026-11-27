@@ -669,6 +669,7 @@ fn sse_dispatch_launch_collision() {
                 },
             }
         }),
+        owner: None,
     };
 
     // First insert must succeed.

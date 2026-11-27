@@ -4207,6 +4207,7 @@ async fn handoff(
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,
+        owner: None,
     };
     #[cfg(any(test, feature = "handoff-test-support"))]
     let source_publication_started = lillux::time::MonotonicTimer::start();
@@ -5798,6 +5799,7 @@ async fn recover_exported_source_writer_cut(
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,
+        owner: None,
     };
     let publication = state.state_store.create_remote_adoption_successor(
         &successor,
@@ -11762,6 +11764,7 @@ mod tests {
             usage_subject_asserted_by: None,
             captured_history_policy,
         }
+        owner: None,
     }
 
     /// Birth `child_id` as an inline in-process child of the root

@@ -2900,6 +2900,7 @@ fn seed_source_exported_handoff_with_kind(
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: Some(captured_policy(item_ref)),
+        owner: None,
     })?;
     store.mark_thread_running(&source_thread_id, None)?;
 

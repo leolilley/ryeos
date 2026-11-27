@@ -188,6 +188,9 @@ impl StateStore {
             }
         }
 
+        if let Some(owner) = &thread.owner {
+            ryeos_state::owner_stamp::stamp(&mut payload, owner)?;
+        }
         let create_event = NewEventRecord {
             event_type: "thread_created".to_string(),
             storage_class: "indexed".to_string(),
@@ -414,6 +417,9 @@ impl StateStore {
             }
         }
         let mut events = Vec::with_capacity(initial_events.len() + 1);
+        if let Some(owner) = &thread.owner {
+            ryeos_state::owner_stamp::stamp(&mut payload, owner)?;
+        }
         events.push(NewEventRecord {
             event_type: ryeos_state::event_types::THREAD_CREATED.to_string(),
             storage_class: "indexed".to_string(),
@@ -661,6 +667,9 @@ impl StateStore {
             }
         }
         let mut events = Vec::with_capacity(initial_events.len() + 1);
+        if let Some(owner) = &thread.owner {
+            ryeos_state::owner_stamp::stamp(&mut payload, owner)?;
+        }
         events.push(NewEventRecord {
             event_type: ryeos_state::event_types::THREAD_CREATED.to_string(),
             storage_class: "indexed".to_string(),
@@ -967,16 +976,20 @@ impl StateStore {
             bail!("thread already exists: {}", thread.thread_id);
         }
 
+        let mut create_payload = json!({
+            "kind": &thread.kind,
+            "item_ref": &thread.item_ref,
+            "executor_ref": &thread.executor_ref,
+            "launch_mode": &thread.launch_mode,
+            "trace_branch": true,
+        });
+        if let Some(owner) = &thread.owner {
+            ryeos_state::owner_stamp::stamp(&mut create_payload, owner)?;
+        }
         let create_event = NewEventRecord {
             event_type: ryeos_state::event_types::THREAD_CREATED.to_string(),
             storage_class: "indexed".to_string(),
-            payload: json!({
-                "kind": &thread.kind,
-                "item_ref": &thread.item_ref,
-                "executor_ref": &thread.executor_ref,
-                "launch_mode": &thread.launch_mode,
-                "trace_branch": true,
-            }),
+            payload: create_payload,
         };
         let branch_event = NewEventRecord {
             event_type: ryeos_state::event_types::EDGE_RECORDED.to_string(),

@@ -875,6 +875,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                             usage_subject: None,
                             usage_subject_asserted_by: None,
                             captured_history_policy: None,
+                            owner: None,
                         },
                         &parent_thread_id,
                         &parent.chain_root_id,

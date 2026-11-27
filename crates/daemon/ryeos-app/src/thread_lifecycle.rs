@@ -4129,6 +4129,7 @@ impl ThreadLifecycleService {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
+            owner: None,
         };
 
         let publication = self
@@ -4198,6 +4199,7 @@ impl ThreadLifecycleService {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
+            owner: None,
         };
         let publication = self
             .state_store
@@ -4298,6 +4300,7 @@ impl ThreadLifecycleService {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: None,
+            owner: None,
         };
 
         let publication = self.state_store.create_continuation_admitted(
@@ -4458,6 +4461,7 @@ impl ThreadLifecycleService {
             } else {
                 None
             },
+            owner: None,
         };
 
         if params.thread_id == params.chain_root_id {
@@ -4741,6 +4745,7 @@ fn recorded_service_thread_record(admitted: &ThreadCreateParams) -> NewThreadRec
         usage_subject_asserted_by: admitted.usage_subject_asserted_by.clone(),
         captured_history_policy: admitted.captured_history_policy.clone(),
     }
+    owner: None,
 }
 
 /// The `thread_started` successor committed with a recorded service birth,
@@ -4856,6 +4861,7 @@ impl ThreadLifecycleService {
             usage_subject: params.usage_subject.clone(),
             usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
             captured_history_policy: params.captured_history_policy.clone(),
+            owner: None,
         };
         let publication = self
             .state_store
@@ -6525,6 +6531,7 @@ impl ThreadLifecycleService {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,
+            owner: None,
         };
 
         // One atomic op under the state store's write permit + lock: re-verify the
@@ -6590,6 +6597,7 @@ impl ThreadLifecycleService {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,
+            owner: None,
         };
         let (persisted, successor) = self
             .state_store

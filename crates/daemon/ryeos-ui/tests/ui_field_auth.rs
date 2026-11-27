@@ -42,6 +42,7 @@ fn create_running_thread(state: &AppState, thread_id: &str, requested_by: &str) 
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(captured_policy()),
+            owner: None,
         })
         .unwrap();
     state

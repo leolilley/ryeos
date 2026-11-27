@@ -151,6 +151,7 @@ fn create_thread(
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: upstream.is_none().then(captured_policy),
+            owner: None,
         })
         .unwrap();
     state

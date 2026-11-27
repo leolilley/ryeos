@@ -78,6 +78,7 @@ fn create_project_thread_stating(
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(captured_policy()),
+            owner: None,
         })
         .expect("create fixture thread");
     state
@@ -116,6 +117,7 @@ fn create_outside_thread(
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(captured_policy()),
+            owner: None,
         })
         .expect("create outside fixture thread");
     state

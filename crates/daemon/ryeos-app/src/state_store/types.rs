@@ -84,6 +84,11 @@ pub struct NewThreadRecord {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    /// The owner of the work this thread belongs to (a principal id), stamped
+    /// into the `thread_created` event at admission. A child or continuation
+    /// copies the chain root's owner; `requested_by` stays the acting key's
+    /// fingerprint. `None` only where no admission supplies one yet.
+    pub owner: Option<ryeos_state::principal_id::PrincipalId>,
     pub project_root: Option<PathBuf>,
     pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     /// Immutable project generation that authorizes this thread from birth.

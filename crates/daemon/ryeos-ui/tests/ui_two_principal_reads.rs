@@ -89,6 +89,7 @@ fn create_thread(
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(captured_policy()),
+            owner: None,
         })
         .expect("create fixture thread");
     state

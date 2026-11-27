@@ -81,6 +81,7 @@ fn create_principal_owned_chain(
                     node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
+            owner: None,
         })
         .expect("create principal-owned chain");
     state

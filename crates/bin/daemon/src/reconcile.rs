@@ -4967,6 +4967,7 @@ mod tests {
                 },
             }),
         }
+        owner: None,
     }
 
     #[test]

@@ -65,6 +65,7 @@ fn record(id: &str, kind: &str) -> NewThreadRecord {
             },
         }),
     }
+    owner: None,
 }
 
 fn running(store: &StateStore, id: &str, kind: &str) {

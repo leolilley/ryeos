@@ -926,6 +926,7 @@ mod tests {
                 },
             }),
         }
+        owner: None,
     }
 
     fn finish(state: &AppState, id: &str, status: &str) {

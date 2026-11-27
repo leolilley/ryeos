@@ -87,6 +87,7 @@ mod integration_tests {
             captured_history_policy: (thread_id == chain_root_id)
                 .then(|| captured_policy(item_ref)),
         }
+        owner: None,
     }
 
     fn make_project_thread(
@@ -109,6 +110,7 @@ mod integration_tests {
         )
         .unwrap();
         thread
+        owner: None,
     }
 
     fn seed_follow_parent(store: &StateStore) {

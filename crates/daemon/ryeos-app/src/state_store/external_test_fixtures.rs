@@ -344,6 +344,7 @@ impl StateStore {
                 usage_subject: None,
                 usage_subject_asserted_by: None,
                 captured_history_policy: Some(captured_history_policy.clone()),
+                owner: None,
             })?;
         }
         let placement_thread = NewThreadRecord {
@@ -363,6 +364,7 @@ impl StateStore {
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: placement_is_chain_root.then_some(captured_history_policy),
+            owner: None,
         };
         if let Some(metadata) = root_launch_metadata {
             self.create_root_thread_for_test_with_launch_metadata(&placement_thread, metadata)?;

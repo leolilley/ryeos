@@ -2646,3 +2646,37 @@ fn continuation_snapshot_binds_project_root_and_pin() {
     assert_eq!(snapshot.project_root, Some(PathBuf::from("/work/project")));
     assert_eq!(snapshot.base_project_snapshot_hash, Some("a".repeat(64)));
 }
+
+#[test]
+fn a_thread_record_with_an_owner_stamps_its_birth_event_and_one_without_stamps_nothing() {
+    let store = test_store();
+    let owner: ryeos_state::principal_id::PrincipalId = format!("pid:v1:{}", "a".repeat(64))
+        .parse()
+        .expect("a principal id");
+    let mut stamped = thread_record("T-stamped-birth", "T-stamped-birth");
+    stamped.owner = Some(owner.clone());
+    store
+        .create_thread_for_test(&stamped)
+        .expect("create the stamped thread");
+    store
+        .create_thread_for_test(&thread_record("T-plain-birth", "T-plain-birth"))
+        .expect("create the plain thread");
+    let birth = |thread_id: &str| {
+        store
+            .replay_events(thread_id, Some(thread_id), None, 8, 1024 * 1024)
+            .expect("replay the thread's events")
+            .events
+            .into_iter()
+            .find(|event| event.event_type == ryeos_state::event_types::THREAD_CREATED)
+            .expect("the birth event")
+            .payload
+    };
+    assert_eq!(
+        ryeos_state::owner_stamp::read(&birth("T-stamped-birth")),
+        Ok(Some(owner))
+    );
+    assert_eq!(
+        ryeos_state::owner_stamp::read(&birth("T-plain-birth")),
+        Ok(None)
+    );
+}

@@ -77,6 +77,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         usage_subject_asserted_by: None,
         captured_history_policy: (thread_id == chain_root_id).then(captured_policy),
     }
+    owner: None,
 }
 
 #[test]

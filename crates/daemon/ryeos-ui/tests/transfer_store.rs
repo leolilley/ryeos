@@ -125,6 +125,7 @@ fn thread_record(id: &str, ownership: &Ownership) -> NewThreadRecord {
         usage_subject_asserted_by: None,
         captured_history_policy: Some(history_policy(&ownership.item_ref)),
     }
+    owner: None,
 }
 
 /// One fixture seat: a running seat root with its initialization and an

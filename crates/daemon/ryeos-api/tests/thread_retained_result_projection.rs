@@ -59,6 +59,7 @@ fn create_thread(state: &AppState, thread_id: &str, owner: &str) {
                         ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
+            owner: None,
         })
         .unwrap();
 }

@@ -920,6 +920,7 @@ pub(super) fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRe
         usage_subject_asserted_by: None,
         captured_history_policy,
     }
+    owner: None,
 }
 
 pub(super) fn launch_attempt_audit_events() -> Vec<NewEventRecord> {
@@ -1191,6 +1192,7 @@ pub(super) fn in_process_child_record(child_id: &str, parent_id: &str) -> NewThr
     let mut record = thread_record(child_id, parent_id);
     record.upstream_thread_id = Some(parent_id.to_string());
     record
+    owner: None,
 }
 
 pub(super) fn in_process_reservation_phase(

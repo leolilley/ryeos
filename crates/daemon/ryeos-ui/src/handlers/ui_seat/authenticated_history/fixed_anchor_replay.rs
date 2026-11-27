@@ -912,6 +912,7 @@ mod tests {
                 },
             }),
         }
+        owner: None,
     }
 
     fn initialization() -> UiPresentationInitialization {

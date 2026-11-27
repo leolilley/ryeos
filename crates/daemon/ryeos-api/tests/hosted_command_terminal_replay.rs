@@ -186,6 +186,7 @@ fn root_thread(thread_id: &str, owner: &str) -> NewThreadRecord {
             },
         }),
     }
+    owner: None,
 }
 
 fn command_fact(

@@ -1166,6 +1166,7 @@ fn thread_record(
             },
         }),
     }
+    owner: None,
 }
 
 fn principal() -> EffectivePrincipal {

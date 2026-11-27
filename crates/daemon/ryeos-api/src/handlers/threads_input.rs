@@ -1093,6 +1093,7 @@ pub async fn handle(
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,
+        owner: None,
     };
     let project_identity = serde_json::to_string(&resume_context.project_context)
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
