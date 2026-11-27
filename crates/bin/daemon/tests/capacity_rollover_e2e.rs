@@ -8,8 +8,8 @@
 //!
 //! The daemon-level rollover loop needs real served windows. A window cannot
 //! be shorter than the drain margin plus the cleanup occupancy the reservation
-//! requires, so the fixture uses 150 s windows and runs 21 rollovers in about
-//! an hour. It is ignored unless `RYEOS_LONG_E2E=1`.
+//! requires, so the fixture uses 150 s incarnations (about 30 s of service each) and
+//! runs 21 rollovers in about 14 minutes. It is ignored unless `RYEOS_LONG_E2E=1`.
 
 use ryeosd::test_support as common;
 
@@ -458,9 +458,13 @@ fn shorten_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Resul
 
 /// Twenty-one orderly rollovers, each renewing the epoch, on a sixteen
 /// incarnation allowance: the account never exhausts and recovery stays at
-/// zero. Each window is 150 s, so the whole run takes about an hour.
+/// zero. An incarnation is 150 s long, but the 60 s cleanup reserve and the
+/// 60 s drain margin come off the end of it, so each service window serves
+/// about 30 s before the orderly stop and the whole run takes about 14 minutes
+/// (823 s measured on a hosted runner). The loop prints `rollover N completed`
+/// after each rollover's checks, so a run that did not loop is visible.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs about an hour of real service windows; set RYEOS_LONG_E2E=1 and run with --ignored"]
+#[ignore = "runs 21 real service windows, about 14 minutes; set RYEOS_LONG_E2E=1 and run with --ignored"]
 async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
     if std::env::var("RYEOS_LONG_E2E").as_deref() != Ok("1") {
         eprintln!("skipped: RYEOS_LONG_E2E is not 1, so the long rollover loop did not run");
@@ -471,7 +475,7 @@ async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
         |_| {},
     )
     .await
-    .expect("start fast daemon with a 150 s window");
+    .expect("start fast daemon with a 150 s incarnation");
     let app_root = harness.state_path.clone();
     const ROLLOVERS: u64 = 21;
     for rollover in 1..=ROLLOVERS {
@@ -513,6 +517,7 @@ async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
         let debited = inspect_capacity_account(&app_root).unwrap().unwrap();
         assert_eq!(debited.epoch, 1 + rollover);
         assert_eq!(debited.incarnations_remaining, 15);
+        eprintln!("rollover {rollover} completed");
     }
     harness.stop_gracefully().await.expect("final stop");
 }
