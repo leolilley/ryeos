@@ -1514,7 +1514,9 @@ jobs:
           # The loop prints "rollover N completed" after each rollover's checks:
           # exactly 21, in order, or the loop did not run (a pass in 0.00 s with no
           # marker is a skip; the run on a hosted runner took about 14 minutes).
-          markers="$(sed -n 's/^rollover \([0-9][0-9]*\) completed$/\1/p' "$log" | tr '\n' ' ')"
+          # The marker can share a line with libtest's own "test ... " prefix (stderr
+          # and stdout interleave), so it is matched anywhere on a line, not anchored.
+          markers="$(grep -o 'rollover [0-9][0-9]* completed' "$log" | sed 's/^rollover \([0-9][0-9]*\) completed$/\1/' | tr '\n' ' ')"
           expected="$(seq -s ' ' 1 21) "
           [[ "$markers" == "$expected" ]] || { echo "FAIL: expected the rollover markers 1 to 21, saw: ${markers:-none}" >&2; exit 1; }
 
