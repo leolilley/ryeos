@@ -19,7 +19,7 @@ on:
       dry_run:
         description: "Rehearse without publishing. Defaults to true; a dispatch with false is refused in the first step, and a real publish comes only from the tag push, which carries no inputs."
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
