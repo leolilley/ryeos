@@ -21,6 +21,7 @@ pub mod disclosure;
 pub mod engine_init;
 
 pub mod grant_revocation;
+pub mod grant_use_ledger;
 pub mod identity;
 pub mod in_place_roots;
 pub mod item_revision;
