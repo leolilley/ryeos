@@ -263,6 +263,9 @@ jobs:
       - name: Check the shipped candidate evaluator
         run: python3 -B tests/development/test_unchecked_evaluator.py
 
+      - name: Check the declared-checks candidate evaluator
+        run: python3 -B tests/development/test_declared_evaluator.py
+
       - name: Check worker capability ceilings name tools only
         run: python3 -B tests/development/test_worker_cap_ceilings.py
 
