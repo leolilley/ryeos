@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:06:44Z:71559693adff76b5940af71981498bd259f7235ebee9558a61e093a7c0eece73:6rn8helkgJI6nMhZNEi9fezqy+pEz5FnQRicxVNtNsmSFYxaIjDf/Q8L2DvzXkSE7QgVUcTVajaV/qofisYrBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:31:30Z:2af3269a84df47c14075c665bd8d9846ba9aec2a3cd3ce7f026685ad7c4f37c0:K9Qn+JK17HNqf+hh8gTk+dXMydj65+2bSWpaqNc93vtTuiWxiJ7LyLd80Yj0CPbXNootYH/AEzFUOfdIN/7CDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -19,7 +19,9 @@
 # read instead (not built yet).
 #
 # --scopes yes (the default when the lifecycle log shows a provisioned node)
-# runs `host retire`; `no` skips it for a node that was never provisioned.
+# runs `host retire`; `no` skips it for a node that was never provisioned. After
+# a removal the app root is deleted and the lifecycle log archived, so the track
+# can only be brought up fresh.
 set -euo pipefail
 
 usage() { sed -n '/^#   rm-node-down.sh/,/^# --scopes/p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -52,12 +54,20 @@ mark() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >> "$log"; echo "rm-node-dow
 export RYEOS_APP_ROOT="$app_root"
 unset RYEOS_CLIENT_KEY || true
 if [[ $scopes == auto ]]; then
-    if grep -q ' provisioned$' "$log" 2>/dev/null; then scopes=yes; else scopes=no; fi
+    if grep -q ' provisioned$' "$log" 2>/dev/null; then
+        scopes=yes
+    elif grep -q ' provision-skipped$' "$log" 2>/dev/null; then
+        scopes=no
+    else
+        echo "rm-node-down: the lifecycle log records neither provisioned nor provision-skipped; pass --scopes yes or no" >&2
+        exit 2
+    fi
 fi
 
 "$ryeos" stop --app-root "$app_root" </dev/null || echo "rm-node-down[$track]: stop reported a failure (already stopped?); continuing only if the node is down" >&2
-if "$ryeos" node status --app-root "$app_root" </dev/null 2>&1 | grep -qiE 'running|ready|started'; then
-    echo "rm-node-down: the node still looks up; not retiring or removing" >&2
+status_first_line="$("$ryeos" node status --app-root "$app_root" </dev/null 2>&1 | head -1 || true)"
+if [[ $status_first_line != stopped ]]; then
+    echo "rm-node-down: the node's status line is '$status_first_line', not 'stopped'; not retiring or removing" >&2
     exit 1
 fi
 mark stopped
@@ -67,3 +77,10 @@ if [[ $scopes == yes ]]; then
 fi
 sudo -n /usr/local/sbin/ryeos-rm-node remove "$track" </dev/null
 mark removed
+# The next up is a fresh install: archive the log and delete the app root (the G-4 row
+# says this node holds only our own history), so nothing of this life is resumed.
+[[ $app_root == "/home/leo/ryeos-rm/$track/app" ]] || { echo "rm-node-down: unexpected app root" >&2; exit 2; }
+rm -rf -- "$app_root"
+mv -- "$log" "$base/lifecycle-$(date -u +%Y%m%dT%H%M%SZ).archived"
+[[ ! -e $base/doctor.log ]] || mv -- "$base/doctor.log" "$base/doctor-$(date -u +%Y%m%dT%H%M%SZ).archived"
+echo "rm-node-down[$track]: app root deleted, log archived"

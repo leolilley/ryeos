@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:26:51Z:b5d3dc1fed0dced90b73ebce0abb40ccb711903f657fcc0b89546df9e7418924:irj25Y2NW9rAt87ewkiqdNCZeYq/sXeO+nLrgi2js+Vf9kE5QaK59/+zFcQ1Ou8m4CjjuULOFFNyASHzUeTBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:31:30Z:c8b1382092b5f1c5c8eac73c870b88ee4e36ca6be53e265c32106179ba74211a:CX+508OZBTgb9fGQpoyu8c3o9PxpGIDcFXqmEIjCP+YJqs1/gscWC06CD6xAd6OmQEHm6YLeCAkDN1YkaGZmDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -63,6 +63,19 @@ fetch="${RM_NODE_FETCH:-/home/leo/projects/ryeos-next/.tmp/ryeos-full-public-202
 
 mkdir -p "$base"
 chmod 0755 "$base"
+# A track is installed fresh each time (decision 8): no state, keys or log from an
+# earlier life of the track may be picked up. rm-node-down archives the log and
+# deletes the app root, so either one still present here was not made by a clean
+# down and is refused rather than resumed as a new install.
+if [[ ! -e $log ]]; then
+    if [[ -e $app_root ]] && [[ -n "$(ls -A "$app_root" 2>/dev/null)" ]]; then
+        echo "rm-node-up: $app_root is not empty and this track has no lifecycle log: it was not made by this helper; remove it by hand if it is yours" >&2
+        exit 2
+    fi
+elif grep -q ' removed$' "$log"; then
+    echo "rm-node-up: the lifecycle log of $track records a removal; rm-node-down archives it, so this is not a clean track" >&2
+    exit 2
+fi
 touch "$log"
 done_step() { grep -q " $1\$" "$log"; }
 mark() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >> "$log"; echo "rm-node-up[$track]: $1"; }
@@ -85,6 +98,10 @@ fi
 if ! done_step initialised; then
     dev_trust="$root/.dev-keys/PUBLISHER_DEV_TRUST.toml"
     [[ -f $dev_trust ]] || { echo "rm-node-up: $dev_trust is missing" >&2; exit 1; }
+    build_commit="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$prefix/BUILD-SOURCE.json")"
+    [[ $build_commit =~ ^[0-9a-f]{7,64}$ ]] || { echo "rm-node-up: bad commit in $prefix/BUILD-SOURCE.json" >&2; exit 1; }
+    built_hash="$(git -C "$root" show "$build_commit:.dev-keys/PUBLISHER_DEV_TRUST.toml" | sha256sum | cut -d' ' -f1)"
+    [[ $built_hash == "$(sha256sum "$dev_trust" | cut -d' ' -f1)" ]] || { echo "rm-node-up: the dev trust file in this checkout differs from the one in the build's commit $build_commit" >&2; exit 1; }
     dev_fp="$(python3 -I - "$dev_trust" <<'PY'
 import sys, tomllib
 print(tomllib.load(open(sys.argv[1], "rb"))["fingerprint"])
@@ -129,14 +146,16 @@ PY
 fi
 
 # A class whose process scopes are required needs one root `host setup`.
-if ! done_step provisioned; then
+if ! done_step provisioned && ! done_step provision-skipped; then
     if [[ $scopes == yes ]]; then
         # stdin closed and a timeout, so a sudo rule that does not match fails
         # at once with sudo's own message instead of waiting on a password.
         timeout 120 "$ryeos" node host setup --confirm --app-root "$app_root" \
             --node-memory-bytes "$memory" --node-processes "$processes" </dev/null
+        mark provisioned
+    else
+        mark provision-skipped
     fi
-    mark provisioned
 fi
 
 if ! done_step started; then
