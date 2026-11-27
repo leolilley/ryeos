@@ -218,7 +218,9 @@ class E2ESelection(unittest.TestCase):
 
     MAP = (
         '[tests.one_e2e]\ncovers = ["pkg-a"]\n\n'
-        '[tests.two_e2e]\ncovers = []\npaths = ["crates/k/src/proc/**"]\n'
+        '[tests.two_e2e]\ncovers = []\npaths = ["crates/k/src/proc/**"]\n\n'
+        '[full_ci.crash]\nreason = "crash cut points"\npaths = ["crates/a/src/lib.rs"]\n\n'
+        '[full_ci.process_scope]\nreason = "isolation"\npaths = ["crates/k/src/proc/**", "crates/bin/daemon/tests/two_e2e.rs"]\n'
     )
     BASE_FILES = {
         "Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/b", "crates/k", "crates/bin/daemon"]\n',
@@ -303,6 +305,36 @@ class E2ESelection(unittest.TestCase):
         self.assertIn("e2e_shards=[1]", out)
         self.assertIn('e2e_uncovered=["pkg-b"]', out)
 
+    def suites(self, changed: dict[str, str], removed: tuple[str, ...] = ()) -> dict[str, bool]:
+        root, paths = self.repo(changed, removed)
+        return {n: on for n, (on, _) in classify_mod.select_full_ci_suites(root, paths).items()}
+
+    def test_full_ci_suites_are_selected_only_by_their_declared_paths(self):
+        self.assertEqual(self.suites({"crates/k/src/proc/mod.rs": "pub fn p() { }\n"}), {"process_scope": True, "crash": False})
+        self.assertEqual(self.suites({"crates/a/src/lib.rs": "pub fn f() { }\n"}), {"process_scope": False, "crash": True})
+        self.assertEqual(self.suites({"crates/b/src/lib.rs": "pub fn f() { }\n"}), {"process_scope": False, "crash": False})
+        self.assertEqual(self.suites({"crates/bin/daemon/tests/two_e2e.rs": "// changed\n"})["process_scope"], True)
+
+    def test_full_ci_suites_with_no_changed_path_are_selected(self):
+        root, _ = self.repo({})
+        result = classify_mod.select_full_ci_suites(root, [])
+        self.assertTrue(all(on for on, _ in result.values()))
+
+    def test_broken_full_ci_table_is_an_error_not_none(self):
+        bad = self.MAP.split("[full_ci.process_scope]")[0] + '[full_ci.process_scope]\nreason = "x"\n'
+        root, paths = self.repo({"crates/bin/daemon/tests/e2e-coverage.toml": bad, "crates/b/src/lib.rs": "pub fn f() { }\n"})
+        with self.assertRaises(ValueError):
+            classify_mod.select_full_ci_suites(root, paths)
+        out = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn("process_scope=ERROR", out)
+        self.assertIn("crash=ERROR", out)
+
+    def test_cli_prints_the_full_ci_suites(self):
+        root, _ = self.repo({"crates/k/src/proc/mod.rs": "pub fn p() { }\n"})
+        out = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn("process_scope=true", out)
+        self.assertIn("crash=false", out)
+
     def test_shard_count_steps(self):
         self.assertEqual([classify_mod.e2e_shard_count(n) for n in (1, 8, 9, 30, 31, 200)], [1, 1, 2, 2, 4, 4])
 
@@ -325,10 +357,37 @@ class E2ESelection(unittest.TestCase):
         faults, _ = classify_mod.check_e2e_coverage(root)
         joined = "\n".join(faults)
         for needle in ("tests/two_e2e.rs has no", "[tests.gone_e2e] names no test file", "unknown package 'nope'",
-                       "covers ryeosd", "matches no tracked file"):
+                       "covers ryeosd", "matches no tracked file", "needs exactly [full_ci."):
             self.assertIn(needle, joined)
         done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root, "--check-e2e-coverage"], capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)
+
+
+class WorkflowWiring(unittest.TestCase):
+    """The jobs that only a full CI runs read the classifier's suite outputs."""
+
+    def job_if(self, name: str) -> str:
+        text = (TOP / ".github/workflows/ci.yml").read_text()
+        start = text.index(f"\n  {name}:\n")
+        end = text.find("\n  ", start + 5)
+        while end != -1 and text[end + 3] == " ":
+            end = text.find("\n  ", end + 1)
+        block = text[start:end if end != -1 else len(text)]
+        return next(line for line in block.splitlines() if line.startswith("    if:"))
+
+    def test_gate_selects_the_full_ci_jobs_by_suite(self):
+        for job, output in (("process-scope-native", "process_scope"), ("process-scope-e2e", "process_scope"),
+                            ("crash-archive", "crash"), ("bundles", "process_scope")):
+            condition = self.job_if(job)
+            self.assertIn(f"needs.classify.outputs.{output} != 'false'", condition, job)
+            self.assertIn("inputs.merge_gates", condition, job)
+        self.assertIn("needs.classify.outputs.crash != 'false'", self.job_if("bundles"))
+
+    def test_classify_publishes_both_outputs(self):
+        text = (TOP / ".github/workflows/ci.yml").read_text()
+        self.assertIn("process_scope: ${{ steps.classify.outputs.process_scope || 'ERROR' }}", text)
+        self.assertIn("crash: ${{ steps.classify.outputs.crash || 'ERROR' }}", text)
+        self.assertIn("e2e_shards|process_scope|crash)=", text)
 
 
 class BundleBins(unittest.TestCase):

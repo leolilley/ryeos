@@ -13,6 +13,15 @@
 #         where the test exists to exercise that crate; otherwise the specific
 #         modules the test drives are listed here.
 #
+# [full_ci.<suite>] names the suites that only a full CI runs, because they
+# take hours and need real isolation or crash features: `process_scope` (the
+# process-scope native job and the process-scope e2e job, whose suites are
+# session_secret_delivery_e2e, handoff_crash_recovery_e2e and
+# claude_code_worker_follow_e2e) and `crash` (the crash qualification build and
+# phases). A merge gate runs a suite only when a changed path matches one of
+# its `paths` globs, so the cost of the chain falls on the branches that can
+# break it; widen a list when a break slips through to next.
+#
 # Tables are sorted by test name; lists are sorted.
 
 
@@ -452,3 +461,55 @@ paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/
 [tests.vault_provider_narrow_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
 paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+
+[full_ci.crash]
+reason = "the crash qualification build compiles the crash-qualification cut points and runs the crash phases"
+paths = [
+    "crates/bin/daemon/src/bootstrap.rs",
+    "crates/bin/daemon/src/main.rs",
+    "crates/bin/daemon/src/test_support/mod.rs",
+    "crates/bin/daemon/src/test_support/runtime_phase_cut.rs",
+    "crates/bin/daemon/src/uds/server.rs",
+    "crates/bin/daemon/src/uds/server/runtime_phase_cut.rs",
+    "crates/bin/daemon/tests/common/stub_rig.rs",
+    "crates/bin/daemon/tests/directive_compaction_crash_e2e.rs",
+    "crates/bin/daemon/tests/directive_crash_recovery_e2e.rs",
+    "crates/bin/daemon/tests/execution_history_reset_scheduler_e2e.rs",
+    "crates/bin/daemon/tests/graph_crash_recovery_e2e.rs",
+    "crates/bin/daemon/tests/handoff_crash_recovery_e2e.rs",
+    "crates/bin/daemon/tests/project_schedule_deploy_e2e.rs",
+    "crates/daemon/ryeos-api/src/handlers/project_apply_snapshot.rs",
+    "crates/daemon/ryeos-app/src/dedicated_session_service.rs",
+    "crates/daemon/ryeos-app/src/env_contract.rs",
+    "crates/daemon/ryeos-scheduler-service/src/retirement_attempt.rs",
+    "crates/daemon/ryeos-scheduler-service/src/retirement_journal.rs",
+    "crates/engine/ryeos-runtime/src/callback.rs",
+    "crates/engine/ryeos-runtime/src/callback_client.rs",
+    "crates/kernel/lillux/src/secure_fs.rs",
+    "crates/kernel/lillux/src/test_hooks.rs",
+    "scripts/gate.sh",
+]
+
+[full_ci.process_scope]
+reason = "the process-scope native job and the process-scope e2e suites run under real isolation and a root-provisioned host"
+paths = [
+    "crates/bin/daemon/src/test_support/process_scopes.rs",
+    "crates/bin/daemon/tests/claude_code_worker_follow_e2e.rs",
+    "crates/bin/daemon/tests/handoff_crash_recovery_e2e.rs",
+    "crates/bin/daemon/tests/session_secret_delivery_e2e.rs",
+    "crates/daemon/ryeos-app/src/dedicated_session_service.rs",
+    "crates/daemon/ryeos-app/src/runtime_vault_service.rs",
+    "crates/daemon/ryeos-app/src/state_store/worker_handoff.rs",
+    "crates/daemon/ryeos-app/src/vault/**",
+    "crates/daemon/ryeos-app/src/worker_handoff.rs",
+    "crates/engine/ryeos-engine/src/authority/isolation.rs",
+    "crates/engine/ryeos-engine/src/authority/isolation/**",
+    "crates/engine/ryeos-isolation-protocol/**",
+    "crates/engine/ryeos-node-runtime/src/node_policy/sections/isolation.rs",
+    "crates/engine/ryeos-runtime/src/scoped_relay_handoff.rs",
+    "crates/kernel/lillux/src/host_service/**",
+    "crates/kernel/lillux/src/process_control.rs",
+    "crates/kernel/lillux/src/process_control/**",
+    "crates/kernel/lillux/src/root_enclosure.rs",
+    "crates/tools/lillux-isolation-adapter/**",
+]

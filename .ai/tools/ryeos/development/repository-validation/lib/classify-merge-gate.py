@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-24T13:41:53Z:46b5df4243485730896c11a34de0b5c04006e48e2a2d1e468fcf53716d4dd0a7:SlrXiK76LbeSCB6Ay1hgR2fwTInvjq4y6mDYaRK4NvDOKb41059i0x4oL18F0njZk+bdnunqtfAIP/x4Z1HjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:09:28Z:a496dc0ca51d933e9b0c07298748decef707d71be5ab22bbd77be35a00e19eac:4kaFXcbznRIuNJ6EoQ/Xp9my9qR3oDzFHyxjhquvWCP1VrUAjFY6Y+X3C8gyQJsNGC2y+oBLn6OUdnumGiHoAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -427,8 +427,8 @@ def load_e2e_coverage(root: Path) -> dict[str, dict]:
     """
     doc = tomllib.loads((root / E2E_COVERAGE).read_text())
     tests = doc.get("tests")
-    if not isinstance(tests, dict) or set(doc) != {"tests"}:
-        raise ValueError(f"{E2E_COVERAGE} must hold only [tests.<binary>] tables")
+    if not isinstance(tests, dict) or not set(doc) <= {"tests", "full_ci"}:
+        raise ValueError(f"{E2E_COVERAGE} must hold only [tests.<binary>] and [full_ci.<suite>] tables")
     out: dict[str, dict] = {}
     for name, entry in tests.items():
         if not isinstance(entry, dict) or not set(entry) <= {"covers", "paths"} or "covers" not in entry:
@@ -440,6 +440,51 @@ def load_e2e_coverage(root: Path) -> dict[str, dict]:
                 raise ValueError(f"[tests.{name}].{key} must be a list of non-empty strings")
             lists[key] = value
         out[name] = lists
+    return out
+
+
+FULL_CI_SUITES = ("process_scope", "crash")
+
+
+def load_full_ci(root: Path) -> dict[str, dict]:
+    """Read [full_ci.<suite>] as {suite: {"reason": str, "paths": [globs]}}.
+
+    These suites run only in a full CI (hours long), so a merge gate runs them
+    only when the branch changes a path that declares it can break them.
+    Raises ValueError on any shape fault.
+    """
+    doc = tomllib.loads((root / E2E_COVERAGE).read_text())
+    table = doc.get("full_ci")
+    if not isinstance(table, dict) or set(table) != set(FULL_CI_SUITES):
+        raise ValueError(f"{E2E_COVERAGE} needs exactly [full_ci.{'], [full_ci.'.join(FULL_CI_SUITES)}]")
+    out: dict[str, dict] = {}
+    for name, entry in table.items():
+        if not isinstance(entry, dict) or set(entry) != {"reason", "paths"}:
+            raise ValueError(f"[full_ci.{name}] needs `reason` and `paths`, nothing else")
+        if not isinstance(entry["reason"], str) or not entry["reason"]:
+            raise ValueError(f"[full_ci.{name}].reason must be a non-empty string")
+        paths = entry["paths"]
+        if not isinstance(paths, list) or not paths or not all(isinstance(v, str) and v for v in paths):
+            raise ValueError(f"[full_ci.{name}].paths must be a non-empty list of strings")
+        out[name] = {"reason": entry["reason"], "paths": paths}
+    return out
+
+
+def select_full_ci_suites(root: str, paths: list[str]) -> dict[str, tuple[bool, str]]:
+    """Return {suite: (selected, reason)} for the full-CI-only suites.
+
+    A suite is selected when a changed path matches one of its globs. No
+    changed path at all is doubt and selects both; a fault in the map raises.
+    """
+    coverage = load_full_ci(Path(root).resolve())
+    out: dict[str, tuple[bool, str]] = {}
+    for name in FULL_CI_SUITES:
+        patterns = [(g, glob_regex(g)) for g in coverage[name]["paths"]]
+        if not paths:
+            out[name] = (True, "no changed paths")
+            continue
+        hit = next(((p, g) for p in paths for g, r in patterns if r.match(p)), None)
+        out[name] = (True, f"{hit[0]} matches {hit[1]}") if hit else (False, "no changed path matches its declared paths")
     return out
 
 
@@ -618,6 +663,14 @@ def check_e2e_coverage(root: str) -> tuple[list[str], list[str]]:
             if not matched:
                 faults.append(f"[tests.{name}] path glob {pattern!r} matches no tracked file")
             by_path |= {p for p, d in packages.items() if any(f.startswith(d + "/") for f in matched)}
+    try:
+        for suite, entry in sorted(load_full_ci(top).items()):
+            for pattern in entry["paths"]:
+                regex = glob_regex(pattern)
+                if not any(regex.match(f) for f in files):
+                    faults.append(f"[full_ci.{suite}] path glob {pattern!r} matches no tracked file")
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+        faults.append(f"{E2E_COVERAGE}: {error}")
     covered = {p for entry in coverage.values() for p in entry["covers"]} | by_path
     gaps = sorted(set(packages) - covered - {E2E_PACKAGE})
     return faults, gaps
@@ -700,15 +753,28 @@ def main() -> None:
     except BaseException as error:  # a fault must not read as "no e2e tests"
         e2e_tests, e2e_shards, e2e_uncovered = "ERROR", "[1]", "[]"
         e2e_reason = f"e2e selection failed: {error}"
+    try:
+        if not paths and reason != "no changed paths":
+            raise RuntimeError(reason)
+        suites = select_full_ci_suites(args.root, paths)
+        suite_values = {n: ("true" if on else "false") for n, (on, _) in suites.items()}
+        suite_reasons = {n: why for n, (_, why) in suites.items()}
+    except BaseException as error:  # a fault must not read as "the suite is not needed"
+        suite_values = {n: "ERROR" for n in FULL_CI_SUITES}
+        suite_reasons = {n: f"selection failed: {error}" for n in FULL_CI_SUITES}
     print(f"test_packages={test_packages}")
     print(f"e2e_tests={e2e_tests}")
     print(f"e2e_shards={e2e_shards}")
     print(f"e2e_uncovered={e2e_uncovered}")
+    for name in FULL_CI_SUITES:
+        print(f"{name}={suite_values[name]}")
     print(f"mode={mode}")
     print(f"bundles_changed={'true' if bundles_changed else 'false'}")
     print(f"# classification: {mode} ({reason})")
     print(f"# bundles: {'refresh from the branch' if bundles_changed else 'restore next'} ({bundles_why})")
     print(f"# daemon e2e: {e2e_reason}")
+    for name in FULL_CI_SUITES:
+        print(f"# full-CI suite {name}: {suite_values[name]} ({suite_reasons[name]})")
     for package in json.loads(e2e_uncovered):
         print(f"# daemon e2e: no coverage-map entry covers changed package {package}")
     print(f"# changed paths ({len(paths)}):")

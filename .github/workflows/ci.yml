@@ -17,7 +17,7 @@ on:
         default: true
         type: boolean
       merge_gates:
-        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Every gate also runs the tests of each crate the branch changed (touched-tests job). Full tests run on next after merge."
+        description: "Branch pre-merge mode: run the gate jobs only. Always: classify, static policy, rust-policy, browser-policy, secrets and ui-assets. By what the branch changes: ui-gate (a UI-only branch), or touched-tests (the changed crates' tests) and e2e-archive with e2e-shard (the daemon e2e binaries crates/bin/daemon/tests/e2e-coverage.toml selects), and, when a changed path matches a [full_ci.<suite>] list in that map, the process-scope jobs (bundles, process-scope-native, process-scope-e2e) or the crash qualification chain (bundles, crash-archive, crash-phase), which take hours. Skipped: bundle refresh, the workspace test archive and shards, the scheduler compositions. Full tests run on next after merge."
         required: true
         default: false
         type: boolean
@@ -111,6 +111,12 @@ jobs:
       # crates/bin/daemon/tests/e2e-coverage.toml; ERROR fails the e2e archive job.
       e2e_tests: ${{ steps.classify.outputs.e2e_tests || 'ERROR' }}
       e2e_shards: ${{ steps.classify.outputs.e2e_shards || '[1]' }}
+      # `true` or `false` per full-CI-only suite, from [full_ci.<suite>] in the same map: a gate
+      # runs the process-scope jobs or the crash qualification chain only when the branch
+      # changes a path the suite declares. Unset or ERROR (a fault) runs the suite; only
+      # `false` skips it.
+      process_scope: ${{ steps.classify.outputs.process_scope || 'ERROR' }}
+      crash: ${{ steps.classify.outputs.crash || 'ERROR' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -137,7 +143,7 @@ jobs:
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards|process_scope|crash)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
           # A changed package no coverage-map entry names runs no daemon e2e test; say so.
           sed -n 's/^e2e_uncovered=//p' "$RUNNER_TEMP/classification" | jq -r '.[]?' | while IFS= read -r package; do
             echo "::warning title=No daemon e2e coverage::$package changed, but no entry in crates/bin/daemon/tests/e2e-coverage.toml covers it, so no daemon e2e test runs for it."
@@ -580,7 +586,8 @@ jobs:
     name: Bundle refresh for tests
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || inputs.process_scope_probe }}
+    needs: [classify]
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || inputs.process_scope_probe || (github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.mode != 'ui-only' && (needs.classify.outputs.process_scope != 'false' || needs.classify.outputs.crash != 'false')) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -1469,7 +1476,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: [classify]
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests || (inputs.merge_gates && needs.classify.outputs.crash != 'false')) && needs.classify.outputs.mode != 'ui-only' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -1631,7 +1638,8 @@ jobs:
     name: Process-scope native qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    if: ${{ inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
+    needs: [classify]
+    if: ${{ inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || (github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.mode != 'ui-only' && needs.classify.outputs.process_scope != 'false') }}
     env:
       # The delegated cgroup parent is created by the probe step; the steps
       # that follow read it from here.
@@ -1861,12 +1869,12 @@ jobs:
   # nonzero number of tests with none skipped.
   process-scope-e2e:
     name: Process-scope e2e (real isolation)
-    needs: [bundles]
+    needs: [bundles, classify]
     runs-on: ubuntu-24.04
     # The handoff acceptance matrix alone runs 55 to 90 minutes depending on
     # the runner, and the claude follow suite runs after it.
     timeout-minutes: 180
-    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || (github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.mode != 'ui-only' && needs.classify.outputs.process_scope != 'false')) }}
     env:
       RUST_MIN_STACK: 8388608
       E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
