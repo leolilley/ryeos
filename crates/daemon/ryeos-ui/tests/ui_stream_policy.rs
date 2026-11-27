@@ -1,4 +1,4 @@
-// The event streams a seat opens pass the same signed `ui_seat_reads` policy
+// The event streams a seat opens pass the same signed `read_disclosure` policy
 // as every read: opening is judged by an entry for the route, the chain
 // stream additionally needs the seat's authority over the chain's signed root
 // subject, and each event is shaped by the entry's keep list and bounds.
@@ -27,7 +27,6 @@ const SESSION_ROUTE: &str = "ui/events/session";
 fn chain_entry(extra: Value) -> Value {
     let mut base = json!({
         "target": "route:ui/events/chain",
-        "classes": ["local_operator", "hosted_principal"],
         "keep": [
             "/event_type",
             "/payload/chain_root_id",
@@ -49,7 +48,6 @@ fn chain_entry(extra: Value) -> Value {
 fn session_entry(extra: Value) -> Value {
     let mut base = json!({
         "target": "route:ui/events/session",
-        "classes": ["local_operator", "hosted_principal"],
         "keep": [
             "/event_type",
             "/payload/kind",
@@ -280,8 +278,6 @@ async fn the_chain_stream_is_refused_without_an_entry_for_its_route() {
         policy(vec![chain_entry(
             json!({"target": "service:ui/events/chain"}),
         )]),
-        // An entry for another class is not an entry for this seat.
-        policy(vec![chain_entry(json!({"classes": ["hosted_principal"]}))]),
     ] {
         let (_tmp, _owner, state, session_id, principal) = seated(&body, None);
         create_thread(&state, "T-own", "T-own", None, &principal);
@@ -294,21 +290,6 @@ async fn the_chain_stream_is_refused_without_an_entry_for_its_route() {
             "{error:?}"
         );
     }
-}
-
-#[tokio::test]
-async fn a_hosted_seat_needs_an_entry_that_admits_its_class() {
-    let body = policy(vec![chain_entry(json!({"classes": ["local_operator"]}))]);
-    let (_tmp, _owner, state, session_id, principal) = seated(
-        &body,
-        Some("fp:4040404040404040404040404040404040404040404040404040404040404040"),
-    );
-    create_thread(&state, "T-own", "T-own", None, &principal);
-    let error = open(&state, &session_id, "chain.yaml", "T-own")
-        .await
-        .err()
-        .expect("a hosted principal is not a local operator");
-    assert!(refusal_text(&error).contains("seat_read_no_entry"));
 }
 
 #[tokio::test]
@@ -629,7 +610,7 @@ async fn an_item_hint_reaches_the_seat_with_the_fields_the_shipped_entry_names()
     let shipped = ryeos_ui::test_support::shipped_seat_reads_record();
     let shipped = shipped
         .as_any()
-        .downcast_ref::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>()
+        .downcast_ref::<ryeos_node_runtime::node_policy::sections::read_disclosure::ReadDisclosurePolicy>()
         .unwrap();
     let entries = shipped.entries_for(&format!("route:{SESSION_ROUTE}"));
     assert_eq!(entries.len(), 1);
@@ -701,7 +682,7 @@ fn the_shipped_profiles_admit_the_streams_the_clients_open() {
     let policy = ryeos_ui::test_support::shipped_seat_reads_record();
     let policy = policy
         .as_any()
-        .downcast_ref::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>()
+        .downcast_ref::<ryeos_node_runtime::node_policy::sections::read_disclosure::ReadDisclosurePolicy>()
         .unwrap();
     for route in [CHAIN_ROUTE, SESSION_ROUTE] {
         let entries = policy.entries_for(&format!("route:{route}"));

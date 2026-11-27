@@ -683,44 +683,10 @@ async fn initial_surface_sources_are_answered_over_http() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// A booted node reads its own signed capability report back through the
-/// capability service: the report stands, its signature verified, and the
-/// service names the signer and when the node measured it. The wording
-/// service answers from the signed config.
+/// The wording service answers from the signed config.
 #[tokio::test(flavor = "multi_thread")]
-async fn node_capability_facts_are_read_from_the_verified_report() -> anyhow::Result<()> {
+async fn node_capability_wording_is_read_from_the_signed_config() -> anyhow::Result<()> {
     let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
-
-    let (status, body) = harness
-        .post_execute("service:ui/ryeos-ui/node/capabilities", ".", json!({}))
-        .await?;
-    anyhow::ensure!(status.is_success(), "capabilities: {status} {body}");
-    let facts = body.get("result").unwrap_or(&body);
-    let facts = facts.get("result").unwrap_or(facts);
-    anyhow::ensure!(
-        facts["schema_version"] == "ryeos.ui.node.capabilities.v1",
-        "facts: {body}"
-    );
-    anyhow::ensure!(facts["report"]["state"] == "present", "report: {body}");
-    anyhow::ensure!(facts["report"]["verified"] == true, "verified: {body}");
-    anyhow::ensure!(
-        facts["report"]["signer"]
-            .as_str()
-            .is_some_and(|signer| signer.starts_with("fp:")),
-        "signer: {body}"
-    );
-    anyhow::ensure!(
-        facts["report"]["measured_at"]
-            .as_str()
-            .is_some_and(|at| !at.is_empty()),
-        "measured_at: {body}"
-    );
-    anyhow::ensure!(
-        facts["host"]["class"]
-            .as_str()
-            .is_some_and(|class| !class.is_empty()),
-        "host class: {body}"
-    );
 
     let (status, body) = harness
         .post_execute(

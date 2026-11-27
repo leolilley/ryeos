@@ -14,6 +14,7 @@
 //! unless the caller holds the capability to inspect unverified records and
 //! asks for them.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::read_envelope::{
+    Coverage, CoverageState, Page, ReadEnvelope, SignerEntry, TotalBasis, authorization_digest,
+    filter_digest, key_id, not_modified, revision_of, signers_table,
+};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
@@ -36,6 +41,9 @@ pub(crate) const INCLUDE_UNVERIFIED_CAP: &str = "ryeos.read.records.unverified";
 const SINGLETON_KEY: &str = "singleton";
 const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_LIST_LIMIT: usize = 200;
+const GET_SCHEMA: &str = "ryeos.read.records.get/v1";
+const LIST_SCHEMA: &str = "ryeos.read.records.list/v1";
+const KINDS_SCHEMA: &str = "ryeos.read.records.kinds/v1";
 
 /// Where a record is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -180,6 +188,22 @@ struct KindDecl {
     max_bytes: u64,
     #[serde(default)]
     freshness: Option<String>,
+    /// Named lists the answer derives from maps in the body, so a client that
+    /// can bind a list but not a map still reads them row by row.
+    #[serde(default)]
+    collections: Vec<CollectionDecl>,
+}
+
+/// One derived list: the object at `from` becomes one row per entry, the entry's
+/// key in `key_field`, the entry's own fields beside it (a scalar entry rides
+/// in `value`). A mechanism over the declared pointer; it names no record
+/// field of its own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionDecl {
+    name: String,
+    from: String,
+    key_field: String,
 }
 
 /// A record kind whose declaration this build can serve.
@@ -257,6 +281,27 @@ fn resolve_decl(name: &str, value: Value) -> Result<UsableKind, String> {
         .find(|pointer| !pointer_is_valid(pointer))
     {
         return Err(format!("summary entry `{bad}` is not a JSON pointer"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for collection in &decl.collections {
+        let name_ok = !collection.name.is_empty()
+            && collection.name.len() <= 64
+            && collection
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        if !name_ok || !seen.insert(collection.name.as_str()) {
+            return Err(format!(
+                "collection name `{}` must be unique lowercase letters, digits and underscores",
+                collection.name
+            ));
+        }
+        if !collection.from.starts_with('/') || collection.key_field.is_empty() {
+            return Err(format!(
+                "collection `{}` needs a JSON pointer in `from` and a `key_field`",
+                collection.name
+            ));
+        }
     }
     Ok(UsableKind {
         decl,
@@ -390,13 +435,46 @@ fn signer_of(found: &Found) -> Option<&str> {
     }
 }
 
+/// The signer's standing at read time. The node's own key is `node`: the
+/// verifier pins that signer to this node's identity. A signer whose standing
+/// can change (an operator or a publisher key) reports `active`, `retired` or
+/// `revoked` once such a kind exists and its resolver is in; no kind that needs
+/// it is declared yet. `signing_principal` is absent, never null, until a
+/// person-signed kind exists.
+fn signer_status_of(kind: &UsableKind, found: &Found) -> Option<&'static str> {
+    match (found, kind.verifier) {
+        (Found::Verified { .. }, Verifier::NodeSignedJsonDigest) => Some("node"),
+        _ => None,
+    }
+}
+
+/// The stable code of a stale report's reason. The reason's sentence names a
+/// policy generation or says the host restarted; a seat reads the code, and the
+/// sentence stays in `detail` for the operator.
+fn stale_code(reason: &str) -> &'static str {
+    if reason.starts_with("the host restarted") {
+        "host_restarted"
+    } else if reason.starts_with("node policy generation is now") {
+        "policy_generation_changed"
+    } else if reason.starts_with("the current node policy generation is unreadable") {
+        "policy_generation_unreadable"
+    } else {
+        "stale"
+    }
+}
+
 fn verify_object(kind: &UsableKind, found: &Found) -> Value {
     let (status, reason, detail, fresh) = match found {
         Found::Verified {
             fresh,
             stale_reason,
             ..
-        } => ("verified", stale_reason.clone(), None, *fresh),
+        } => (
+            "verified",
+            stale_reason.as_deref().map(stale_code).map(str::to_owned),
+            stale_reason.clone(),
+            *fresh,
+        ),
         Found::Failed { code, message } => (
             "failed",
             Some((*code).to_owned()),
@@ -409,10 +487,56 @@ fn verify_object(kind: &UsableKind, found: &Found) -> Value {
         "status": status,
         "scheme": kind.verifier.name(),
         "signer": signer_of(found),
+        "signer_status": signer_status_of(kind, found),
         "reason": reason,
         "detail": detail,
         "fresh": fresh,
     })
+}
+
+/// The derived lists of a verified body: one array per declared collection, and
+/// per collection a coverage word: `present`, `not_reported` (the body has no
+/// such map), `not_a_map` (the pointer names an array or a scalar) or
+/// `key_field_collision` (an entry has a field named like the key field; that
+/// field is left out of its row, and this word says so).
+fn collections_of(kind: &UsableKind, body: &Value) -> (Value, Value) {
+    let mut lists = serde_json::Map::new();
+    let mut coverage = serde_json::Map::new();
+    for collection in &kind.decl.collections {
+        let mut rows = Vec::new();
+        // `present` is the normal case; the others say why the list is what it
+        // is, so a format change reads as a shape error and a dropped field is
+        // never silent.
+        let mut state = "present";
+        match body.pointer(&collection.from) {
+            Some(Value::Object(entries)) => {
+                for (key, entry) in entries {
+                    let mut row = serde_json::Map::new();
+                    row.insert(collection.key_field.clone(), Value::String(key.clone()));
+                    match entry {
+                        Value::Object(fields) => {
+                            for (name, value) in fields {
+                                if name == &collection.key_field {
+                                    state = "key_field_collision";
+                                } else {
+                                    row.insert(name.clone(), value.clone());
+                                }
+                            }
+                        }
+                        other => {
+                            row.insert("value".to_owned(), other.clone());
+                        }
+                    }
+                    rows.push(Value::Object(row));
+                }
+            }
+            Some(_) => state = "not_a_map",
+            None => state = "not_reported",
+        }
+        lists.insert(collection.name.clone(), Value::Array(rows));
+        coverage.insert(collection.name.clone(), Value::String(state.to_owned()));
+    }
+    (Value::Object(lists), Value::Object(coverage))
 }
 
 fn summary_of(kind: &UsableKind, body: &Value) -> Value {
@@ -485,6 +609,7 @@ fn unverified_kind_answer(name: &str, reason: &str) -> Value {
             "status": "unverified_kind",
             "scheme": null,
             "signer": null,
+            "signer_status": null,
             "reason": reason,
             "fresh": null,
         },
@@ -523,6 +648,11 @@ fn record_answer(kind: &UsableKind, found: &Found, unverified: Option<Value>) ->
     });
     if let Found::Verified { body, .. } = found {
         answer["body"] = body.clone();
+        if !kind.decl.collections.is_empty() {
+            let (collections, coverage) = collections_of(kind, body);
+            answer["collections"] = collections;
+            answer["collections_coverage"] = coverage;
+        }
     } else if let Some(body) = unverified {
         answer["body"] = body;
     }
@@ -541,6 +671,8 @@ pub struct GetRequest {
     pub holder: Option<String>,
     #[serde(default)]
     pub include_unverified: bool,
+    #[serde(default)]
+    pub if_revision: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -553,11 +685,15 @@ pub struct ListRequest {
     pub limit: Option<usize>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub if_revision: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct KindsRequest {}
+pub struct KindsRequest {
+    pub if_revision: Option<String>,
+}
 
 fn holds_unverified_cap(ctx: &HandlerContext, state: &AppState) -> bool {
     state
@@ -581,6 +717,78 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| HandlerError::Internal(format!("records read task failed: {error}")))?
 }
 
+/// The state of a record as a revision tip. A verified record is its digest;
+/// a failed one is its failure code, plus the digest of the unverified body
+/// when one is served, so a changed refusal or a changed served body never
+/// shares a revision with an earlier one; an absent record is `absent`.
+fn record_tip(found: &Found, unverified: Option<&Value>) -> HandlerResult<String> {
+    Ok(match found {
+        Found::Verified { .. } => digest_of(found).unwrap_or("absent").to_owned(),
+        Found::Failed { code, .. } => match unverified {
+            Some(body) => format!("failed:{code}:{}", filter_digest(body)?),
+            None => format!("failed:{code}"),
+        },
+        Found::Absent => "absent".to_owned(),
+    })
+}
+
+/// How much of a single record the answer holds. A verified record read in
+/// full is `complete`; one whose body was cut is `partial`, since a reader
+/// must not take the body for the whole; a record that failed verification is
+/// `partial` with its own reason.
+fn record_coverage(verified: bool, answer: &Value) -> Coverage {
+    match verified {
+        true if answer["truncated"] == json!(true) => {
+            Coverage::with_reason(CoverageState::Partial, "body_truncated")
+        }
+        true => Coverage::complete(),
+        false => Coverage::with_reason(CoverageState::Partial, "record_unverified"),
+    }
+}
+
+/// The signers side table for the signers an answer names. A value that is
+/// not a key fingerprint is left out: the table refuses such values, and the
+/// answer's own `verify.signer` still states it.
+// The keys of the signers table are key fingerprints: public identity, shown
+// to a principal on purpose (the old tier withheld `/verify/signer`, the text
+// of the signer; the fingerprint a record names is not secret). A signer's
+// label and role stay free text.
+fn signers_for(signers: &[&str], state: &AppState) -> HandlerResult<BTreeMap<String, SignerEntry>> {
+    let valid: Vec<&str> = signers
+        .iter()
+        .copied()
+        .filter(|signer| key_id(signer).is_ok())
+        .collect();
+    if valid.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let view = ryeos_node::trust_registry::load_view(&state.config.app_root)
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
+    signers_table(valid, &view, state.identity.fingerprint())
+}
+
+/// The not-modified answer, when the caller's token is the current revision.
+fn unchanged(if_revision: Option<&str>, revision: &str) -> HandlerResult<Option<Value>> {
+    not_modified(if_revision, revision)
+        .map(|unchanged| {
+            serde_json::to_value(unchanged)
+                .map_err(|error| HandlerError::Internal(error.to_string()))
+        })
+        .transpose()
+}
+
+fn envelope_json(envelope: ReadEnvelope<Value>) -> HandlerResult<Value> {
+    serde_json::to_value(envelope).map_err(|error| HandlerError::Internal(error.to_string()))
+}
+
+fn authorization_of(ctx: &HandlerContext, state: &AppState) -> String {
+    authorization_digest(
+        &ctx.fingerprint,
+        &ctx.scopes,
+        state.node_policy.generation_digest(),
+    )
+}
+
 pub async fn get(
     req: GetRequest,
     ctx: HandlerContext,
@@ -588,12 +796,37 @@ pub async fn get(
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
     require_unverified_authority(req.include_unverified, holds_unverified_cap(&ctx, &state))?;
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let loaded = find_kind(&kinds, &req.record_kind)?;
+        let filter = filter_digest(&json!({
+            "record_kind": req.record_kind,
+            "key": req.key,
+            "hash": req.hash,
+            "holder": req.holder,
+            "include_unverified": req.include_unverified,
+        }))?;
         let kind = match &loaded.usable {
             Ok(kind) => kind,
-            Err(reason) => return Ok(unverified_kind_answer(&loaded.name, reason)),
+            Err(reason) => {
+                let revision = revision_of(
+                    "records_get",
+                    &authorization,
+                    &[("unverified_kind", reason.as_str())],
+                    &filter,
+                );
+                if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+                    return Ok(value);
+                }
+                return envelope_json(ReadEnvelope::record(
+                    GET_SCHEMA,
+                    revision,
+                    Coverage::with_reason(CoverageState::Unavailable, "unverified_kind"),
+                    unverified_kind_answer(&loaded.name, reason),
+                    BTreeMap::new(),
+                ));
+            }
         };
         refuse_unsupported_holder(kind, req.holder.as_deref())?;
         let found = read_record(kind, &state.config.app_root, &policy_generation(&state));
@@ -606,7 +839,22 @@ pub async fn get(
         let unverified = (req.include_unverified && matches!(found, Found::Failed { .. }))
             .then(|| unverified_body(kind, &state.config.app_root))
             .flatten();
-        Ok(record_answer(kind, &found, unverified))
+        let tip = record_tip(&found, unverified.as_ref())?;
+        let revision = revision_of(
+            "records_get",
+            &authorization,
+            &[("record", tip.as_str())],
+            &filter,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
+        let answer = record_answer(kind, &found, unverified);
+        let coverage = record_coverage(matches!(found, Found::Verified { .. }), &answer);
+        let signers = signers_for(&signer_of(&found).into_iter().collect::<Vec<_>>(), &state)?;
+        envelope_json(ReadEnvelope::record(
+            GET_SCHEMA, revision, coverage, answer, signers,
+        ))
     })
     .await
 }
@@ -631,15 +879,52 @@ pub async fn list(
             )
         })?,
     };
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let loaded = find_kind(&kinds, &req.record_kind)?;
+        let filter = filter_digest(&json!({
+            "record_kind": req.record_kind,
+            "holder": req.holder,
+        }))?;
         let kind = match &loaded.usable {
             Ok(kind) => kind,
-            Err(reason) => return Ok(unverified_kind_answer(&loaded.name, reason)),
+            Err(reason) => {
+                let revision = revision_of(
+                    "records_list",
+                    &authorization,
+                    &[("unverified_kind", reason.as_str())],
+                    &filter,
+                );
+                if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+                    return Ok(value);
+                }
+                return envelope_json(ReadEnvelope::rows(
+                    LIST_SCHEMA,
+                    revision,
+                    Coverage::with_reason(CoverageState::Unavailable, "unverified_kind"),
+                    Vec::new(),
+                    Page {
+                        next_cursor: None,
+                        total: Some(0),
+                        total_basis: TotalBasis::Exact,
+                    },
+                    BTreeMap::new(),
+                ));
+            }
         };
         refuse_unsupported_holder(kind, req.holder.as_deref())?;
         let found = read_record(kind, &state.config.app_root, &policy_generation(&state));
+        let tip = record_tip(&found, None)?;
+        let revision = revision_of(
+            "records_list",
+            &authorization,
+            &[("record", tip.as_str())],
+            &filter,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
         // A kind with a singleton key has at most one record.
         let mut records = Vec::new();
         if !matches!(found, Found::Absent) && holder_matches(kind, req.holder.as_deref(), &found) {
@@ -648,6 +933,7 @@ pub async fn list(
                 _ => Value::Null,
             };
             records.push(json!({
+                "record_kind": kind.decl.record_kind,
                 "key": SINGLETON_KEY,
                 "hash": digest_of(&found),
                 "summary": summary,
@@ -657,21 +943,34 @@ pub async fn list(
         let total = records.len();
         let page: Vec<Value> = records.into_iter().skip(offset).take(limit).collect();
         let next = offset.saturating_add(page.len());
-        Ok(json!({
-            "record_kind": kind.decl.record_kind,
-            "records": page,
-            "next_cursor": if next < total { json!(next.to_string()) } else { Value::Null },
-        }))
+        let named: Vec<&str> = page
+            .iter()
+            .filter_map(|row| row["verify"]["signer"].as_str())
+            .collect();
+        let signers = signers_for(&named, &state)?;
+        envelope_json(ReadEnvelope::rows(
+            LIST_SCHEMA,
+            revision,
+            Coverage::complete(),
+            page,
+            Page {
+                next_cursor: (next < total).then(|| next.to_string()),
+                total: Some(total as u64),
+                total_basis: TotalBasis::Exact,
+            },
+            signers,
+        ))
     })
     .await
 }
 
 pub async fn kinds(
-    _req: KindsRequest,
+    req: KindsRequest,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    let authorization = authorization_of(&ctx, &state);
     blocking(move || {
         let kinds = load_kinds(&state.engine)?;
         let rows: Vec<Value> = kinds
@@ -695,7 +994,29 @@ pub async fn kinds(
                 }),
             })
             .collect();
-        Ok(json!({ "kinds": rows }))
+        let rows_digest = filter_digest(&rows)?;
+        let revision = revision_of(
+            "records_kinds",
+            &authorization,
+            &[("kinds", rows_digest.as_str())],
+            &filter_digest(&json!({}))?,
+        );
+        if let Some(value) = unchanged(req.if_revision.as_deref(), &revision)? {
+            return Ok(value);
+        }
+        let total = rows.len() as u64;
+        envelope_json(ReadEnvelope::rows(
+            KINDS_SCHEMA,
+            revision,
+            Coverage::complete(),
+            rows,
+            Page {
+                next_cursor: None,
+                total: Some(total),
+                total_basis: TotalBasis::Exact,
+            },
+            BTreeMap::new(),
+        ))
     })
     .await
 }
@@ -771,6 +1092,99 @@ mod tests {
         let mut decl = declaration();
         decl[field] = value;
         decl
+    }
+
+    #[test]
+    fn a_collection_turns_a_map_into_rows_with_the_key_as_a_field() {
+        let kind = usable(with(
+            "collections",
+            json!([
+                {"name": "provided", "from": "/provided", "key_field": "name"},
+                {"name": "capacity", "from": "/capacity", "key_field": "name"},
+                {"name": "unmet", "from": "/floor/unmet", "key_field": "label"},
+                {"name": "gone", "from": "/nothing", "key_field": "name"},
+            ]),
+        ));
+        let body = json!({
+            "provided": {
+                "isolation:pid_ns": {"source": "kernel", "provider": "p1", "basis": "probe"},
+            },
+            "capacity": {"memory_bytes": 4096},
+            "floor": {"unmet": {"quiescence": "never provided", "other": "reason"}},
+        });
+        let (lists, coverage) = collections_of(&kind, &body);
+        assert_eq!(
+            lists["provided"],
+            json!([{"name": "isolation:pid_ns", "source": "kernel", "provider": "p1", "basis": "probe"}])
+        );
+        assert_eq!(
+            lists["capacity"],
+            json!([{"name": "memory_bytes", "value": 4096}])
+        );
+        assert_eq!(
+            lists["unmet"],
+            json!([
+                {"label": "other", "value": "reason"},
+                {"label": "quiescence", "value": "never provided"}
+            ])
+        );
+        assert_eq!(lists["gone"], json!([]));
+        assert_eq!(coverage["provided"], "present");
+        assert_eq!(coverage["gone"], "not_reported");
+
+        let shaped = json!({
+            "provided": ["not", "a", "map"],
+            "capacity": {"memory_bytes": {"name": "clash", "bytes": 1}},
+        });
+        let (lists, coverage) = collections_of(&kind, &shaped);
+        assert_eq!(coverage["provided"], "not_a_map");
+        assert_eq!(lists["provided"], json!([]));
+        assert_eq!(coverage["capacity"], "key_field_collision");
+        assert_eq!(
+            lists["capacity"],
+            json!([{"name": "memory_bytes", "bytes": 1}])
+        );
+    }
+
+    #[test]
+    fn a_collection_with_a_bad_name_or_pointer_makes_the_kind_unusable() {
+        for bad in [
+            json!([{"name": "Bad", "from": "/a", "key_field": "name"}]),
+            json!([{"name": "a", "from": "a", "key_field": "name"}]),
+            json!([{"name": "a", "from": "/a", "key_field": ""}]),
+            json!([
+                {"name": "a", "from": "/a", "key_field": "n"},
+                {"name": "a", "from": "/b", "key_field": "n"}
+            ]),
+        ] {
+            assert!(resolve_decl("capability_report", with("collections", bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_stale_reasons_sentence_stays_in_detail_and_its_code_is_the_reason() {
+        for (sentence, code) in [
+            ("the host restarted since this report", "host_restarted"),
+            (
+                "node policy generation is now a, not b",
+                "policy_generation_changed",
+            ),
+            (
+                "the current node policy generation is unreadable",
+                "policy_generation_unreadable",
+            ),
+            ("anything else, /home/x", "stale"),
+        ] {
+            assert_eq!(stale_code(sentence), code);
+        }
+    }
+
+    #[test]
+    fn a_failed_read_has_no_signer_standing_and_no_signing_principal() {
+        let kind = usable(declaration());
+        let verify = verify_object(&kind, &Found::Absent);
+        assert!(verify["signer_status"].is_null());
+        assert!(verify.get("signing_principal").is_none());
     }
 
     #[test]
@@ -964,5 +1378,71 @@ mod tests {
         );
         assert_eq!(answer["verify"]["status"], "unverified_kind");
         assert!(answer.get("body").is_none());
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn shown(verified: bool, truncated: bool) -> Value {
+        let coverage = record_coverage(verified, &json!({ "truncated": truncated }));
+        serde_json::to_value(&coverage).unwrap()
+    }
+
+    #[test]
+    fn a_verified_record_read_in_full_is_complete() {
+        let value = shown(true, false);
+        assert_eq!(value["state"], "complete");
+        assert_eq!(value["reason"], Value::Null);
+    }
+
+    #[test]
+    fn a_verified_record_with_a_cut_body_is_partial() {
+        let value = shown(true, true);
+        assert_eq!(value["state"], "partial");
+        assert_eq!(value["reason"], "body_truncated");
+    }
+
+    #[test]
+    fn a_record_that_failed_verification_is_partial_whatever_its_body() {
+        for truncated in [false, true] {
+            let value = shown(false, truncated);
+            assert_eq!(value["state"], "partial");
+            assert_eq!(value["reason"], "record_unverified");
+        }
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    fn failed(code: &'static str) -> Found {
+        Found::Failed {
+            code,
+            message: "m".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_changed_failure_never_shares_a_revision_with_an_earlier_one() {
+        let a = record_tip(&failed("record_oversized"), None).unwrap();
+        let b = record_tip(&failed("record_unreadable"), None).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, record_tip(&Found::Absent, None).unwrap());
+        let one = revision_of("records_get", "auth", &[("record", a.as_str())], "f");
+        let two = revision_of("records_get", "auth", &[("record", b.as_str())], "f");
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn a_served_unverified_body_is_part_of_the_tip() {
+        let found = failed("record_unverified");
+        let first = record_tip(&found, Some(&json!({"a": 1}))).unwrap();
+        let second = record_tip(&found, Some(&json!({"a": 2}))).unwrap();
+        let none = record_tip(&found, None).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, none);
     }
 }

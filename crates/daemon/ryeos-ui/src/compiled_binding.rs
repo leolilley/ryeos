@@ -14,7 +14,7 @@ use serde_json::Value;
 use ryeos_api::surface_views::{
     EffectiveUiItemIdentity, EmbeddedSurfaceIdentity, EmbeddedViewIdentity,
 };
-use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{SeatClass, UiSeatReadsPolicy};
+use ryeos_node_runtime::node_policy::sections::read_disclosure::ReadDisclosurePolicy;
 
 /// Informational summary derived from the compiled grant. It is never an
 /// authorization input.
@@ -232,10 +232,8 @@ pub struct BindingCompileContext<'a> {
     /// authored in project space may bind as sources. The caller loads it
     /// from signed bundle-space data; nothing a project supplies reaches it.
     pub project_source_ceiling: &'a [String],
-    /// The node's signed seat read policy, and the class of the seat this
-    /// binding is compiled for.
-    pub seat_reads: &'a UiSeatReadsPolicy,
-    pub seat_class: SeatClass,
+    /// The node's signed seat read policy.
+    pub seat_reads: &'a ReadDisclosurePolicy,
 }
 
 /// Name of the refusal for a source a project-authored item binds outside
@@ -326,8 +324,7 @@ struct OwnerGrant<'a> {
     project_source_ceiling: &'a [String],
     caller_scopes: &'a [String],
     has_project: bool,
-    seat_reads: &'a UiSeatReadsPolicy,
-    seat_class: SeatClass,
+    seat_reads: &'a ReadDisclosurePolicy,
 }
 
 impl OwnerGrant<'_> {
@@ -337,7 +334,6 @@ impl OwnerGrant<'_> {
     fn seat_read_refusal(&self, target: &CompiledUiTarget) -> Option<String> {
         crate::seat_read_policy::decide(
             self.seat_reads,
-            self.seat_class,
             &target.identity.canonical_ref,
             &target.parameter_schema,
             None,
@@ -473,7 +469,6 @@ impl SessionCompiledUiBinding {
             caller_scopes: context.caller_scopes,
             has_project: context.project_root.is_some(),
             seat_reads: context.seat_reads,
-            seat_class: context.seat_class,
         };
         let surface_grant = grant_for(surface_authority);
 
@@ -1462,17 +1457,22 @@ mod tests {
 
     /// The seat read policy the compile tests run under: one entry, for the
     /// one read service the stand-in registries declare.
-    fn test_seat_reads() -> &'static UiSeatReadsPolicy {
-        static POLICY: std::sync::LazyLock<UiSeatReadsPolicy> = std::sync::LazyLock::new(|| {
+    fn test_seat_reads() -> &'static ReadDisclosurePolicy {
+        static POLICY: std::sync::LazyLock<ReadDisclosurePolicy> = std::sync::LazyLock::new(|| {
             serde_json::from_value(serde_json::json!({
                 "schema": 1,
                 "reads": [{
                     "target": "service:test/read",
-                    "classes": ["local_operator", "hosted_principal"],
                     "keep": ["/value"],
                     "max_result_bytes": 1024,
                     "max_items": 10
-                }]
+                },
+                // The UI plane has no exemption: a field service a seat reads
+                // is admitted by an entry like any other.
+                {"target": "service:ui/ryeos-ui/field/project"},
+                {"target": "service:ui/ryeos-ui/field/runs"},
+                {"target": "service:ui/ryeos-ui/field/execution"},
+                {"target": "service:ui/ryeos-ui/field/definition"}]
             }))
             .expect("test seat reads")
         });
@@ -1503,7 +1503,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -1590,7 +1589,6 @@ mod tests {
             node_policy_generation_digest: "policy:test",
             project_source_ceiling: &[],
             seat_reads: test_seat_reads(),
-            seat_class: SeatClass::LocalOperator,
             identities: EmbeddedSurfaceIdentity {
                 view_sets: Default::default(),
                 request_engine_generation_identity: "engine:test".into(),
@@ -1705,7 +1703,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -1787,7 +1784,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -1940,7 +1936,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling,
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -2565,7 +2560,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -2797,7 +2791,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -3091,7 +3084,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: test_seat_reads(),
-                seat_class: SeatClass::LocalOperator,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets,
                     request_engine_generation_identity: "engine:test".into(),
@@ -3171,30 +3163,25 @@ mod tests {
 
     // ── Seat read policy ────────────────────────────────────────────────
 
-    fn reads_policy(entries: Vec<Value>) -> UiSeatReadsPolicy {
-        let policy: UiSeatReadsPolicy =
+    fn reads_policy(entries: Vec<Value>) -> ReadDisclosurePolicy {
+        let policy: ReadDisclosurePolicy =
             serde_json::from_value(serde_json::json!({"schema": 1, "reads": entries})).unwrap();
         policy.validate().unwrap();
         policy
     }
 
-    fn read_entry(target: &str, classes: Value) -> Value {
+    fn read_entry(target: &str) -> Value {
         serde_json::json!({
             "target": target,
-            "classes": classes,
             "keep": ["/value"],
             "max_result_bytes": 1024,
             "max_items": 10
         })
     }
 
-    /// Compile `surface` under `policy` for a seat of `class`, with the
+    /// Compile `surface` under `policy` for a seat, with the
     /// stand-in registry: a service whose ref ends `/read` is read-only.
-    fn compile_under_reads(
-        surface: &Value,
-        policy: &UiSeatReadsPolicy,
-        class: SeatClass,
-    ) -> CompiledUiBinding {
+    fn compile_under_reads(surface: &Value, policy: &ReadDisclosurePolicy) -> CompiledUiBinding {
         let view_ref = "view:test/input";
         SessionCompiledUiBinding::compile(
             BindingCompileContext {
@@ -3206,7 +3193,6 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 seat_reads: policy,
-                seat_class: class,
                 identities: EmbeddedSurfaceIdentity {
                     view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
@@ -3237,11 +3223,7 @@ mod tests {
 
     #[test]
     fn a_read_the_policy_has_no_entry_for_is_attenuated_with_its_reason() {
-        let binding = compile_under_reads(
-            &surface(serde_json::json!([])),
-            &reads_policy(vec![]),
-            SeatClass::HostedPrincipal,
-        );
+        let binding = compile_under_reads(&surface(serde_json::json!([])), &reads_policy(vec![]));
         assert!(binding.sources.is_empty(), "{:?}", binding.sources);
         assert!(
             reason_of(&binding, "source:view:test/input:default").contains("seat_read_no_entry")
@@ -3252,39 +3234,25 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_admits_exactly_the_classes_it_names() {
-        let policy = reads_policy(vec![read_entry(
-            "service:test/read",
-            serde_json::json!(["local_operator"]),
-        )]);
+    fn an_entry_admits_the_read_it_names() {
+        let policy = reads_policy(vec![read_entry("service:test/read")]);
         let surface = surface(serde_json::json!([]));
-        let local = compile_under_reads(&surface, &policy, SeatClass::LocalOperator);
-        assert_eq!(local.sources.len(), 2, "{:?}", local.attenuated);
+        let compiled = compile_under_reads(&surface, &policy);
+        assert_eq!(compiled.sources.len(), 2, "{:?}", compiled.attenuated);
         assert!(
-            local
+            compiled
                 .attenuated
                 .iter()
                 .all(|entry| !entry.reason.contains("seat_read"))
-        );
-        let hosted = compile_under_reads(&surface, &policy, SeatClass::HostedPrincipal);
-        assert!(hosted.sources.is_empty());
-        assert!(
-            reason_of(&hosted, "source:view:test/input:default").contains("seat_read_no_entry")
         );
     }
 
     #[test]
     fn an_entry_naming_an_undeclared_parameter_attenuates_the_read() {
-        let mut entry = read_entry(
-            "service:test/read",
-            serde_json::json!(["local_operator", "hosted_principal"]),
-        );
+        let mut entry = read_entry("service:test/read");
         entry["deny_params"] = serde_json::json!(["not_a_parameter"]);
-        let binding = compile_under_reads(
-            &surface(serde_json::json!([])),
-            &reads_policy(vec![entry]),
-            SeatClass::LocalOperator,
-        );
+        let binding =
+            compile_under_reads(&surface(serde_json::json!([])), &reads_policy(vec![entry]));
         assert!(binding.sources.is_empty());
         assert!(
             reason_of(&binding, "source:view:test/input:default")
@@ -3293,7 +3261,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_plane_service_needs_no_entry_and_a_lookalike_does() {
+    fn a_ui_plane_service_needs_an_entry_like_any_other_read() {
         let mut authored = surface(serde_json::json!([]));
         authored["views"]["view:test/input"]["sources"] = serde_json::json!({
             "wrapper": {"ref": "service:ui/ryeos-ui/test/read", "params": {}},
@@ -3304,15 +3272,22 @@ mod tests {
             "ryeos.execute.service.test/*",
             "ryeos.execute.service.ui/*",
         ]);
-        let binding =
-            compile_under_reads(&authored, &reads_policy(vec![]), SeatClass::HostedPrincipal);
-        let bound = &binding.sources["view:test/input"];
-        // The stand-in registry reads only refs ending `/read`.
+        let none = compile_under_reads(&authored, &reads_policy(vec![]));
+        assert!(
+            none.sources
+                .get("view:test/input")
+                .is_none_or(|bound| !bound.contains_key("wrapper")),
+            "{:?}",
+            none.sources
+        );
+        assert!(reason_of(&none, "source:view:test/input:wrapper").contains("seat_read_no_entry"));
+        let with_entry = compile_under_reads(
+            &authored,
+            &reads_policy(vec![read_entry("service:ui/ryeos-ui/test/read")]),
+        );
+        let bound = &with_entry.sources["view:test/input"];
         assert!(bound.contains_key("wrapper"));
         assert!(!bound.contains_key("lookalike"));
-        assert!(
-            reason_of(&binding, "source:view:test/input:lookalike").contains("seat_read_no_entry")
-        );
     }
 
     #[test]
@@ -3322,7 +3297,7 @@ mod tests {
             "id": "peek", "producer": "tokens",
             "invoke": {"plane": "rye", "ref": "service:test/peek/read", "args": {}}
         }]);
-        let none = compile_under_reads(&authored, &reads_policy(vec![]), SeatClass::LocalOperator);
+        let none = compile_under_reads(&authored, &reads_policy(vec![]));
         assert!(
             none.affordances
                 .get("view:test/input")

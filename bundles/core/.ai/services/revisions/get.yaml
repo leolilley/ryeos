@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T11:27:27Z:1b53f2302f8619c19ab42939e119d58c36dc8862a9a23c4ccf050a80386f48a3:+ivP+Wb5U9GPkEy/vXip8CVeoySt4y+avcuHUNbGPQjGFcgsu2Q7K+sppqCe35zTEBYZ86/dDJKAUPFFuuaDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-24T18:46:54Z:ee3bb7de7f0cd83c9fa96e6ba854151f50c67dfc18b40ada0d4962ebcf14a2fa:+J+eAqmTXjz1rYE/CzQxzA9N6OmOLY0ntcWgF0WG0AEF8E7Jj3p2aN9xUiEM6T3E7cnQ+qZp+meSnN/LsX+EAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.get
 availability: both
@@ -14,6 +14,7 @@ schema:
 description: "Read one signed revision record of a project item with its signed item bytes and what was checked. A record that fails verification is withheld"
 disclosure:
   principal:
+    - "/file"
     - "/item_ref"
     - "/total"
     - "/sound"
@@ -43,9 +44,9 @@ disclosure:
     - "/record/provenance/target_ref"
     - "/record/provenance/content_digest"
   free_text:
-    - "/file"
     - "/record/verify/reason"
-    - "/record/body/previous"
-    - "/record/body/content"
-  max_items: 256
-  max_result_bytes: 524288
+  interim_free_text:
+    - "/record/body/previous"  # removed by: m4
+    - "/record/body/content"  # removed by: m4
+  max_items: 16
+  max_result_bytes: 1048576

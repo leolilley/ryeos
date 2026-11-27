@@ -121,6 +121,23 @@ pub async fn handle(
         )
         .into());
     }
+    // A live schedule stores the path it will run in. The registering key must
+    // be allowed to run a live project there now, and is judged again at every
+    // fire, so a stored path never outlives the right to use it.
+    let admitted_project_root = match (&req.execution_policy.project, req.project_root.as_deref()) {
+        (
+            ryeos_engine::execution_contract::ProjectExecutionPolicy::LiveDirect { .. },
+            Some(root),
+        ) => {
+            let admitted = ryeos_app::live_project_path::admit_handler_live_path(
+                &state,
+                &ctx,
+                std::path::Path::new(root),
+            )?;
+            Some(admitted.canonical.display().to_string())
+        }
+        _ => None,
+    };
 
     if req.schedule_type == "at"
         && ryeos_scheduler::crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
@@ -299,7 +316,7 @@ pub async fn handle(
         overlap_policy: req.overlap_policy.clone(),
         lateness_grace_secs: req.lateness_grace_secs,
         enabled: req.enabled,
-        project_root: req.project_root.clone(),
+        project_root: admitted_project_root.or_else(|| req.project_root.clone()),
         registered_at,
         execution: ScheduleExecution {
             authority,

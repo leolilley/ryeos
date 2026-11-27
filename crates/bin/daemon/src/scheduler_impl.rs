@@ -187,6 +187,21 @@ impl AppSchedulerContext {
                 let root = Self::project_root(spec)?;
                 let state = self.0.as_ref().clone();
                 let principal = spec.execution.principal_id().to_owned();
+                // The path was admitted when the schedule was registered. It is
+                // judged again now against the registering key's authority, so a
+                // stored path never outlives the right to use it. The key is the
+                // operator only if it is the node's configured local operator.
+                let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                    &state.config.app_root,
+                )
+                .map(|operator| operator.principal_id() == principal.as_str())
+                .unwrap_or(false);
+                ryeos_app::live_project_path::admit_live_project_path(
+                    &state, &principal, operator, &root,
+                )
+                .map_err(|refusal| {
+                    anyhow::anyhow!("scheduled_live_project_not_admitted: {refusal}")
+                })?;
                 let checkout_id = format!("schedule-live-{thread_id}");
                 let context = ryeos_api::routes::response_modes::execute_mode::resolve_project_context_off_thread(
                     ryeos_api::routes::response_modes::execute_mode::ResolveProjectContextRequest {

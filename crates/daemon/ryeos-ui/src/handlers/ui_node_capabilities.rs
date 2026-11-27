@@ -1,23 +1,11 @@
-//! `ui.ryeos.node.capabilities` — what this node contains and proves, as
-//! facts, and `ui.ryeos.node.capabilities.wording` — the signed words for
-//! those facts.
-//!
-//! The facts come from the node's signed capability report, the one launch
-//! admission judges: it is read back, its digest and this node's signature
-//! verified, and refused unless it still describes the running node. The
-//! response carries the report's signer, digest and the time the node
-//! measured it, its host class, its proof rows (each with the grade,
-//! provider and basis the report recorded, or the reason it records for a
-//! missing one) and whether its floor was met. The posture is the report's own
-//! `isolation:enforced` row; nothing is recomputed from `node/status`. The
-//! caller's granted capabilities ride along unchanged. The response holds
-//! codes and values only; it holds no sentence of this module's own.
+//! `ui.ryeos.node.capabilities.wording` — the signed words for the codes a
+//! client shows about a node's capabilities.
 //!
 //! The sentence and tone for each code come from the signed config
-//! `config:ryeos/ui/node-capability-wording`, served by the wording service.
-//! A client resolves a code against that config and falls back to the
-//! config's own fallback for a code it does not list, so a new host class,
-//! proof name or grant needs a config edit and no code change.
+//! `config:ryeos/ui/node-capability-wording`. A client resolves a code against
+//! that config and falls back to the config's own fallback for a code it does
+//! not list, so a new host class, proof name or grant needs a config edit and
+//! no code change.
 //!
 //! This module decides no meaning. The wording handler verifies the config,
 //! refuses an unknown field, an empty sentence or a tone outside the closed
@@ -27,21 +15,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lillux::process_control::HostCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_app::node_requirement_admission::{
-    NodeReportFacts, current_node_report_facts, is_report_unreadable,
-};
 use ryeos_app::state::AppState;
-use ryeos_engine::isolation::ISOLATION_ENFORCED;
 use ryeos_executor::executor::ServiceAvailability;
 
-pub const FACTS_SCHEMA: &str = "ryeos.ui.node.capabilities.v1";
 pub const WORDING_CONTRACT: &str = "ryeos.ui.node_capability_wording.v1";
 pub const CONFIG_REF: &str = "config:ryeos/ui/node-capability-wording";
 const CONFIG_PATH: &str = "ryeos/ui/node-capability-wording.yaml";
@@ -49,152 +31,9 @@ const CONFIG_PATH: &str = "ryeos/ui/node-capability-wording.yaml";
 /// The tones a wording entry may name.
 pub const TONES: [&str; 5] = ["none", "good", "warn", "danger", "accent"];
 
-/// Every report state the facts service can emit.
-pub const REPORT_STATES: [&str; 4] = ["present", "not_composed", "refused", "unreadable"];
-/// Every isolation mode the facts service can emit.
-pub const ISOLATION_MODES: [&str; 2] = ["enforce", "disabled"];
-/// Every proof state the facts service can emit.
-pub const PROOF_STATES: [&str; 2] = ["provided", "missing"];
-/// Every proof grade the report grades a proof with.
-pub const PROOF_GRADES: [&str; 4] = ["measured", "provider_attested", "peer_attested", "trusted"];
-
-/// What reading the node's signed capability report came to.
-pub enum ReportOutcome {
-    /// The report stands.
-    Present(Box<NodeReportFacts>),
-    /// This node was composed with no report reader.
-    NotComposed,
-    /// A report is missing, stale, or does not verify; nothing this node does
-    /// while it runs changes that. The text is the node's reason.
-    Refused(String),
-    /// The report could not be read at this moment.
-    Unreadable(String),
-}
-
-/// Everything the facts are made from.
-pub struct FactInputs<'a> {
-    pub report: ReportOutcome,
-    pub granted: &'a [String],
-}
-
-/// The facts response for `inputs`.
-pub fn facts(inputs: FactInputs<'_>) -> Value {
-    let mut response = json!({
-        "schema_version": FACTS_SCHEMA,
-        "host": null,
-        "isolation": { "mode": null },
-        "floor": null,
-        "proofs": [],
-        "granted": inputs.granted,
-    });
-    let report = match &inputs.report {
-        ReportOutcome::Present(report) => {
-            response["host"] = json!({
-                "class": report.host_class,
-                "profile": report.profile,
-                "kernel": report.kernel_kind,
-            });
-            response["isolation"]["mode"] = posture(&report.capabilities);
-            response["floor"] = json!({
-                "admitted": report.floor_admitted,
-                "unmet": report.floor_unmet,
-            });
-            response["proofs"] = json!(proofs(&report.capabilities));
-            json!({
-                "state": "present",
-                "verified": true,
-                "signer": report.signer,
-                "digest": report.digest,
-                "measured_at": report.generated_at,
-            })
-        }
-        ReportOutcome::NotComposed => json!({ "state": "not_composed" }),
-        ReportOutcome::Refused(reason) => json!({ "state": "refused", "reason": reason }),
-        ReportOutcome::Unreadable(reason) => json!({ "state": "unreadable", "reason": reason }),
-    };
-    response["report"] = report;
-    response
-}
-
-/// The report's own isolation decision as a code: `enforce` when it records
-/// `isolation:enforced` as provided, `disabled` when it records it as
-/// refused, and nothing when it records neither.
-fn posture(view: &HostCapabilities) -> Value {
-    if view.provided.contains_key(ISOLATION_ENFORCED) {
-        json!("enforce")
-    } else if view.missing.contains_key(ISOLATION_ENFORCED) {
-        json!("disabled")
-    } else {
-        Value::Null
-    }
-}
-
-/// One row per capability name the report records, sorted by name.
-fn proofs(view: &HostCapabilities) -> Vec<Value> {
-    let mut rows: BTreeMap<&str, Value> = BTreeMap::new();
-    for (name, reason) in &view.missing {
-        rows.insert(
-            name,
-            json!({ "name": name, "state": "missing", "reason": reason }),
-        );
-    }
-    for (name, evidence) in &view.provided {
-        rows.insert(
-            name,
-            json!({
-                "name": name,
-                "state": "provided",
-                "grade": evidence.source.as_str(),
-                "provider": evidence.provider,
-                "basis": evidence.basis,
-            }),
-        );
-    }
-    rows.into_values().collect()
-}
-
-fn read_report(state: &AppState) -> ReportOutcome {
-    match current_node_report_facts(state) {
-        None => ReportOutcome::NotComposed,
-        Some(Ok(report)) => ReportOutcome::Present(Box::new(report)),
-        Some(Err(error)) if is_report_unreadable(&error) => {
-            ReportOutcome::Unreadable(format!("{error:#}"))
-        }
-        Some(Err(error)) => ReportOutcome::Refused(format!("{error:#}")),
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitiesRequest {}
-
-pub async fn handle_facts(
-    params: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let _request: CapabilitiesRequest = serde_json::from_value(params)
-        .map_err(|error| HandlerError::BadRequest(format!("invalid request: {error}")))?;
-    let granted = ctx.scopes.clone();
-    let value = tokio::task::spawn_blocking(move || {
-        facts(FactInputs {
-            report: read_report(&state),
-            granted: &granted,
-        })
-    })
-    .await
-    .map_err(|error| HandlerError::Internal(format!("read node capabilities: {error}")))?;
-    Ok(value)
-}
-
-pub const FACTS_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/node/capabilities",
-    endpoint: "ui.ryeos.node.capabilities",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle_facts(params, ctx, state).await }),
-};
 
 /// One sentence, the tone it is drawn in, and optionally a longer line that
 /// says what it means.
@@ -221,6 +60,12 @@ pub struct Wording {
     pub grades: BTreeMap<String, Entry>,
     pub guarantees: BTreeMap<String, Entry>,
     pub grants: BTreeMap<String, Entry>,
+    /// The coverage word of each collection of a record read.
+    pub coverage_states: BTreeMap<String, Entry>,
+    /// The verification status of a record read.
+    pub verify_states: BTreeMap<String, Entry>,
+    /// The reason code of a record that failed or is stale.
+    pub verify_reasons: BTreeMap<String, Entry>,
 }
 
 impl Wording {
@@ -234,6 +79,9 @@ impl Wording {
                 &self.grades,
                 &self.guarantees,
                 &self.grants,
+                &self.coverage_states,
+                &self.verify_states,
+                &self.verify_reasons,
             ]
             .into_iter()
             .flat_map(BTreeMap::values),
@@ -307,158 +155,11 @@ pub const WORDING_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::process_control::{CapabilityEvidence, ProofSource};
-    use ryeos_app::node_requirement_admission::NodeReportFacts;
 
     fn shipped() -> Value {
         let path = ryeos_engine::test_support::workspace_root()
             .join("bundles/ryeos-ui/.ai/config/ryeos/ui/node-capability-wording.yaml");
         serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-    }
-
-    fn view(provided: &[(&str, ProofSource)], missing: &[(&str, &str)]) -> HostCapabilities {
-        let mut view = HostCapabilities::default();
-        for (name, source) in provided {
-            view.provided.insert(
-                (*name).to_owned(),
-                CapabilityEvidence {
-                    source: source.clone(),
-                    provider: "host".into(),
-                    basis: "probed".into(),
-                },
-            );
-        }
-        for (name, reason) in missing {
-            view.missing
-                .insert((*name).to_owned(), (*reason).to_owned());
-        }
-        view
-    }
-
-    fn granted() -> Vec<String> {
-        vec!["ryeos.execute.service.projects/open".to_owned()]
-    }
-
-    fn report(
-        host_class: &str,
-        provided: &[(&str, ProofSource)],
-        missing: &[(&str, &str)],
-    ) -> ReportOutcome {
-        ReportOutcome::Present(Box::new(NodeReportFacts {
-            signer: "fp:node".into(),
-            digest: "sha256:abc".into(),
-            generated_at: "2026-11-20T00:00:00Z".into(),
-            host_class: host_class.into(),
-            profile: Some("core".into()),
-            kernel_kind: "native".into(),
-            floor_admitted: missing.is_empty(),
-            floor_unmet: missing
-                .iter()
-                .map(|(name, reason)| ((*name).to_owned(), (*reason).to_owned()))
-                .collect(),
-            capabilities: view(provided, missing),
-        }))
-    }
-
-    #[test]
-    fn a_contained_local_node_reports_its_measured_proofs_and_signer() {
-        let granted = granted();
-        let value = facts(FactInputs {
-            report: report(
-                "local",
-                &[
-                    ("isolation:enforced", ProofSource::Measured),
-                    ("isolation:namespaces", ProofSource::Measured),
-                ],
-                &[],
-            ),
-            granted: &granted,
-        });
-        assert_eq!(value["schema_version"], FACTS_SCHEMA);
-        assert_eq!(value["report"]["state"], "present");
-        assert_eq!(value["report"]["verified"], true);
-        assert_eq!(value["report"]["signer"], "fp:node");
-        assert_eq!(value["report"]["digest"], "sha256:abc");
-        assert_eq!(value["report"]["measured_at"], "2026-11-20T00:00:00Z");
-        assert_eq!(value["host"]["class"], "local");
-        assert_eq!(value["host"]["kernel"], "native");
-        assert_eq!(value["isolation"]["mode"], "enforce");
-        assert_eq!(value["floor"]["admitted"], true);
-        assert_eq!(value["proofs"][1]["name"], "isolation:namespaces");
-        assert_eq!(value["proofs"][1]["state"], "provided");
-        assert_eq!(value["proofs"][1]["grade"], "measured");
-        assert_eq!(value["granted"], json!(granted));
-    }
-
-    #[test]
-    fn a_hosted_node_that_is_not_contained_names_what_it_lacks() {
-        let value = facts(FactInputs {
-            report: report(
-                "hosted",
-                &[("storage:durable_root", ProofSource::ProviderAttested)],
-                &[
-                    (
-                        "isolation:enforced",
-                        "isolation is not enforced on this node",
-                    ),
-                    ("isolation:namespaces", "the host gives no namespace rights"),
-                ],
-            ),
-            granted: &[],
-        });
-        assert_eq!(value["host"]["class"], "hosted");
-        assert_eq!(value["isolation"]["mode"], "disabled");
-        assert_eq!(value["floor"]["admitted"], false);
-        assert_eq!(
-            value["floor"]["unmet"]["isolation:namespaces"],
-            "the host gives no namespace rights"
-        );
-        let proofs = value["proofs"].as_array().unwrap();
-        assert_eq!(proofs.len(), 3);
-        assert_eq!(proofs[1]["name"], "isolation:namespaces");
-        assert_eq!(proofs[1]["state"], "missing");
-        assert_eq!(proofs[2]["grade"], "provider_attested");
-        assert_eq!(value["granted"], json!([]));
-    }
-
-    #[test]
-    fn a_report_that_says_nothing_of_enforcement_carries_no_posture() {
-        let value = facts(FactInputs {
-            report: report("local_unconfined", &[], &[]),
-            granted: &[],
-        });
-        assert_eq!(value["host"]["class"], "local_unconfined");
-        assert_eq!(value["isolation"]["mode"], Value::Null);
-        assert_eq!(value["proofs"], json!([]));
-    }
-
-    #[test]
-    fn a_report_that_does_not_stand_carries_no_host_or_proofs() {
-        for (outcome, state, reason) in [
-            (ReportOutcome::NotComposed, "not_composed", None),
-            (
-                ReportOutcome::Refused("stale".into()),
-                "refused",
-                Some("stale"),
-            ),
-            (
-                ReportOutcome::Unreadable("io".into()),
-                "unreadable",
-                Some("io"),
-            ),
-        ] {
-            let value = facts(FactInputs {
-                report: outcome,
-                granted: &[],
-            });
-            assert_eq!(value["report"]["state"], state);
-            assert_eq!(
-                value["report"].get("reason").and_then(Value::as_str),
-                reason
-            );
-            assert_eq!(value["host"], Value::Null);
-            assert_eq!(value["proofs"], json!([]));
-        }
     }
 
     #[test]
@@ -494,35 +195,14 @@ mod tests {
         assert!(response_from_config(json!([])).is_err());
     }
 
-    /// The shipped wording words every closed code the facts service can emit,
-    /// so a code added there without a sentence here fails this test.
+    /// Every table entry of the shipped wording has a tone from the closed
+    /// list, and the config reads as a response.
     #[test]
-    fn the_shipped_wording_covers_every_code_the_facts_service_can_emit() {
+    fn the_shipped_wording_tones_are_all_closed_codes() {
         let wording = wording_from_config(shipped()).unwrap();
-        for (table, codes, name) in [
-            (&wording.report_states, &REPORT_STATES[..], "report_states"),
-            (
-                &wording.isolation_modes,
-                &ISOLATION_MODES[..],
-                "isolation_modes",
-            ),
-            (&wording.proof_states, &PROOF_STATES[..], "proof_states"),
-            (&wording.grades, &PROOF_GRADES[..], "grades"),
-        ] {
-            for code in codes {
-                assert!(
-                    table.contains_key(*code),
-                    "{name} has no sentence for {code}"
-                );
-            }
-        }
-        for source in [
-            ProofSource::Measured,
-            ProofSource::ProviderAttested,
-            ProofSource::PeerAttested,
-            ProofSource::Trusted,
-        ] {
-            assert!(PROOF_GRADES.contains(&source.as_str()));
+        assert!(response_from_config(shipped()).is_ok());
+        for entry in wording.entries() {
+            assert!(TONES.contains(&entry.tone.as_str()), "{}", entry.tone);
         }
         // The host classes the shipped isolation profiles declare.
         for class in ["hosted", "local", "local_unconfined"] {
@@ -541,5 +221,43 @@ mod tests {
         ] {
             assert!(wording.guarantees.contains_key(name), "{name}");
         }
+    }
+
+    #[test]
+    fn the_shipped_wording_covers_every_coverage_word_and_verify_code_and_a_missing_one_reads_not_known()
+     {
+        let wording = wording_from_config(shipped()).unwrap();
+        for word in [
+            "present",
+            "not_reported",
+            "not_a_map",
+            "key_field_collision",
+        ] {
+            assert!(wording.coverage_states.contains_key(word), "{word}");
+        }
+        for status in ["verified", "failed", "unverified_kind"] {
+            assert!(wording.verify_states.contains_key(status), "{status}");
+        }
+        for reason in [
+            "absent",
+            "unreadable",
+            "oversized",
+            "stale_format",
+            "digest_mismatch",
+            "wrong_signer",
+            "bad_signature",
+            "host_restarted",
+            "policy_generation_changed",
+            "policy_generation_unreadable",
+            "stale",
+        ] {
+            assert!(wording.verify_reasons.contains_key(reason), "{reason}");
+        }
+        // A code no table lists reads as the fallback, which says "not known".
+        assert!(
+            wording.fallback.label.to_lowercase().contains("not known"),
+            "{}",
+            wording.fallback.label
+        );
     }
 }

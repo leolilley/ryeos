@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T07:28:13Z:f5b1ea8360acd51b379d5d9a1cde625fe9b11032adf4d63d4ab8110a9be68dba:UU01JxD+h9cXi8PFihl20ahzQ9EAsHGaBNSPtuGyFZpmdbrb5JJGfQeDTW8x+Y4R+59dP2107koFpR/IL4bnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-25T18:56:52Z:4843bec3a89526ef4a240a91446b30906c59980586036f3b3831710bdd97a21e:BYuzfex8hT5+FPsUT22Xqv4hI51iUWYOxiN+86xjEGI4L9kklC8wz0D/gXBKaJc2Hl/9W94dEUFpjRxHToCkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone the node moment shows for each fact the node capability service reports.
@@ -19,7 +19,7 @@ description: The sentence and tone the node moment shows for each fact the node 
 # Tone is one of none, good, warn, danger, accent. A sentence is plain, in
 # normal case, and says what the node does or cannot show.
 fallback:
-  label: This node has not said.
+  label: Not known.
   tone: none
 report_states:
   present:
@@ -147,3 +147,63 @@ grants:
   ryeos.execute.service.node/status:
     label: Read this node's status
     tone: none
+coverage_states:
+  present:
+    label: Listed.
+    tone: none
+  not_reported:
+    label: Not known.
+    detail: The node's report does not carry this list.
+    tone: warn
+  not_a_map:
+    label: Not known.
+    detail: The node's report carries this list in a shape that cannot be read.
+    tone: warn
+  key_field_collision:
+    label: Listed, with a name clash.
+    detail: Two entries share a name, so one was kept.
+    tone: warn
+verify_states:
+  verified:
+    label: Checked and signed by this node.
+    tone: good
+  failed:
+    label: Could not be checked.
+    tone: warn
+  unverified_kind:
+    label: This kind of record cannot be checked here.
+    tone: warn
+verify_reasons:
+  absent:
+    label: The node has not recorded one yet.
+    tone: warn
+  unreadable:
+    label: It could not be read just now.
+    tone: warn
+  oversized:
+    label: It is larger than this kind allows.
+    tone: warn
+  stale_format:
+    label: It was written in an older format.
+    tone: warn
+  digest_mismatch:
+    label: It does not match its signature.
+    tone: danger
+  wrong_signer:
+    label: It was not signed by this node.
+    tone: danger
+  bad_signature:
+    label: Its signature does not verify.
+    tone: danger
+  host_restarted:
+    label: The host restarted since it was written.
+    tone: warn
+  policy_generation_changed:
+    label: The node's policy changed since it was written.
+    tone: warn
+  policy_generation_unreadable:
+    label: The node's current policy could not be read.
+    tone: warn
+  stale:
+    label: It is out of date.
+    tone: warn
