@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:31:30Z:c8b1382092b5f1c5c8eac73c870b88ee4e36ca6be53e265c32106179ba74211a:CX+508OZBTgb9fGQpoyu8c3o9PxpGIDcFXqmEIjCP+YJqs1/gscWC06CD6xAd6OmQEHm6YLeCAkDN1YkaGZmDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:43:27Z:e2dc6a5ffe5b19d9cec4f0a8931d84615ddfaaff5270fff0dd54d3d8dc0f981e:ExD8z+mXCzNHdIjag5ZmAeipXGLTSGYG41yL/Phl7xkCE1Pk/02CVPo+soiBMnhAQmQ9MCViuL6lYfXJszaIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -158,9 +158,17 @@ if ! done_step provisioned && ! done_step provision-skipped; then
     fi
 fi
 
-if ! done_step started; then
+# Start by the node's actual state, not the log: a resumed run may find the node stopped.
+status_first_line="$("$ryeos" node status --app-root "$app_root" </dev/null 2>&1 | head -1 || true)"
+if [[ $status_first_line == "initialized, stopped"* ]]; then
     "$ryeos" start --app-root "$app_root" </dev/null
     mark started
 fi
+port="${bind##*:}"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    ss -ltnH "sport = :$port" 2>/dev/null | grep -q "$bind" && break
+    sleep 1
+done
+ss -ltnH "sport = :$port" 2>/dev/null | grep -q "$bind" || { echo "rm-node-up: nothing is listening on $bind after start" >&2; exit 1; }
 "$ryeos" node doctor --app-root "$app_root" </dev/null | tee -a "$base/doctor.log"
 mark doctor
