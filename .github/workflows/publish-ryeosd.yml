@@ -1044,7 +1044,7 @@ jobs:
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
-          RYEOS_PUBLISHER_KEY: ${{ steps.rehearsal.outputs.pem }}
+          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         with:
           source: .
           files: ./docker-bake.release.hcl
