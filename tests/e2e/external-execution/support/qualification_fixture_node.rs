@@ -112,3 +112,35 @@ where
         .join()
         .unwrap();
 }
+
+/// Make `remote_operator` an operator of this node: it reaches a receiver as a
+/// `remote_principal`, which is an operator only if its key speaks for the
+/// owner the receiver's own operator acts for. The state's Engine holds no
+/// node registry, so give it an empty one and pin the link, signed by the
+/// receiver's operator and node and by the remote key.
+pub fn link_remote_operator(
+    state: &mut ryeos_app::state::AppState,
+    remote_operator: &lillux::crypto::SigningKey,
+) {
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    let engine = std::sync::Arc::make_mut(&mut state.engine);
+    engine.trust_store = engine.trust_store.clone().with_succession_chain(&[]);
+    let owner = engine
+        .trust_store
+        .owner_for(&operator.principal_id())
+        .unwrap()
+        .principal
+        .to_string();
+    let link = ryeos_engine::trust::pin_link_for_tests(
+        &state.config.app_root,
+        state.identity.signing_key(),
+        operator.signing_key(),
+        remote_operator,
+        &owner,
+        3600,
+    )
+    .unwrap();
+    engine.trust_store = engine.trust_store.clone().with_key_links(vec![link]);
+}
