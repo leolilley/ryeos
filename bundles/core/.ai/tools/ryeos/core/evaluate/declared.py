@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T17:26:42Z:0c0082f5fa1d9a7b71635bd612ac614063db681d499dbea99cf08a93da796dd8:FXgn+CHNSLJatdntEvpd5ymh2p+thrwlzOSE52wjamwRZR8xH5yujmn28cfkGzKshCiEiJBudQs2v5i65qG4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T21:29:40Z:aeabdf4a9bc4a41d33432a6e8c2adfcecb6b16591732f364f782dc5dfe001f22:z9idVTGE1tVHg8xujn6NpOC+Iu0K9jzP1GhekbYDqKc6ueUmMLCC3G7FMkxWnzJKuLnHgNYThyLVBCO1/ZGBBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/core/evaluate
 #   version: "1.0.0"
@@ -240,6 +240,33 @@ def yaml_refuse_unsafe(data: bytes) -> None:
         raise Refused(f"yaml does not parse ({type(error).__name__})")
 
 
+JSON_DEPTH_CEILING = 128
+
+
+def json_refuse_deep(text: str) -> None:
+    # The depth is measured here so the verdict does not depend on the
+    # interpreter's recursion limit, which differs between Python versions.
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > JSON_DEPTH_CEILING:
+                raise Refused("json is nested too deeply")
+        elif ch in "]}":
+            depth -= 1
+
+
 def check_parses_as(root, spec, ctx):
     limit = spec.get("max_bytes", PARSE_BYTES_DEFAULT)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= PARSE_BYTES_CEILING:
@@ -248,7 +275,11 @@ def check_parses_as(root, spec, ctx):
     kind = spec.get("format")
     if kind == "json":
         try:
-            json.loads(data.decode("utf-8"))
+            text = data.decode("utf-8")
+            json_refuse_deep(text)
+            json.loads(text)
+        except Refused:
+            raise
         except (ValueError, RecursionError, UnicodeDecodeError) as error:
             raise Refused(f"json does not parse ({type(error).__name__})")
     elif kind == "yaml":
