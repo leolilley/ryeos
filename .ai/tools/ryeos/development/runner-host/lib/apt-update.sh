@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-11-27T03:23:53Z:530a257e3f3fc8ab1a2caf47af19641f0841e342d58f964c4779c89d9637e260:Rgh6o6DzwAn9KH8wx1jSwBJI6V77jQeFu1cllS8pkmMO3WVCTOTvjD8sYZ1tN03CueExsLnqmULTLFuj4E0SAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked CI runner helper in the development bundle; lib/ is
+# excluded from Tool resolution, so this is signed source, not an admitted
+# Tool. It grants no RyeOS authority.
+#
 # Refresh the apt package lists on a hosted runner without depending on the
 # runner image's third-party sources.
 #
@@ -9,7 +14,7 @@
 # for ordinary network flakes. Ubuntu's own archives are still required: if the
 # update keeps failing, this fails.
 #
-# Usage: apt-update.sh   (run on the runner; uses sudo unless already root)
+# Usage: .ai/tools/ryeos/development/runner-host/lib/apt-update.sh   (run on the runner; uses sudo unless already root)
 set -euo pipefail
 
 sudo=()

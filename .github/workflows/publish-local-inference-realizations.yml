@@ -55,7 +55,7 @@ jobs:
 
       - name: Install authoring dependencies
         run: |
-          ./scripts/ci/apt-update.sh
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends \
             binutils python3 python3-yaml zstd
 

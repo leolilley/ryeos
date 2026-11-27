@@ -20,7 +20,6 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/ci/pack-bundle-state.sh \
     scripts/ci/prepare-runner.sh \
-    scripts/ci/apt-update.sh \
     scripts/ci/unpack-bundle-state.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
     scripts/ci/test-image-build-cache.sh \
@@ -43,6 +42,7 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/gate.sh \
     tests/e2e/configured-remote/qualify.sh \
     tests/e2e/configured-remote/test_qualification.sh \
+    .ai/tools/ryeos/development/runner-host/lib/apt-update.sh \
     .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh \
     .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh \
     tests/e2e/execute-stream/smoke.sh \

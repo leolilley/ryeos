@@ -27,7 +27,7 @@ jobs:
           toolchain: 1.95.0
       - name: Provision disposable qualification host
         run: |
-          ./scripts/ci/apt-update.sh
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo -n apt-get install -y --no-install-recommends pkg-config libssl-dev jq
           # This selects the namespace-enabled test-host baseline on this
           # disposable Ubuntu VM, not an application fallback or node policy.
