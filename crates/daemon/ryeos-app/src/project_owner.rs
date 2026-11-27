@@ -263,9 +263,19 @@ mod tests {
             admitting_owner_in(&trust, Some(&successor_fp)),
             Some(solo(&root_fp))
         );
-        // No acting key, or a key the registry does not know: nothing to stamp.
+        // No acting key: nothing to stamp. A key the registry has no record of
+        // acts for its own solo principal, as the resolver says everywhere.
         assert_eq!(admitting_owner_in(&trust, None), None);
-        assert_eq!(admitting_owner_in(&trust, Some(&"f".repeat(64))), None);
+        let stranger = "f".repeat(64);
+        assert_eq!(
+            admitting_owner_in(&trust, Some(&stranger)),
+            Some(solo(&stranger))
+        );
+        // A store that never loaded the registry resolves nothing.
+        assert_eq!(
+            admitting_owner_in(&TrustStore::empty(), Some(&successor_fp)),
+            None
+        );
     }
 
     /// A store that never loaded the node's registry cannot say whose
