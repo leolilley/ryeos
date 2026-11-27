@@ -106,3 +106,38 @@ async fn same_kind_passes_validation_but_not_found() {
         "should NOT contain wrong_kind, got: {msg}"
     );
 }
+
+/// A key that is not the node's operator is refused a project path no owner
+/// it speaks for registered, and the answer for an existing unregistered
+/// directory is the same as for one that does not exist: the call does not
+/// say which paths are there.
+#[tokio::test]
+async fn a_non_operator_key_naming_an_unregistered_path_is_refused_like_a_missing_one() {
+    let (_tmp, _state_owner, state) = build_test_state_with_bundles();
+    let existing = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(existing.path().join(".ai")).unwrap();
+    let missing = existing.path().join("no-such-project");
+    let mut answers = Vec::new();
+    for path in [existing.path().to_owned(), missing, "relative/path".into()] {
+        let req: ryeos_api::handlers::items_effective::Request =
+            serde_json::from_value(serde_json::json!({
+                "canonical_ref": "surface:ryeos/ui/base",
+                "project_path": path,
+            }))
+            .unwrap();
+        let ctx = HandlerContext::new("fp:not-the-operator".to_owned(), Vec::new(), true);
+        let err = ryeos_api::handlers::items_effective::handle(req, ctx, Arc::new(state.clone()))
+            .await
+            .expect_err("an unregistered path is refused to a non-operator key");
+        answers.push(format!("{err:#}"));
+    }
+    assert!(
+        answers[0].contains(ryeos_app::live_project_path::LIVE_PROJECT_NOT_REGISTERED_TO_CALLER),
+        "the refusal is the fixed one: {}",
+        answers[0]
+    );
+    assert!(
+        answers.iter().all(|answer| answer == &answers[0]),
+        "the refusals differ: {answers:?}"
+    );
+}
