@@ -1927,9 +1927,19 @@ mod original_window_tests {
         let adopted = adopt_original_bound(
             &limit,
             cleanup,
-            MonotonicDeadline::after(Duration::from_millis(100)),
+            // Far enough out that a stalled runner cannot expire it before the
+            // adoption above finishes; the contact cutoff is then waited for by
+            // observation, never by a fixed sleep.
+            MonotonicDeadline::after(Duration::from_millis(500)),
         );
-        std::thread::sleep(Duration::from_millis(120));
+        let waited = Instant::now();
+        while adopted.original_service_parts().is_ok() {
+            assert!(
+                waited.elapsed() < Duration::from_secs(8),
+                "the contact cutoff never closed the service window"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(adopted.original_service_parts().is_err());
         assert!(matches!(
             adopted.original_cleanup_window().unwrap(),
