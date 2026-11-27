@@ -746,3 +746,78 @@ fn first_regular_file(root: &Path) -> PathBuf {
     }
     find(root).expect("the staged tree holds no regular file")
 }
+
+/// A puller whose signed `bundle_staging` policy member states 1-byte caps:
+/// the member is rewritten and re-signed with the fixture's node key after the
+/// profile's generation is written and before initialization is sealed, so the
+/// node loads it through the real policy load.
+async fn start_puller_with_tiny_staging_caps() -> (DaemonHarness, FastFixture) {
+    DaemonHarness::start_fast_core_knowledge_with_node_and_user_keys_and_plant(
+        SigningKey::from_bytes(&[0x5d; 32]),
+        SigningKey::from_bytes(&[0x5e; 32]),
+        |state_path, _, fixture| {
+            let path = state_path.join(".ai/node/policies/bundle_staging.yaml");
+            assert!(path.is_file(), "the profile wrote no bundle_staging member");
+            let body = serde_yaml::to_string(&json!({
+                "schema": 1,
+                "max_node_bytes": 1,
+                "max_node_stages": 1,
+                "max_key_bytes": 1,
+                "max_key_stages": 1,
+            }))?;
+            std::fs::write(
+                &path,
+                lillux::signature::sign_content_at(
+                    &body,
+                    &fixture.node,
+                    "#",
+                    None,
+                    common::fast_fixture::FAST_FIXTURE_TIME,
+                ),
+            )?;
+            Ok(())
+        },
+    )
+    .await
+    .expect("start the pulling node with tiny staging caps")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caps_a_node_stages_under_are_the_ones_its_signed_policy_states() {
+    let (a, a_fixture) = start_publisher().await;
+    let publication = publish(&a, &a_fixture).await;
+    let pull_request = json!({
+        "url": publication.url,
+        "node": format!("fp:{}", publication.node_fingerprint),
+        "expect": publication.record_hash,
+    });
+
+    // Under the policy's 1-byte caps the stage is refused with the typed cap
+    // code, the message names the clear, and nothing is staged.
+    let (tiny, _fixture) = start_puller_with_tiny_staging_caps().await;
+    let (status, refused) = service(&tiny, "service:bundle/pull", pull_request.clone()).await;
+    assert_eq!(status, 507, "{refused:#}");
+    let text = refused.to_string();
+    assert!(text.contains("bundle_stage_node_bytes_cap"), "{refused:#}");
+    assert!(text.contains("ryeos bundle stage-clear"), "{refused:#}");
+    let listed = listing(&tiny).await;
+    assert!(
+        listed["staged"].as_array().unwrap().is_empty(),
+        "{listed:#}"
+    );
+    let area = tiny.state_path.join(".ai/state/bundle-staging");
+    let held: Vec<String> = std::fs::read_dir(&area)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(held.is_empty(), "a refused stage left {held:?}");
+
+    // The same stage passes under the shipped caps (2 GiB / 64, 512 MiB / 16).
+    let (shipped, _fixture) = start_puller().await;
+    let (status, staged) = service(&shipped, "service:bundle/pull", pull_request).await;
+    assert_eq!(status, 200, "{staged:#}");
+    assert_eq!(staged["result"]["status"], "staged", "{staged:#}");
+}

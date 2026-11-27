@@ -233,6 +233,16 @@ pub(crate) async fn materialise_verified_tree<S: BlobSource>(
     Ok((files_staged, total_bytes, tree_digest))
 }
 
+/// The staging caps the node's loaded policy states. The policy is the only
+/// source: a snapshot without the section is an error, never a default.
+pub(crate) fn stage_caps(
+    policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+) -> Result<ryeos_node::bundle_staging::StagingCaps> {
+    Ok(ryeos_node::bundle_staging::StagingCaps::from_policy(
+        policy.require::<ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy>()?,
+    ))
+}
+
 /// Fetch `entries` from `source`, verify every blob against its entry, and
 /// stage the result.
 ///
@@ -254,11 +264,7 @@ pub(crate) async fn stage_entries<S: BlobSource>(
 
     let node_key = state.identity.signing_key();
     let verifying = node_key.verifying_key();
-    let caps = staging::StagingCaps::from_policy(
-        state
-            .node_policy
-            .require::<ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy>()?,
-    );
+    let caps = stage_caps(&state.node_policy)?;
     let requested_by = actor.strip_prefix("fp:").unwrap_or(actor).to_owned();
     let declared_bytes = entries
         .iter()
@@ -1030,6 +1036,76 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(max_node_stages: u64) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
+        use ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy;
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            BundleStagingPolicy {
+                schema: 1,
+                max_node_bytes: 1 << 20,
+                max_node_stages,
+                max_key_bytes: 1 << 20,
+                max_key_stages: max_node_stages,
+            },
+        )])
+    }
+
+    #[test]
+    fn the_loaded_policy_sets_the_caps_a_stage_is_refused_by() {
+        use ryeos_node::bundle_staging as staging;
+        let node = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let area = staging::StagingArea::open(dir.path()).unwrap();
+        let caps = stage_caps(&snapshot(1)).unwrap();
+        assert_eq!(caps.max_node_stages, 1);
+
+        let digest = staging::tree_digest(
+            "demo",
+            &[staging::TreeFile {
+                path: "f.txt".into(),
+                hash: lillux::sha256_hex(b"x"),
+                size: 1,
+                mode: 0o644,
+            }],
+        )
+        .unwrap();
+        let record = staging::StagingRecord {
+            schema: staging::STAGING_SCHEMA.to_owned(),
+            bundle_name: "demo".to_owned(),
+            tree_digest: digest,
+            source: staging::StagedSource {
+                kind: staging::SOURCE_REMOTE.to_owned(),
+                origin: "remote:test".to_owned(),
+                publication_record_hash: None,
+                pinned_node: None,
+                manifest_hash: None,
+            },
+            requested_by: "aa".to_owned(),
+            policy_generation: "4".repeat(64),
+            declared: staging::DeclaredFacets::default(),
+            file_count: 1,
+            total_bytes: 1,
+            evidence: Default::default(),
+            staged_at: "2026-11-27T00:00:00Z".to_owned(),
+        };
+        let temp = area.begin().unwrap();
+        std::fs::write(temp.tree().join("f.txt"), b"x").unwrap();
+        area.commit(temp, record, &[], &caps, &node).unwrap();
+
+        // The one stage the policy allows is held: the next is refused with
+        // the typed node count code, before any transfer.
+        let refused = area
+            .check_admission(&caps, "bb", 1, &node.verifying_key())
+            .unwrap_err();
+        assert_eq!(refused.code(), "bundle_stage_node_count_cap");
+        // A policy that allows two admits it.
+        let wider = stage_caps(&snapshot(2)).unwrap();
+        area.check_admission(&wider, "bb", 1, &node.verifying_key())
+            .unwrap();
+        // A snapshot with no section is an error, not a default.
+        let empty = ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![]);
+        assert!(stage_caps(&empty).is_err());
+    }
 
     #[test]
     fn a_refused_stage_answers_with_its_typed_code_and_status() {
