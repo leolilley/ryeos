@@ -7763,6 +7763,12 @@ const BASE_CONFIG_PARAMETER: &str = "base_config";
 /// What the daemon learned reading one config item from the base snapshot.
 struct BaseConfigFacts {
     kind: String,
+    /// Every contributor of the resolved item is a file of the base
+    /// snapshot's own project space; an installed bundle's item under the same
+    /// ref does not count.
+    in_base_project: bool,
+    /// The engine trusts the item and every contributor has project trust
+    /// (the project's trusted key, or an authoring key's per-digest endorsement).
     trusted: bool,
     content_hash: String,
     composed_value: Value,
@@ -7786,6 +7792,10 @@ fn base_config_testimony(config_ref: &str, read: Result<BaseConfigFacts, String>
         Ok(facts) if facts.kind != "config" => {
             untrusted("the ref does not name a config item".into())
         }
+        Ok(facts) if !facts.in_base_project => untrusted(
+            "the config is not the base snapshot's own project item (an installed bundle's item under the same ref does not count)"
+                .into(),
+        ),
         Ok(facts) if !facts.trusted => {
             untrusted("the config is not trusted under the project's signer rules".into())
         }
@@ -8164,16 +8174,27 @@ async fn start_candidate_operation(
                         })
                         .map_err(|error| error.to_string())
                 })
-                .map(|item| BaseConfigFacts {
-                    trusted: item.trusted
-                        && matches!(
-                            item.trust_class,
-                            ryeos_engine::resolution::TrustClass::TrustedBundle
-                                | ryeos_engine::resolution::TrustClass::TrustedProject
-                        ),
-                    kind: item.kind,
-                    content_hash: item.source.content_hash,
-                    composed_value: item.composed_value,
+                .map(|item| {
+                    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+                    use ryeos_engine::resolution::TrustClass;
+                    let nodes: Vec<_> = std::iter::once(&item.provenance.root)
+                        .chain(item.provenance.ancestors.iter())
+                        .chain(item.provenance.referenced_items.iter())
+                        .collect();
+                    BaseConfigFacts {
+                        in_base_project: nodes.iter().all(|node| {
+                            node.source_space == ItemSpace::Project
+                                && matches!(node.source_root, ItemSourceRoot::Project)
+                        }),
+                        trusted: item.trusted
+                            && item.trust_class == TrustClass::TrustedProject
+                            && nodes
+                                .iter()
+                                .all(|node| node.trust_class == TrustClass::TrustedProject),
+                        kind: item.kind,
+                        content_hash: item.source.content_hash,
+                        composed_value: item.composed_value,
+                    }
                 });
             seal_base_config(
                 req.parameters.clone(),
@@ -11716,6 +11737,7 @@ mod tests {
     fn facts(kind: &str, trusted: bool, hash: &str) -> BaseConfigFacts {
         BaseConfigFacts {
             kind: kind.to_owned(),
+            in_base_project: true,
             trusted,
             content_hash: hash.to_owned(),
             composed_value: json!({"checks": [{"id": "a", "kind": "path_exists", "path": "x"}]}),
@@ -11751,6 +11773,20 @@ mod tests {
                     .is_some_and(|reason| !reason.is_empty())
             );
         }
+    }
+
+    #[test]
+    fn a_bundle_supplied_config_under_the_same_ref_seals_untrusted() {
+        let mut bundle_item = facts("config", true, &"d".repeat(64));
+        bundle_item.in_base_project = false;
+        let testimony = base_config_testimony("config:p/checks", Ok(bundle_item));
+        assert_eq!(testimony["trusted"], json!(false));
+        assert!(testimony["value"].is_null());
+        assert!(
+            testimony["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("installed bundle"))
+        );
     }
 
     #[test]
