@@ -322,6 +322,7 @@ jobs:
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
       - name: Assert publisher key secret exists
+        if: ${{ !inputs.dry_run }}
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
@@ -329,6 +330,7 @@ jobs:
             { echo "ERROR: RYEOS_PUBLISHER_KEY secret is not set"; exit 1; }
 
       - name: Verify publisher key matches OFFICIAL_PUBLISHER_FP
+        if: ${{ !inputs.dry_run }}
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
@@ -453,11 +455,18 @@ jobs:
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
           LOCAL_INFERENCE_EXISTS: ${{ steps.resolve-images.outputs.local_inference_exists }}
           HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           targets=()
-          [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
-          [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
-          [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
+          # The three archives are built from the official publication stage,
+          # whose packaging gate refuses a development signer. A rehearsal
+          # never uses the official key (Leo, decision 42), so it builds the
+          # images from the development publication and no archive.
+          if [[ "$DRY_RUN" != true ]]; then
+            [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
+            [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
+            [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
+          fi
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
           [[ "$LOCAL_INFERENCE_EXISTS" == true ]] || targets+=(local-inference)
@@ -470,7 +479,7 @@ jobs:
       # shared `published` stage therefore compiles and signs exactly once.
       - name: Build release archive and attested image candidates once
         id: release-build
-        if: steps.release-plan.outputs.targets != ''
+        if: ${{ !inputs.dry_run && steps.release-plan.outputs.targets != '' }}
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           # Image targets declare max provenance explicitly. Suppress the
@@ -481,13 +490,55 @@ jobs:
           source: .
           files: ./docker-bake.release.hcl
           targets: ${{ steps.release-plan.outputs.targets }}
+          vars: |
+            VERSION=${{ needs.qualify.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+            ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
+            WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
+            NODE_BINARIES_ARTIFACT_DIR=${{ runner.temp }}/ryeos-node-binaries-artifacts
+            STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
+            CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
+            LOCAL_INFERENCE_TAG=${{ steps.resolve-images.outputs.local_inference_candidate_tag }}
+            HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
+
+      # Rehearsal (decision 42: a dry run never touches the official key). The
+      # development key is a tracked file in the repository; the images build
+      # from the development publication stage, which checks the bundle trust
+      # documents against the development trust document, and export nothing.
+      # This step names no secret.
+      - name: Select the rehearsal's development signing key
+        if: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo 'RYEOS_PUBLISHER_KEY<<RYEOS_DEV_KEY_EOF'
+            cat .dev-keys/PUBLISHER_DEV.pem
+            echo 'RYEOS_DEV_KEY_EOF'
+          } >> "$GITHUB_ENV"
+
+      - name: Rehearse the image builds with the development key
+        id: release-rehearsal-build
+        if: ${{ inputs.dry_run && steps.release-plan.outputs.targets != '' }}
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          # Image targets declare max provenance explicitly. Suppress the
+          # action's implicit attestation on the local archive exporter.
+          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+        with:
+          source: .
+          files: ./docker-bake.release.hcl
+          targets: ${{ steps.release-plan.outputs.targets }}
           # A rehearsal builds every image so each build-time check runs, but
           # exports none of them to a registry.
           set: |
-            ${{ inputs.dry_run && 'standard.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'central-host.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'local-inference.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'hosted-workflow.output=type=cacheonly' || '' }}
+            standard.output=type=cacheonly
+            central-host.output=type=cacheonly
+            local-inference.output=type=cacheonly
+            hosted-workflow.output=type=cacheonly
+            *.args.PUBLICATION_STAGE=development-publication
+            *.args.CONTAINED_PUBLICATION_STAGE=development-publication
+            *.args.PUBLISHER_OWNER=RyeOS Development
           vars: |
             VERSION=${{ needs.qualify.outputs.version }}
             SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
@@ -515,49 +566,6 @@ jobs:
             echo "local_inference=$(jq -r '.["local-inference"]["containerimage.digest"] // empty' <<<"$METADATA")"
             echo "hosted_workflow=$(jq -r '.["hosted-workflow"]["containerimage.digest"] // empty' <<<"$METADATA")"
           } >> "$GITHUB_OUTPUT"
-
-      # Rehearsal only: the checks the publish steps run on the freshly built
-      # artifacts before uploading them, run here against the local artifact
-      # directories, so a failure shows up without a release.
-      - name: Verify locally built artifacts (dry run)
-        if: ${{ inputs.dry_run }}
-        env:
-          VERSION: ${{ needs.qualify.outputs.version }}
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
-          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
-          SOURCE_DATE_EPOCH: ${{ needs.qualify.outputs.source_date_epoch }}
-        run: |
-          BUNDLE_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
-          BUNDLE="$BUNDLE_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
-          test -s "$BUNDLE"
-          test -s "$BUNDLE.sha256"
-          scripts/release/verify-bundle-artifact.sh \
-            --version "$VERSION" \
-            --archive "$BUNDLE" \
-            --checksum "$BUNDLE.sha256"
-
-          WORKLOAD="$RUNNER_TEMP/ryeos-workload-client-artifacts/ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          test -s "$WORKLOAD"
-          test -s "$WORKLOAD.sha256"
-          scripts/release/verify-workload-client-realization.sh \
-            --version "$VERSION" \
-            --source-revision "$SOURCE_SHA" \
-            --build-date "$BUILD_DATE" \
-            --source-date-epoch "$SOURCE_DATE_EPOCH" \
-            --archive "$WORKLOAD" \
-            --checksum "$WORKLOAD.sha256"
-
-          NODE_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
-          NAME="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu"
-          NODE="$NODE_DIR/${NAME}.tar.gz"
-          test -s "$NODE"
-          test -s "$NODE.sha256"
-          EXPECTED_LISTING="$(printf '%s\n' "${NAME}/" "${NAME}/LICENSE" "${NAME}/bin/" "${NAME}/bin/ryeos" "${NAME}/bin/ryeosd")"
-          [[ "$(tar -tzf "$NODE" | LC_ALL=C sort)" == "$(LC_ALL=C sort <<<"$EXPECTED_LISTING")" ]] || {
-            echo "::error::Node binary archive has unexpected contents"
-            exit 1
-          }
-          (cd "$NODE_DIR" && sha256sum --check "$(basename "$NODE.sha256")")
 
       # Sign the exact digests returned by this authorized solve before any
       # later publication step. Candidate tags are mutable staging locations,
