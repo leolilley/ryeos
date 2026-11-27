@@ -93,7 +93,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml zstd jq
 
       - name: Install Rust toolchain

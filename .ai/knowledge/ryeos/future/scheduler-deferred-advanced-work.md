@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-04T02:13:42Z:13c72379d4d9f5a4063e9a24bfb7e72a0584a86209363e9548c06935347cbeb1:b+RQekhVh0mcj7BN7xgLBVw4f/RAclb/p4luG5DDfyjeHqZrOcfNQgUXhasoxh40aB3F1U9rLk4/mKG6EZTbAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-11-27T07:02:00Z:760af75ce83a5fa57bcf480f69ae3464cf72e2347a98ce41c23eb697ad75ae03:kpY9kDpT/PyLNpw6aQR5hvcbNzLwPDybLKYtZzHkTVs61Fx8/yYnqClwy3RT3U7/w5soSLDr2x53rLSwAnF5Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: scheduler-deferred-advanced-work
@@ -207,7 +207,7 @@ Keep observability read-only unless a repair action is explicitly requested.
 
 ## Guardrails for future implementation
 
-- JSONL fire history remains canonical rebuild/audit state.
+- JSONL fire history remains canonical rebuild/audit state for ordinary rebuilds and project reconciliation. An execution-history reset (`ryeos node reset execution-history`) retires it: the reset's completion step unlinks every fire file and schedule directory under a signed intent, before the operation completes (`ryeos-scheduler-service` `reset.rs`, `retirement_journal.rs` `retire_fire_history`). Nothing exports it first today; the per-person signed export (roadmap X-1) is the planned way to keep it.
 - SQLite projections remain rebuildable.
 - Fire claims remain the idempotency mechanism while the DB is retained.
 - Advisory cursors must never suppress or create dispatch by themselves.
