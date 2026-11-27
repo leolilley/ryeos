@@ -3671,6 +3671,7 @@ fn derive_manifest_runtime_caps(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
+    project_mint: ryeos_app::runtime_capability_admission::ProjectMint,
 ) -> Result<Vec<String>, DispatchError> {
     let requires_value = resolved_item.metadata.extra.get("requires");
     reject_tool_declared_capabilities(requires_value, item_ref)?;
@@ -3684,8 +3685,14 @@ fn derive_manifest_runtime_caps(
     // the root item's own verified class is its complete effective trust: a
     // project tool that is unsigned or signed by an unpinned key mints no
     // runtime caps from its project manifest.
-    mint_runtime_capability_caps(requires_value, resolved_item, trust_class, &ctx.engine)
-        .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
+    mint_runtime_capability_caps(
+        requires_value,
+        resolved_item,
+        trust_class,
+        &ctx.engine,
+        project_mint,
+    )
+    .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
 }
 
 /// The class a test fixture item carries when it stands for a signed,
@@ -3744,13 +3751,16 @@ fn admit_tool_launch(
     item_ref: &str,
     ctx: &ExecutionContext,
     launch_params: &Value,
+    project_mint: ryeos_app::runtime_capability_admission::ProjectMint,
 ) -> Result<Vec<String>, DispatchError> {
-    let mut caps = derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx)?;
+    let mut caps =
+        derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx, project_mint)?;
     caps.extend(derive_tool_state_home_cap(
         resolved_item,
         trust_class,
         ctx,
         launch_params,
+        project_mint,
     )?);
     admit_tool_node_requirements(node, resolved_item, item_ref)?;
     Ok(caps)
@@ -3766,6 +3776,7 @@ fn derive_tool_state_home_cap(
     trust_class: ryeos_engine::resolution::TrustClass,
     ctx: &ExecutionContext,
     launch_params: &Value,
+    project_mint: ryeos_app::runtime_capability_admission::ProjectMint,
 ) -> Result<Option<String>, DispatchError> {
     let refuse = |refusal| crate::execution::launch::state_home_dispatch_error(&refusal);
     let Some(cap) = ryeos_app::runtime_capability_admission::mint_state_home_cap(
@@ -3774,6 +3785,7 @@ fn derive_tool_state_home_cap(
         trust_class,
         &ctx.engine,
         launch_params,
+        project_mint,
     )
     .map_err(refuse)?
     else {
@@ -6435,6 +6447,11 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                     &hop_ref.to_string(),
                                     ctx,
                                     params,
+                                    ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+                                        &state.config.app_root,
+                                        &ctx.engine.trust_store,
+                                        &ctx.principal_fingerprint,
+                                    ),
                                 )?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
@@ -8375,6 +8392,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -8414,12 +8432,121 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.author.knowledge.runtime-authored/*".to_string()]
         );
+    }
+
+    /// IH-8: a trusted live project's runtime authority is minted only for
+    /// the operator's key. Any other key gets the typed refusal for every
+    /// kind of runtime authority, and nothing is minted.
+    #[test]
+    fn non_operator_key_project_item_mints_nothing() {
+        let project = tempdir().join("arc");
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &SELF_BUNDLE_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
+        let ctx = test_execution_context(project.clone());
+        let mut resolved = resolved_tool_in_space(
+            &project,
+            "tool:arc-project/send",
+            ryeos_engine::contracts::ItemSpace::Project,
+            &signing_key(),
+        );
+        let requirements = [
+            json!({ "item_authoring": [
+                { "kind": "knowledge", "namespace": "runtime-authored/*" }
+            ] }),
+            json!({ "runtime_vault": [
+                { "namespace": "oauth", "operations": ["get"] }
+            ] }),
+            json!({ "bundle_events": [
+                { "event_kind": "example_event", "operations": ["append"] }
+            ] }),
+        ];
+        for authority in requirements {
+            resolved.resolved_item.metadata.extra = requires_extra(json!({
+                "capabilities": { "manifest": { "runtime_authority": authority } }
+            }));
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::NoProjectMint,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    ryeos_app::runtime_capability_admission::PROJECT_RUNTIME_CAPS_OPERATOR_ONLY
+                ),
+                "{authority}: {err}"
+            );
+        }
+        // An item with no runtime authority is unaffected by the key.
+        resolved.resolved_item.metadata.extra = Default::default();
+        assert!(
+            derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::NoProjectMint,
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    /// IH-8: a projection previews with the judgement of the key that asked
+    /// for it, never a default; with `NoProjectMint` the mint refuses with
+    /// the launch's own code (`non_operator_key_project_item_mints_nothing`).
+    #[test]
+    fn a_projection_preview_judges_project_mint_on_its_requesting_key() {
+        use ryeos_app::runtime_capability_admission::ProjectMint;
+        let app_root = tempdir();
+        let operator_sk = SigningKey::from_bytes(&[37u8; 32]);
+        let operator_fp = lillux::sha256_hex(operator_sk.verifying_key().as_bytes());
+        ryeos_node_runtime::operator_identity::test_support::write_genesis(
+            &app_root,
+            &operator_fp,
+            &operator_sk,
+        );
+        let bundle = tempdir().join("example-bundle");
+        fs::create_dir_all(bundle.join(ryeos_engine::AI_DIR)).unwrap();
+        let ctx = test_execution_context(bundle);
+        let mut plan = ctx.plan_ctx.clone();
+        plan.project_context = ryeos_engine::contracts::ProjectContext::None;
+        plan.subject_resolution_authority =
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless;
+        plan.logical_project = ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        );
+        for (key, expected) in [
+            (format!("fp:{operator_fp}"), ProjectMint::OperatorKey),
+            (format!("fp:{}", "b".repeat(64)), ProjectMint::NoProjectMint),
+        ] {
+            plan.requested_by = ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: key.clone(),
+                    scopes: vec!["*".into()],
+                },
+            );
+            let session =
+                crate::execution::effective_program_projection::EffectiveProgramProjectionSession::new(
+                    &ctx.engine,
+                    &app_root,
+                    &plan,
+                    None,
+                )
+                .expect("projectless projection session");
+            assert_eq!(session.project_mint(), expected, "{key}");
+        }
     }
 
     #[test]
@@ -8445,6 +8572,7 @@ runtime_authority:
             &resolved.resolved_item,
             ryeos_engine::resolution::TrustClass::TrustedProject,
             &ctx.engine,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8484,9 +8612,14 @@ runtime_authority:
             ryeos_engine::resolution::TrustClass::UntrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned,
         ] {
-            let err =
-                mint_runtime_capability_caps(requires, &resolved.resolved_item, class, &ctx.engine)
-                    .unwrap_err();
+            let err = mint_runtime_capability_caps(
+                requires,
+                &resolved.resolved_item,
+                class,
+                &ctx.engine,
+                ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
+            )
+            .unwrap_err();
             assert!(
                 err.contains("project runtime capability requirements need TrustedProject"),
                 "{class:?} must mint nothing: {err}"
@@ -8518,6 +8651,7 @@ runtime_authority:
             ryeos_engine::resolution::TrustClass::TrustedProject,
             &ctx,
             &json!({ "realm": "ns1" }),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         let DispatchError::LaunchPreparationFailed { code, .. } = &error else {
@@ -8539,7 +8673,8 @@ runtime_authority:
                 &resolved.resolved_item,
                 fixture_trust(&resolved.resolved_item),
                 &resolved.item_ref,
-                &ctx
+                &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey
             )
             .unwrap()
             .is_empty()
@@ -8581,6 +8716,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8611,6 +8747,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -8641,6 +8778,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -8670,6 +8808,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -8700,6 +8839,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8734,6 +8874,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8763,6 +8904,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8806,6 +8948,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(err.to_string().contains("identity mismatch"), "got: {err}");
@@ -8863,6 +9006,7 @@ runtime_authority:
                 fixture_trust(&resolved.resolved_item),
                 &resolved.item_ref,
                 &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
             )
             .unwrap_err();
             let text = err.to_string();
@@ -8871,6 +9015,22 @@ runtime_authority:
                     && text.contains("example-bundle")
                     && text.contains("Rename the project bundle"),
                 "a project manifest named after an installed bundle must be refused: {text}"
+            );
+            // A key that is not the operator is refused before the collision
+            // is judged: it may mint under no project id at all.
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::NoProjectMint,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    ryeos_app::runtime_capability_admission::PROJECT_RUNTIME_CAPS_OPERATOR_ONLY
+                ),
+                "a member key naming an installed bundle id is refused as operator-only: {err}"
             );
         }
     }
@@ -8902,6 +9062,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8932,6 +9093,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
@@ -8952,6 +9114,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -8981,6 +9144,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -9027,6 +9191,7 @@ runtime_authority:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -9143,6 +9308,7 @@ requires:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert_eq!(
@@ -9230,6 +9396,7 @@ requires:
                 fixture_trust(&resolved.resolved_item),
                 &resolved.item_ref,
                 &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
             )
             .unwrap_err();
             assert!(
@@ -9260,7 +9427,8 @@ requires:
                 &resolved.resolved_item,
                 fixture_trust(&resolved.resolved_item),
                 &resolved.item_ref,
-                &ctx
+                &ctx,
+                ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey
             )
             .unwrap()
             .is_empty()
@@ -9323,6 +9491,7 @@ requires:
             &resolved.item_ref,
             &ctx,
             &json!({}),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
         assert!(caps.is_empty(), "{caps:?}");
@@ -9336,6 +9505,7 @@ requires:
             &plain.item_ref,
             &ctx,
             &json!({}),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap();
     }
@@ -9365,6 +9535,7 @@ requires:
             &resolved.item_ref,
             &ctx,
             &json!({}),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -9390,6 +9561,7 @@ requires:
             &resolved.item_ref,
             &ctx,
             &json!({}),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
         .unwrap_err();
         assert!(
@@ -9444,6 +9616,7 @@ runtime_authority:
             &resolved.item_ref,
             &ctx,
             &json!({ "realm": realm }),
+            ryeos_app::runtime_capability_admission::ProjectMint::OperatorKey,
         )
     }
 

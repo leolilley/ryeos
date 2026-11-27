@@ -51,6 +51,10 @@ pub struct EffectiveProgramProjectionSession<'a> {
     roots: ryeos_engine::item_resolution::ResolutionRoots,
     request_snapshot: ryeos_engine::engine::EffectiveRequestSnapshot,
     hook_snapshots: LaunchConfigSnapshotSet,
+    /// Judged once from `plan_context.requested_by`, as the launch it previews
+    /// judges it: a preview of project runtime authority for a key that is not
+    /// the operator is refused with the launch's own code.
+    project_mint: ryeos_app::runtime_capability_admission::ProjectMint,
 }
 
 impl<'a> EffectiveProgramProjectionSession<'a> {
@@ -59,10 +63,11 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
     /// [`Self::new_under_project_authority`] instead.
     pub fn new(
         engine: &'a ryeos_engine::engine::Engine,
+        app_root: &Path,
         plan_context: &PlanContext,
         project_root: Option<&Path>,
     ) -> Result<Self, DispatchError> {
-        Self::build(engine, plan_context, project_root, None)
+        Self::build(engine, app_root, plan_context, project_root, None)
     }
 
     /// Project a live project through its exact project-content authority.
@@ -70,12 +75,14 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
     /// for and is never reopened as a pathname.
     pub fn new_under_project_authority(
         engine: &'a ryeos_engine::engine::Engine,
+        app_root: &Path,
         plan_context: &PlanContext,
         project_root: &Path,
         project_content: &'a dyn AuthoritativeProjectContent,
     ) -> Result<Self, DispatchError> {
         Self::build(
             engine,
+            app_root,
             plan_context,
             Some(project_root),
             Some(project_content),
@@ -84,6 +91,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
 
     fn build(
         engine: &'a ryeos_engine::engine::Engine,
+        app_root: &Path,
         plan_context: &PlanContext,
         project_root: Option<&Path>,
         project_content: Option<&'a dyn AuthoritativeProjectContent>,
@@ -127,7 +135,18 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
             roots,
             request_snapshot,
             hook_snapshots,
+            project_mint: ryeos_app::runtime_capability_admission::ProjectMint::for_requested_by(
+                app_root,
+                &engine.trust_store,
+                &plan_context.requested_by,
+            ),
         })
+    }
+
+    /// The project-mint judgement this session previews with.
+    #[cfg(test)]
+    pub(crate) fn project_mint(&self) -> ryeos_app::runtime_capability_admission::ProjectMint {
+        self.project_mint
     }
 
     /// The live project-content authority with the root it answers for.
@@ -329,6 +348,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
             &resolved,
             resolution.effective_trust_class,
             self.engine,
+            self.project_mint,
         )
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
         let effective_caps = declared_caps
@@ -360,11 +380,13 @@ struct PreparedProjectionInput {
 /// evidence only and cannot be converted into launch authority.
 pub fn prepare_effective_program_projection(
     engine: &ryeos_engine::engine::Engine,
+    app_root: &Path,
     plan_context: &PlanContext,
     project_root: Option<&Path>,
     canonical_ref: &CanonicalRef,
 ) -> Result<EffectiveProgramProjection, DispatchError> {
-    let mut session = EffectiveProgramProjectionSession::new(engine, plan_context, project_root)?;
+    let mut session =
+        EffectiveProgramProjectionSession::new(engine, app_root, plan_context, project_root)?;
     session.prepare(canonical_ref, None)
 }
 
