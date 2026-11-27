@@ -455,7 +455,7 @@ pub fn chain_usage_for(
     filter: Option<&ThreadFilter<'_>>,
 ) -> Result<ThreadUsageTotals> {
     let Some(filter) = filter else {
-        return Ok(state.state_store.chain_usage_totals(chain_root_id)?);
+        return state.state_store.chain_usage_totals(chain_root_id);
     };
     let mut totals = ThreadUsageTotals::default();
     for (thread_id, usage) in state.state_store.chain_usage_by_thread(chain_root_id)? {

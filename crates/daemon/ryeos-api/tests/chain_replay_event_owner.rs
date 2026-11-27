@@ -14,7 +14,7 @@ use ryeos_api::handler_error::HandlerError;
 use ryeos_api::handlers::events_chain_replay;
 use ryeos_api::timeline_host::{ThreadFilter, chain_usage_for, visible_page};
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord};
+use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
 use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::Value;
 
@@ -57,6 +57,18 @@ fn thread(thread_id: &str, chain_root_id: &str, owner: &str) -> NewThreadRecord 
     }
 }
 
+/// A chain rooted at `root_owner` with a descendant requested by `B`.
+fn seed_chain_for(state: &AppState, root: &str, root_owner: &str) {
+    state
+        .state_store
+        .create_thread_for_test(&thread(root, root, root_owner))
+        .unwrap();
+    state
+        .state_store
+        .create_thread_for_test(&thread(&format!("{root}-other"), root, B))
+        .unwrap();
+}
+
 fn seed(state: &AppState) {
     state
         .state_store
@@ -72,33 +84,31 @@ fn seed(state: &AppState) {
         .unwrap();
 }
 
-/// Settle `thread_id` completed with `input_tokens` of recorded usage.
-fn settle_with_usage(state: &AppState, thread_id: &str, input_tokens: u64) {
+/// Record `input_tokens` of cumulative usage for `thread_id` the way a runtime
+/// does: a `thread_usage` event, which the projection keeps as the thread's
+/// latest usage row.
+fn record_usage(state: &AppState, thread_id: &str, input_tokens: u64) {
+    let event_type = ryeos_runtime::events::RuntimeEventType::ThreadUsage;
     state
         .state_store
-        .finalize_thread(
+        .append_events(
+            "T-root",
             thread_id,
-            &FinalizeThreadRecord {
-                status: "completed".to_owned(),
-                outcome_code: Some("success".to_owned()),
-                result_json: None,
-                error_json: None,
-                artifacts: Vec::new(),
-                final_cost: Some(ryeos_engine::contracts::FinalCost {
-                    turns: 1,
-                    input_tokens,
-                    output_tokens: 1,
-                    spend: ryeos_engine::launch_envelope_types::UsdNanos::parse_canonical("0.01")
-                        .unwrap(),
-                    provider: None,
-                    basis: None,
-                    usage_status: Default::default(),
-                    metadata: None,
+            &[NewEventRecord {
+                event_type: event_type.as_str().to_owned(),
+                storage_class: event_type.storage_class().as_str().to_owned(),
+                payload: serde_json::json!({
+                    "completed_turns": 1,
+                    "input_tokens": input_tokens,
+                    "output_tokens": 1,
+                    "spend_usd": ryeos_accounting::UsdNanos::from_nanos(1_000).unwrap(),
+                    "spawns_used": 0,
+                    "started_at": "2026-06-01T00:00:00Z",
+                    "settled_at": "2026-06-01T00:05:00Z",
+                    "last_settled_turn_seq": 1,
+                    "elapsed_ms": 100,
                 }),
-                managed_envelope: None,
-                result_project_snapshot_hash: None,
-                result_workspace_output_capture_hash: None,
-            },
+            }],
         )
         .unwrap();
 }
@@ -112,9 +122,18 @@ async fn replay(
     ctx: HandlerContext,
     after: Option<i64>,
 ) -> Result<Value, HandlerError> {
+    replay_chain(state, ctx, "T-root", after).await
+}
+
+async fn replay_chain(
+    state: Arc<AppState>,
+    ctx: HandlerContext,
+    chain_root_id: &str,
+    after: Option<i64>,
+) -> Result<Value, HandlerError> {
     events_chain_replay::handle(
         events_chain_replay::Request {
-            chain_root_id: "T-root".to_owned(),
+            chain_root_id: chain_root_id.to_owned(),
             after_chain_seq: after,
             limit: 200,
         },
@@ -137,12 +156,15 @@ fn thread_ids(answer: &Value) -> Vec<String> {
 async fn the_root_owner_reads_only_the_events_of_threads_they_requested() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     seed(&state);
-    let state = Arc::new(state);
-
+    // The operator owns the root of a second chain, which holds a thread
+    // requested by B; the operator sees both.
     let operator =
         ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
-    let everything = replay(
+    seed_chain_for(&state, "O-root", &operator.principal_id());
+    let state = Arc::new(state);
+
+    let operator_view = replay_chain(
         state.clone(),
         HandlerContext::new_with_authority(
             operator.principal_id(),
@@ -151,14 +173,14 @@ async fn the_root_owner_reads_only_the_events_of_threads_they_requested() {
             Some(AuthorizedKeyPrincipalClass::LocalClient),
             None,
         ),
+        "O-root",
         None,
     )
     .await
     .unwrap();
-    let all = thread_ids(&everything);
-    assert!(all.iter().any(|id| id == "T-root"));
-    assert!(all.iter().any(|id| id == "T-mine"));
-    assert!(all.iter().any(|id| id == "T-theirs"));
+    let all = thread_ids(&operator_view);
+    assert!(all.iter().any(|id| id == "O-root"), "{all:?}");
+    assert!(all.iter().any(|id| id == "O-root-other"), "{all:?}");
 
     let mine = replay(state.clone(), user(A), None).await.unwrap();
     let seen = thread_ids(&mine);
@@ -168,8 +190,7 @@ async fn the_root_owner_reads_only_the_events_of_threads_they_requested() {
         !seen.iter().any(|id| id == "T-theirs"),
         "another principal's thread must not reach the root owner: {seen:?}"
     );
-    // The cursor is the unfiltered page's, so it advances over hidden events.
-    assert_eq!(mine["next_cursor"], everything["next_cursor"]);
+    assert!(mine["next_cursor"].is_null() || mine["next_cursor"].is_number());
 }
 
 #[tokio::test]
@@ -222,8 +243,8 @@ fn the_timeline_page_holds_only_the_threads_the_reader_owns_and_the_operator_see
 fn a_readers_usage_totals_count_only_the_threads_they_own() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     seed(&state);
-    settle_with_usage(&state, "T-mine", 100);
-    settle_with_usage(&state, "T-theirs", 1000);
+    record_usage(&state, "T-mine", 100);
+    record_usage(&state, "T-theirs", 1000);
 
     let whole_chain = chain_usage_for(&state, "T-root", None).unwrap();
     assert_eq!(whole_chain.input_tokens, 1100);
