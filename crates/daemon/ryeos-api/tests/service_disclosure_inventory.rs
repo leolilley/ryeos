@@ -976,7 +976,7 @@ fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_ba
 /// braced item (`mod tests { .. }`) ends where its braces balance.
 fn ungated_measurement_writes(source: &str) -> Vec<usize> {
     let lines: Vec<&str> = source.lines().collect();
-    let production = rust_source_text::production_text(source);
+    let production = rust_source_text::production_text("handler source", source);
     let production_lines: Vec<&str> = production.lines().collect();
     let mut ungated = Vec::new();
     for (index, line) in lines.iter().enumerate() {

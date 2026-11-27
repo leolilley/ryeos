@@ -56,7 +56,7 @@ const SEAT_AUTHORITY_SPEAKS_FOR_CALLS: usize = 3;
 fn the_thread_read_rule_asks_speaks_for_only_in_its_stated_project_arms() {
     let path = workspace_root().join("crates/daemon/ryeos-app/src/seat_authority.rs");
     let text = std::fs::read_to_string(&path).expect("read seat_authority.rs");
-    let production = rust_source_text::production_text(&text);
+    let production = rust_source_text::production_text("seat_authority.rs", &text);
     assert_eq!(
         production.matches(concat!("speaks_", "for(")).count(),
         SEAT_AUTHORITY_SPEAKS_FOR_CALLS,
@@ -179,7 +179,7 @@ fn every_head_advance_gets_its_advancer_from_the_resolver() {
             continue;
         };
         let needle = concat!("HeadAdvancer", " {");
-        if rust_source_text::production_text(&text).contains(needle)
+        if rust_source_text::production_text(&relative, &text).contains(needle)
             && !HEAD_ADVANCER_BUILDERS.contains(&relative.as_str())
         {
             violations.push(format!(

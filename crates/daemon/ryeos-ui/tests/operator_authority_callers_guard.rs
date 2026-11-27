@@ -61,7 +61,7 @@ fn the_operator_decision_functions_have_exactly_the_callers_the_impact_table_lis
             continue;
         }
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let body = rust_source_text::production_text(&text);
+        let body = rust_source_text::production_text(&file.to_string_lossy(), &text);
         with_test_module += usize::from(body.lines().ne(text.lines()));
         for (index, (name, _)) in EXPECTED.iter().enumerate() {
             counts[index] += body.matches(name).count();

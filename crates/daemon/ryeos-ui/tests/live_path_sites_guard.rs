@@ -206,7 +206,7 @@ fn live_provenance_has_only_the_listed_constructors_and_matchers() {
     let mut root_variant = std::collections::BTreeSet::new();
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let body = non_test_text(&text);
+        let body = non_test_text(&file.to_string_lossy(), &text);
         let name = file.to_string_lossy().replace('\\', "/");
         if body.contains("root_live_fs(") {
             roots.insert(name.clone());
@@ -243,7 +243,7 @@ fn the_matcher_files_have_exactly_their_pinned_live_path_lines() {
     let root = ryeos_engine::test_support::workspace_root();
     for (path, pinned) in PINNED_MARKER_LINES {
         let text = std::fs::read_to_string(root.join(path)).unwrap();
-        let production = non_test_text(&text);
+        let production = non_test_text(path, &text);
         let found: Vec<&str> = production
             .lines()
             .map(str::trim)
@@ -275,8 +275,8 @@ fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 /// items (the shared helper), so code after a test module is read too. The
 /// sweep asserts that many files lose text, so a cut that stops matching fails
 /// the guard instead of passing silently.
-fn non_test_text(text: &str) -> String {
-    rust_source_text::production_text(text)
+fn non_test_text(label: &str, text: &str) -> String {
+    rust_source_text::production_text(label, text)
 }
 
 #[test]
@@ -295,8 +295,12 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     let mut with_test_module = 0_usize;
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        with_test_module += usize::from(non_test_text(&text).lines().ne(text.lines()));
-        let body = non_test_text(&text);
+        with_test_module += usize::from(
+            non_test_text(&file.to_string_lossy(), &text)
+                .lines()
+                .ne(text.lines()),
+        );
+        let body = non_test_text(&file.to_string_lossy(), &text);
         if !LIVE_MARKERS.iter().any(|marker| body.contains(marker)) {
             continue;
         }
@@ -386,7 +390,7 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
     let text =
         std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
             .unwrap();
-    let production = non_test_text(&text);
+    let production = non_test_text("node_config/loader.rs", &text);
     assert!(
         production.lines().ne(text.lines()),
         "loader.rs has a test module and the cut still removes it"
@@ -434,7 +438,7 @@ fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
-        let body = non_test_text(&text);
+        let body = non_test_text(&path.display().to_string(), &text);
         if !body.contains("project_path") {
             continue;
         }
@@ -486,7 +490,7 @@ fn the_resume_and_materialization_provenance_sites_have_exactly_their_pinned_lin
     let root = ryeos_engine::test_support::workspace_root();
     for (path, needles, pinned) in PINNED_PROVENANCE_LINES {
         let text = std::fs::read_to_string(root.join(path)).unwrap();
-        let production = non_test_text(&text);
+        let production = non_test_text(path, &text);
         let found: Vec<&str> = production
             .lines()
             .map(str::trim)
@@ -512,7 +516,7 @@ fn the_non_execution_root_admissions_are_called_only_with_the_node_root_or_an_ad
     let mut by_directory = Vec::new();
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let production = squash(&non_test_text(&text));
+        let production = squash(&non_test_text(&file.to_string_lossy(), &text));
         let name = file.to_string_lossy().replace('\\', "/");
         if production.contains("::admit_non_execution_root(") {
             by_path.push((name.clone(), production.clone()));
