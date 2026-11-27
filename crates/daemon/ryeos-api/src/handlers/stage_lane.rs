@@ -304,3 +304,59 @@ pub(crate) fn applied_lane_report(lane: &LaneInstall) -> Value {
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_node_runtime::node_policy::NodePolicySnapshot;
+
+    #[test]
+    fn a_snapshot_without_the_section_has_no_grants_and_predicts_the_lane_off() {
+        let empty = NodePolicySnapshot::from_test_records(vec![]);
+        assert!(grants_from_snapshot(&empty, "demo").is_err());
+        let prediction = predicted_lifts(&empty, "demo");
+        assert_eq!(prediction["lane"], "off");
+        assert_eq!(prediction["note"], "prediction; policy is re-read at apply");
+    }
+
+    #[test]
+    fn a_snapshot_with_the_shipped_section_admits_invoked_items_only() {
+        let shipped = NodePolicySnapshot::from_test_records(vec![
+            ryeos_node_runtime::node_policy::shipped_publication_lane_record(),
+        ]);
+        let grants = grants_from_snapshot(&shipped, "demo").unwrap();
+        assert!(grants.invoked);
+        assert!(grants.kinds.is_empty() && grants.facets.is_empty());
+        let prediction = predicted_lifts(&shipped, "demo");
+        assert_eq!(prediction["invoked"], true);
+        assert_eq!(prediction["kinds"], json!([]));
+    }
+
+    #[test]
+    fn only_the_audit_codes_are_lane_audit_refusals() {
+        for code in LANE_AUDIT_CODES {
+            let error = anyhow::Error::new(ryeos_app::handler_error::typed_refusal(code, 422, "x"));
+            assert!(is_lane_audit_refusal(&error), "{code}");
+        }
+        let other = anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_lane_not_replaceable",
+            409,
+            "x",
+        ));
+        assert!(!is_lane_audit_refusal(&other));
+        assert!(!is_lane_audit_refusal(&anyhow::anyhow!("boom")));
+    }
+
+    #[test]
+    fn every_apply_refusal_a_lane_can_make_is_a_closed_code() {
+        for code in [
+            ApplyRefusalCode::LaneRefused,
+            ApplyRefusalCode::LaneEvidenceInvalid,
+            ApplyRefusalCode::LanePolicyUnavailable,
+            ApplyRefusalCode::LaneNameRefused,
+        ] {
+            assert_eq!(ApplyRefusalCode::parse(code.as_str()), Some(code));
+        }
+        assert_eq!(ApplyRefusalCode::ALL.len(), 14);
+    }
+}
