@@ -135,18 +135,8 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
             roots,
             request_snapshot,
             hook_snapshots,
-            project_mint: ryeos_app::runtime_capability_admission::ProjectMint::for_requested_by(
-                app_root,
-                &engine.trust_store,
-                &plan_context.requested_by,
-            ),
+            project_mint: projection_project_mint(engine, app_root, plan_context),
         })
-    }
-
-    /// The project-mint judgement this session previews with.
-    #[cfg(test)]
-    pub(crate) fn project_mint(&self) -> ryeos_app::runtime_capability_admission::ProjectMint {
-        self.project_mint
     }
 
     /// The live project-content authority with the root it answers for.
@@ -388,6 +378,21 @@ pub fn prepare_effective_program_projection(
     let mut session =
         EffectiveProgramProjectionSession::new(engine, app_root, plan_context, project_root)?;
     session.prepare(canonical_ref, None)
+}
+
+/// The project-mint judgement a projection previews with: the same judgement
+/// as the launch it previews, on the key the plan was requested by, never a
+/// default.
+pub(crate) fn projection_project_mint(
+    engine: &ryeos_engine::engine::Engine,
+    app_root: &Path,
+    plan_context: &PlanContext,
+) -> ryeos_app::runtime_capability_admission::ProjectMint {
+    ryeos_app::runtime_capability_admission::ProjectMint::for_requested_by(
+        app_root,
+        &engine.trust_store,
+        &plan_context.requested_by,
+    )
 }
 
 fn validate_projection_authority(

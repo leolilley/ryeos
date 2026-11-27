@@ -8441,7 +8441,7 @@ runtime_authority:
         );
     }
 
-    /// IH-8: a trusted live project's runtime authority is minted only for
+    /// A trusted live project's runtime authority is minted only for
     /// the operator's key. Any other key gets the typed refusal for every
     /// kind of runtime authority, and nothing is minted.
     #[test]
@@ -8503,7 +8503,7 @@ runtime_authority:
         );
     }
 
-    /// IH-8: a projection previews with the judgement of the key that asked
+    /// A projection previews with the judgement of the key that asked
     /// for it, never a default; with `NoProjectMint` the mint refuses with
     /// the launch's own code (`non_operator_key_project_item_mints_nothing`).
     #[test]
@@ -8537,15 +8537,15 @@ runtime_authority:
                     scopes: vec!["*".into()],
                 },
             );
-            let session =
-                crate::execution::effective_program_projection::EffectiveProgramProjectionSession::new(
+            assert_eq!(
+                crate::execution::effective_program_projection::projection_project_mint(
                     &ctx.engine,
                     &app_root,
                     &plan,
-                    None,
-                )
-                .expect("projectless projection session");
-            assert_eq!(session.project_mint(), expected, "{key}");
+                ),
+                expected,
+                "{key}"
+            );
         }
     }
 
