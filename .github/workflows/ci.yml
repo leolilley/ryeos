@@ -413,7 +413,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -478,7 +478,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -587,7 +587,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -642,7 +642,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -693,7 +693,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -788,7 +788,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -853,7 +853,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -921,7 +921,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Show the coreutils under test
@@ -977,7 +977,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1068,7 +1068,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1110,7 +1110,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1179,7 +1179,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1307,7 +1307,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1394,7 +1394,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1476,7 +1476,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1554,7 +1554,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1642,7 +1642,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1932,7 +1932,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1964,7 +1964,7 @@ jobs:
       # The enclosure's pid 1 is tini, the init the shipped image runs.
       - name: Install the enclosure init
         run: |
-          sudo -n apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo -n apt-get install -y --no-install-recommends tini
           test -x /usr/bin/tini
 
@@ -2209,7 +2209,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -2252,7 +2252,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
@@ -2318,7 +2318,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
@@ -2384,7 +2384,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
