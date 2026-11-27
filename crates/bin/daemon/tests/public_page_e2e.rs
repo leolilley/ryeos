@@ -1,6 +1,9 @@
-//! The shipped `ryeos-public` bundle serves the public page at `/`.
+//! The shipped `ryeos-public` page serves at `/`.
 //!
-//! On a node whose `public_routes` policy names the page's route, `GET /`
+//! `ryeos-public` is in no shipped bundle set, and the test harness refuses to
+//! register a published bundle no shipped profile selects, so the page's signed
+//! route item is copied byte for byte into a synthetic bundle. On a node whose
+//! `public_routes` policy names the page's route, `GET /`
 //! with no key answers the signed page, and the response carries exactly the
 //! headers a static public page sends: nothing names the node, its operator,
 //! its version or a principal, and no cookie is set. `HEAD /` answers the same
@@ -12,11 +15,38 @@ use ryeosd::test_support as common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_presigned_fixture_bundle};
+use common::fast_fixture::{FAST_FIXTURE_TIME, FastFixture, register_presigned_fixture_bundle};
 use lillux::crypto::SigningKey;
 use serde_json::json;
 
 const FRONT: &str = "public/front";
+
+const FRONT_ITEM: &str = ".ai/node/routes/public/front.yaml";
+
+/// A synthetic bundle carrying the shipped, signed page route item unchanged.
+fn plant_shipped_page(state_path: &Path, fixture: &FastFixture) -> anyhow::Result<()> {
+    let bundle = state_path.join(".ai/bundles/public-page-fixture");
+    let item = bundle.join(FRONT_ITEM);
+    std::fs::create_dir_all(item.parent().expect("the item has a parent"))?;
+    std::fs::copy(
+        common::workspace_root()
+            .join("bundles/ryeos-public")
+            .join(FRONT_ITEM),
+        &item,
+    )?;
+    let manifest = "name: public-page-fixture\nversion: 1.0.0\ndescription: the shipped public page route\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n";
+    std::fs::write(
+        bundle.join(".ai/manifest.yaml"),
+        lillux::signature::sign_content_at(
+            manifest,
+            &fixture.publisher,
+            "#",
+            None,
+            FAST_FIXTURE_TIME,
+        ),
+    )?;
+    register_presigned_fixture_bundle(state_path, "public-page-fixture", &bundle, fixture)
+}
 
 fn name_front_route(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
     let body = serde_yaml::to_string(&json!({
@@ -65,8 +95,7 @@ fn header_names(headers: &[(String, String)]) -> Vec<&str> {
 async fn the_public_page_serves_at_the_root_with_exactly_its_headers() {
     let (h, _fixture): (DaemonHarness, FastFixture) = DaemonHarness::start_fast_with(
         |state_path, _, fixture| {
-            let bundle = common::workspace_root().join("bundles/ryeos-public");
-            register_presigned_fixture_bundle(state_path, "ryeos-public", &bundle, fixture)?;
+            plant_shipped_page(state_path, fixture)?;
             name_front_route(state_path, &fixture.node)
         },
         |_| {},
