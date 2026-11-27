@@ -3174,3 +3174,5 @@ mod group_presence_tests {
         assert_eq!(reapable_members(&members, 10, me, &[11]), vec![12]);
     }
 }
+
+// proof only, never merged: selects the process-scope suites at a gate
