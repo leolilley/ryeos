@@ -3530,22 +3530,10 @@ fn bind_retention_store(store: &Arc<state_store::StateStore>) -> Result<()> {
         .context("bind the retention qualifier's store")
 }
 
-fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
-    static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
-        once_cell::sync::Lazy::new(|| {
-            ryeos_api::handlers::ALL
-                .iter()
-                .chain(ryeos_ui::handlers::ALL.iter())
-                .copied()
-                .collect()
-        });
-    &DESCRIPTORS
-}
-
 fn build_service_registry() -> Result<ryeos_app::service_registry::ServiceRegistry> {
     let mut refs = BTreeSet::new();
     let mut endpoints = BTreeSet::new();
-    for descriptor in service_descriptors() {
+    for descriptor in ryeosd::route_composition::service_descriptors() {
         anyhow::ensure!(
             refs.insert(descriptor.service_ref),
             "duplicate compiled service ref `{}`",
@@ -3558,7 +3546,7 @@ fn build_service_registry() -> Result<ryeos_app::service_registry::ServiceRegist
         );
     }
     Ok(ryeos_api::registry::build_service_registry_from(
-        service_descriptors(),
+        ryeosd::route_composition::service_descriptors(),
     ))
 }
 
@@ -3670,56 +3658,13 @@ fn installed_service_refs(
     .context("enumerate installed Services-registry items")
 }
 
-fn build_route_table(
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    ui: std::sync::Arc<ryeos_ui::UiState>,
-    kinds: &ryeos_engine::kind_registry::KindRegistry,
-) -> anyhow::Result<ryeos_api::routes::RouteTable> {
-    let mut mode_registry =
-        ryeos_api::routes::response_modes::ResponseModeRegistry::with_api_builtins_from(
-            service_descriptors(),
-            Arc::new(kinds.clone()),
-        );
-    let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
-        auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
-    };
-    extensions.auth.register(
-        "external_occurrence",
-        Arc::new(
-            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalOccurrenceAuthFactory,
-        ),
-    );
-    extensions.auth.register(
-        "external_channel",
-        Arc::new(
-            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalChannelAuthFactory,
-        ),
-    );
-
-    ryeos_ui::register_extensions(&mut extensions, &mut mode_registry, ui);
-
-    ryeos_api::routes::build_route_table_from_snapshot_with_extensions(
-        snapshot,
-        &mode_registry,
-        &extensions,
-    )
-    .map_err(|errors| {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        anyhow::anyhow!(
-            "route table build failed at startup ({} error(s)): {}",
-            errors.len(),
-            msgs.join("; ")
-        )
-    })
-}
-
 fn prospective_node_config_validator(
     ui: Arc<ryeos_ui::UiState>,
     engine: Arc<ryeos_engine::engine::Engine>,
 ) -> Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator> {
     Arc::new(
         ryeos_app::prospective_admission::ProspectiveNodeConfigValidator::new(move |snapshot| {
-            build_route_table(snapshot, ui.clone(), &engine.kinds)
+            ryeosd::route_composition::compose_route_table(snapshot, ui.clone(), &engine.kinds)
                 .map(|_| ())
                 .context("prospective route-table compilation failed")
         }),
@@ -4645,7 +4590,7 @@ async fn run(
                             }
                             Ok(true) => {}
                         }
-                        match service_descriptors()
+                        match ryeosd::route_composition::service_descriptors()
                             .iter()
                             .find(|candidate| candidate.service_ref == service_ref)
                         {
@@ -4735,21 +4680,23 @@ async fn run(
 
             // Build the route table from the node-config snapshot.
             let route_table = {
-                let table =
-                    build_route_table(&node_config_snapshot, ui_state.clone(), &engine.kinds)
-                        .context("route table build failed at startup — check route YAML files")?;
-                Arc::new(arc_swap::ArcSwap::from_pointee(table))
+                let table = ryeosd::route_composition::compose_route_table(
+                    &node_config_snapshot,
+                    ui_state.clone(),
+                    &engine.kinds,
+                )
+                .context("route table build failed at startup — check route YAML files")?;
+                Arc::new(table)
             };
-            tracing::info!(routes = route_table.load().all.len(), "route table built");
+            tracing::info!(routes = route_table.all.len(), "route table built");
 
             // Publish the route diagnostics snapshot consumed by
             // `service:system/routes`.
             let route_diagnostics = Arc::new(ryeos_app::route_diagnostics::RouteDiagnostics::new());
             {
-                let table = route_table.load();
                 route_diagnostics.publish(
-                    table.fingerprint.clone(),
-                    ryeos_api::routes::route_diagnostic_entries(&table),
+                    route_table.fingerprint.clone(),
+                    ryeos_api::routes::route_diagnostic_entries(&route_table),
                 );
             }
 
@@ -5248,7 +5195,7 @@ async fn run(
                 started_at_iso: process_started_at.clone(),
                 catalog_health,
                 services,
-                service_descriptors: service_descriptors(),
+                service_descriptors: ryeosd::route_composition::service_descriptors(),
                 node_config: node_config_snapshot,
                 external_placement_backends: Arc::new(
                     external_artifacts.placement_backends.with_guest_runtime_upload_source(Arc::new(
@@ -9371,7 +9318,7 @@ async fn run_service_standalone(
             missing_services: vec![],
         },
         services,
-        service_descriptors: service_descriptors(),
+        service_descriptors: ryeosd::route_composition::service_descriptors(),
         node_config: node_config_snapshot.clone(),
         external_placement_backends: Arc::new(
             external_artifacts.placement_backends.with_guest_runtime_upload_source(Arc::new(
