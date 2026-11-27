@@ -25,15 +25,20 @@ fn execution() -> String {
         .to_string()
 }
 
-/// A `finish_check` hook running `tool`, with one signed text and `limit`
-/// rejections allowed in the run.
-fn check_header(tool: &str, limit: u32) -> &'static str {
-    Box::leak(
-        format!(
-            "hooks:\n  - id: finish\n    event: finish_check\n    result: verdict\n    steer:\n      limit: {limit}\n      texts:\n        unread: \"SIGNED_WORDS attempt {{attempt}} turn {{turn}} left {{remaining}}\"\n    action:\n      primary: execute\n      item_id: \"tool:{tool}/{tool}\"\n      ref_bindings: {{}}\n      params: {{}}\n"
+/// A `finish_check` hook running `$tool`, with one signed text and `$limit`
+/// rejections allowed in the run, as directive frontmatter.
+macro_rules! check_header {
+    ($tool:literal, $limit:literal) => {
+        concat!(
+            "hooks:\n  - id: finish\n    event: finish_check\n    result: verdict\n    steer:\n      limit: ",
+            $limit,
+            "\n      texts:\n        unread: \"SIGNED_WORDS attempt {attempt} turn {turn} left {remaining}\"\n    action:\n      primary: execute\n      item_id: \"tool:",
+            $tool,
+            "/",
+            $tool,
+            "\"\n      ref_bindings: {}\n      params: {}\n"
         )
-        .into_boxed_str(),
-    )
+    };
 }
 
 fn options(header: &'static str) -> RigOptions {
@@ -87,7 +92,7 @@ async fn without_a_check_a_plain_done_ends_the_run_at_turn_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_finish_takes_another_turn_with_only_the_signed_words() {
-    let (rig, id, status) = run(DONE_CALL_DONE, options(check_header("verdict_once", 2))).await;
+    let (rig, id, status) = run(DONE_CALL_DONE, options(check_header!("verdict_once", 2))).await;
     assert_eq!(status, "completed");
     let bodies = rig.stub.request_bodies().await;
     assert_eq!(bodies.len(), 3, "the rejected finish, the call, the finish");
@@ -105,7 +110,7 @@ async fn a_rejected_finish_takes_another_turn_with_only_the_signed_words() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_never_passes_ends_the_run_failed_with_its_code() {
     let script = "steps:\n  - repeat: 6\n    text: done\n";
-    let (rig, id, status) = run(script, options(check_header("verdict_never", 2))).await;
+    let (rig, id, status) = run(script, options(check_header!("verdict_never", 2))).await;
     assert_eq!(status, "failed", "never a success");
     assert_eq!(rig.stub.requests().await.len(), 3);
     let record = record(&rig, &id).await;
@@ -120,7 +125,7 @@ async fn a_check_that_never_passes_ends_the_run_failed_with_its_code() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_result_carrying_free_text_fails_the_run_and_the_text_never_reaches_the_model() {
     let script = "steps:\n  - repeat: 3\n    text: done\n";
-    let (rig, id, status) = run(script, options(check_header("verdict_free", 2))).await;
+    let (rig, id, status) = run(script, options(check_header!("verdict_free", 2))).await;
     assert_eq!(status, "failed");
     let bodies = rig.stub.request_bodies().await;
     assert_eq!(bodies.len(), 1);
@@ -132,7 +137,7 @@ async fn a_result_carrying_free_text_fails_the_run_and_the_text_never_reaches_th
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_the_hook_did_not_sign_fails_the_run() {
     let script = "steps:\n  - repeat: 3\n    text: done\n";
-    let (rig, id, status) = run(script, options(check_header("verdict_unknown", 2))).await;
+    let (rig, id, status) = run(script, options(check_header!("verdict_unknown", 2))).await;
     assert_eq!(status, "failed");
     assert_eq!(rig.stub.requests().await.len(), 1);
     assert!(record(&rig, &id).await.contains("finish_check_invalid"));
@@ -141,7 +146,7 @@ async fn a_key_the_hook_did_not_sign_fails_the_run() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_cannot_run_fails_the_run_closed() {
     let script = "steps:\n  - repeat: 3\n    text: done\n";
-    let (rig, id, status) = run(script, options(check_header("verdict_broken", 2))).await;
+    let (rig, id, status) = run(script, options(check_header!("verdict_broken", 2))).await;
     assert_eq!(status, "failed");
     assert_eq!(rig.stub.requests().await.len(), 1);
     assert!(record(&rig, &id).await.contains("finish_check_failed"));
@@ -150,7 +155,7 @@ async fn a_check_that_cannot_run_fails_the_run_closed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejection_with_no_turn_left_ends_with_the_turn_limits_own_code() {
     let script = "steps:\n  - repeat: 3\n    text: done\n";
-    let mut opts = options(check_header("verdict_never", 2));
+    let mut opts = options(check_header!("verdict_never", 2));
     opts.limits = Some((1, 5));
     let (rig, id, status) = run(script, opts).await;
     assert_eq!(status, "failed");
