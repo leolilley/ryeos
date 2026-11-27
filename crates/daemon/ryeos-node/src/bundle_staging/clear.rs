@@ -338,13 +338,14 @@ mod tests {
         let remnant = "c".repeat(64);
         lillux::create_directory_exact_mode(&area.root().join(&remnant), 0o700).unwrap();
         // A temporary directory a day old belongs to a transfer that is gone.
-        let stale = area.begin().unwrap();
-        let stale_dir = stale.dir().to_owned();
+        let stale_dir = area
+            .root()
+            .join(format!("{}{}", super::TEMP_PREFIX, "d".repeat(32)));
+        lillux::create_directory_exact_mode(&stale_dir, 0o700).unwrap();
         std::fs::File::open(&stale_dir)
             .unwrap()
             .set_modified(SystemTime::now() - STALE_TEMP_AGE - std::time::Duration::from_secs(60))
             .unwrap();
-        std::mem::forget(stale);
         // A fresh temporary directory may be in flight.
         let live = area.begin().unwrap();
 
