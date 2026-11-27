@@ -292,6 +292,41 @@ async fn config_get_grants_the_session_the_ground_pictures_of_its_active_themes(
     drop(other_attachment);
 }
 
+/// An act that grants something to the session derives the grant from signed
+/// data and the caller's own subjects, never from a request field: a hash
+/// named in the request is not granted.
+#[tokio::test]
+async fn config_get_ignores_a_request_field_that_names_a_picture_to_grant() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let principal = format!("fp:{}", "ee".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+    let session_id = ctx.fingerprint.strip_prefix("session:").unwrap().to_owned();
+    let asked = "ab".repeat(32);
+    test_state::with_dispatched_session(
+        &state,
+        &session_id,
+        attachment,
+        ryeos_ui::handlers::ui_projects::handle_config_get(
+            json!({
+                "sha256": asked,
+                "art": [asked],
+                "grant_art": asked,
+                "pictures": { "ground": asked }
+            }),
+            ctx,
+            Arc::new(state.clone()),
+        ),
+    )
+    .await
+    .expect("config reads");
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    assert!(!session.art_grants.contains(&asked));
+}
+
 #[tokio::test]
 async fn ryeos_dimension_exposes_session_user_principal() {
     let (_tmp, _state_owner, state) = build_test_state();

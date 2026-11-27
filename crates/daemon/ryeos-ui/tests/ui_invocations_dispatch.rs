@@ -606,3 +606,60 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         .expect("list threads after read-only sources");
     assert_eq!(rows_after.len(), rows_before.len());
 }
+
+/// The Surface ceiling holds at dispatch on every call, not only when the
+/// binding compiles: a call a browser crafts for a source or an act the
+/// Surface's views do not bind is refused as Forbidden before any effect.
+/// `base-observe` keeps an empty act lane, so its registration affordance is
+/// not in the compiled binding either.
+#[tokio::test]
+async fn a_crafted_call_outside_the_surface_ceiling_is_refused_at_dispatch() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (_session_id, ctx, producer, coordinate) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/base-observe").await;
+    let state = Arc::new(state);
+    let folder = tempfile::TempDir::new().expect("folder to register");
+
+    let crafted = [
+        serde_json::json!({
+            "kind": "affordance",
+            "view_ref": "view:ryeos/projects/list",
+            "affordance_id": "register-project"
+        }),
+        serde_json::json!({
+            "kind": "source",
+            "view_ref": "view:ryeos/projects/list",
+            "channel": "a-channel-the-view-does-not-declare"
+        }),
+    ];
+    for coordinate_value in crafted {
+        let payload = if coordinate_value["kind"] == "affordance" {
+            serde_json::json!({ "kind": "selection", "record": { "root": folder.path() } })
+        } else {
+            serde_json::json!({ "kind": "source_parameters", "params": {} })
+        };
+        let refused = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
+            serde_json::json!({
+                "producer": producer,
+                "binding": {
+                    "binding_attachment_id": coordinate.binding_attachment_id,
+                    "binding_generation": coordinate.binding_generation,
+                    "binding_digest": coordinate.binding_digest,
+                    "coordinate": coordinate_value,
+                    "payload": payload
+                }
+            }),
+            ctx.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("a call outside the ceiling is refused");
+        assert!(
+            matches!(
+                ryeos_app::handler_error::extract_handler_error(&refused),
+                Some(ryeos_app::handler_error::HandlerError::Forbidden(_))
+            ),
+            "expected Forbidden for {coordinate_value}, got: {refused:#}"
+        );
+    }
+}
