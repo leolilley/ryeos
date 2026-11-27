@@ -2658,6 +2658,48 @@ pub fn sum_thread_usage_latest_by_chain(
     })
 }
 
+/// The chain's effective usage per thread, as [`sum_thread_usage_latest_by_chain`]
+/// counts it but kept apart by thread, so a caller that may see only some of
+/// the chain's threads can sum just those.
+pub fn thread_usage_latest_by_chain(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Vec<(String, ThreadUsageTotals)>> {
+    db.with_sql(|connection| {
+        let sql = format!(
+            "{EFFECTIVE_USAGE_CTE}
+             SELECT
+                u.thread_id AS thread_id,
+                COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+                COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+             FROM effective_usage u
+             WHERE u.chain_root_id = ?
+             GROUP BY u.thread_id"
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .context("prepare thread_usage_latest_by_chain")?;
+        let rows = statement
+            .query_map([chain_root_id], |row| {
+                Ok((
+                    row.get::<_, String>("thread_id")?,
+                    ThreadUsageTotals {
+                        thread_count: 1,
+                        completed_turns: row.get("completed_turns")?,
+                        input_tokens: row.get("input_tokens")?,
+                        output_tokens: row.get("output_tokens")?,
+                        spend_usd: row.get("spend_usd")?,
+                    },
+                ))
+            })
+            .context("query thread_usage_latest_by_chain")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read thread_usage_latest_by_chain")
+    })
+}
+
 /// Node-wide usage settled inside the window (`since_iso`, inclusive) —
 /// the pulse's "what did cognition cost lately". Same continuation-aware
 /// dedup as the per-chain totals: a settled successor's cumulative row

@@ -2,7 +2,8 @@
 //! installed timeline definition.
 //!
 //! Authorised like `events.chain_replay`: the caller must own the chain's root
-//! thread. The fold itself is the shared host in [`crate::timeline_host`]; the
+//! thread, and sees only the entries of threads they own (the admitted operator
+//! sees the whole chain). The fold itself is the shared host in [`crate::timeline_host`]; the
 //! UI endpoint serves the same response under a browser-seat authorisation.
 
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use serde_json::Value;
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use crate::timeline_host::{TimelineParams, timeline_response};
+use crate::timeline_host::{ThreadFilter, TimelineParams, timeline_response};
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -45,7 +46,21 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         &root.chain_root_id,
         root.requested_by.as_deref(),
     )?;
-    timeline_response(&state, &params, &root.status)
+    // The chain can hold threads other principals requested; only the admitted
+    // operator sees those entries.
+    if ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok() {
+        return timeline_response(&state, &params, &root.status, None);
+    }
+    let owns = |thread_id: &str| {
+        state
+            .state_store
+            .get_thread(thread_id)
+            .ok()
+            .flatten()
+            .is_some_and(|detail| ctx.is_owner(detail.requested_by.as_deref()))
+    };
+    let filter = ThreadFilter { admits: &owns };
+    timeline_response(&state, &params, &root.status, Some(&filter))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -91,7 +106,7 @@ mod tests {
     fn a_missing_definition_is_refused_clearly() {
         let (_dir, _store, state) = build_test_state();
         let params = TimelineParams::parse(serde_json::json!({"chain_root_id": "T-1"})).unwrap();
-        let error = timeline_response(&state, &params, "running").unwrap_err();
+        let error = timeline_response(&state, &params, "running", None).unwrap_err();
         assert!(
             error
                 .to_string()

@@ -2,7 +2,8 @@
 //! only for the threads that owner requested. A descendant thread requested by
 //! another principal stays out of the root owner's replay; the node's admitted
 //! operator reads the whole chain; a caller who does not own the root is
-//! refused as before.
+//! refused as before. The timeline fold reads the chain through the same rule:
+//! its event page holds only the threads the reader may see.
 
 use ryeos_api::test_support as test_state;
 
@@ -11,8 +12,9 @@ use std::sync::Arc;
 use ryeos_api::handler_context::HandlerContext;
 use ryeos_api::handler_error::HandlerError;
 use ryeos_api::handlers::events_chain_replay;
+use ryeos_api::timeline_host::{ThreadFilter, chain_usage_for, visible_page};
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::NewThreadRecord;
+use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord};
 use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::Value;
 
@@ -67,6 +69,37 @@ fn seed(state: &AppState) {
     state
         .state_store
         .create_thread_for_test(&thread("T-theirs", "T-root", B))
+        .unwrap();
+}
+
+/// Settle `thread_id` completed with `input_tokens` of recorded usage.
+fn settle_with_usage(state: &AppState, thread_id: &str, input_tokens: u64) {
+    state
+        .state_store
+        .finalize_thread(
+            thread_id,
+            &FinalizeThreadRecord {
+                status: "completed".to_owned(),
+                outcome_code: Some("success".to_owned()),
+                result_json: None,
+                error_json: None,
+                artifacts: Vec::new(),
+                final_cost: Some(ryeos_engine::contracts::FinalCost {
+                    turns: 1,
+                    input_tokens,
+                    output_tokens: 1,
+                    spend: ryeos_engine::launch_envelope_types::UsdNanos::parse_canonical("0.01")
+                        .unwrap(),
+                    provider: None,
+                    basis: None,
+                    usage_status: Default::default(),
+                    metadata: None,
+                }),
+                managed_envelope: None,
+                result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
+            },
+        )
         .unwrap();
 }
 
@@ -147,4 +180,64 @@ async fn a_caller_who_does_not_own_the_root_is_refused_as_not_found() {
         .await
         .expect_err("B does not own the chain root");
     assert!(matches!(error, HandlerError::NotFound));
+}
+
+fn timeline_threads(state: &AppState, filter: Option<&ThreadFilter<'_>>) -> Vec<String> {
+    let mut judged = std::collections::HashMap::new();
+    let page = visible_page(state, "T-root", None, filter, &mut judged).unwrap();
+    let mut ids: Vec<String> = page
+        .events
+        .iter()
+        .map(|event| event["thread_id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.dedup();
+    ids
+}
+
+#[test]
+fn the_timeline_page_holds_only_the_threads_the_reader_owns_and_the_operator_sees_all() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    seed(&state);
+
+    let all = timeline_threads(&state, None);
+    assert!(all.iter().any(|id| id == "T-theirs"), "{all:?}");
+
+    let ctx = user(A);
+    let owns = |thread_id: &str| {
+        state
+            .state_store
+            .get_thread(thread_id)
+            .ok()
+            .flatten()
+            .is_some_and(|detail| ctx.is_owner(detail.requested_by.as_deref()))
+    };
+    let filter = ThreadFilter { admits: &owns };
+    let mine = timeline_threads(&state, Some(&filter));
+    assert!(mine.iter().any(|id| id == "T-root"), "{mine:?}");
+    assert!(mine.iter().any(|id| id == "T-mine"), "{mine:?}");
+    assert!(!mine.iter().any(|id| id == "T-theirs"), "{mine:?}");
+}
+
+#[test]
+fn a_readers_usage_totals_count_only_the_threads_they_own() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    seed(&state);
+    settle_with_usage(&state, "T-mine", 100);
+    settle_with_usage(&state, "T-theirs", 1000);
+
+    let whole_chain = chain_usage_for(&state, "T-root", None).unwrap();
+    assert_eq!(whole_chain.input_tokens, 1100);
+
+    let ctx = user(A);
+    let owns = |thread_id: &str| {
+        state
+            .state_store
+            .get_thread(thread_id)
+            .ok()
+            .flatten()
+            .is_some_and(|detail| ctx.is_owner(detail.requested_by.as_deref()))
+    };
+    let filter = ThreadFilter { admits: &owns };
+    let mine = chain_usage_for(&state, "T-root", Some(&filter)).unwrap();
+    assert_eq!(mine.input_tokens, 100, "B's thread is not counted");
 }

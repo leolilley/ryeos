@@ -248,9 +248,9 @@ fn load_definition(state: &AppState, definition_ref: &str) -> Result<(Definition
 
 /// One page of a chain's durable events in ascending `chain_seq`, and the
 /// cursor of the next page when there is one.
-struct EventPage {
-    events: Vec<Value>,
-    next: Option<i64>,
+pub struct EventPage {
+    pub events: Vec<Value>,
+    pub next: Option<i64>,
 }
 
 /// A chain's timeline at its highest `chain_seq`.
@@ -438,41 +438,124 @@ fn window_response(
     Ok(response)
 }
 
+/// Which threads of a chain a reader may see. The chain's root authorisation
+/// has already passed; this narrows the fold to the threads the reader may
+/// read, so another principal's descendant thread never reaches them. `None`
+/// where a response is built means the whole chain (the admitted operator).
+pub struct ThreadFilter<'a> {
+    /// Whether the reader may see this thread's events.
+    pub admits: &'a dyn Fn(&str) -> bool,
+}
+
+/// The chain's usage totals counting only the threads `filter` admits; with no
+/// filter, the whole chain.
+pub fn chain_usage_for(
+    state: &AppState,
+    chain_root_id: &str,
+    filter: Option<&ThreadFilter<'_>>,
+) -> Result<ThreadUsageTotals> {
+    let Some(filter) = filter else {
+        return Ok(state.state_store.chain_usage_totals(chain_root_id)?);
+    };
+    let mut totals = ThreadUsageTotals::default();
+    for (thread_id, usage) in state.state_store.chain_usage_by_thread(chain_root_id)? {
+        if !(filter.admits)(&thread_id) {
+            continue;
+        }
+        totals.thread_count += usage.thread_count;
+        totals.completed_turns += usage.completed_turns;
+        totals.input_tokens += usage.input_tokens;
+        totals.output_tokens += usage.output_tokens;
+        totals.spend_usd += usage.spend_usd;
+    }
+    Ok(totals)
+}
+
+/// One page of the chain's events after `after`, holding only events of
+/// threads `filter` admits. Each distinct thread is judged once per call. A
+/// page whose events are all hidden is skipped over, so a returned empty page
+/// means the chain has no further visible events.
+pub fn visible_page(
+    state: &AppState,
+    chain_root_id: &str,
+    mut after: Option<i64>,
+    filter: Option<&ThreadFilter<'_>>,
+    judged: &mut std::collections::HashMap<String, bool>,
+) -> Result<EventPage> {
+    loop {
+        let page = state.events.replay(&EventReplayParams {
+            thread_id: None,
+            chain_root_id: Some(chain_root_id.to_string()),
+            after_chain_seq: after,
+            limit: REPLAY_PAGE_EVENTS,
+            event_types: None,
+        })?;
+        let mut events = Vec::with_capacity(page.events.len());
+        for event in &page.events {
+            let admitted = match filter {
+                None => true,
+                Some(filter) => *judged
+                    .entry(event.thread_id.clone())
+                    .or_insert_with(|| (filter.admits)(&event.thread_id)),
+            };
+            if admitted {
+                events.push(serde_json::to_value(event)?);
+            }
+        }
+        if !events.is_empty() || page.next_cursor.is_none() {
+            return Ok(EventPage {
+                events,
+                next: page.next_cursor,
+            });
+        }
+        after = page.next_cursor;
+    }
+}
+
 /// The timeline response for an already-authorised caller: the chain's last
 /// `params.limit` top-level items (or an upsert since `params.since`), the
 /// chain summary and the definition's identity. `status` is the chain root
-/// thread's current status, which the caller's authorisation read.
-pub fn timeline_response(state: &AppState, params: &TimelineParams, status: &str) -> Result<Value> {
+/// thread's current status, which the caller's authorisation read. `filter`
+/// narrows the fold and the summary's usage totals to the threads the reader
+/// may see.
+pub fn timeline_response(
+    state: &AppState,
+    params: &TimelineParams,
+    status: &str,
+    filter: Option<&ThreadFilter<'_>>,
+) -> Result<Value> {
     let (definition, definition_digest) = load_definition(state, &params.definition_ref)?;
     let host = timeline_host(state);
     let chain_root_id = &params.chain_root_id;
     let key = (chain_root_id.clone(), definition_digest.clone());
+    let judged = std::cell::RefCell::new(std::collections::HashMap::new());
+    // A filtered fold is never cached: what a reader may see changes with
+    // ownership and speaks-for links, so a kept fold could outlive the
+    // visibility it was built under. The whole-chain fold is shared.
+    let transient;
+    let cache = match filter {
+        None => &host.timelines,
+        Some(_) => {
+            transient = TimelineCache::with_capacity(1);
+            &transient
+        }
+    };
     let folded = timeline_for(
-        &host.timelines,
+        cache,
         &key,
         &definition,
         |after| {
-            let page = state.events.replay(&EventReplayParams {
-                thread_id: None,
-                chain_root_id: Some(chain_root_id.clone()),
-                after_chain_seq: after,
-                limit: REPLAY_PAGE_EVENTS,
-                event_types: None,
-            })?;
-            Ok(EventPage {
-                events: page
-                    .events
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<Value>, _>>()?,
-                next: page.next_cursor,
-            })
+            visible_page(
+                state,
+                chain_root_id,
+                after,
+                filter,
+                &mut judged.borrow_mut(),
+            )
         },
         |thread| presentation_subject(state, &host.presentations, thread),
     )?;
-    let totals = state
-        .state_store
-        .chain_usage_totals(chain_root_id)
+    let totals = chain_usage_for(state, chain_root_id, filter)
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     window_response(
         chain_root_id,

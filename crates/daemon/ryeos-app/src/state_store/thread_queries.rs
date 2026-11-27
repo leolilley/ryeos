@@ -636,6 +636,16 @@ impl StateStore {
         queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
     }
 
+    /// The chain's usage per thread, counted as [`Self::chain_usage_totals`]
+    /// counts it, for a caller that sums only the threads it may see.
+    pub fn chain_usage_by_thread(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<Vec<(String, queries::ThreadUsageTotals)>> {
+        let g = self.lock()?;
+        queries::thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
+    }
+
     /// Node-wide usage settled since `since_iso` (inclusive), continuation-
     /// deduped — what cognition on this node cost inside the window.
     pub fn node_usage_totals_since(&self, since_iso: &str) -> Result<queries::ThreadUsageTotals> {

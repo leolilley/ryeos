@@ -11,8 +11,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::seat_auth::SeatCaller;
 use ryeos_api::registry::ServiceDescriptor;
-use ryeos_api::timeline_host::{TimelineParams, timeline_response};
+use ryeos_api::timeline_host::{ThreadFilter, TimelineParams, timeline_response};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
@@ -39,7 +40,23 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         return Err(HandlerError::NotFound.into());
     }
 
-    timeline_response(&state, &params, subject.status.as_str())
+    // The chain can hold threads other principals requested. A browser seat
+    // sees the entries of the threads its binding may read, judged thread by
+    // thread as the root was; the admitted operator reads the whole chain.
+    let admits = |thread_id: &str| {
+        crate::thread_authorization::authorize_exact_thread_subjects(
+            &ctx,
+            &state,
+            &caller,
+            &[thread_id],
+        )
+        .is_ok()
+    };
+    let filter = match &caller {
+        SeatCaller::Operator { .. } => None,
+        SeatCaller::Attachment(_) => Some(ThreadFilter { admits: &admits }),
+    };
+    timeline_response(&state, &params, subject.status.as_str(), filter.as_ref())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

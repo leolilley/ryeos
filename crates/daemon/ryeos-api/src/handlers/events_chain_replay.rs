@@ -23,6 +23,7 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 use super::default_replay_limit;
+use crate::timeline_host::{ThreadFilter, chain_usage_for};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,12 +54,24 @@ pub async fn handle(
         None => return Err(HandlerError::NotFound),
     };
 
-    // Deep-watch summary: the chain's status plus its chain-wide usage totals,
-    // returned alongside the events so the timeline lens can render a header
-    // (the braid carries what happened; this carries what it cost).
-    let totals = state
-        .state_store
-        .chain_usage_totals(&req.chain_root_id)
+    // Only the admitted operator reads other principals' threads; everyone
+    // else sees the events and the cost of threads they own.
+    let operator = ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok();
+    let owns = |thread_id: &str| {
+        state
+            .state_store
+            .get_thread(thread_id)
+            .ok()
+            .flatten()
+            .is_some_and(|detail| ctx.is_owner(detail.requested_by.as_deref()))
+    };
+    let filter = ThreadFilter { admits: &owns };
+
+    // Deep-watch summary: the chain's status plus its usage totals (the
+    // reader's own threads only, unless the reader is the operator), returned
+    // alongside the events so the timeline lens can render a header (the braid
+    // carries what happened; this carries what it cost).
+    let totals = chain_usage_for(&state, &req.chain_root_id, (!operator).then_some(&filter))
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let result = state
@@ -76,7 +89,7 @@ pub async fn handle(
     // operator reads other principals' threads; everyone else keeps the events
     // of threads they own. `next_cursor` comes from the unfiltered page, so the
     // cursor advances over events the caller may not see.
-    let events = if ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).is_ok() {
+    let events = if operator {
         result.events
     } else {
         let mut visible: HashMap<String, bool> = HashMap::new();
