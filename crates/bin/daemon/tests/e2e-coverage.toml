@@ -22,9 +22,11 @@
 # merge gate: every binary tagged `authority = true` below, the extra test
 # `packages`, and one real-isolation smoke test (`smoke`). The full
 # process-scope matrix stays on next. When a suite goes red on next that the
-# gate did not select, name the miss here: add the path or token.
+# gate did not select, name the miss here: add the path or token. This map is
+# itself a named path, so a change to the selection runs the smoke test.
 [authority]
 paths = [
+    "crates/bin/daemon/tests/e2e-coverage.toml",
     "crates/bin/cli/src/lifecycle_key_link.rs",
     "crates/bin/cli/src/lifecycle_offline_operation.rs",
     "crates/bin/cli/src/lifecycle_trust.rs",
