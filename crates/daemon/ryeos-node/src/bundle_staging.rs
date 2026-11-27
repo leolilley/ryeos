@@ -182,11 +182,11 @@ impl std::fmt::Display for StagingRefusal {
             } => write!(
                 f,
                 "the node holds {held} staged bytes and this stage adds {requested}; the node cap \
-                 is {limit}. Nothing was staged"
+                 is {limit}. Nothing was staged. The node's operator can free space with `ryeos bundle stage-clear`"
             ),
             Self::NodeCount { limit } => write!(
                 f,
-                "the node already holds {limit} stages, its cap. Nothing was staged"
+                "the node already holds {limit} stages, its cap. Nothing was staged. The node's operator can free space with `ryeos bundle stage-clear`"
             ),
             Self::KeyBytes {
                 limit,
@@ -195,11 +195,11 @@ impl std::fmt::Display for StagingRefusal {
             } => write!(
                 f,
                 "this key already has {held} staged bytes and this stage adds {requested}; the \
-                 per-key cap is {limit}. Nothing was staged"
+                 per-key cap is {limit}. Nothing was staged. The node's operator can free space with `ryeos bundle stage-clear`"
             ),
             Self::KeyCount { limit } => write!(
                 f,
-                "this key already has {limit} stages, the per-key cap. Nothing was staged"
+                "this key already has {limit} stages, the per-key cap. Nothing was staged. The node's operator can free space with `ryeos bundle stage-clear`"
             ),
             Self::Invalid(reason) | Self::Store(reason) => f.write_str(reason),
             Self::NotFound(digest) => write!(f, "the node holds no stage {digest}"),

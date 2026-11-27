@@ -1,11 +1,11 @@
-# ryeos:signed:2026-11-26T23:13:46Z:593dfd88a1f9c42fd6ea7f0eaf1f825bb8ead9c150bce391e67448a2691c96fd:xunjE2M6dqdfkigMd03Z0JQASSOEZoSJFswbSLKYQr8WTAozd2MFReA3V0gUfM5qtHOYm4koqiP9vakdtBPYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:14:34Z:3f3fc1d01206a5a019720fe1308199db038a343fa171500288e050bd5e5588da:pnPL2lkQvqinAI1NQDYPmzf6JogcfDKvzLxkXjQmaxkceQTfNZxCaGXmfWl3yehTvRK5jZ4D6cx/qPudbwfkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: []
-description: "List installed bundles, and bundles staged for a later start (status staged; operators see the stage detail, and apply_refused with the closed refusal code once a signed apply of the stage was refused; principals see the name and plain staged only)"
+description: "List installed bundles, and bundles staged for a later start (status staged; operators see the stage detail, and apply_refused with the closed refusal code once a signed apply of the stage was refused; principals see the name and plain staged only; the operator removes stages with bundle/stage-clear)"
 disclosure:
   principal:
     - "/bundles/*/name"

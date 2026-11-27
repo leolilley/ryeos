@@ -1,8 +1,8 @@
-# ryeos:signed:2026-11-26T23:13:38Z:79c222980696038d4e44f4db611676ec2c27672795f13af0c65cb39a4d1cb927:52sE3t6eMS0WtlkXZMkU5jzq2kta94pFL2+BJKPVQW/PMmgWV/Hq4JEH9flpDt4hgacprephxT8noiAB0SiyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T00:14:34Z:a59fd6813250818929e8d481653d00d072845b5f8d5066b559a4448d6ad196be:sy5ffMeVPqNdrp1zWELk0gMwNftYyFKOiiBogyOhPbS0lvK7cOgyDZugyhoITrszwVf32gB8FZJAX9h8cVgZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - list
-description: List installed bundles, and bundles staged for a later start (status staged; an operator also sees apply_refused with the closed refusal code once a signed apply of the stage was refused)
+description: List installed bundles, and bundles staged for a later start (status staged; an operator also sees apply_refused with the closed refusal code once a signed apply of the stage was refused; `ryeos bundle stage-clear` removes stages)
 dispatch:
   kind: execute_ref
   execute: service:bundle/list
