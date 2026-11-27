@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T16:16:40Z:afc0a5eacec2233fcde5b52aa7461bde6d5c9fb93c7492c3975777031ee072a8:ptd7dYH7IREXRWlkUtmxW0vaoThfXWpmcPaKYzAATBAhYdqaftiQeXd+/5rd0JVkqpGjZ2b37ShbiNkJW7fZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:17:51Z:0bd772a5d02bcf5d3867102186b28c55b173afe447fb04ae6853366334519258:xMwu9yw0qZuhGZ7o93BXWqMjxzG/oQEJ1ivBR2A+XLBRIPvE9lXtQyJUfWx1S3LpBxxhC3D0lBw+o6pyABbYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -15,8 +15,8 @@
 #     --throwaway        confirms, never replaces, the G-4 check: a build whose manifest
 #                        says build_profile other than release (a test build carries the
 #                        Claude Code stub driver; an absent or unknown value is refused) installs only when the track's own G-4
-#                        row exists, is marked throwaway and names that profile in its
-#                        Build profile cell, and this flag is also given
+#                        row exists, says yes in its Throwaway cell and names that profile
+#                        in its Build profile cell, and this flag is also given
 #     --bundle-trust     also pass each staged bundle's PUBLISHER_TRUST.toml that
 #                        names the development key's fingerprint and nothing else
 #
@@ -117,10 +117,11 @@ if [[ $build_profile != release ]]; then
     # throwaway, and name this build profile in its Build profile cell (the last
     # cell). --throwaway is a second confirmation, never the only check.
     table="${RM_NODE_G4_TABLE:-/home/leo/projects/ryeos-next/.tmp/ryeos-full-public-20261126/10-running-unattended.md}"
-    row="$(grep -F "| \`$track\` |" "$table" | head -1 || true)"
-    [[ -n $row ]] || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and track $track has no row in G-4's table ($table)" >&2; exit 3; }
-    [[ $row == *throwaway* ]] || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and the G-4 row for $track is not marked throwaway" >&2; exit 3; }
-    row_profile="$(printf '%s' "$row" | awk -F'|' '{gsub(/^ +| +$/, "", $(NF-1)); print $(NF-1)}')"
+    # shellcheck source=rm-node-g4.sh
+    . "$here/rm-node-g4.sh"
+    row_throwaway="$(g4_cell "$table" "$track" "Throwaway")" || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and track $track has no row (or no Throwaway column) in G-4's table ($table)" >&2; exit 3; }
+    [[ $row_throwaway == yes ]] || { echo "rm-node-up: refusing: run $run is a '$build_profile' build and the G-4 row for $track does not say yes in its Throwaway cell" >&2; exit 3; }
+    row_profile="$(g4_cell "$table" "$track" "Build profile")" || exit 3
     [[ $row_profile == "$build_profile" ]] || { echo "rm-node-up: refusing: the G-4 row for $track says build profile '$row_profile', the build is '$build_profile'" >&2; exit 3; }
     [[ $throwaway == 1 ]] || { echo "rm-node-up: a '$build_profile' build also needs --throwaway as the caller's confirmation" >&2; exit 2; }
 fi

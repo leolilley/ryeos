@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-27T06:42:51Z:4e4083b522a231f4469783740653e481345e85aed9591b3bdaf48ea2dc366608:x82RqPRjuXMajRwz5wFEjcUsqpiQJvqwECzO4CL4zFmaxVBMUrPkFK0dNhAR5s4pmUlzq/R+qwH/spFA0peyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:17:51Z:1e5ceeeedbedd686d1f9048e805f180e511aa265b2b87473628bc2616826a0fc:WiMsHVTh1FqAWDgGvwgyWBBs53AHOUuzWllFa1UhtOnTyPFDzv85QlsXa/YZF1KJxDU+r8msRfQNkcUTapLjDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority.
@@ -38,10 +38,12 @@ done
 [[ $confirm == 1 ]] || usage
 [[ $track =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ && $track != stage ]] || { echo "rm-node-down: bad track name: $track" >&2; exit 2; }
 
+here="$(cd "$(dirname "$0")" && pwd)"
 table="${RM_NODE_G4_TABLE:-/home/leo/projects/ryeos-next/.tmp/ryeos-full-public-20261126/10-running-unattended.md}"
-row="$(grep -F "| \`$track\` |" "$table" | head -1 || true)"
-[[ -n $row ]] || { echo "rm-node-down: refusing: no row for track $track in G-4's table ($table)" >&2; exit 3; }
-[[ $row == *own-history-only* ]] || { echo "rm-node-down: refusing: the G-4 row for $track does not say own-history-only; removal needs the per-principal export first" >&2; exit 3; }
+# shellcheck source=rm-node-g4.sh
+. "$here/rm-node-g4.sh"
+removal="$(g4_cell "$table" "$track" "Removal (rulings 1.37, 1.39)")" || { echo "rm-node-down: refusing: no row for track $track in G-4's table ($table)" >&2; exit 3; }
+[[ $removal == own-history-only ]] || { echo "rm-node-down: refusing: the Removal cell of the G-4 row for $track is '$removal', not own-history-only; removal needs the per-principal export first" >&2; exit 3; }
 
 prefix="/opt/ryeos-rm-$track"
 base="/home/leo/ryeos-rm/$track"
