@@ -128,6 +128,134 @@ fn encoded_body(
     }
 }
 
+// ── Byte ranges ────────────────────────────────────────────────────────────
+
+/// What a `Range` request asks of a body of `len` bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeAnswer {
+    /// Send the whole body: no range, a range this mode does not serve
+    /// (several ranges, a unit other than bytes, malformed), or an
+    /// `If-Range` that does not match.
+    Whole,
+    /// Send bytes `start..=end`.
+    Part { start: u64, end: u64 },
+    /// No byte of the body is in the range.
+    Unsatisfiable,
+}
+
+/// Read one `bytes=` range against a body of `len` bytes. Several ranges and
+/// anything malformed are answered with the whole body, which RFC 9110 allows.
+fn range_answer(range: &str, len: u64) -> RangeAnswer {
+    let Some(spec) = range.trim().strip_prefix("bytes=") else {
+        return RangeAnswer::Whole;
+    };
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return RangeAnswer::Whole;
+    }
+    let Some((first, last)) = spec.split_once('-') else {
+        return RangeAnswer::Whole;
+    };
+    let number = |text: &str| -> Option<u64> {
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    };
+    match (first.is_empty(), last.is_empty()) {
+        // `-n`: the last n bytes.
+        (true, false) => match number(last) {
+            None => RangeAnswer::Whole,
+            Some(0) => RangeAnswer::Unsatisfiable,
+            Some(_) if len == 0 => RangeAnswer::Unsatisfiable,
+            Some(suffix) => RangeAnswer::Part {
+                start: len.saturating_sub(suffix),
+                end: len - 1,
+            },
+        },
+        // `a-`: from a to the end.
+        (false, true) => match number(first) {
+            None => RangeAnswer::Whole,
+            Some(start) if start >= len => RangeAnswer::Unsatisfiable,
+            Some(start) => RangeAnswer::Part {
+                start,
+                end: len - 1,
+            },
+        },
+        // `a-b`.
+        (false, false) => match (number(first), number(last)) {
+            (Some(start), Some(end)) if start <= end => {
+                if start >= len {
+                    RangeAnswer::Unsatisfiable
+                } else {
+                    RangeAnswer::Part {
+                        start,
+                        end: end.min(len - 1),
+                    }
+                }
+            }
+            _ => RangeAnswer::Whole,
+        },
+        (true, true) => RangeAnswer::Whole,
+    }
+}
+
+/// The response for `body` under the request's `Range` and `If-Range`.
+///
+/// Ranges are served only on a 200 body sent as stored without a transfer
+/// coding (`rangeable`); otherwise the body goes out whole and no
+/// `Accept-Ranges` is sent. An `If-Range` is honoured only against this
+/// body's strong `etag`; anything else, a date included, sends it whole.
+fn ranged_response(
+    status: StatusCode,
+    body: std::borrow::Cow<'static, [u8]>,
+    request: &axum::http::HeaderMap,
+    etag: Option<&str>,
+    rangeable: bool,
+) -> Response {
+    if !rangeable || status != StatusCode::OK {
+        return (status, body).into_response();
+    }
+    let len = body.len() as u64;
+    let if_range_holds = match request.get(header::IF_RANGE) {
+        None => true,
+        Some(value) => match (value.to_str(), etag) {
+            (Ok(given), Some(etag)) => !given.starts_with("W/") && given == etag,
+            _ => false,
+        },
+    };
+    let answer = match request.get(header::RANGE).map(|value| value.to_str()) {
+        Some(Ok(range)) if if_range_holds => range_answer(range, len),
+        _ => RangeAnswer::Whole,
+    };
+    let mut response = match answer {
+        RangeAnswer::Whole => (status, body).into_response(),
+        RangeAnswer::Part { start, end } => {
+            let part = body[start as usize..=end as usize].to_vec();
+            let mut response = (StatusCode::PARTIAL_CONTENT, part).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{len}"))
+                    .expect("a byte range is a valid header value"),
+            );
+            response
+        }
+        RangeAnswer::Unsatisfiable => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{len}"))
+                    .expect("a byte length is a valid header value"),
+            );
+            response
+        }
+    };
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response
+}
+
 static CSP_VALUE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
 
 impl ResponseMode for StaticMode {
@@ -287,7 +415,13 @@ impl CompiledResponseMode for CompiledStaticMode {
     ) -> Result<Response, RouteDispatchError> {
         match &self.source {
             CompiledStaticSource::Inline { body } => {
-                let mut resp = (self.status, body.clone()).into_response();
+                let mut resp = ranged_response(
+                    self.status,
+                    std::borrow::Cow::Owned(body.clone()),
+                    &ctx.request_parts.headers,
+                    None,
+                    true,
+                );
                 if let Some(ref ct) = self.content_type {
                     resp.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
                 }
@@ -330,7 +464,13 @@ impl CompiledResponseMode for CompiledStaticMode {
                     ctx.request_parts.headers.get(header::ACCEPT_ENCODING),
                 )?;
 
-                let mut resp = (self.status, body).into_response();
+                let mut resp = ranged_response(
+                    self.status,
+                    body,
+                    &ctx.request_parts.headers,
+                    Some(&etag),
+                    !stored_encoded,
+                );
                 let headers = resp.headers_mut();
                 if let Some(encoding) = encoding {
                     headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
@@ -649,5 +789,143 @@ mod tests {
         assert_eq!((&*body, encoding), (stored.as_slice(), Some("gzip")));
         let (body, encoding) = encoded_body(asset(), None).unwrap();
         assert_eq!((&*body, encoding), (&b"(module)"[..], None));
+    }
+
+    fn headers(pairs: &[(header::HeaderName, &str)]) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(name.clone(), value.parse().unwrap());
+        }
+        map
+    }
+
+    async fn body_of(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    const BODY: &[u8] = b"0123456789";
+    const ETAG: &str = "\"body-etag\"";
+
+    fn answer(request: &axum::http::HeaderMap, rangeable: bool) -> Response {
+        ranged_response(
+            StatusCode::OK,
+            std::borrow::Cow::Borrowed(BODY),
+            request,
+            Some(ETAG),
+            rangeable,
+        )
+    }
+
+    #[test]
+    fn range_specs_read_as_rfc_9110_says() {
+        assert_eq!(
+            range_answer("bytes=0-1", 10),
+            RangeAnswer::Part { start: 0, end: 1 }
+        );
+        assert_eq!(
+            range_answer("bytes=8-", 10),
+            RangeAnswer::Part { start: 8, end: 9 }
+        );
+        assert_eq!(
+            range_answer("bytes=-3", 10),
+            RangeAnswer::Part { start: 7, end: 9 }
+        );
+        assert_eq!(
+            range_answer("bytes=-30", 10),
+            RangeAnswer::Part { start: 0, end: 9 }
+        );
+        assert_eq!(
+            range_answer("bytes=5-500", 10),
+            RangeAnswer::Part { start: 5, end: 9 }
+        );
+        assert_eq!(range_answer("bytes=10-", 10), RangeAnswer::Unsatisfiable);
+        assert_eq!(range_answer("bytes=10-12", 10), RangeAnswer::Unsatisfiable);
+        assert_eq!(range_answer("bytes=-0", 10), RangeAnswer::Unsatisfiable);
+        assert_eq!(range_answer("bytes=0-", 0), RangeAnswer::Unsatisfiable);
+        assert_eq!(range_answer("bytes=0-1,4-5", 10), RangeAnswer::Whole);
+        assert_eq!(range_answer("items=0-1", 10), RangeAnswer::Whole);
+        assert_eq!(range_answer("bytes=5-2", 10), RangeAnswer::Whole);
+        assert_eq!(range_answer("bytes=a-b", 10), RangeAnswer::Whole);
+        assert_eq!(range_answer("bytes=+1-2", 10), RangeAnswer::Whole);
+        assert_eq!(range_answer("bytes=-", 10), RangeAnswer::Whole);
+    }
+
+    #[tokio::test]
+    async fn one_range_is_answered_206_with_its_content_range() {
+        let response = answer(&headers(&[(header::RANGE, "bytes=0-1")]), true);
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 0-1/10");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(body_of(response).await, b"01");
+    }
+
+    #[tokio::test]
+    async fn an_unsatisfiable_range_is_answered_416_with_the_length() {
+        let response = answer(&headers(&[(header::RANGE, "bytes=10-")]), true);
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+        assert!(body_of(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn several_ranges_are_answered_whole() {
+        let response = answer(&headers(&[(header::RANGE, "bytes=0-1,4-5")]), true);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert!(response.headers().get(header::CONTENT_RANGE).is_none());
+        assert_eq!(body_of(response).await, BODY);
+    }
+
+    #[tokio::test]
+    async fn if_range_serves_the_range_only_for_this_bodys_strong_etag() {
+        let matching = answer(
+            &headers(&[(header::RANGE, "bytes=0-1"), (header::IF_RANGE, ETAG)]),
+            true,
+        );
+        assert_eq!(matching.status(), StatusCode::PARTIAL_CONTENT);
+        for stale in [
+            "\"another\"",
+            "W/\"body-etag\"",
+            "Wed, 21 Oct 2015 07:28:00 GMT",
+        ] {
+            let response = answer(
+                &headers(&[(header::RANGE, "bytes=0-1"), (header::IF_RANGE, stale)]),
+                true,
+            );
+            assert_eq!(response.status(), StatusCode::OK, "If-Range {stale}");
+            assert_eq!(body_of(response).await, BODY);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_sent_with_a_coding_is_never_ranged() {
+        let response = answer(&headers(&[(header::RANGE, "bytes=0-1")]), false);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
+        assert_eq!(body_of(response).await, BODY);
+    }
+
+    #[tokio::test]
+    async fn only_a_200_body_is_ranged() {
+        let response = ranged_response(
+            StatusCode::NOT_FOUND,
+            std::borrow::Cow::Borrowed(BODY),
+            &headers(&[(header::RANGE, "bytes=0-1")]),
+            Some(ETAG),
+            true,
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
+    }
+
+    #[tokio::test]
+    async fn without_a_range_the_whole_body_says_ranges_are_accepted() {
+        let response = answer(&headers(&[]), true);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(body_of(response).await, BODY);
     }
 }
