@@ -133,9 +133,13 @@ jobs:
           echo "Tag commit: $TAG_COMMIT"
           echo "Build date: $BUILD_DATE"
 
+  # The real release. It never runs in a rehearsal, and it is the only job that
+  # names the official publisher key: a job that is not scheduled is never sent
+  # to a runner, so a dry run cannot be handed the secret (decision 42).
   publish:
     name: Publish release artifacts
     needs: qualify
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # immutable bundle assets on the GitHub release
@@ -383,7 +387,6 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
           BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           resolve_tag() {
             local tag="$1"
@@ -430,16 +433,6 @@ jobs:
             echo "local_inference_candidate_tag=$LOCAL_INFERENCE_CANDIDATE"
             echo "hosted_workflow_candidate_tag=$HOSTED_WORKFLOW_CANDIDATE"
           } >> "$GITHUB_OUTPUT"
-          if [[ "$DRY_RUN" == true ]]; then
-            # A rehearsal never queries the registry: every image is built.
-            for prefix in standard central local_inference hosted_workflow; do
-              {
-                echo "${prefix}_exists=false"
-                echo "${prefix}_digest="
-              } >> "$GITHUB_OUTPUT"
-            done
-            exit 0
-          fi
           resolve_tag "$STANDARD_VERSION" standard
           resolve_tag "$CENTRAL_VERSION" central
           resolve_tag "$LOCAL_INFERENCE_VERSION" local_inference
@@ -455,18 +448,11 @@ jobs:
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
           LOCAL_INFERENCE_EXISTS: ${{ steps.resolve-images.outputs.local_inference_exists }}
           HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           targets=()
-          # The three archives are built from the official publication stage,
-          # whose packaging gate refuses a development signer. A rehearsal
-          # never uses the official key (Leo, decision 42), so it builds the
-          # images from the development publication and no archive.
-          if [[ "$DRY_RUN" != true ]]; then
-            [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
-            [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
-            [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
-          fi
+          [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
+          [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
+          [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
           [[ "$LOCAL_INFERENCE_EXISTS" == true ]] || targets+=(local-inference)
@@ -475,28 +461,8 @@ jobs:
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Release construction targets: ${TARGETS:-none}"
 
-      # Rehearsal key (decision 42: a dry run never touches the official key).
-      # The development key is a tracked file in the repository. The step that
-      # reads it runs only in a rehearsal and names no secret; the bake below
-      # takes the official secret only when `!inputs.dry_run` holds, so a
-      # rehearsal's expression never evaluates the secrets context.
-      - name: Select the rehearsal's development signing key
-        id: rehearsal-key
-        if: ${{ inputs.dry_run }}
-        run: |
-          {
-            echo 'pem<<RYEOS_DEV_KEY_EOF'
-            cat .dev-keys/PUBLISHER_DEV.pem
-            echo 'RYEOS_DEV_KEY_EOF'
-          } >> "$GITHUB_OUTPUT"
-
       # Bake evaluates all requested targets in one BuildKit solve. Their
       # shared `published` stage therefore compiles and signs exactly once.
-      # A rehearsal signs with the development key, builds the images from the
-      # development publication stage (checked against the development trust
-      # document), exports nothing, and builds no archive: the archives come
-      # from the official stage, whose packaging gate refuses a development
-      # signer.
       - name: Build release archive and attested image candidates once
         id: release-build
         if: steps.release-plan.outputs.targets != ''
@@ -505,19 +471,11 @@ jobs:
           # Image targets declare max provenance explicitly. Suppress the
           # action's implicit attestation on the local archive exporter.
           BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
-          RYEOS_PUBLISHER_KEY: ${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || steps.rehearsal-key.outputs.pem }}
+          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         with:
           source: .
           files: ./docker-bake.release.hcl
           targets: ${{ steps.release-plan.outputs.targets }}
-          set: |
-            ${{ inputs.dry_run && 'standard.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'central-host.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'local-inference.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && 'hosted-workflow.output=type=cacheonly' || '' }}
-            ${{ inputs.dry_run && '*.args.PUBLICATION_STAGE=development-publication' || '' }}
-            ${{ inputs.dry_run && '*.args.CONTAINED_PUBLICATION_STAGE=development-publication' || '' }}
-            ${{ inputs.dry_run && '*.args.PUBLISHER_OWNER=RyeOS Development' || '' }}
           vars: |
             VERSION=${{ needs.qualify.outputs.version }}
             SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
@@ -1029,3 +987,85 @@ jobs:
               exit 1
             }
           done
+
+  # The rehearsal (dry_run: a dispatch, which is always a dry run). It names no
+  # secret and cannot be handed one: it signs with the development key, which is
+  # a tracked file, builds the four images from the development publication
+  # stage (checked against the development trust document), exports nothing, and
+  # builds no archive (the archives come from the official stage, whose packaging
+  # gate refuses a development signer).
+  rehearse:
+    name: Rehearse the release with the development key
+    needs: qualify
+    if: ${{ inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.qualify.outputs.source_sha }}
+
+      - name: Verify release source revision
+        env:
+          EXPECTED_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          if [ "$SOURCE_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Rehearsal source $SOURCE_SHA differs from release source $EXPECTED_SHA"
+            exit 1
+          fi
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Select the development signing key and the candidate tags
+        id: rehearsal
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+        run: |
+          BUILD_DATE_KEY="$(printf '%s' "$BUILD_DATE" | sha256sum | cut -c1-12)"
+          SUFFIX="candidate-${VERSION}-${SOURCE_SHA}-${BUILD_DATE_KEY}"
+          {
+            echo "standard_tag=ghcr.io/leolilley/ryeos-standard:${SUFFIX}"
+            echo "central_tag=ghcr.io/leolilley/ryeos-central-host:${SUFFIX}"
+            echo "local_inference_tag=ghcr.io/leolilley/ryeos-local-inference:${SUFFIX}"
+            echo "hosted_workflow_tag=ghcr.io/leolilley/ryeos-hosted-workflow:${SUFFIX}"
+            echo 'pem<<RYEOS_DEV_KEY_EOF'
+            cat .dev-keys/PUBLISHER_DEV.pem
+            echo 'RYEOS_DEV_KEY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rehearse the image builds with the development key
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+          RYEOS_PUBLISHER_KEY: ${{ steps.rehearsal.outputs.pem }}
+        with:
+          source: .
+          files: ./docker-bake.release.hcl
+          targets: standard,central-host,local-inference,hosted-workflow
+          set: |
+            standard.output=type=cacheonly
+            central-host.output=type=cacheonly
+            local-inference.output=type=cacheonly
+            hosted-workflow.output=type=cacheonly
+            *.args.PUBLICATION_STAGE=development-publication
+            *.args.CONTAINED_PUBLICATION_STAGE=development-publication
+            *.args.PUBLISHER_OWNER=RyeOS Development
+          vars: |
+            VERSION=${{ needs.qualify.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+            ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
+            WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
+            NODE_BINARIES_ARTIFACT_DIR=${{ runner.temp }}/ryeos-node-binaries-artifacts
+            STANDARD_TAG=${{ steps.rehearsal.outputs.standard_tag }}
+            CENTRAL_HOST_TAG=${{ steps.rehearsal.outputs.central_tag }}
+            LOCAL_INFERENCE_TAG=${{ steps.rehearsal.outputs.local_inference_tag }}
+            HOSTED_WORKFLOW_TAG=${{ steps.rehearsal.outputs.hosted_workflow_tag }}

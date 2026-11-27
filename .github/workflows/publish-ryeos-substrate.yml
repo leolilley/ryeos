@@ -28,7 +28,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The real publication. It never runs in a rehearsal and is the only job that
+  # names the official publisher key (decision 42).
   publish:
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       # A dispatch publishes nothing: a real release comes only from the tag
@@ -55,15 +58,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - if: ${{ !inputs.dry_run }}
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish immutable substrate
-        if: ${{ !inputs.dry_run }}
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
           SOURCE_SHA: ${{ inputs.source_ref }}
@@ -87,3 +88,26 @@ jobs:
             --tag "ghcr.io/leolilley/ryeos-substrate:git-$SOURCE_SHA" \
             --push \
             .
+
+  # The rehearsal: checks the source coordinate and prepares the builder, and
+  # publishes nothing. It names no secret and has no write permission.
+  rehearse:
+    if: ${{ inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require an immutable source coordinate
+        env:
+          EXPECTED_SHA: ${{ inputs.source_ref }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3

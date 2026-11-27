@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-27T06:30:33Z:4b3df7b61cbc02097a1ac7ac873f80240a17042099762fca99a2168dee9bd381:mZiAfju2v0KR0Mbzu50EIBal9otkX70cTK1lE7EC9t1bNcVup++ZeTVzLVbArk0L7XGGehQ7ITm2/Yq+xrwTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T06:57:45Z:545805a5381d508ff634b8288d58e888dda0756833e23bf2d2a445766b6c58f4:0gA6Y1ZPdIItZV0oJXqnmmdlkbPgjJFj8XEhw9V2FdIpgfrQcMpbMQQN/GAok9AB9AQ0mY7TnVa42L5aNiv4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
 #   version: "1.0.0"
@@ -33,15 +33,17 @@ inputs. For each such file this check holds:
    MARKERS; until then the check cannot see it.
 5. No line reads `github.event.inputs.dry_run` (a string, where "false" is
    truthy).
-6. A rehearsal never touches the official publisher key (Leo, decision 42):
-   every step or job that names `secrets.RYEOS_PUBLISHER_KEY` carries
-   `!inputs.dry_run`, or reads it only as the short-circuit expression
-   `${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || ... }}`, and no
-   workflow-level line names it. A workflow that
-   bakes images must also select `.dev-keys/PUBLISHER_DEV.pem` and the
-   `development-publication` stage for its rehearsal, so the rehearsal signs
-   with the development key and is checked against the development trust
-   document.
+6. A rehearsal never touches the official publisher key (Leo, decision 42).
+   `secrets.RYEOS_PUBLISHER_KEY` appears only in a job whose job-level `if:`
+   contains `!inputs.dry_run`; a job whose `if:` is `inputs.dry_run` names no
+   secrets context. publish-ryeosd.yml in particular has exactly two jobs
+   that bake: `publish` (`if: ${{ !inputs.dry_run }}`, the real release) and
+   `rehearse` (`if: ${{ inputs.dry_run }}`, `permissions: contents: read`
+   only, outputs `cacheonly`, signed with `.dev-keys/PUBLISHER_DEV.pem` from
+   the `development-publication` stage), one bake action each and none
+   elsewhere. A job that is not scheduled is never sent to a runner, so a dry
+   run cannot be handed the secret; a step-level condition or a short-circuit
+   expression inside a scheduled job is not relied on.
 
 The files are read as text by indentation, with the standard library only.
 Anything not found is a failure, never a pass.
@@ -61,11 +63,6 @@ from pathlib import Path
 WORKFLOW_DIR = ".github/workflows"
 
 OFFICIAL_KEY = "secrets.RYEOS_PUBLISHER_KEY"
-# A read inside a step that also runs in a rehearsal is allowed only as the
-# short-circuit `${{ !inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY || ... }}`,
-# whose secrets context is never evaluated when dry_run is true.
-GUARDED_KEY = re.compile(r"\$\{\{\s*!inputs\.dry_run\s*&&\s*secrets\.RYEOS_PUBLISHER_KEY\s*\|\|")
-
 # Operations that write outside the runner. Closed: extend it with a new kind
 # of publishing step, with a fixture in self_test.
 MARKERS = {
@@ -206,6 +203,8 @@ def check_text(name, text):
         if any("secrets." in l for l in header):
             failures.append("the first job's header reads a secret before the refusal step")
         for jname, jheader, _ in jobs[1:]:
+            if any(re.match(r"^ {4}if:\s*\$\{\{ inputs\.dry_run \}\}\s*$", l) for l in jheader):
+                continue  # a rehearsal job cannot run on a real dispatch
             if _key_line(jheader, 4, "needs") is None:
                 failures.append(f"job `{jname}` has no `needs`, so it could run without the first job's refusal")
 
@@ -220,22 +219,40 @@ def check_text(name, text):
             "and the `development-publication` stage"
         )
 
+    by_name = {n: (h, st) for n, h, st in jobs}
+    job_ifs = {n: next((m.group(1).strip() for l in h if (m := re.match(r"^ {4}if:\s*(.*)$", l))), "") for n, (h, _) in by_name.items()}
+    for n, (h, st) in by_name.items():
+        job_text = "\n".join(h) + "\n" + "\n".join("\n".join(x) for x in st)
+        if job_ifs[n] == "${{ inputs.dry_run }}" and "secrets." in job_text:
+            failures.append(f"job `{n}` runs in a rehearsal and names a secrets context")
+    if name == "publish-ryeosd.yml":
+        if job_ifs.get("publish") != "${{ !inputs.dry_run }}":
+            failures.append("job `publish` must have the job-level `if: ${{ !inputs.dry_run }}`")
+        if job_ifs.get("rehearse") != "${{ inputs.dry_run }}":
+            failures.append("job `rehearse` must have the job-level `if: ${{ inputs.dry_run }}`")
+        bakes = {n: sum(1 for x in st for l in x if "uses: docker/bake-action@" in l) for n, (h, st) in by_name.items()}
+        if {n: c for n, c in bakes.items() if c} != {"publish": 1, "rehearse": 1}:
+            failures.append(f"exactly one bake action in `publish` and one in `rehearse` and none elsewhere, found {{ {', '.join(f'{n}: {c}' for n, c in bakes.items() if c)} }}")
+        if "rehearse" in by_name:
+            rh = [l.rstrip() for l in by_name["rehearse"][0]]
+            perms = _block(rh, next((i for i, l in enumerate(rh) if re.match(r"^ {4}permissions:", l)), len(rh) - 1), 4) if any(re.match(r"^ {4}permissions:", l) for l in rh) else None
+            if perms is None or [l.strip() for l in perms if l.strip()] != ["contents: read"]:
+                failures.append("job `rehearse` must have `permissions:` of exactly `contents: read`")
     for jname, header, steps in jobs:
         job_if = next((m.group(1) for l in header if (m := re.match(r"^ {4}if:\s*(.*)$", l))), "")
         for step in steps:
             body = "\n".join(step)
             gated = "!inputs.dry_run" in _step_if(step) or "!inputs.dry_run" in job_if
-            unguarded = [l for l in step if OFFICIAL_KEY in l and not GUARDED_KEY.search(l)]
-            if unguarded and not gated:
+            if OFFICIAL_KEY in body and "!inputs.dry_run" not in job_if:
                 title = next((l.strip() for l in step if "name:" in l or "uses:" in l), step[0].strip())
                 failures.append(
                     f"job `{jname}`: ungated read of {OFFICIAL_KEY}: {title}; a rehearsal never "
-                    "touches the official key, so the step needs `!inputs.dry_run` in its own or its job's `if:`"
+                    "touches the official key, so only a job whose own `if:` contains `!inputs.dry_run` may name it"
                 )
             for label, pat in MARKERS.items():
                 if not pat.search(body):
                     continue
-                if label == "bake" and "cacheonly" in body and "inputs.dry_run &&" in body:
+                if label == "bake" and job_if.strip() == "${{ inputs.dry_run }}" and body.count("output=type=cacheonly") >= 4:
                     continue
                 if not gated:
                     title = next((l.strip() for l in step if "name:" in l or "uses:" in l), step[0].strip())
@@ -279,6 +296,10 @@ def _extra_job(text, step):
     )
 
 
+RYEOSD_ONLY = {"secret in the rehearsal job", "rehearsal job permissions widened", "publish job if changed",
+               "rehearse job if changed"}
+
+
 def _alterations(text):
     """name -> (altered text, a substring its failure message must contain)."""
     out = {}
@@ -302,7 +323,11 @@ def _alterations(text):
     out["ungated registry login"] = (_extra_job(text, "      - uses: docker/login-action@abc # v3\n"), "ungated publishing step (registry login)")
     out["bake not cacheonly"] = (text.replace("cacheonly", "registry"), "ungated publishing step (bake)")
     out["ungated official key read"] = (_extra_job(text, "      - name: Key\n        env:\n          K: ${{ secrets.RYEOS_PUBLISHER_KEY }}\n        run: true\n"), "ungated read of secrets.RYEOS_PUBLISHER_KEY")
-    out["official key expression not short-circuited"] = (text.replace("!inputs.dry_run && secrets.RYEOS_PUBLISHER_KEY ||", "secrets.RYEOS_PUBLISHER_KEY ||"), "ungated read of secrets.RYEOS_PUBLISHER_KEY")
+    out["secret in the rehearsal job"] = (text.replace("RYEOS_PUBLISHER_KEY: ${{ steps.rehearsal.outputs.pem }}", "RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}"), "names a secrets context")
+    out["rehearsal job permissions widened"] = (re.sub(r"(\n  rehearse:\n(?:.*\n)*?    permissions:\n      contents: read\n)", r"\1      packages: write\n", text, count=1), "exactly `contents: read`")
+    out["publish job if changed"] = (text.replace("    needs: qualify\n    if: ${{ !inputs.dry_run }}\n    runs-on", "    needs: qualify\n    if: ${{ true }}\n    runs-on", 1), "job `publish` must have the job-level")
+    out["rehearse job if changed"] = (text.replace("    needs: qualify\n    if: ${{ inputs.dry_run }}\n", "    needs: qualify\n    if: ${{ true }}\n", 1), "job `rehearse` must have the job-level")
+    out["third bake"] = (_extra_job(text, "      - uses: docker/bake-action@abc # v7\n"), "ungated publishing step (bake)")
     out["official key in workflow env"] = (text.replace("\njobs:\n", "\nenv:\n  K: ${{ secrets.RYEOS_PUBLISHER_KEY }}\n\njobs:\n", 1), "a workflow-level line names")
     out["rehearsal without the development key"] = (text.replace(".dev-keys/PUBLISHER_DEV.pem", ".dev-keys/other.pem"), "must rehearse with")
     out["job without needs"] = (text.rstrip("\n") + "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", "has no `needs`")
@@ -323,6 +348,8 @@ def self_test(project):
             bad += 1
             continue
         for name, (altered, expect) in _alterations(text).items():
+            if name in RYEOSD_ONLY and path.name != "publish-ryeosd.yml":
+                continue
             if altered == text:
                 continue  # this file has nothing of that shape
             applied.add(name)
