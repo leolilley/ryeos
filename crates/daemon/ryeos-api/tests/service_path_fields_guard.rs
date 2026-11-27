@@ -643,16 +643,6 @@ const NO_HOST_RESOURCE: &[(&str, &str, &str)] = &[
         "a record key inside the caller's readable records; cross-principal reads by key are covered by the two-person isolation test",
     ),
     (
-        "remote/list",
-        "project",
-        "an optional project path the CLI forwards; the handler binds it to a field it never reads, because remote pins are node-level records",
-    ),
-    (
-        "remote/status",
-        "project",
-        "an optional project path the CLI forwards; the handler binds it to a field it never reads, because remote pins are node-level records",
-    ),
-    (
         "system/routes",
         "path",
         "a substring filter over the node's route table, never a host path",

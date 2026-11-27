@@ -1,6 +1,5 @@
 //! `remote/list` — list configured remote nodes.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,15 +12,7 @@ use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct Request {
-    /// Local project path the CLI may forward. Remote pins are node-level
-    /// records, so a project never changes the listing.
-    #[serde(default, alias = "project")]
-    pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
-    #[serde(default)]
-    pub no_project: bool,
-}
+pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let report = config::load_remotes_report(&state.config.app_root)?;

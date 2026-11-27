@@ -1,6 +1,5 @@
 //! `remote/status` — check a remote node's status and public key.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,13 +19,6 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Local project path the CLI may forward. Remote pins are node-level
-    /// records, so a project never changes which remote is used.
-    #[serde(default, alias = "project")]
-    pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
-    #[serde(default)]
-    pub no_project: bool,
 }
 
 fn default_remote() -> String {

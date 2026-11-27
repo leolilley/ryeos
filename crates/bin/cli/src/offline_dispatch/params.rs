@@ -239,8 +239,6 @@ mod tests {
         let root = ryeos_engine::test_support::workspace_root();
         for (file, expected, positionals) in [
             ("remote-execute", true, vec!["test", "tool:test/read"]),
-            ("remote-status", true, vec!["test"]),
-            ("remote-list", true, vec![]),
             ("remote-doctor", false, vec!["test"]),
             ("fetch", false, vec!["tool:test/read"]),
             (

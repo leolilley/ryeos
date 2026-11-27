@@ -1,11 +1,9 @@
-# ryeos:signed:2026-11-24T20:26:06Z:52edeecad0f761124f7731319cdbfa486085ba24b02267c79f2713d328e34b86:P+3EYWofe6KXL0PP4PLzFQ6wdOxseQJqU+5tc2+ghLuGPWsyV65avWC10MVLeIZglAdNEbmu3itD9KGaimwYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:00:42Z:3ce980ae8f597ed073c06f38c53ea3ed366f1fc3f260d286cd7a07af7b9e8ac0:iFAr9zkgld2mK6kXoi3e0zosksxr6M3142Bp5gtlhH3RCZQctWjEqjV8nUQunBfNtfhARXRIzo3DJ6Y+zYLvBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.status
 required_caps: ["ryeos.execute.service.remote/status"]
 schema:
   remote: string?
-  project: string?
-  no_project: boolean?
 description: "Check a remote node's status and public key"
 disclosure:
   principal:

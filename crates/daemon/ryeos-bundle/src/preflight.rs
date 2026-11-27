@@ -1625,12 +1625,7 @@ mod tests {
     fn preflight_uses_current_project_contract_for_shipped_remote_commands() {
         let root =
             ryeos_engine::test_support::workspace_root().join("bundles/core/.ai/node/commands");
-        for name in [
-            "remote-execute",
-            "remote-list",
-            "remote-status",
-            "remote-doctor",
-        ] {
+        for name in ["remote-execute", "remote-doctor"] {
             let path = root.join(format!("{name}.yaml"));
             let body: serde_json::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

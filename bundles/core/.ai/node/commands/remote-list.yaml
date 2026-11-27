@@ -1,13 +1,8 @@
-# ryeos:signed:2026-09-09T04:33:06Z:b5f44e14b45d6cd72fd46936c1d7b7bfc94e175579d9604b5781bed20ecb95e6:WzwEpsTyHcDJTTpX80Ww+pJIPVEWPmpfcLmcLEP+EvYHGfTQq+e8NIYElfAzJH7yGctGW0Uta4bElmsijjE6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T23:00:42Z:f30b678ad17517f0bf5fe3950e05ed0c300a4f35c1d436981dad3e09c27f8229:i+ZfjNUSfkvYjx5rHb0YvnYPhqym84HVxufjrLS0UmqyxYJAGplXYV0KAWi7tYHscD851Iiw+NJT4amXJ7PgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - list
 description: List configured remote nodes
-project:
-  resolution: optional
-  bind_parameter: project
-  bind_no_project_parameter: no_project
-  no_project_flag: true
 dispatch:
   kind: execute_ref
   execute: service:remote/list

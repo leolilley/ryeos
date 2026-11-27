@@ -594,15 +594,9 @@ async fn remote_list_retains_configured_site_coordinate() {
         &remote_config("prod", "https://target.example", &public_key),
     );
 
-    let result = remote_list::handle(
-        remote_list::Request {
-            project_path: None,
-            no_project: true,
-        },
-        Arc::new(local_state),
-    )
-    .await
-    .unwrap();
+    let result = remote_list::handle(remote_list::Request {}, Arc::new(local_state))
+        .await
+        .unwrap();
 
     assert_eq!(result["remotes"][0]["site_id"], public_key["site_id"]);
     assert_eq!(result["remotes"][0]["pin_source"], "expected_fingerprint");
@@ -656,8 +650,6 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
     let status = remote_status::handle(
         remote_status::Request {
             remote: "prod".to_string(),
-            project_path: Some(project_path),
-            no_project: false,
         },
         local_state,
     )
@@ -702,8 +694,6 @@ async fn remote_doctor_and_status_reject_stale_configured_vault_without_signed_c
     let status = remote_status::handle(
         remote_status::Request {
             remote: "prod".to_string(),
-            project_path: None,
-            no_project: true,
         },
         local_state,
     )
