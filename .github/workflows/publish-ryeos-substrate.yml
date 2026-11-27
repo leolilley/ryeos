@@ -13,6 +13,11 @@ on:
         description: "Substrate version used for build provenance"
         required: true
         type: string
+      dry_run:
+        description: "Rehearse without publishing. Defaults to true; a dispatch with false is refused in the first step, and a real publish comes only from the tag push, which carries no inputs."
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -26,6 +31,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # A dispatch publishes nothing: a real release comes only from the tag
+      # push, which carries no inputs. This is the first step, before anything
+      # reads a secret.
+      - name: Refuse a real publish by dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        run: |
+          echo "::error::A dispatch only rehearses (dry_run=true). A real release comes from the tag push."
+          exit 1
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.source_ref }}
@@ -41,13 +55,15 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish immutable substrate
+        if: ${{ !inputs.dry_run }}
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
           SOURCE_SHA: ${{ inputs.source_ref }}

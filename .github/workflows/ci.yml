@@ -405,7 +405,7 @@ jobs:
       # A dispatch of the release workflow that omits dry_run must rehearse,
       # never publish with the official key. The self-test runs the check over
       # altered copies of the workflow and requires each to fail.
-      - name: Check the release workflow's dispatch defaults to a dry run
+      - name: Check every publish workflow rehearses by default, refuses a real dispatch and gates its publishing steps
         run: |
           python3 -I .ai/tools/ryeos/development/repository-validation/release-dry-run-default.py --check --project-path "$PWD"
           python3 -I .ai/tools/ryeos/development/repository-validation/release-dry-run-default.py --self-test --project-path "$PWD"
