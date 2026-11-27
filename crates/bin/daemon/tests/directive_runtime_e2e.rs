@@ -2270,6 +2270,16 @@ config:
 }
 
 /// One provider attempt in the accounting ledger.
+/// The fan-out's child threads, as the daemon lists them.
+async fn fanout_children(h: &DaemonHarness) -> Vec<common::ListedThread> {
+    h.list_threads(200)
+        .await
+        .expect("list threads")
+        .into_iter()
+        .filter(|thread| thread.item_ref.contains("fanout_child"))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct LedgerAttempt {
     thread_id: String,
@@ -2407,22 +2417,12 @@ async fn a_fan_out_shares_the_roots_spend_limit() {
             "completed" | "failed" | "cancelled" | "killed" | "timed_out"
         )
     };
-    let children = |h: &DaemonHarness| {
-        let h = h.list_threads(200);
-        async move {
-            h.await
-                .expect("list threads")
-                .into_iter()
-                .filter(|thread| thread.item_ref.contains("fanout_child"))
-                .collect::<Vec<_>>()
-        }
-    };
 
     // While the first attempt is held in flight, the siblings that cannot
     // reserve fail without contacting the provider.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let listed = children(&h).await;
+        let listed = fanout_children(&h).await;
         let settled = listed.iter().filter(|t| terminal(&t.status)).count();
         let contacts = mock.captured_bodies().await.len();
         if (listed.len() == CHILDREN && settled >= CHILDREN - 1) || contacts >= CHILDREN {
@@ -2467,7 +2467,7 @@ async fn a_fan_out_shares_the_roots_spend_limit() {
     mock.release_responses();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let listed = loop {
-        let listed = children(&h).await;
+        let listed = fanout_children(&h).await;
         if listed.len() == CHILDREN && listed.iter().all(|t| terminal(&t.status)) {
             break listed;
         }
