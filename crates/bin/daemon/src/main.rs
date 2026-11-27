@@ -9292,8 +9292,15 @@ async fn run_service_standalone(
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
-    let standalone_node_config_validator =
-        prospective_node_config_validator(standalone_ui_state.clone(), engine.clone());
+    let standalone_node_config_validator = prospective_node_config_validator(
+        standalone_ui_state.clone(),
+        engine.clone(),
+        Arc::new(
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                .clone(),
+        ),
+    );
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
         daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),
