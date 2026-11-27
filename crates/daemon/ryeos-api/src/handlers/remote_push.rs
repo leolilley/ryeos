@@ -15,6 +15,10 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::project_sync::ProjectSyncScope;
 
+/// Code a request for `outbound_principal: node` from a key that is not the
+/// node's admitted operator is refused with.
+pub const OUTBOUND_PRINCIPAL_NODE_OPERATOR_ONLY: &str = "outbound_principal_node_operator_only";
+
 /// Which principal an outbound remote call is made as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +48,32 @@ impl OutboundPrincipal {
                 Self::Delegated
             }
         })
+    }
+
+    /// [`Self::resolve`] for a request that may name its outbound principal.
+    /// The node key signs for the operator alone: `node` is admitted only for
+    /// the node's admitted operator, or for the node itself as the caller;
+    /// any other caller is refused, never quietly sent as itself.
+    pub fn resolve_admitted(
+        requested: Option<Self>,
+        state: &AppState,
+        context: &crate::handler_context::HandlerContext,
+    ) -> Result<Self, crate::handler_error::HandlerError> {
+        let principal = Self::resolve(requested, state, context);
+        let caller_is_node = context.fingerprint == state.identity.principal_id()
+            || context.fingerprint == state.identity.fingerprint();
+        if principal == Self::Node
+            && !caller_is_node
+            && ryeos_app::operator_authority::require_admitted_operator(state, context).is_err()
+        {
+            return Err(ryeos_app::handler_error::typed_refusal(
+                OUTBOUND_PRINCIPAL_NODE_OPERATOR_ONLY,
+                403,
+                "outbound_principal `node` makes the node key sign; only the node's admitted \
+                 operator may ask for it. Omit it to push or run as yourself",
+            ));
+        }
+        Ok(principal)
     }
 
     /// Wire spelling, as echoed in results.
@@ -121,6 +151,8 @@ pub async fn handle(
     context: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    // Judged before any path is touched, so a refused request learns nothing.
+    let principal = OutboundPrincipal::resolve_admitted(req.outbound_principal, &state, &context)?;
     let path = &req.project;
     if !path.is_absolute() {
         return Err(refuse(
@@ -155,7 +187,6 @@ pub async fn handle(
     let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
-    let principal = OutboundPrincipal::resolve(req.outbound_principal, &state, &context);
     let client = match principal {
         OutboundPrincipal::Node => RemoteClient::from_named_remote(&state, &req.remote)?,
         OutboundPrincipal::Delegated => {

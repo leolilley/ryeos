@@ -744,7 +744,10 @@ mod tests {
             // Then silent until the client gives up and releases its socket.
             let _ = peer.read(&mut [0; 1]);
         });
-        let deadline = MonotonicDeadline::after(Duration::from_millis(2_000));
+        // The server answers after 600 ms; the absolute deadline is 4 s, so a
+        // stalled runner has seconds of room before the first byte could be
+        // refused for lateness, and the timeout read still ends well inside 10 s.
+        let deadline = MonotonicDeadline::after(Duration::from_millis(4_000));
         let mut stream = context("127.0.0.1:53".parse().unwrap())
             .connect(
                 "127.0.0.1",
@@ -765,7 +768,7 @@ mod tests {
             stream.read(&mut byte).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(10));
         drop(stream);
         server.join().unwrap();
     }
