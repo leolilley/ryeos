@@ -637,7 +637,8 @@ async fn a_publication_stage_applies_in_the_lane_and_only_the_apply_writes_the_m
     assert!(entry.get("lane").is_none(), "{entry:#}");
     assert!(!is_installed(&listed, ITEMS_BUNDLE));
 
-    let result = apply(&mut b, &arguments(&b, ITEMS_BUNDLE, &digest)).await;
+    let args = arguments(&b, ITEMS_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "applied", "{result:#}");
     assert_eq!(result["lane"]["lifted"]["invoked"], true, "{result:#}");
     let receipt = result["lane"]["receipt"].as_str().expect("lane receipt");
@@ -719,7 +720,8 @@ async fn a_named_bundle_is_lifted_by_the_policy_and_its_unnamed_twin_stages_noth
         staged["predicted_lifts"]["facets"],
         json!(["owns_namespaces"])
     );
-    let result = apply(&mut b, &arguments(&b, NAMED_BUNDLE, &digest)).await;
+    let args = arguments(&b, NAMED_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "applied", "{result:#}");
     assert_eq!(result["lane"]["lifted"]["kinds"], json!(["config"]));
     assert_eq!(
@@ -753,7 +755,8 @@ async fn a_lift_the_policy_no_longer_names_is_refused_at_apply_and_shown_to_the_
     assert!(staged_entry(&listed, NAMED_BUNDLE).is_some(), "{listed:#}");
 
     let receipts_before = receipt_count(&b);
-    let result = apply(&mut b, &arguments(&b, NAMED_BUNDLE, &digest)).await;
+    let args = arguments(&b, NAMED_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "refused", "{result:#}");
     assert_eq!(result["code"], "lane_refused", "{result:#}");
     assert!(
@@ -818,7 +821,8 @@ async fn a_stage_whose_record_names_another_publication_than_its_evidence_is_ref
         .expect("commit the altered stage");
     drop(area);
 
-    let result = apply(&mut b, &arguments(&b, ITEMS_BUNDLE, &digest)).await;
+    let args = arguments(&b, ITEMS_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "refused", "{result:#}");
     assert_eq!(result["code"], "lane_evidence_invalid", "{result:#}");
     assert!(!b.state_path.join(".ai/bundles").join(ITEMS_BUNDLE).exists());
@@ -830,7 +834,8 @@ async fn a_laned_bundle_whose_tree_changed_after_apply_is_skipped_and_the_node_s
     let (mut b, _b_fixture) = start_puller().await;
     let publication = publish_bundle(&a, &a_fixture, ITEMS_BUNDLE, 0x75).await;
     let (digest, _) = pull(&b, &publication).await;
-    let result = apply(&mut b, &arguments(&b, ITEMS_BUNDLE, &digest)).await;
+    let args = arguments(&b, ITEMS_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "applied", "{result:#}");
     let registration_before = registration_text(&b, ITEMS_BUNDLE);
 
@@ -878,7 +883,8 @@ async fn a_skipped_laned_bundle_is_removed_through_bundle_remove_and_the_node_bo
     let (mut b, _b_fixture) = start_puller().await;
     let publication = publish_bundle(&a, &a_fixture, ITEMS_BUNDLE, 0x76).await;
     let (digest, _) = pull(&b, &publication).await;
-    let result = apply(&mut b, &arguments(&b, ITEMS_BUNDLE, &digest)).await;
+    let args = arguments(&b, ITEMS_BUNDLE, &digest);
+    let result = apply(&mut b, &args).await;
     assert_eq!(result["outcome"], "applied", "{result:#}");
 
     // The installed tree gains a native executable directory, and the node

@@ -380,7 +380,7 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", code.as_str()));
         }
         assert_eq!(ApplyRefusalCode::parse("signers_not_trusted"), None);
-        assert_eq!(ApplyRefusalCode::parse("lane_refused"), None);
+        assert_eq!(ApplyRefusalCode::parse("lane_unknown"), None);
     }
 
     #[test]
