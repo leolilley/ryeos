@@ -561,8 +561,11 @@ fn the_exempt_daemon_sites_get_their_roots_only_from_admission() {
         mint.contains("ui_projects::authorize_launch_project("),
         "ui.launch.mint takes its project from authorize_launch_project"
     );
+    // rustfmt may split `req.project_path` across lines, so count it with the
+    // whitespace removed.
+    let compact: String = mint.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(
-        mint.matches("req.project_path").count(),
+        compact.matches("req.project_path").count(),
         1,
         "the request's project_path is read once, to be authorized"
     );
