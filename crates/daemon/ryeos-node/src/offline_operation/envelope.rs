@@ -294,7 +294,7 @@ impl Envelope<'_> {
                 self.grant_not_after_ceiling(),
             )?;
             if spec.operator_issued_grant {
-                self.check_issued_by_operator_owner(&grant)?;
+                self.check_issued_by_operator_owner(grant)?;
             }
             if spec.authority_bearing {
                 match delegated_remote_operations(self.app_root) {
