@@ -61,6 +61,25 @@ pub struct BundleReplace<'a> {
     pub preserve_runtime_artifacts: bool,
 }
 
+/// What `node.bundle.apply-staged` asks the host to do: install the staged
+/// bundle by the same path a local `bundle install` takes, verifying the tree
+/// digest on the install's own copy.
+pub struct StagedBundleApply<'a> {
+    pub app_root: &'a Path,
+    /// Held by the application for the whole call.
+    pub state_lock: &'a StateLock,
+    pub node: &'a NodeIdentity,
+    /// The stage, its record verified under the node's key. Only its bundle
+    /// name and tree digest are used, and the install re-derives both from
+    /// the bytes.
+    pub staged: &'a crate::bundle_staging::StagedBundle,
+    /// The evidence bytes that were verified against the record's digests. An
+    /// audit of the evidence reads these and never the evidence files.
+    pub evidence: &'a std::collections::BTreeMap<String, Vec<u8>>,
+    /// Install over an installed bundle of that name.
+    pub replace: bool,
+}
+
 pub trait OfflineHost {
     /// The image seed this process was started with, if any. Policy
     /// replacement refuses without one.
@@ -97,6 +116,17 @@ pub trait OfflineHost {
     fn replace_bundle(&self, _request: BundleReplace<'_>) -> Result<Value> {
         bail!(
             "this process cannot replace bundles; the operation is applied when the daemon starts"
+        )
+    }
+
+    /// Install a staged bundle. Like [`OfflineHost::replace_bundle`] it needs
+    /// the node's full configuration composed as the daemon composes it, so
+    /// only the daemon's startup can do it. A refusal is an
+    /// [`crate::bundle_staging::apply::ApplyRefusal`] in the error chain; any
+    /// other error is a fault of the environment.
+    fn apply_staged_bundle(&self, _request: StagedBundleApply<'_>) -> Result<Value> {
+        bail!(
+            "this process cannot apply staged bundles; the operation is applied when the daemon starts"
         )
     }
 }
