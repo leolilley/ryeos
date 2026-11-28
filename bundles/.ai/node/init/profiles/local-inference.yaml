@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-28T04:38:52Z:26c47bb428c053783c2e0ba0f6defbdb40bcab1d9657045710381d1cb0a8c70c:4YXVoTCqCx7WpX4JkZlnpFaCjlliOUODIZC2LVw4k8btFuN1ncbglq+q+p4Fmexgz6HaHHVYTk1Q1xoTqysKAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T08:59:27Z:58ad2503b5285581e35f5f1efb006d3e5e067dfe081f94c3b17d821da059a86b:jBl7+CUXoNSJGji+VB5ea+ayUmKfAqPVa7k4o1K6DiONZ2JoYIiqDftCE8w0iAlZ60OcnaVQ5v6tjSjYcAUjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -192,6 +192,13 @@ policies:
     # `refuse` is final. A class not listed is refused, so no class is accepted
     # until it is listed `allow` here.
     classes: {}
+  public_routes:
+    schema: 1
+    # The keyless routes of the public page this node serves, by route id,
+    # with the bytes each may send in a day and the requests it may work on
+    # at once. A route not named here is not served. Empty on every node but
+    # the public node.
+    routes: {}
   publication:
     schema: 1
     # What this node publishes to strangers. daily_bytes caps the bytes the

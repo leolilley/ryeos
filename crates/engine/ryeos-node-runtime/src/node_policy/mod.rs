@@ -83,6 +83,7 @@ impl NodePolicyTable {
             Box::new(sections::object_closure::NodeObjectClosurePolicySection),
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
             Box::new(sections::provider_environment::ProviderEnvironmentPolicySection),
+            Box::new(sections::public_routes::PublicRoutesPolicySection),
             Box::new(sections::publication::PublicationPolicySection),
             Box::new(sections::publication_lane::PublicationLanePolicySection),
             Box::new(sections::sealed_vault_names::SealedVaultNamesPolicySection),

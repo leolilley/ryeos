@@ -17,6 +17,7 @@ pub mod native_capacity;
 pub mod object_closure;
 pub mod persistent_sessions;
 pub mod provider_environment;
+pub mod public_routes;
 pub mod publication;
 pub mod publication_lane;
 pub mod read_disclosure;
