@@ -5421,6 +5421,58 @@ mod tests {
         }
     }
 
+    /// The real kill point: a process aborts inside the conditional remove,
+    /// after Lillux has moved the file to its quarantine name and before the
+    /// unlink. The next node start settles it and the scan succeeds.
+    #[test]
+    fn a_process_killed_inside_the_conditional_remove_is_settled_at_the_next_start() {
+        const CHILD: &str = "RYEOS_X35_KILL_CHILD_DIR";
+        if let Ok(dir) = std::env::var(CHILD) {
+            let directory = lillux::PinnedDirectory::open(std::path::Path::new(&dir))
+                .unwrap()
+                .unwrap();
+            let name = std::ffi::OsStr::new("T-real.json");
+            let file = directory.open_regular(name, false).unwrap().unwrap();
+            let _ =
+                directory.remove_if_same_validated_atomic(name, &file, |_| std::process::abort());
+            std::process::exit(3);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-real");
+        store
+            .prepare_set(&lock, "T-real", None, &hash("a"))
+            .unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recovery::tests::a_process_killed_inside_the_conditional_remove_is_settled_at_the_next_start",
+                "--test-threads",
+                "1",
+            ])
+            .env(CHILD, pending_dir(temp.path()))
+            .output()
+            .unwrap();
+        assert!(
+            !child.status.success(),
+            "the child must die at the kill point"
+        );
+        assert!(
+            !pending_dir(temp.path()).join("T-real.json").exists(),
+            "the canonical file was moved aside"
+        );
+        assert!(
+            store.list_pending().is_err(),
+            "the scan refuses before settlement"
+        );
+
+        let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
+        assert_eq!(report.restored.len(), 1, "{report:?}");
+        let pending = store.list_pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].chain_root_id, "T-real");
+    }
+
     #[test]
     fn a_leftover_whose_pid_is_live_is_deferred_never_removed() {
         let temp = tempfile::tempdir().unwrap();
