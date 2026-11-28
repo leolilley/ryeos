@@ -110,6 +110,10 @@ covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
 paths = ["crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
 
+[tests.directive_reads_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
+paths = ["crates/daemon/ryeos-app/src/reads_projection.rs", "crates/daemon/ryeos-app/src/state_store/terminal_envelope.rs"]
+
 [tests.directive_runtime_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-expression", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
