@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:44:16Z:e74a2031156942d2886c18c89c048b60ccb34f4178fe3ef80acb62ce18789b15:zIZs0wpaqAU+YeSZJi7aWKfmt6KUPjlZ2FxkdkYQANZyN1eUAOZc4MhDVd41oTmj4Xv3xedJXbr6w4HPRnvDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T21:16:41Z:5c6a7b42e5e0483f902246d8d12e983f621d815b6e0e68cb4bd8385000559020:GwTuZYj7GrSXjhsTjpnAuaOyg8wegAIfTf3VeeTQMgaBJJau2sZcdZPPeAZq/Ww+Li/m854QBdk5sxbYqR4XDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -381,7 +381,15 @@ Rotation and keys:
 - A key rotated with `ryeos node operator rotate` keeps its projects on the node where the rotation was recorded. Remotes see it only once they record it.
 - Retired and revoked keys own nothing. Revocation is per key.
 - Per-key state (principal space, schedules, the UI project list) does not move on rotation.
-- A second key is a second owner until key pairing exists.
+- A second key acts for the same owner only through a key link; without one it
+  is a second owner. Build the link with `ryeos key link-body`, sign it with
+  `ryeos key link-sign` twice (once by the owner's active key, once by the added
+  key, each where its private half is), and apply it on a stopped node with
+  `ryeos key link`. A link carries ownership only: the linked key still needs
+  its own grant, which is what carries scope. Every link expires (`not_after`,
+  at most 365 days; a link into the operator's owner defaults to 90), an
+  expired link owns nothing, and `ryeos node doctor` warns 30 days before.
+  `ryeos key unlink` withdraws a link by id, or every link one key signed.
 
 Before installing, on the old binary: run `ryeos trust list` and re-scope every signer record that lists project paths (a v1 record with paths is refused by name). On the release authority, take the public dev key out of project space with `--space bundle --any-project`.
 
