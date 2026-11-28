@@ -402,12 +402,36 @@ pub struct TerminalCompletion {
 /// child's durable, lossless terminal diagnostic.
 pub const RUNTIME_FAILURE_KIND: &str = "runtime_failure";
 
+/// The only supported version of the runtime failure payload. Version 1 had no
+/// `origin`; it is refused, not read.
+pub const RUNTIME_FAILURE_VERSION: u8 = 2;
+
+/// Who chose a failure's code: the platform (a runtime's own typed failure) or
+/// an author (a graph return node's `fail`). A reader that sees a code that
+/// looks like a platform code tells the two apart by this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureOrigin {
+    Platform,
+    Author,
+}
+
+impl FailureOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::Author => "author",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeFailure {
     pub kind: String,
     pub version: u8,
     pub code: String,
+    pub origin: FailureOrigin,
     pub summary: String,
     pub diagnostic_locator: RuntimeFailureDiagnosticLocator,
     pub retryable: bool,
@@ -429,7 +453,7 @@ impl RuntimeFailure {
         if self.kind != RUNTIME_FAILURE_KIND {
             return Err(format!("unsupported runtime failure kind `{}`", self.kind));
         }
-        if self.version != 1 {
+        if self.version != RUNTIME_FAILURE_VERSION {
             return Err(format!(
                 "unsupported runtime failure version {}",
                 self.version
@@ -1329,8 +1353,9 @@ mod tests {
     fn runtime_failure_contract_rejects_unsupported_or_unbounded_values() {
         let valid = RuntimeFailure {
             kind: RUNTIME_FAILURE_KIND.to_string(),
-            version: 1,
+            version: RUNTIME_FAILURE_VERSION,
             code: "provider_protocol_error".to_string(),
+            origin: FailureOrigin::Platform,
             summary: "precise failure".to_string(),
             diagnostic_locator: RuntimeFailureDiagnosticLocator {
                 thread_id: "T-child".to_string(),
@@ -1343,7 +1368,7 @@ mod tests {
         assert!(valid.validate().is_ok());
 
         let mut unsupported = valid.clone();
-        unsupported.version = 2;
+        unsupported.version = 1;
         assert!(unsupported.validate().unwrap_err().contains("unsupported"));
 
         let mut oversized = valid;

@@ -492,6 +492,8 @@ pub(super) struct TerminalOutcome {
     pub(super) error: Option<String>,
     pub(super) origin: TerminalOrigin,
     pub(super) output: Option<Value>,
+    /// Set only by a return node that declares `fail`.
+    pub(super) failure: Option<ryeos_runtime::graph_result::GraphFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -611,6 +613,7 @@ pub(super) struct CommitTerminalInput<'a> {
     pub(super) base_status: GraphRunStatus,
     pub(super) error: Option<&'a str>,
     pub(super) output: Option<Value>,
+    pub(super) failure: Option<ryeos_runtime::graph_result::GraphFailure>,
     pub(super) guard: &'a mut RunGuard,
     pub(super) inputs: &'a Value,
 }

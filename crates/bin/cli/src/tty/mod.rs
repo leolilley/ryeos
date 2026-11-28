@@ -1710,7 +1710,8 @@ mod tests {
         let structured = serde_json::json!({
             "error": {
                 "kind": "runtime_failure",
-                "version": 1,
+                "version": 2,
+                "origin": "platform",
                 "code": "provider_protocol_error",
                 "summary": "full structured stream failure",
                 "diagnostic_locator": {

@@ -83,12 +83,20 @@ impl CompiledGraph {
     }
 }
 
+/// A return node's failure: the literal code and the compiled message.
+#[derive(Debug, Clone)]
+pub struct CompiledFail {
+    pub code: String,
+    pub message: Option<CompiledTemplate>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledNode {
     pub action: Option<CompiledActionTemplate>,
     pub assign: Option<CompiledJsonTemplate>,
     pub project_observations: Option<CompiledJsonTemplate>,
     pub output: Option<CompiledJsonTemplate>,
+    pub fail: Option<CompiledFail>,
     pub over: Option<CompiledTemplate>,
     pub facets: Option<CompiledJsonTemplate>,
     pub next: Option<CompiledEdgeSpec>,
@@ -179,6 +187,31 @@ impl CompiledNode {
                 Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
+        let fail = node
+            .fail
+            .as_ref()
+            .map(|spec| {
+                let message = spec
+                    .message
+                    .as_ref()
+                    .map(|source| {
+                        let field = format!("node {name}.fail.message");
+                        let compiled = compile_template_for(source, field.clone(), limits)?;
+                        validate_references(
+                            &field,
+                            compiled.references(),
+                            &state_roots,
+                            input_properties,
+                        )?;
+                        Ok::<_, anyhow::Error>(compiled)
+                    })
+                    .transpose()?;
+                Ok::<_, anyhow::Error>(CompiledFail {
+                    code: spec.code.clone(),
+                    message,
+                })
+            })
+            .transpose()?;
         let over = node
             .over
             .as_ref()
@@ -231,6 +264,9 @@ impl CompiledNode {
                 .as_ref()
                 .map(CompiledJsonTemplate::references),
             output.as_ref().map(CompiledJsonTemplate::references),
+            fail.as_ref()
+                .and_then(|fail| fail.message.as_ref())
+                .map(CompiledTemplate::references),
             over.as_ref().map(CompiledTemplate::references),
             facets.as_ref().map(CompiledJsonTemplate::references),
             next.as_ref().map(CompiledEdgeSpec::references),
@@ -246,6 +282,7 @@ impl CompiledNode {
             assign,
             project_observations,
             output,
+            fail,
             over,
             facets,
             next,

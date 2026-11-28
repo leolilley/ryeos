@@ -64,6 +64,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await;
         }
@@ -94,6 +95,7 @@ impl Walker {
             },
             error: None,
             cost: agg_cost,
+            failure: None,
             node_costs,
             hook_costs,
         };
@@ -139,6 +141,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await
             }
@@ -203,6 +206,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await;
         }
@@ -224,6 +228,7 @@ impl Walker {
             errors: (!suppressed_errors.is_empty()).then_some(suppressed_errors.clone()),
             error: None,
             cost: agg_cost,
+            failure: None,
             node_costs,
             hook_costs,
         };
@@ -260,6 +265,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await
             }
@@ -369,6 +375,7 @@ impl Walker {
                         output: None,
                         guard,
                         inputs,
+                        failure: None,
                     })
                     .await;
             }
@@ -431,6 +438,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await;
         }
@@ -461,6 +469,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await
             }

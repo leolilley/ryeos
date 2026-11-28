@@ -90,6 +90,7 @@ mod tests {
             parallel: false,
             max_concurrency: None,
             output: None,
+            fail: None,
             env_requires: Vec::new(),
             retry: None,
         }

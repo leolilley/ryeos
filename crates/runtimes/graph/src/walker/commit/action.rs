@@ -120,6 +120,7 @@ impl Walker {
                         output: None,
                         guard,
                         inputs,
+                        failure: None,
                     })
                     .await;
             }
@@ -183,6 +184,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await
             }

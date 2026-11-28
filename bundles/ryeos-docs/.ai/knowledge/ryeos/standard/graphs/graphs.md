@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T02:56:23Z:002c423450e541e7d3885679018a092f7658a83b3edd38a787fc0932c9164800:hcyWCGWX9EendQTVxAcTfDw6PW/tBg2PvbO7+ku+IYlns0fVaSZ2E9j32/9Ug++q3AJuOorbZ7o6D9m+CyrsBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T17:18:47Z:42e9f91c3c2efc44b3592aac07081ffb4d5977333c4ce981c578255361d0abc8:rUF41IW5bXMs7opnV1qPhI13Ip8+yRaUShUWczHeBj13zUJmllp0vMMIoENuZRj+WFCYNzoISczdsAIyrpUFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.1.1"
@@ -182,6 +182,30 @@ different payload or occurrence fails the graph commit. The field therefore
 projects one selectable entity across a crash/retry. This boundary is for
 accepted project claims, not progress telemetry; use milestones for advisory
 status.
+
+### Ending a graph failed with its own code
+
+A return node ends a graph completed and carries its `output`. A return node
+that declares `fail` instead ends the graph failed, never completed:
+
+```yaml
+too_many_rounds:
+  node_type: return
+  fail: {code: goal_rounds_exhausted, message: "gave up after ${state.round} rounds"}
+```
+
+`fail` and `output` are mutually exclusive and `fail` is valid only on a return
+node. `code` is a literal of 3 to 64 characters matching `^[a-z][a-z0-9_]*$`
+(an expression is refused), so it is signed data a reader can search for.
+`message` is a template rendered from state when the node is reached, at most
+512 bytes with no control characters; it can hold text from a model, so quote it
+wherever it is shown to another directive and show it as plain text in a UI.
+A run that ends this way reports a runtime failure whose `origin` is `author`
+(the platform's own failures say `platform`), and its `result` is that failure
+rather than the graph's result record; the graph's state stays in its events.
+A graph that follows it reads `state._outcome.failure_code` and
+`state._outcome.failure_origin`; a graph that names a code the platform also
+uses is told apart from the platform's failure by the origin.
 
 ### Edge Conditions
 

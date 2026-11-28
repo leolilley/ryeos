@@ -101,6 +101,7 @@ impl Walker {
                         error: None,
                         origin: TerminalOrigin::Node,
                         output: None,
+                        failure: None,
                     }),
                     Err(error) => StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
                         item_id: None,
@@ -204,6 +205,7 @@ impl Walker {
                     )),
                     origin: TerminalOrigin::RunControl,
                     output: None,
+                    failure: None,
                 });
             }
         }
@@ -323,6 +325,7 @@ impl Walker {
                         )),
                         origin: TerminalOrigin::RunControl,
                         output: None,
+                        failure: None,
                     });
                 }
             }
@@ -756,6 +759,7 @@ impl Walker {
                 )),
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
         }
         // An armed cohort resume is immutable: its iteration values are local
@@ -825,6 +829,7 @@ impl Walker {
                     )),
                     origin: TerminalOrigin::RunControl,
                     output: None,
+                    failure: None,
                 });
             }
             let wrapper = match dispatch::classify_follow_fanout_envelope(
@@ -840,6 +845,7 @@ impl Walker {
                         )),
                         origin: TerminalOrigin::RunControl,
                         output: None,
+                        failure: None,
                     });
                 }
             };
@@ -1255,6 +1261,7 @@ impl Walker {
                 )),
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
         }
         let width = match node.max_concurrency.map(u32::try_from).transpose() {

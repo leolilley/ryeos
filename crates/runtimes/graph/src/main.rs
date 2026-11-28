@@ -250,7 +250,12 @@ fn main() -> anyhow::Result<()> {
         success: status.is_success(),
         status,
         thread_id: resolved.thread_id.clone(),
-        result: Some(serde_json::to_value(&graph_result)?),
+        result: Some(match &graph_result.failure {
+            // A run that ended at a `fail` return node reports the author's
+            // typed failure, as a directive does, so a follower reads the code.
+            Some(failure) => graph_failure_value(failure, &resolved.thread_id),
+            None => serde_json::to_value(&graph_result)?,
+        }),
         outputs: serde_json::Value::Null,
         // Surface the graph's aggregate token/spend so the daemon's
         // `/execute` response carries non-null cost for a graph that
@@ -323,6 +328,32 @@ fn runtime_status_for_graph(
         ryeos_runtime::graph_result::GraphRunStatus::Cancelled => RuntimeResultStatus::Cancelled,
         ryeos_runtime::graph_result::GraphRunStatus::Killed => RuntimeResultStatus::Killed,
     }
+}
+
+/// The runtime failure a graph's own `fail` return node ends the run with:
+/// the author's code and message, marked as chosen by an author.
+fn graph_failure_value(
+    failure: &ryeos_runtime::graph_result::GraphFailure,
+    thread_id: &str,
+) -> serde_json::Value {
+    let record = ryeos_runtime::RuntimeFailure {
+        kind: ryeos_runtime::RUNTIME_FAILURE_KIND.to_string(),
+        version: ryeos_runtime::RUNTIME_FAILURE_VERSION,
+        code: failure.code.clone(),
+        origin: ryeos_runtime::FailureOrigin::Author,
+        summary: failure.message.clone(),
+        diagnostic_locator: ryeos_runtime::RuntimeFailureDiagnosticLocator {
+            thread_id: thread_id.to_string(),
+            turn: None,
+            attempt_id: None,
+            event_type: "thread_failed".to_string(),
+        },
+        retryable: false,
+    };
+    record
+        .validate()
+        .expect("a graph fail node's code and message satisfy the runtime failure contract");
+    serde_json::to_value(record).expect("runtime failure serializes")
 }
 
 fn make_error_runtime_result(thread_id: &str, error: &str) -> RuntimeResult {
@@ -493,6 +524,21 @@ mod tests {
         let mut params = json!({"inputs": {"name": "test"}});
         assert!(normalize_inputs_against_schema(&mut params, &schema).is_ok());
         assert!(params["inputs"].get("optional_field").is_none());
+    }
+
+    #[test]
+    fn a_fail_node_reports_an_author_failure_the_follow_code_can_read() {
+        let failure = ryeos_runtime::graph_result::GraphFailure {
+            code: "depth_limit_exceeded".to_string(),
+            message: "the goal was not met".to_string(),
+        };
+        let value = graph_failure_value(&failure, "T-graph");
+        let parsed: ryeos_runtime::RuntimeFailure = serde_json::from_value(value).unwrap();
+        assert!(parsed.validate().is_ok());
+        assert_eq!(parsed.code, "depth_limit_exceeded");
+        assert_eq!(parsed.origin, ryeos_runtime::FailureOrigin::Author);
+        assert_eq!(parsed.summary, "the goal was not met");
+        assert_eq!(parsed.diagnostic_locator.thread_id, "T-graph");
     }
 
     #[test]

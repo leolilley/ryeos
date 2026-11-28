@@ -141,6 +141,35 @@ impl EffectClass {
     }
 }
 
+/// The failure a return node ends the run with. `code` is a literal (never an
+/// expression) so it is signed data a reader can grep for; `message` is a
+/// template rendered from state when the node is reached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailSpec {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// The longest failure code, so it fits the platform's runtime failure record.
+pub const MAX_FAIL_CODE_BYTES: usize = 64;
+
+/// The longest rendered failure message, in bytes.
+pub const MAX_FAIL_MESSAGE_BYTES: usize = 512;
+
+pub fn validate_fail_code(code: &str) -> Result<(), String> {
+    let mut chars = code.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    let rest_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !first_ok || !rest_ok || code.len() < 3 || code.len() > MAX_FAIL_CODE_BYTES {
+        return Err(format!(
+            "`fail.code` must be a literal of 3 to {MAX_FAIL_CODE_BYTES} characters matching ^[a-z][a-z0-9_]*$, got `{code}`"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
@@ -188,6 +217,9 @@ pub struct GraphNode {
     pub max_concurrency: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+    /// A return node that ends the run failed with the author's own code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail: Option<FailSpec>,
     #[serde(default)]
     pub env_requires: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -610,6 +642,16 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
     }
     if node.output.is_some() && node.node_type != NodeType::Return {
         bail!("node `{name}` output is only valid on a return node");
+    }
+    if let Some(fail) = &node.fail {
+        if node.node_type != NodeType::Return {
+            bail!("node `{name}` fail is only valid on a return node");
+        }
+        if node.output.is_some() {
+            bail!("return node `{name}` cannot declare both output and fail");
+        }
+        validate_fail_code(&fail.code)
+            .map_err(|reason| anyhow::anyhow!("node `{name}`: {reason}"))?;
     }
     if node.action.is_some() && matches!(node.node_type, NodeType::Gate | NodeType::Return) {
         bail!("node `{name}` cannot declare action on a gate or return node");
@@ -1112,6 +1154,69 @@ mod tests {
         });
 
         validate_view(&view(graph, Vec::new())).unwrap();
+    }
+
+    #[test]
+    fn admits_a_return_node_that_fails_with_a_literal_code_and_a_message() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["finish"] = serde_json::json!({
+            "node_type": "return",
+            "fail": {"code": "goal_not_met", "message": "missed ${inputs.subject}"}
+        });
+        validate_view(&view(graph, Vec::new())).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_fail_node_that_also_declares_output() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["finish"] = serde_json::json!({
+            "node_type": "return",
+            "output": "done",
+            "fail": {"code": "goal_not_met"}
+        });
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot declare both output and fail"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_fail_code_that_is_not_a_short_lowercase_literal() {
+        let too_long = "a".repeat(65);
+        for code in [
+            "Goal-Not-Met",
+            "ab",
+            "9lives",
+            "${state.code}",
+            too_long.as_str(),
+        ] {
+            let mut graph = composed_graph();
+            graph["config"]["nodes"]["finish"] = serde_json::json!({
+                "node_type": "return",
+                "fail": {"code": code}
+            });
+            let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("`fail.code` must be a literal"),
+                "`{code}`: unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_fail_on_a_node_that_is_not_a_return_node() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "node_type": "gate",
+            "fail": {"code": "goal_not_met"},
+            "next": {"type": "conditional", "branches": [{"to": "finish"}]}
+        });
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("fail is only valid on a return node"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

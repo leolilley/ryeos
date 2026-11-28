@@ -732,6 +732,7 @@ mod tests {
             errors: None,
             error: None,
             cost: None,
+            failure: None,
             node_costs: Vec::new(),
             hook_costs: Vec::new(),
         };
@@ -882,6 +883,7 @@ mod tests {
             errors: None,
             error: None,
             cost: None,
+            failure: None,
             node_costs: Vec::new(),
             hook_costs: Vec::new(),
         };

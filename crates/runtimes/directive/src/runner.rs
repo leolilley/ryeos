@@ -8184,8 +8184,9 @@ fn runtime_failure_payload(
     };
     let failure = ryeos_runtime::RuntimeFailure {
         kind: ryeos_runtime::RUNTIME_FAILURE_KIND.to_string(),
-        version: 1,
+        version: ryeos_runtime::RUNTIME_FAILURE_VERSION,
         code,
+        origin: ryeos_runtime::FailureOrigin::Platform,
         summary,
         diagnostic_locator: ryeos_runtime::RuntimeFailureDiagnosticLocator {
             thread_id: thread_id.to_string(),
@@ -8904,7 +8905,8 @@ mod tests {
             Some("T-child:15:2"),
         );
         let failure: ryeos_runtime::RuntimeFailure = serde_json::from_value(value).unwrap();
-        assert_eq!(failure.version, 1);
+        assert_eq!(failure.version, ryeos_runtime::RUNTIME_FAILURE_VERSION);
+        assert_eq!(failure.origin, ryeos_runtime::FailureOrigin::Platform);
         assert_eq!(failure.code, "provider_accounting_invalid");
         assert_eq!(failure.diagnostic_locator.thread_id, "T-child");
         assert_eq!(failure.diagnostic_locator.turn, Some(15));

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:19:58Z:5f9a24fc7fd09f7b4d281beafba28a6899d7a3f46319855ee2c179e0da24466c:0fe2QwiE/Q87o0zg79Tm+65SU0ks5Q76/d3kYQQoIf8fogAv/hY0HjYuc4JWS9xul78mRLU8+VPgxjHvEmZQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T17:18:53Z:8328e6ab97eecda90c5a6554d0d7a2c02435317beae99c0f1e23e85256e311b0:it89yRBwqW1yCMfjzvNLZP6zWMh1dGy+k6QOs+JyOZnSt3tfrg7p7iN6aBF1OY5yf8mZB4YnixzMhDL8qOV9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -198,7 +198,9 @@ read a partial `state._outcome.result`; the next failed worker node overwrites
 it. A followed child that failed with a structured runtime failure and has no
 worker record of its own (a directive that ended on a typed failure) gets a
 generic record: `outcome_kind`, `failure_code` (the failure's own code, which the
-graph runtime does not interpret), `child_thread_id`, `status` and `result`, so
+graph runtime does not interpret), `failure_origin` (`platform` for a runtime's
+own typed failure, `author` for a graph's `fail` return node; the same code can
+come from either), `child_thread_id`, `status` and `result`, so
 a recovery node can branch on `state._outcome.failure_code`. Under `fail` the
 graph terminates as before. In a cohort follow, a failed
 worker child's slot holds its record (not `null`), so

@@ -23,6 +23,7 @@ impl Walker {
             error,
             origin,
             output,
+            failure,
         } = outcome;
         let terminal_steps = match origin {
             TerminalOrigin::Node => {
@@ -67,6 +68,7 @@ impl Walker {
             output,
             guard,
             inputs,
+            failure,
         })
         .await
     }
@@ -134,6 +136,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await
             }

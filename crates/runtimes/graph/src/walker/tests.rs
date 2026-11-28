@@ -1777,6 +1777,57 @@ config:
 }
 
 #[tokio::test]
+async fn a_fail_return_node_ends_the_run_failed_with_the_authors_code_and_message() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: decide
+  state: {goal: "write a poem"}
+  nodes:
+    decide:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - to: stop
+    stop:
+      node_type: return
+      fail: {code: goal_not_met, message: "missed: ${state.goal}"}
+"#;
+    let graph = make_graph(yaml);
+    let w = make_walker(graph, vec![]);
+    let result = w.execute(json!({}), None).await;
+    assert!(!result.success, "{result:?}");
+    assert_eq!(result.status, GraphRunStatus::Error);
+    let failure = result.failure.expect("the author's failure");
+    assert_eq!(failure.code, "goal_not_met");
+    assert_eq!(failure.message, "missed: write a poem");
+    assert_eq!(result.error.as_deref(), Some("missed: write a poem"));
+    assert!(result.result.is_none());
+}
+
+#[tokio::test]
+async fn a_completing_return_node_carries_no_failure() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: stop
+  nodes:
+    stop:
+      node_type: return
+      output: {ok: true}
+"#;
+    let graph = make_graph(yaml);
+    let w = make_walker(graph, vec![]);
+    let result = w.execute(json!({}), None).await;
+    assert!(result.success);
+    assert_eq!(result.status, GraphRunStatus::Completed);
+    assert!(result.failure.is_none());
+}
+
+#[tokio::test]
 async fn segment_steps_cuts_machine_continuation() {
     // With segment_steps=1 the first step advances and the per-thread budget
     // is hit before a terminal node — the walker cuts a machine continuation
@@ -2663,6 +2714,7 @@ fn step_outcome_terminal_captures_status() {
         error: Some("hit limit".to_string()),
         origin: TerminalOrigin::RunControl,
         output: None,
+        failure: None,
     });
     match outcome {
         StepOutcome::Terminal(outcome) => {
@@ -3048,7 +3100,8 @@ fn retryable_retained_leaf_failure() -> Value {
         "status": "failed",
         "result": {
             "kind": "runtime_failure",
-            "version": 1,
+            "version": 2,
+            "origin": "platform",
             "code": "temporary_child_failure",
             "summary": "retryable retained child failure",
             "diagnostic_locator": {

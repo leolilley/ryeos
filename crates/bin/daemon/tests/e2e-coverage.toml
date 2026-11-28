@@ -178,6 +178,9 @@ paths = ["crates/daemon/ryeos-app/src/callback_token.rs"]
 covers = ["lillux", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
 paths = ["crates/daemon/ryeos-app/src/offline_native.rs", "crates/daemon/ryeos-app/src/recovery_execution_gate.rs", "crates/daemon/ryeos-app/src/recovery_nudge.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]
 
+[tests.graph_fail_node_e2e]
+covers = ["ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
+
 [tests.graph_follow_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-knowledge-runtime", "ryeos-provider-contract", "ryeos-runtime", "ryeos-vault"]
 paths = ["crates/daemon/ryeos-app/src/federated_follow.rs", "crates/daemon/ryeos-app/src/thread_lifecycle/**"]

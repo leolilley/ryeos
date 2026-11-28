@@ -194,6 +194,7 @@ impl Walker {
             output: None,
             guard,
             inputs,
+            failure: None,
         })
         .await
     }
@@ -240,6 +241,7 @@ impl Walker {
             base_status,
             error,
             output,
+            failure,
             guard,
             inputs,
         } = input;
@@ -322,6 +324,7 @@ impl Walker {
             steps,
             state: state.clone(),
             result: if history_failed { None } else { output },
+            failure: if history_failed { None } else { failure },
             errors_suppressed: if suppressed_errors.is_empty() {
                 None
             } else {

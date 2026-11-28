@@ -38,6 +38,15 @@ impl GraphRunStatus {
     }
 }
 
+/// The typed failure a graph's own `fail` return node ends the run with: the
+/// author's literal code and the rendered message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphFailure {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphResult {
@@ -57,6 +66,9 @@ pub struct GraphResult {
     pub errors: Option<Vec<ErrorRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set only when the run ended at a return node that declares `fail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GraphFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

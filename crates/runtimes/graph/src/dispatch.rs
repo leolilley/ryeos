@@ -700,6 +700,7 @@ fn failure_code_outcome(
     Some(json!({
         "outcome_kind": ryeos_runtime::envelope::status_outcome_kind(status),
         "failure_code": failure.code,
+        "failure_origin": failure.origin.as_str(),
         "child_thread_id": child_thread_id,
         "status": status.as_str(),
         "result": result,
@@ -2029,7 +2030,8 @@ mod tests {
             RuntimeResultStatus::Failed,
             json!({
                 "kind": "runtime_failure",
-                "version": 1,
+                "version": 2,
+                "origin": "platform",
                 "code": "provider_accounting_invalid",
                 "summary": "precise child failure",
                 "diagnostic_locator": {
@@ -2678,10 +2680,15 @@ mod tests {
     }
 
     fn structured_failure_value(code: &str) -> Value {
+        structured_failure_with_origin(code, "platform")
+    }
+
+    fn structured_failure_with_origin(code: &str, origin: &str) -> Value {
         json!({
             "kind": ryeos_runtime::RUNTIME_FAILURE_KIND,
-            "version": 1,
+            "version": ryeos_runtime::RUNTIME_FAILURE_VERSION,
             "code": code,
+            "origin": origin,
             "summary": "the provider refused the request",
             "diagnostic_locator": {
                 "thread_id": "T-follow-child",
@@ -2705,9 +2712,41 @@ mod tests {
             .expect("a failure-code outcome record");
         assert_eq!(outcome["outcome_kind"], "failed");
         assert_eq!(outcome["failure_code"], "provider_context_length_exceeded");
+        assert_eq!(outcome["failure_origin"], "platform");
         assert_eq!(outcome["status"], "failed");
         assert_eq!(outcome["child_thread_id"], "T-follow-child");
         assert_eq!(outcome["result"], result);
+    }
+
+    #[test]
+    fn an_author_failure_with_a_platform_looking_code_is_told_apart_by_its_origin() {
+        let platform = structured_failure_value("depth_limit_exceeded");
+        let author = structured_failure_with_origin("depth_limit_exceeded", "author");
+        let outcome_of = |result: Value| {
+            let classified = classify_follow_envelope(canonical_follow_envelope(
+                false,
+                RuntimeResultStatus::Failed,
+                result,
+            ))
+            .expect("canonical failed follow envelope");
+            expect_action_failure(classified.outcome)
+                .outcome
+                .expect("a failure-code outcome record")
+        };
+        let platform = outcome_of(platform);
+        let author = outcome_of(author);
+        assert_eq!(platform["failure_code"], author["failure_code"]);
+        assert_eq!(platform["failure_origin"], "platform");
+        assert_eq!(author["failure_origin"], "author");
+    }
+
+    #[test]
+    fn a_version_one_failure_without_an_origin_is_refused() {
+        let mut v1 = structured_failure_value("provider_context_length_exceeded");
+        v1["version"] = json!(1);
+        v1.as_object_mut().unwrap().remove("origin");
+        assert!(runtime_failure_contract_error(&v1).is_some());
+        assert!(parse_runtime_failure(&v1).is_none());
     }
 
     #[test]

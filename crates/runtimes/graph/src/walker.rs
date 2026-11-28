@@ -388,6 +388,7 @@ impl Walker {
             errors: None,
             error: Some(diagnostic.clone()),
             cost: None,
+            failure: None,
             node_costs: Vec::new(),
             hook_costs: Vec::new(),
         };
@@ -721,6 +722,7 @@ impl Walker {
                 error: Some(error.to_string()),
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
             return Ok(
                 match self
@@ -794,6 +796,7 @@ impl Walker {
                     error: control.reason,
                     origin: TerminalOrigin::RunControl,
                     output: None,
+                    failure: None,
                 });
                 return Ok(
                     match self
@@ -827,6 +830,7 @@ impl Walker {
                         error: Some(format!("node '{current}' not found")),
                         origin: TerminalOrigin::RunControl,
                         output: None,
+                        failure: None,
                     });
                     match self
                         .commit_step(CommitStepInput {
@@ -913,6 +917,7 @@ impl Walker {
                 error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
             return Ok(
                 match self
@@ -946,6 +951,7 @@ impl Walker {
                 error: control.reason,
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
             return Ok(
                 match self
@@ -995,6 +1001,7 @@ impl Walker {
             },
             error: None,
             cost: agg_cost,
+            failure: None,
             node_costs,
             hook_costs,
         };
@@ -1016,6 +1023,7 @@ impl Walker {
                 error: Some(format!("continuation handoff failed: {e}")),
                 origin: TerminalOrigin::RunControl,
                 output: None,
+                failure: None,
             });
             return Ok(
                 match self
@@ -1183,6 +1191,67 @@ impl Walker {
 
         match node.node_type {
             NodeType::Return => {
+                if let Some(fail) = &compiled.fail {
+                    let rendered = match &fail.message {
+                        None => Ok(String::new()),
+                        Some(template) => ExpressionScope::new(
+                            state,
+                            inputs,
+                            Some(&execution),
+                            GraphRunExpressionContext::new(
+                                graph_run_id,
+                                step,
+                                &self.graph.definition_ref,
+                                &self.graph.effective_definition_digest,
+                            ),
+                        )
+                        .render_template(template)
+                        .map_err(|error| error.to_string())
+                        .and_then(|value| match value {
+                            Value::String(text) => Ok(text),
+                            other => Err(format!("message rendered {}, not a string", other)),
+                        })
+                        .and_then(|text| {
+                            if text.len() > ryeos_graph_definition::MAX_FAIL_MESSAGE_BYTES {
+                                Err(format!(
+                                    "message is {} bytes, over the {} byte limit",
+                                    text.len(),
+                                    ryeos_graph_definition::MAX_FAIL_MESSAGE_BYTES
+                                ))
+                            } else if text.chars().any(char::is_control) {
+                                Err("message holds a control character".to_string())
+                            } else {
+                                Ok(text)
+                            }
+                        }),
+                    };
+                    let message = match rendered {
+                        Ok(text) if text.is_empty() => fail.code.clone(),
+                        Ok(text) => text,
+                        Err(error) => {
+                            return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                                item_id: None,
+                                error: format!(
+                                    "expression evaluation failed in `fail.message` for return node `{current}`: {error}"
+                                ),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                cost: None,
+                                effects: ExpressionFailureEffects::default(),
+                            });
+                        }
+                    };
+                    return StepOutcome::Terminal(TerminalOutcome {
+                        status: GraphRunStatus::Error,
+                        error: Some(message.clone()),
+                        origin: TerminalOrigin::Node,
+                        output: None,
+                        failure: Some(ryeos_runtime::graph_result::GraphFailure {
+                            code: fail.code.clone(),
+                            message,
+                        }),
+                    });
+                }
                 let output = match &compiled.output {
                     Some(output) => match ExpressionScope::new(
                         state,
@@ -1218,6 +1287,7 @@ impl Walker {
                     error: None,
                     origin: TerminalOrigin::Node,
                     output,
+                    failure: None,
                 })
             }
 
@@ -1615,6 +1685,7 @@ impl Walker {
                     output: None,
                     guard,
                     inputs,
+                    failure: None,
                 })
                 .await;
         }
