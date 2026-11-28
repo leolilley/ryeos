@@ -187,6 +187,11 @@ pub async fn handle(
     let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
+    // A remote pinned without its signed descriptor has no ingest rules, and
+    // this node pushes nothing to it: refused before any client is built.
+    if let Some(cfg) = remote_cfg.as_ref() {
+        cfg.ingest_rules()?;
+    }
     let client = match principal {
         OutboundPrincipal::Node => RemoteClient::from_named_remote(&state, &req.remote)?,
         OutboundPrincipal::Delegated => {

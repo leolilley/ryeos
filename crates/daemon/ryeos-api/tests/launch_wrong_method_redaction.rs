@@ -23,7 +23,7 @@ const TOKEN: &str = "one-time-secret-token-9f3a";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_method_on_a_launch_url_does_not_echo_the_token() {
-    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_bundles();
     let raw: RawRouteSpec =
         serde_yaml::from_str(&std::fs::read_to_string(ROUTE_YAML).unwrap()).unwrap();
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
