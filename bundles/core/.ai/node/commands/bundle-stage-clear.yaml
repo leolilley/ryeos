@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-27T00:09:22Z:abf3291f569be0d5e1defd08255c6c900fd5adc00c14c73acd4193ac778acbb4:VE912vI+oid1HPWxTkdkpEo1zs0ho3LxZiEKbOrWmKJgVpyIszFwgSLOx+KWlgEcb7NE/Q52KpheUZxsNVarCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- bundle
+- stage-clear
+description: Remove staged bundles while the node runs, by digest, every refused one, or all (admitted operator only; nothing is written to the ledger)
+help:
+  usage: "ryeos bundle stage-clear (--digests <tree-digest> | --apply-refused | --all)"
+  examples:
+    - "ryeos bundle stage-clear --digests <tree-digest>"
+    - "ryeos bundle stage-clear --apply-refused"
+    - "ryeos bundle stage-clear --all"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/stage-clear

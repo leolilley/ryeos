@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-27T17:49:53Z:0ce82787ead0b38133f68907ae015848acd8c5b17c5fc9b7334830399d276a7b:1E9a9Z/sA+EVafmS9ogZH3ydpp8RW635qOZ37ecUa0tjZG0c1YDtrMgSrUaIf7SDANdy29xPEr+8RkBv+dS/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-public
+version: 0.5.0
+description: "The public page of a RyeOS node: keyless routes signed public, served only where the node's public_routes policy names them"
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
