@@ -104,11 +104,17 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let mut projection_session = match project_access.as_ref() {
         Some(access) => EffectiveProgramProjectionSession::new_under_project_authority(
             &state.engine,
+            &state.config.app_root,
             &plan_context,
             access.path(),
             access.content_authority(),
         )?,
-        None => EffectiveProgramProjectionSession::new(&state.engine, &plan_context, None)?,
+        None => EffectiveProgramProjectionSession::new(
+            &state.engine,
+            &state.config.app_root,
+            &plan_context,
+            None,
+        )?,
     };
     let mut projections = BTreeMap::new();
     let mut projection_warnings = Vec::new();

@@ -5534,11 +5534,20 @@ async fn prepare_managed_launch_authority_in_mode(
         .map_err(|error| BuildAndLaunchError::CapabilityRejected {
             reason: error.to_string(),
         })?;
+        // Project-minted runtime authority is the operator's alone, judged
+        // on the key this launch acts for (a schedule fire acts for its
+        // registrant, never the node key).
+        let project_mint = ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+            &params.state.config.app_root,
+            &engine.trust_store,
+            params.acting_principal,
+        );
         let mut runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
             resolution.composed.composed.get("requires"),
             &params.resolved.resolved_item,
             resolution.effective_trust_class,
             engine,
+            project_mint,
         )
         .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
         // A bundle state access cap joins the minted set only when the signed
@@ -5551,6 +5560,7 @@ async fn prepare_managed_launch_authority_in_mode(
                 resolution.effective_trust_class,
                 engine,
                 params.parameters,
+                project_mint,
             )
             .map_err(state_home_launch_error)?,
         );
