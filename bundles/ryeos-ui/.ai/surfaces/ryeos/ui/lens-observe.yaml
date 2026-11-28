@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:4496c306d5d93dbe9faf4c087fe50aff52a6320072175d84f6a7db60c4acd57d:FU2Jf9WI3LhXTLm4TYP3i76jJ1XIsOEUxfU9bDDubwAXqvF9ETi2ekpfusCzl+BeodLIsnwaJElHnQFofr1ICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T05:29:51Z:9be3125a242044833b132ca2c0291f4d3005187514cf04cb3aaaadbe6d26c02d:okrJbnK/s9lhA1Isvu65H1yLe2JkigmXDE6h9C4rVw64mrSdnrTFhGrv5xx6q8oImVHqCvu2D2Y7Hqv0nKx3Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens-observe
 title: Lens · observe
 version: "1.0.0"
@@ -6,5 +6,26 @@ description: Observation-only single-lens surface for the default terminal launc
 extends: surface:ryeos/ui/lens
 
 capabilities:
-  sources: ["ryeos.execute.service.*"]
+  sources:
+    - ryeos.execute.service.bundle/list
+    - ryeos.execute.service.commands/list
+    - ryeos.execute.service.node/status
+    - ryeos.execute.service.projects/list
+    - ryeos.execute.service.scheduler/list
+    - ryeos.execute.service.ui/ryeos-ui/config/get
+    - ryeos.execute.service.ui/ryeos-ui/coverage/wording
+    - ryeos.execute.service.ui/ryeos-ui/dimension/get
+    - ryeos.execute.service.ui/ryeos-ui/files/read
+    - ryeos.execute.service.ui/ryeos-ui/files/tree
+    - ryeos.execute.service.ui/ryeos-ui/gc/status
+    - ryeos.execute.service.ui/ryeos-ui/items/list
+    - ryeos.execute.service.ui/ryeos-ui/node/activity
+    - ryeos.execute.service.ui/ryeos-ui/node/usage
+    - ryeos.execute.service.ui/ryeos-ui/remotes/list
+    - ryeos.execute.service.ui/ryeos-ui/thread/inspect
+    - ryeos.execute.service.ui/ryeos-ui/thread/tree
+    - ryeos.execute.service.ui/ryeos-ui/threads/list
+    - ryeos.execute.service.ui/ryeos-ui/timeline/raw
+    - ryeos.execute.service.ui/ryeos-ui/timeline/thread
+    - ryeos.execute.service.ui/ryeos-ui/work/attention
   affordances: []
