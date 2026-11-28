@@ -123,10 +123,12 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
     // its request tasks reaches the Store close while this one still holds the
     // application state. The hold is shorter than the shutdown grace, so a
     // stop that does join waits it out.
-    // One second under the shutdown grace, derived from the constant the join
-    // is bounded by.
+    // Half the shutdown grace, derived from the constant the join is bounded
+    // by: long enough to outlive the Store close of a stop that does not join,
+    // and well inside the grace so a loaded runner cannot push the join past
+    // its deadline.
     tokio::time::sleep(std::time::Duration::from_secs(
-        ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS.saturating_sub(1),
+        ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS / 2,
     ))
     .await;
     bail!("runtime phase-cut callback ended by daemon shutdown")
