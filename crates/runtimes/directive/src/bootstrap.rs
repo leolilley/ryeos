@@ -371,7 +371,7 @@ fn compile_admitted_directive_hooks(
 /// an event the runtime never fires, and a hook on it would sit silently
 /// inert. It is refused instead, so a launch never carries a hook that cannot
 /// run. A test holds this list equal to the kind-schema's events.
-pub(super) const FIRED_HOOK_EVENTS: [&str; 8] = [
+pub(super) const FIRED_HOOK_EVENTS: [&str; 9] = [
     "after_step",
     "continuation",
     "provider_error",
@@ -380,6 +380,7 @@ pub(super) const FIRED_HOOK_EVENTS: [&str; 8] = [
     "after_tool",
     "turn_incomplete",
     "idle",
+    "finish_check",
 ];
 
 fn refuse_hooks_on_unfired_events(hooks: &[ryeos_runtime::CompiledHook]) -> Result<()> {
@@ -410,6 +411,7 @@ pub(super) fn compile_directive_hook_sources(
         ryeos_runtime::HookContextSchema::new("after_tool", ["event"]),
         ryeos_runtime::HookContextSchema::new("turn_incomplete", ["event"]),
         ryeos_runtime::HookContextSchema::new("idle", ["event"]),
+        ryeos_runtime::HookContextSchema::new("finish_check", ["event"]),
     ];
     ryeos_runtime::compile_hooks(
         sources,
