@@ -183,12 +183,11 @@ mod tests {
         let join = main
             .find("join_request_owners(")
             .expect("shutdown joins the request owners");
-        let close = main
-            .find("close_after_shutdown_drain(")
-            .expect("shutdown closes the scheduler database");
+        // An earlier use of the close belongs to another path; the one that
+        // matters follows the join.
         assert!(
-            join < close,
-            "the request owners must be joined before the scheduler database closes"
+            main[join..].contains("close_after_shutdown_drain("),
+            "the scheduler database close must follow the join of the request owners"
         );
     }
 
@@ -196,8 +195,10 @@ mod tests {
     fn the_transport_runs_every_request_owner_through_the_tracker() {
         let transport =
             super::rust_source_text::production_text("uds transport", include_str!("transport.rs"));
+        // rustfmt may break the call across lines.
+        let compact: String = transport.split_whitespace().collect();
         assert!(
-            transport.contains("request_owners().spawn("),
+            compact.contains("request_owners().spawn("),
             "a request owner is spawned through the tracker"
         );
         assert!(
