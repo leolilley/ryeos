@@ -8,11 +8,83 @@ use std::path::{Path, PathBuf};
 /// begins with.
 pub const PROJECT_BUNDLE_ID_COLLISION: &str = "project_bundle_id_collision";
 
+/// Code a refusal of project-minted runtime authority for a key that is not
+/// the node's operator begins with.
+pub const PROJECT_RUNTIME_CAPS_OPERATOR_ONLY: &str = "project_runtime_caps_operator_only";
+
+/// Whether the key a launch or preview acts for may mint runtime authority
+/// from a project's own signed manifest. Judged by key alone: the key is the
+/// node's configured operator, or speaks for the owner the operator key acts
+/// for. Every caller states it; there is no default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectMint {
+    /// The requesting key is the node's admitted operator.
+    OperatorKey,
+    /// Any other key, or an operator that could not be established.
+    NoProjectMint,
+}
+
+impl ProjectMint {
+    /// Judge `key` (`fp:<hex>`) at the node's current time. A failure to load
+    /// the operator identity or resolve an owner is never the operator.
+    pub fn for_requesting_key(
+        app_root: &Path,
+        trust_store: &ryeos_engine::trust::TrustStore,
+        key: &str,
+    ) -> Self {
+        Self::for_requesting_key_at(app_root, trust_store, key, lillux::time::unix_secs_now())
+    }
+
+    /// [`Self::for_requesting_key`] for the key a plan was requested by: a
+    /// local principal's own key, or a delegated request's calling key.
+    pub fn for_requested_by(
+        app_root: &Path,
+        trust_store: &ryeos_engine::trust::TrustStore,
+        requested_by: &ryeos_engine::contracts::EffectivePrincipal,
+    ) -> Self {
+        let key = match requested_by {
+            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+                principal.fingerprint.as_str()
+            }
+            ryeos_engine::contracts::EffectivePrincipal::Delegated(delegated) => {
+                delegated.caller_fingerprint.as_str()
+            }
+        };
+        Self::for_requesting_key(app_root, trust_store, key)
+    }
+
+    /// [`Self::for_requesting_key`] judging key links at `now_secs`.
+    pub fn for_requesting_key_at(
+        app_root: &Path,
+        trust_store: &ryeos_engine::trust::TrustStore,
+        key: &str,
+        now_secs: u64,
+    ) -> Self {
+        let Ok(operator) =
+            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)
+        else {
+            return Self::NoProjectMint;
+        };
+        let operator_key = operator.principal_id();
+        if key == operator_key {
+            return Self::OperatorKey;
+        }
+        let Ok(operator_owner) = trust_store.owner_for_at(&operator_key, now_secs) else {
+            return Self::NoProjectMint;
+        };
+        match trust_store.owner_for_at(key, now_secs) {
+            Ok(owner) if owner.principal == operator_owner.principal => Self::OperatorKey,
+            _ => Self::NoProjectMint,
+        }
+    }
+}
+
 pub fn mint_runtime_capability_caps(
     requires_value: Option<&Value>,
     resolved_item: &ResolvedItem,
     effective_trust_class: ryeos_engine::resolution::TrustClass,
     engine: &ryeos_engine::engine::Engine,
+    project_mint: ProjectMint,
 ) -> Result<Vec<String>, String> {
     // (1) Requirement contract. No `requires:` → no runtime callback authority.
     let Some(requires_value) = requires_value else {
@@ -65,6 +137,7 @@ pub fn mint_runtime_capability_caps(
         effective_trust_class,
         engine,
         &effective_bundle_id,
+        project_mint,
     )?;
     manifest.runtime_authority.validate()?;
 
@@ -116,6 +189,7 @@ pub fn mint_state_home_cap(
     effective_trust_class: ryeos_engine::resolution::TrustClass,
     engine: &ryeos_engine::engine::Engine,
     launch_params: &Value,
+    project_mint: ProjectMint,
 ) -> Result<Option<String>, ryeos_bundle::runtime_authority::StateHomeRefusal> {
     use ryeos_bundle::runtime_authority::StateHomeRefusal;
 
@@ -147,8 +221,14 @@ pub fn mint_state_home_cap(
     ryeos_state::objects::validate_bundle_identifier("bundle_id", &bundle_id)
         .map_err(|error| undeclared(format!("{error:#}")))?;
     let namespace = requirement.resolve_namespace(launch_params)?;
-    let manifest = authoritative_manifest(resolved_item, effective_trust_class, engine, &bundle_id)
-        .map_err(undeclared)?;
+    let manifest = authoritative_manifest(
+        resolved_item,
+        effective_trust_class,
+        engine,
+        &bundle_id,
+        project_mint,
+    )
+    .map_err(undeclared)?;
     manifest.runtime_authority.validate().map_err(undeclared)?;
     let requested = requirement.requested_cap(&bundle_id, &namespace);
     let backed = ryeos_bundle::runtime_authority::manifest_backs_requested_cap(
@@ -171,6 +251,7 @@ fn authoritative_manifest(
     effective_trust_class: ryeos_engine::resolution::TrustClass,
     engine: &ryeos_engine::engine::Engine,
     effective_bundle_id: &str,
+    project_mint: ProjectMint,
 ) -> Result<ryeos_bundle::manifest::BundleManifest, String> {
     // (2) Authority upper bound comes from the signed manifest at the exact
     // provenance boundary that supplied the item. Installed bundle authority
@@ -202,6 +283,15 @@ fn authoritative_manifest(
             .manifest
         }
         ryeos_engine::contracts::ItemSpace::Project => {
+            if project_mint != ProjectMint::OperatorKey {
+                return Err(format!(
+                    "{PROJECT_RUNTIME_CAPS_OPERATOR_ONLY}: project item `{}` declares runtime \
+                     authority in its project manifest, which only the node's operator key may \
+                     mint; the requesting key is not the operator and does not speak for the \
+                     operator's owner",
+                    resolved_item.canonical_ref
+                ));
+            }
             if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedProject {
                 return Err(format!(
                     "project runtime capability requirements need TrustedProject provenance; \

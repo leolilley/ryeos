@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T22:28:39Z:bba8bcd98158d8951d83d95844c455341522da73c2df2f66aea8b14d4a67fced:5LCCVg08f9WeVTiPmV3PhzKlit5erC12SUECg4yRZmUUaRhrCfTl4hbgpOIQUie+RBXDqcxPqmINlwsx4+aPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T08:59:26Z:0bc5abbda7c63708c26cb15e8077622c158f4455a53aa6e5ff13d7d1e0e07577:6Fi5BgrLHxZXFI/n7RqaAT+cewRw7vL+dfskzxcFBqlLHC21EwFNR2PGz5qStlxW5y3b2W/Fd9zZyEkARyl/AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -668,6 +668,10 @@ policies:
     reads:
       - target: service:node/status
       - target: service:bundle/list
+        # The staged list is the operator's node administration: no seat
+        # sees it, the operator's own seat included.
+        keep:
+        - /bundles
       - target: service:projects/list
       - target: service:commands/list
       - target: service:threads/list

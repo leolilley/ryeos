@@ -211,6 +211,12 @@ async fn the_shipped_policy_withholds_bundle_paths_from_a_seat() {
         listed["result"]["result"],
         json!({"bundles": [{"name": "alpha"}, {"name": "beta"}]})
     );
+    // The staged list is the operator's node administration: the shipped
+    // policy keeps only the installed bundles, so a seat never sees the key.
+    assert!(
+        listed["result"]["result"].get("staged").is_none(),
+        "a seat was shown the staged list: {listed}"
+    );
     let text = serde_json::to_string(&listed).unwrap();
     assert!(!text.contains("/srv/private"), "{text}");
 }
