@@ -289,6 +289,9 @@ paths = ["crates/engine/ryeos-engine/src/execution_workspace.rs"]
 covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-node-runtime", "ryeos-project-capture", "ryeos-runtime", "ryeos-state", "ryeos-vault"]
 paths = ["crates/state/ryeos-state/src/project_materialization.rs"]
 
+[tests.plan_tool_e2e]
+covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
+
 [tests.product_transport_large_content_e2e]
 covers = ["ryeos-api", "ryeos-http-transport", "ryeos-node", "ryeos-node-runtime", "ryeos-project-capture", "ryeos-state"]
 paths = ["crates/state/ryeos-state/src/large_object_store.rs", "crates/state/ryeos-state/src/sync.rs"]

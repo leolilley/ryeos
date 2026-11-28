@@ -322,4 +322,69 @@ mod tests {
         );
         assert_eq!(text.lines().count(), 2);
     }
+
+    fn plan_turn(
+        id: &str,
+        steps: Value,
+        status: ToolResultStatus,
+    ) -> Vec<ryeos_provider_contract::Message> {
+        use crate::directive::{ProviderMessageExt, ToolCall};
+        vec![
+            ryeos_provider_contract::Message::assistant(
+                None,
+                vec![ToolCall {
+                    id: Some(id.to_string()),
+                    name: PLAN_TOOL.to_string(),
+                    arguments: json!({ "steps": steps }),
+                }],
+                None,
+            ),
+            ryeos_provider_contract::Message::tool_result_with_status(id, "{}", status),
+        ]
+    }
+
+    fn steps(name: &str) -> Value {
+        json!([{"step": name, "status": "pending"}])
+    }
+
+    #[test]
+    fn a_cut_that_drops_the_newest_plan_pins_it_once_and_replaces_the_older_pin() {
+        let mut dropped = plan_turn("a", steps("first"), ToolResultStatus::Ok);
+        dropped.extend(plan_turn("b", steps("second"), ToolResultStatus::Ok));
+        // A refused call is not state.
+        dropped.extend(plan_turn("c", steps("refused"), ToolResultStatus::Error));
+        let pin = pin_after_cut(None, &dropped, &[]).expect("a pin");
+        assert_eq!(pinned_rev(&pin), Some(2));
+        let text = pin
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(text.contains("second") && !text.contains("first") && !text.contains("refused"));
+
+        // A later cut with one more call counts on from the old revision.
+        let later = plan_turn("d", steps("third"), ToolResultStatus::Ok);
+        let again = pin_after_cut(Some(&pin), &later, &[]).expect("a pin");
+        assert_eq!(pinned_rev(&again), Some(3));
+    }
+
+    #[test]
+    fn a_plan_call_in_the_kept_turns_gets_no_pin_and_no_plan_keeps_the_old_pin() {
+        let kept = plan_turn("k", steps("kept"), ToolResultStatus::Ok);
+        let dropped = plan_turn("a", steps("older"), ToolResultStatus::Ok);
+        assert!(
+            pin_after_cut(None, &dropped, &kept).is_none(),
+            "no doubling"
+        );
+        assert!(pin_after_cut(None, &[], &[]).is_none());
+        let old = pinned_input(
+            &validate(&json!({"steps": steps("old")}), &spec()).unwrap(),
+            5,
+        );
+        let kept_pin = pin_after_cut(Some(&old), &[], &[]).expect("the old pin stays");
+        assert_eq!(kept_pin, old);
+    }
 }

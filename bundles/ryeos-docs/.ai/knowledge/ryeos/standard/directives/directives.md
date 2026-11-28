@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T23:17:01Z:36bc7ecfd23bad330fa77e795c207fbc8f828e03db75a3d9bd1e3bf9f0e5e023:ga3f9haKCnQEvWE/BiIiNukWAx2yuSR4+5f4kO44MLg8inh6NHa7gv2JSPzN79OVfoL6YxKoJkGqeVaiPWgJBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T02:13:55Z:754a3de19f5e4b4baad1c02ffbede6cbc935d357bf086e48942a2975bd22a9de:eNeTloM3aVq7it2mngqGQIJCMxAYoni2j/RNDnAVjr/s4QSk3ApnzBVF+cM1JgvDB4CpI0Wl74u3d6Ofq7ICAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -285,6 +285,25 @@ past it the turn's remaining observations are skipped and warned about once.
 After a crash an event can fire again (at least once). These events ship with the
 directive kind-schema; a runtime older than the schema never fires them, so a
 hook on one is silently inert until the runtime is updated with it.
+
+### The plan tool
+
+A directive that declares `plan: { max_steps, max_step_bytes }` in its header gets
+a built-in `plan` tool (the name is reserved, like `time_left`). The model sends
+the whole checklist each call, each step `pending`, `in_progress` or `completed`,
+and at most one `in_progress`; a call that breaks a bound, uses another status or
+carries a control character is refused as a tool error the model sees. The
+runtime ceilings are 64 steps, 512 bytes a step and 16 KiB in all. Without the
+header field the tool does not exist.
+
+Nothing is written per update: the newest accepted `plan` call in the
+conversation is the state. When a compaction or a successor start drops that
+call, the runtime pins one input, origin `plan`, kind `plan_state_rev_<n>`,
+saying "your plan as you last recorded it" with each step quoted as data; a plan
+call still inside the kept turns carries itself and nothing is added. The pinned
+plan is the model's own words, never the harness speaking, and it counts toward
+the pinned-size bound. It proves nothing about the work: a model can mark every
+step complete without doing it, so the plan is a memory aid, not evidence.
 
 ### Finish checks and reminders
 
