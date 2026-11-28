@@ -1274,9 +1274,11 @@ pub fn validate_scopes_carry_required_constraints(
         .filter(|spec| spec.requires_grant_constraint)
     {
         let scope = spec.scope();
-        if scopes.iter().any(|granted| *granted == scope) {
+        if scopes.contains(&scope) {
             ensure!(
-                constraints.iter().any(|constraint| constraint.scope == scope),
+                constraints
+                    .iter()
+                    .any(|constraint| constraint.scope == scope),
                 "the grant names `{scope}`, which takes only a grant with a constraint for it"
             );
         }
@@ -1471,10 +1473,10 @@ mod tests {
         let link = "ryeos.offline.node.key.link";
         let one = constraint(link, "/link/body/key");
         // No ceiling exists yet: the node refuses to issue what no use admits.
-        let refused = validate_grant_constraints(&[one.clone()]).unwrap_err();
+        let refused = validate_grant_constraints(std::slice::from_ref(&one)).unwrap_err();
         assert!(refused.to_string().starts_with("grant_ceiling_unavailable"));
         // With a ceiling, a not_after at or under it passes and one past it fails.
-        validate_grant_constraints_within(&[one.clone()], Some(2_000_000_000)).unwrap();
+        validate_grant_constraints_within(std::slice::from_ref(&one), Some(2_000_000_000)).unwrap();
         let err = validate_grant_constraints_within(&[one], Some(1_999_999_999)).unwrap_err();
         assert!(err.to_string().contains("ends by"));
     }
