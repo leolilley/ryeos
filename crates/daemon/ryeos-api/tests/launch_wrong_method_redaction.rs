@@ -24,8 +24,15 @@ const TOKEN: &str = "one-time-secret-token-9f3a";
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_method_on_a_launch_url_does_not_echo_the_token() {
     let (_tmp, _state_owner, state) = test_state::build_test_state_with_bundles();
-    let raw: RawRouteSpec =
+    let mut raw: RawRouteSpec =
         serde_yaml::from_str(&std::fs::read_to_string(ROUTE_YAML).unwrap()).unwrap();
+    // The shipped launch route keeps its own path and methods. Its browser
+    // launch mode and service belong to the UI crate, which this crate cannot
+    // compose; a wrong method is answered by the dispatcher before any mode or
+    // service runs, so a JSON service this crate holds stands in for them.
+    raw.response.mode = "json".to_owned();
+    raw.response.source = Some("service:admission/claim".to_owned());
+    raw.response.source_config = serde_json::Value::Null;
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)
         .unwrap_or_else(|errors| panic!("launch route does not compile: {errors:?}"));
