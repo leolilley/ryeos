@@ -602,7 +602,8 @@ async fn a_principal_without_a_delegation_is_refused_on_origin_and_capped_on_hos
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -> Result<()> {
+async fn authorize_and_bundle_install_go_out_as_the_caller_and_pull_is_the_operators() -> Result<()>
+{
     let pair = start_pair().await?;
     let u2 = u2_key();
     let calls = [
@@ -613,15 +614,6 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
                 "public_key": format!("ed25519:{}", public_b64(&hosted_operator_key())),
                 "label": "x",
                 "scopes": ["ryeos.execute.service.threads/list"],
-            }),
-        ),
-        (
-            "service:remote/pull",
-            json!({
-                "remote": HOSTED_REMOTE,
-                "root": {"kind": "thread_result", "thread_id": "T-x"},
-                "object_hashes": ["object:00"],
-                "output_dir": "/nonexistent/out",
             }),
         ),
         (
@@ -637,6 +629,29 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
             "{service}: {body}"
         );
     }
+    // A pull writes into a host directory it names, so it is the operator's
+    // alone: a non-operator caller is refused before its delegation is read.
+    let (status, body) = pair
+        .origin_service(
+            &u2,
+            "service:remote/pull",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "root": {"kind": "thread_result", "thread_id": "T-x"},
+                "object_hashes": ["object:00"],
+                "output_dir": "/nonexistent/out",
+            }),
+        )
+        .await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "remote/pull: {body}"
+    );
+    assert!(
+        body.to_string().contains("local_operator_required"),
+        "remote/pull: {body}"
+    );
     Ok(())
 }
 
