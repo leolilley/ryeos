@@ -706,5 +706,21 @@ class Digest(unittest.TestCase):
             digest_mod.digest(root)
 
 
+class RuneBuildPaths(unittest.TestCase):
+    """The package bytes must not depend on whether rust-src is installed."""
+
+    def test_sysroot_source_path_is_mapped_to_the_rustc_commit_after_the_home_map(self):
+        script = (
+            Path(__file__).resolve().parents[2]
+            / ".ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh"
+        ).read_text()
+        home = script.index("--remap-path-prefix=$HOME=/home")
+        sysroot = script.index(
+            "--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$rustc_commit"
+        )
+        self.assertLess(home, sysroot, "later remaps win, so the sysroot one comes last")
+        self.assertIn("commit-hash", script)
+
+
 if __name__ == "__main__":
     unittest.main()

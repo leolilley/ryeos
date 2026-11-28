@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-20T10:04:57Z:371bf1802bb37b7ff8992f55b8340ee21c235d193891cfcd6239c9e3e6c139ca:th2Q6BtsF2zStS7yDnJP/apEp0ZOcXJrIsz5oe68kPXPE1TChwSPXq+g5oOeypfQAFOJ6a2k2cFaDBJxL3KqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T11:39:49Z:b81722b09dcd2531d7e5f3f5d641a9248c3add05079492bc5d3022b8901b81d6:/rjifgbXaTrVWunJliHHNpJrkgOheP5KaM7HOx3zLe93UAr1afOW9UubFtSItt4lWh+tm5Fo6oMIpk/nzBJiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -82,7 +82,16 @@ flock 9
 ln -sfn "$root" "$fixed"
 
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$root=/ryeos --remap-path-prefix=$fixed=/ryeos"
+# The standard library's panic locations: without the rust-src component they are already
+# /rustc/<commit>/library/..., with it rustc rewrites them to the sysroot's own source path
+# (under $HOME, so a machine-dependent string). Map that path back to /rustc/<commit> so the
+# bytes are the same whether or not rust-src is installed. This flag comes after the $HOME one
+# so it takes precedence for these paths.
+rustc=${RUSTC:-rustc}
+sysroot=$("$rustc" --print sysroot)
+rustc_commit=$("$rustc" -vV | sed -n 's/^commit-hash: //p')
+[[ $rustc_commit =~ ^[0-9a-f]{40}$ ]] || { echo "rustc -vV names no commit-hash" >&2; exit 1; }
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$root=/ryeos --remap-path-prefix=$fixed=/ryeos --remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$rustc_commit"
 "$cargo" build --locked --profile web --manifest-path "$fixed/crates/clients/rune/Cargo.toml" --target wasm32-unknown-unknown
 artifact=$target_dir/wasm32-unknown-unknown/web/ryeos_client_rune.wasm
 [[ -f $artifact ]] || { echo "build produced no $artifact" >&2; exit 1; }
