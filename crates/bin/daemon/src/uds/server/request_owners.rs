@@ -4,9 +4,12 @@
 //! task cannot cut the request off halfway (the connection's `JoinHandle` is
 //! then dropped, which detaches the task). A detached task still holds the
 //! application state, and with it a clone of the live Store, until the request
-//! returns. Shutdown must therefore join these tasks before it closes the
-//! scheduler database and the live Store; a bounded wait or a retry would only
-//! hide that they are still alive.
+//! returns. Shutdown therefore joins these tasks before it closes the scheduler
+//! database and the live Store. The join waits for the tasks to finish, up to
+//! the shutdown grace the caller passes; it does not poll or retry. A task still
+//! running at that deadline is counted, logged by the caller, and left to the
+//! close, which then refuses with the Store's real error instead of hiding the
+//! live task.
 //!
 //! The tracker admits a task only while open, and counts it until the task's
 //! future, including everything it captured, has been dropped.
