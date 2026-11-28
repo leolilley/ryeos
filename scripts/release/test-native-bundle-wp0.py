@@ -36,6 +36,17 @@ class NativeBundleWp0Tests(unittest.TestCase):
             )
             self.assertEqual(sorted(document["exact_bundles"]), sorted(fixture["sets"][bundle_set]))
 
+    def test_every_set_that_carries_directive_also_carries_graph(self):
+        # The directive bundle uses the graph kind (its examples include a
+        # graph) and is published with the graph bundle's registry root, so
+        # graph must be present in every such set. Publication order is fixed
+        # by populate-bundles.sh (graph before directive), not by this list.
+        fixture = json.loads((FIXTURES / "bundle-sets.json").read_text())
+        carrying = {name: members for name, members in fixture["sets"].items() if "directive" in members}
+        self.assertTrue(carrying)
+        for name, members in carrying.items():
+            self.assertIn("graph", members, name)
+
     def test_payload_ownership_is_unique_and_references_known_bundles(self):
         fixture = json.loads((FIXTURES / "bundle-sets.json").read_text())
         known = set().union(*map(set, fixture["sets"].values()))
