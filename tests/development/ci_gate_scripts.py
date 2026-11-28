@@ -331,6 +331,153 @@ class E2ESelection(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
 
 
+class AuthoritySelection(unittest.TestCase):
+    """A change to operator authority or the trust store selects the extra gate tests."""
+
+    MAP = (
+        '[authority]\n'
+        'paths = ["crates/k/src/authority/**", "crates/a/src/operator_authority.rs"]\n'
+        'tokens = ["speaks_for", "remote_principal"]\n'
+        'packages = ["pkg-k"]\n\n'
+        '[authority.smoke]\nsuite = "one_e2e"\ntest = "smoke_one"\n\n'
+        '[tests.one_e2e]\ncovers = ["pkg-a"]\nauthority = true\n\n'
+        '[tests.two_e2e]\ncovers = []\npaths = ["crates/k/src/proc/**"]\n'
+    )
+    BASE_FILES = {
+        "Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/b", "crates/k", "crates/bin/daemon"]\n',
+        "crates/a/Cargo.toml": '[package]\nname = "pkg-a"\nversion = "0"\n',
+        "crates/a/src/lib.rs": "pub fn f() {}\n// a context line\npub fn g() {}\n",
+        "crates/a/src/operator_authority.rs": "pub fn h() {}\n",
+        "crates/a/README.md": "docs\n",
+        "crates/b/Cargo.toml": '[package]\nname = "pkg-b"\nversion = "0"\n',
+        "crates/b/src/lib.rs": "pub fn f() {}\n// speaks_for is named here already\npub fn g() {}\n",
+        "crates/k/Cargo.toml": '[package]\nname = "pkg-k"\nversion = "0"\n',
+        "crates/k/src/lib.rs": "pub fn f() {}\n",
+        "crates/k/src/authority/trust.rs": "pub fn t() {}\n",
+        "crates/k/src/proc/mod.rs": "pub fn p() {}\n",
+        "crates/bin/daemon/Cargo.toml": '[package]\nname = "ryeosd"\nversion = "0"\n',
+        "crates/bin/daemon/src/main.rs": "fn main() {}\n",
+        "crates/bin/daemon/tests/one_e2e.rs": "#[test]\nfn smoke_one() {}\n",
+        "crates/bin/daemon/tests/two_e2e.rs": "// e2e\n",
+        "crates/bin/daemon/tests/e2e-coverage.toml": MAP,
+    }
+
+    def repo(self, changed: dict[str, str], files: dict[str, str] | None = None) -> tuple[str, list[str]]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        git(root, "init", "-q", "-b", "next")
+        for name, text in (files or self.BASE_FILES).items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        git(root, "update-ref", "refs/remotes/origin/next", "HEAD")
+        git(root, "checkout", "-q", "-b", "work")
+        for name, text in changed.items():
+            write(root, name, text)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "--allow-empty", "-m", "change")
+        paths = [n for n in classify_mod.git(str(root), "diff", "--name-only", "-z", "origin/next", "HEAD").decode().split("\0") if n]
+        return str(root), sorted(paths)
+
+    def select(self, changed: dict[str, str]) -> dict:
+        root, paths = self.repo(changed)
+        base = classify_mod.git(root, "merge-base", "HEAD", "origin/next").decode().strip()
+        return classify_mod.select_authority(root, base, paths)
+
+    def test_a_named_path_selects_without_a_token(self):
+        got = self.select({"crates/k/src/authority/trust.rs": "pub fn t() { }\n"})
+        self.assertTrue(got["selected"])
+        self.assertEqual(got["tests"], ["one_e2e"])
+        self.assertEqual(got["packages"], ["pkg-k"])
+        self.assertEqual(got["suites"], [{"suite": "one_e2e", "test": "smoke_one"}])
+        self.assertIn("crates/k/src/authority/trust.rs", got["reason"])
+
+    def test_a_token_alone_selects_even_in_a_comment(self):
+        got = self.select({"crates/a/src/lib.rs": "pub fn f() {}\n// a context line\n// uses speaks_for\npub fn g() {}\n"})
+        self.assertTrue(got["selected"])
+        self.assertIn("speaks_for", got["reason"])
+
+    def test_a_removed_token_line_selects(self):
+        got = self.select({"crates/b/src/lib.rs": "pub fn f() {}\npub fn g() {}\n"})
+        self.assertTrue(got["selected"])
+
+    def test_a_token_on_an_unchanged_line_does_not_select(self):
+        got = self.select({"crates/b/src/lib.rs": "pub fn f() { }\n// speaks_for is named here already\npub fn g() {}\n"})
+        self.assertFalse(got["selected"])
+        self.assertEqual((got["tests"], got["packages"], got["suites"]), ([], [], []))
+
+    def test_a_docs_only_diff_selects_nothing_even_naming_a_token(self):
+        got = self.select({"crates/a/README.md": "speaks_for and remote_principal\n"})
+        self.assertFalse(got["selected"])
+        self.assertEqual(got["suites"], [])
+
+    def test_an_unrelated_change_selects_nothing(self):
+        got = self.select({"crates/k/src/proc/mod.rs": "pub fn p() { }\n"})
+        self.assertFalse(got["selected"])
+
+    def test_a_map_with_no_authority_table_selects_nothing(self):
+        files = dict(self.BASE_FILES)
+        files["crates/bin/daemon/tests/e2e-coverage.toml"] = '[tests.one_e2e]\ncovers = ["pkg-a"]\n'
+        root, paths = self.repo({"crates/a/src/operator_authority.rs": "pub fn h() { }\n"}, files)
+        base = classify_mod.git(root, "merge-base", "HEAD", "origin/next").decode().strip()
+        self.assertFalse(classify_mod.select_authority(root, base, paths)["selected"])
+
+    def test_a_broken_authority_table_is_an_error_not_none(self):
+        bad = self.MAP.replace('tokens = ["speaks_for", "remote_principal"]', "tokens = 3")
+        files = dict(self.BASE_FILES)
+        files["crates/bin/daemon/tests/e2e-coverage.toml"] = bad
+        root, paths = self.repo({"crates/a/src/operator_authority.rs": "pub fn h() { }\n"}, files)
+        base = classify_mod.git(root, "merge-base", "HEAD", "origin/next").decode().strip()
+        with self.assertRaises(ValueError):
+            classify_mod.select_authority(root, base, paths)
+        done = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True)
+        self.assertIn("process_scope_suites=ERROR", done.stdout.splitlines())
+
+    def test_the_cli_adds_the_tagged_binaries_the_package_and_the_suite(self):
+        root, _ = self.repo({"crates/a/src/operator_authority.rs": "pub fn h() { }\n"})
+        out = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn('process_scope_suites=[{"suite":"one_e2e","test":"smoke_one"}]', out)
+        self.assertIn('e2e_tests=["one_e2e"]', out)
+        root, paths = self.repo({"crates/a/src/operator_authority.rs": "pub fn h() { }\n"})
+        base = classify_mod.git(root, "merge-base", "HEAD", "origin/next").decode().strip()
+        added = classify_mod.add_authority_packages(root, base, paths, [])
+        self.assertEqual([p["package"] for p in added], ["pkg-k"])
+        self.assertEqual(classify_mod.add_authority_packages(root, base, ["crates/a/README.md"], []), [])
+
+    def test_the_cli_prints_an_empty_suite_list_for_docs(self):
+        root, _ = self.repo({"crates/a/README.md": "speaks_for\n"})
+        out = subprocess.run(["python3", "-I", str(CLASSIFY), "--root", root], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn("process_scope_suites=[]", out)
+
+    def test_lint(self):
+        def check_faults(root: str) -> list[str]:
+            return classify_mod.check_e2e_coverage(root)[0]
+
+        root, _ = self.repo({})
+        self.assertEqual(check_faults(root), [])
+        bad = (
+            '[authority]\npaths = ["crates/zz/**"]\ntokens = ["speaks_for"]\npackages = ["nope"]\n\n'
+            '[authority.smoke]\nsuite = "one_e2e"\ntest = "missing_test"\n\n'
+            '[tests.one_e2e]\ncovers = ["pkg-a"]\n\n[tests.two_e2e]\ncovers = []\n'
+        )
+        files = dict(self.BASE_FILES)
+        files["crates/bin/daemon/tests/e2e-coverage.toml"] = bad
+        root, _ = self.repo({}, files)
+        faults, _ = classify_mod.check_e2e_coverage(root)
+        joined = "\n".join(faults)
+        for needle in ("matches no tracked file", "unknown package 'nope'", "smoke test 'missing_test'"):
+            self.assertIn(needle, joined)
+        files["crates/bin/daemon/tests/e2e-coverage.toml"] = self.MAP.replace("authority = true", 'authority = "yes"')
+        root, _ = self.repo({}, files)
+        self.assertIn("authority must be true", "\n".join(check_faults(root)))
+        no_tag = self.MAP.replace("authority = true\n", "")
+        files["crates/bin/daemon/tests/e2e-coverage.toml"] = no_tag
+        root, _ = self.repo({}, files)
+        faults, _ = classify_mod.check_e2e_coverage(root)
+        self.assertIn("smoke suite 'one_e2e' is not tagged authority", "\n".join(faults))
+
+
 class BundleBins(unittest.TestCase):
     """A change that reaches a bundle bin needs the branch's own refresh."""
 

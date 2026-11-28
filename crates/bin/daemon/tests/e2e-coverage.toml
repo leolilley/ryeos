@@ -16,9 +16,63 @@
 # Tables are sorted by test name; lists are sorted.
 
 
+# [authority]: the operator-authority and trust-store surface. A change that
+# matches it (a named path, or a token on a changed line of a changed Rust
+# file; a comment or test module counts, over-selecting is cheap) adds to a
+# merge gate: every binary tagged `authority = true` below, the extra test
+# `packages`, and one real-isolation smoke test (`smoke`). The full
+# process-scope matrix stays on next. When a suite goes red on next that the
+# gate did not select, name the miss here: add the path or token. This map is
+# itself a named path, so a change to the selection runs the smoke test.
+[authority]
+paths = [
+    "crates/bin/daemon/tests/e2e-coverage.toml",
+    "crates/bin/cli/src/lifecycle_key_link.rs",
+    "crates/bin/cli/src/lifecycle_offline_operation.rs",
+    "crates/bin/cli/src/lifecycle_trust.rs",
+    "crates/daemon/ryeos-api/src/handlers/offline_operations.rs",
+    "crates/daemon/ryeos-api/src/handlers/project_owner.rs",
+    "crates/daemon/ryeos-api/src/handlers/remote_admit_principal.rs",
+    "crates/daemon/ryeos-api/src/handlers/remote_offline_operations.rs",
+    "crates/daemon/ryeos-api/src/handlers/trust_list.rs",
+    "crates/daemon/ryeos-app/src/bundle_transaction.rs",
+    "crates/daemon/ryeos-app/src/live_project_path.rs",
+    "crates/daemon/ryeos-app/src/operator_authority.rs",
+    "crates/daemon/ryeos-app/src/principal.rs",
+    "crates/daemon/ryeos-app/src/project_owner.rs",
+    "crates/daemon/ryeos-app/src/project_registry.rs",
+    "crates/daemon/ryeos-node/src/key_link.rs",
+    "crates/daemon/ryeos-node/src/offline_operation/**",
+    "crates/engine/ryeos-engine/src/authority/trust/**",
+    "crates/engine/ryeos-engine/src/principal_contract.rs",
+    "crates/engine/ryeos-node-runtime/src/node_policy/sections/authorization.rs",
+    "crates/engine/ryeos-node-runtime/src/node_policy/sections/bundle_publication.rs",
+    "crates/engine/ryeos-node-runtime/src/node_policy/sections/hosted.rs",
+]
+tokens = [
+    "admit_handler_live_path",
+    "admit_live_project_path",
+    "admit_signer",
+    "authorize_launch_project",
+    "key_link",
+    "live_logical_project",
+    "local_signer_only",
+    "owner_for",
+    "remote_principal",
+    "require_admitted_operator",
+    "speaks_for",
+    "trust_store",
+]
+packages = ["ryeos-synthetic-external-lifecycle-adapter"]
+
+[authority.smoke]
+suite = "handoff_crash_recovery_e2e"
+test = "real_portable_worker_completes_cross_site_handoff"
+
 [tests.acting_principal_e2e]
 covers = ["ryeos-executor"]
 paths = ["crates/daemon/ryeos-app/src/env_contract.rs", "crates/daemon/ryeos-app/src/principal.rs"]
+authority = true
 
 [tests.auth_audience_e2e]
 covers = ["ryeos-request-signing"]
@@ -92,6 +146,7 @@ covers = ["ryeos-engine", "ryeos-executor"]
 [tests.controller_grant_inventory_e2e]
 covers = ["ryeos-codex-external-configuration", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+authority = true
 
 [tests.directive_compaction_crash_e2e]
 covers = ["lillux", "ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
@@ -133,6 +188,7 @@ paths = ["crates/engine/ryeos-engine/src/launch/**"]
 [tests.endorsement_e2e]
 covers = ["ryeos-engine", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/engine/ryeos-engine/src/authority/**"]
+authority = true
 
 [tests.endorsement_launch_e2e]
 covers = ["ryeos-directive-runtime", "ryeos-engine", "ryeos-knowledge-runtime"]
@@ -169,6 +225,7 @@ paths = ["crates/daemon/ryeos-app/src/node_config/**"]
 [tests.grant_lifecycle_e2e]
 covers = ["ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/auth.rs", "crates/daemon/ryeos-app/src/operator_authority.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+authority = true
 
 [tests.graph_action_completes_with_permitted_cap_e2e]
 covers = ["ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
@@ -196,6 +253,7 @@ covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "rye
 [tests.handler_route_authority_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-api/src/routes/**"]
+authority = true
 
 [tests.handler_route_http_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-vault"]
@@ -203,6 +261,7 @@ paths = ["crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/r
 
 [tests.handoff_crash_recovery_e2e]
 covers = ["lillux", "ryeos-accounting", "ryeos-api", "ryeos-app", "ryeos-engine", "ryeos-node-runtime", "ryeos-state", "ryeos-structured-session"]
+authority = true
 
 [tests.hello_world_python]
 covers = ["ryeos-engine", "ryeos-executor", "ryeos-tracing"]
@@ -280,6 +339,7 @@ covers = ["ryeos-node", "ryeos-node-runtime"]
 [tests.node_locality_e2e]
 covers = ["ryeos-api", "ryeos-effect-contract", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-app/src/remote_consumer_launch.rs"]
+authority = true
 
 [tests.objects_read_scope_e2e]
 covers = ["ryeos-api", "ryeos-knowledge-runtime", "ryeos-project-capture"]
@@ -288,6 +348,7 @@ paths = ["crates/state/ryeos-state/src/object_closure/**", "crates/state/ryeos-s
 [tests.offline_operation_delivery_e2e]
 covers = ["ryeos-node"]
 paths = ["crates/daemon/ryeos-api/src/routes/**"]
+authority = true
 
 [tests.overlay_seal_unrepresentable_e2e]
 covers = ["lillux", "ryeos-isolation-protocol", "ryeos-lillux-isolation-adapter"]
@@ -300,10 +361,12 @@ paths = ["crates/state/ryeos-state/src/project_materialization.rs"]
 [tests.product_transport_large_content_e2e]
 covers = ["ryeos-api", "ryeos-http-transport", "ryeos-node", "ryeos-node-runtime", "ryeos-project-capture", "ryeos-state"]
 paths = ["crates/state/ryeos-state/src/large_object_store.rs", "crates/state/ryeos-state/src/sync.rs"]
+authority = true
 
 [tests.project_registration_e2e]
 covers = ["ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/state/ryeos-state/src/project_discovery.rs", "crates/state/ryeos-state/src/project_identity.rs"]
+authority = true
 
 [tests.project_apply_published_e2e]
 covers = ["ryeos-api"]
@@ -347,6 +410,7 @@ covers = ["ryeos-engine", "ryeos-executor", "ryeos-graph-runtime", "ryeos-knowle
 [tests.qualification_testimony_transport_e2e]
 covers = ["ryeos-api", "ryeos-effect-contract", "ryeos-node", "ryeos-node-runtime", "ryeos-state"]
 paths = ["crates/daemon/ryeos-app/src/external_qualification_*.rs", "crates/daemon/ryeos-app/src/qualification_*.rs"]
+authority = true
 
 [tests.reasoning_roundtrip_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
@@ -359,10 +423,12 @@ paths = ["crates/daemon/ryeos-api/src/handlers/**", "crates/daemon/ryeos-api/src
 [tests.remote_delegation_e2e]
 covers = ["ryeos-api", "ryeos-knowledge-runtime", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/remote/**", "crates/daemon/ryeos-app/src/remote_consumer_launch.rs", "crates/daemon/ryeos-app/src/runtime_vault_service.rs", "crates/daemon/ryeos-app/src/vault/**", "crates/kernel/lillux/src/vault.rs"]
+authority = true
 
 [tests.remote_offline_operation_delivery_e2e]
 covers = ["ryeos-api", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/routes/**"]
+authority = true
 
 [tests.required_caps_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-executor"]
@@ -375,10 +441,12 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 [tests.root_admission_e2e]
 covers = ["ryeos-executor", "ryeos-expression", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-scheduler", "ryeos-scheduler-contract", "ryeos-scheduler-service"]
 paths = ["crates/daemon/ryeos-app/src/admission_events.rs", "crates/daemon/ryeos-app/src/prospective_admission.rs"]
+authority = true
 
 [tests.route_principal_authority_e2e]
 covers = ["ryeos-executor", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-runtime", "ryeos-vault"]
 paths = ["crates/daemon/ryeos-app/src/operator_authority.rs"]
+authority = true
 
 [tests.run_deadline_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
@@ -460,6 +528,7 @@ covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "
 [tests.trust_registry_e2e]
 covers = ["ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/engine/ryeos-engine/src/authority/**", "crates/state/ryeos-state/src/signer.rs"]
+authority = true
 
 [tests.ui_live_rebind_e2e]
 covers = ["ryeos-api", "ryeos-client-base", "ryeos-ui"]
