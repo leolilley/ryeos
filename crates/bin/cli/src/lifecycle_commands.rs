@@ -3716,46 +3716,75 @@ fn remote_content_testimonies_check(
     }
 }
 
-/// Doctor row for files a process left under Lillux's quarantine name in the
-/// pending-transition directory and under `.ai/node`. A leftover that records
-/// its original name is settled at the next start and only warns; one an older
-/// build left records nothing, refuses the start, and fails the row.
+/// Doctor row for files a process left under Lillux's quarantine name. In the
+/// pending-transition directory and under `.ai/node` a leftover that records
+/// its original name is settled at the next start and only warns; a plain one
+/// refuses the start and fails the row. Anywhere else under the app root or the
+/// runtime state dir (thread runtime tree, file cache, GC cache) nothing
+/// settles it, so each is listed with its path as debris and warns.
 fn quarantine_leftovers_check(
     app_root: &std::path::Path,
     runtime_state_dir: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
-    let mut roots = vec![app_root.join(".ai").join("node")];
-    roots.push(
-        runtime_state_dir
-            .join("recovery")
-            .join("thread-projection")
-            .join("pending"),
-    );
+    let node_root = app_root.join(".ai").join("node");
+    let pending_root = runtime_state_dir
+        .join("recovery")
+        .join("thread-projection")
+        .join("pending");
+    let settled_roots = [node_root, pending_root];
+    // Every leftover under the app root and the runtime state dir, deduplicated
+    // by path (the state dir sits inside the app root).
+    let mut found: std::collections::BTreeMap<std::path::PathBuf, bool> =
+        std::collections::BTreeMap::new();
+    let mut walk_errors: Vec<(bool, String)> = Vec::new();
+    let mut scan = |root: &std::path::Path, required: bool| {
+        let listed = lillux::PinnedDirectory::open(root).and_then(|directory| match directory {
+            Some(directory) => directory.quarantine_leftovers_tree(),
+            None => Ok(Vec::new()),
+        });
+        match listed {
+            Ok(list) => {
+                for (path, leftover) in list {
+                    found.insert(path, leftover.original().is_some());
+                }
+            }
+            Err(error) => walk_errors.push((required, format!("{}: {error:#}", root.display()))),
+        }
+    };
+    for root in &settled_roots {
+        scan(root, true);
+    }
+    scan(app_root, false);
+    scan(runtime_state_dir, false);
     let mut settle = Vec::new();
     let mut plain_form = Vec::new();
-    let mut errors = Vec::new();
-    for root in roots {
-        match lillux::PinnedDirectory::open(&root) {
-            Ok(None) => {}
-            Ok(Some(directory)) => match directory.quarantine_leftovers_tree() {
-                Ok(found) => {
-                    for (path, leftover) in found {
-                        if leftover.original().is_some() {
-                            settle.push(path.display().to_string());
-                        } else {
-                            plain_form.push(path.display().to_string());
-                        }
-                    }
-                }
-                Err(error) => errors.push(format!("{}: {error:#}", root.display())),
-            },
-            Err(error) => errors.push(format!("{}: {error:#}", root.display())),
+    let mut debris = Vec::new();
+    for (path, recorded) in &found {
+        let text = path.display().to_string();
+        if settled_roots.iter().any(|root| path.starts_with(root)) {
+            if *recorded {
+                settle.push(text);
+            } else {
+                plain_form.push(text);
+            }
+        } else {
+            debris.push(text);
         }
     }
-    let status = if !plain_form.is_empty() || !errors.is_empty() {
+    let required_errors: Vec<&String> = walk_errors
+        .iter()
+        .filter(|(required, _)| *required)
+        .map(|(_, text)| text)
+        .collect();
+    let other_errors: Vec<&String> = walk_errors
+        .iter()
+        .filter(|(required, _)| !*required)
+        .map(|(_, text)| text)
+        .collect();
+    let status = if !plain_form.is_empty() || !required_errors.is_empty() {
         FAIL
-    } else if !settle.is_empty() {
+    } else if !settle.is_empty() || !debris.is_empty() || !other_errors.is_empty() {
         WARN
     } else {
         OK
@@ -3766,8 +3795,10 @@ fn quarantine_leftovers_check(
         serde_json::json!({
             "settled_at_next_start": settle,
             "plain_refuse_start": plain_form,
-            "errors": errors,
-            "fix": "a settled leftover needs nothing; for a plain one, inspect it, rename it back to its original name or delete it, then start again",
+            "debris_not_settled": debris,
+            "errors": required_errors,
+            "listing_incomplete": other_errors,
+            "fix": "a settled leftover needs nothing; for a plain one, or debris outside the settled directories, inspect it, rename it back to its original name or delete it",
         }),
     )
 }
@@ -6576,6 +6607,40 @@ fn policy_carry_choices(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doctor_lists_every_quarantine_leftover_with_its_path() {
+        let app = tempfile::tempdir().unwrap();
+        let state = app.path().join(".ai").join("state");
+        let node = app.path().join(".ai").join("node").join("routes");
+        let threads = app.path().join("threads").join("t1");
+        for dir in [&state, &node, &threads] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let recorded = lillux::quarantine_name(std::ffi::OsStr::new("a.yaml"), 7, 1).unwrap();
+        std::fs::write(node.join(&recorded), "q").unwrap();
+        let debris = ".ryeos-quarantine.7.2";
+        std::fs::write(threads.join(debris), "q").unwrap();
+        let row = quarantine_leftovers_check(app.path(), &state);
+        assert_eq!(row.status, ryeos_core_tools::actions::doctor::WARN);
+        let text = row.detail.to_string();
+        assert!(
+            text.contains(&recorded.to_string_lossy().to_string()),
+            "{text}"
+        );
+        assert!(text.contains(debris), "{text}");
+        assert_eq!(
+            row.detail["debris_not_settled"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            row.detail["settled_at_next_start"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     use super::*;
 
     #[test]
