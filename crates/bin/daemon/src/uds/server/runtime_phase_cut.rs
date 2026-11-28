@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub(crate) const PHASE_ENV: &str = "RYEOSD_TEST_RUNTIME_PHASE_CUT";
 pub(crate) const CHANNEL_FD_ENV: &str = "RYEOSD_TEST_RUNTIME_PHASE_CUT_FD";
