@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:22:30Z:be0025b1deb5eeef03307c8aaf5689d4a406fc4703a34efcb61955ad183d820d:w8xvikxxtIaD3TstdwOIvuW6GYw9jMB7gPTUneyd1vrnp4ZQJGz02+m0N8w+/NOIfl45aIL7x8Mog6NkPaQeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T21:16:41Z:8e3921e9f373b237b7a0255690a4cfb63777c873d8b96c72f1f22beef6a16442:p888kHC33EIvvWyOLDzaCo1YiNMG1jlp+z4bBEMLTzDM7JmSt4TI4/rQYjPvCIG2R9xKyXesHVzRNeH4I28cDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -266,13 +266,20 @@ in its `authorized_keys` row.
 
 ### Naming principals across nodes
 
-A principal is its key fingerprint, `fp:<64 lowercase hex>`, on every node:
+A key is named by its fingerprint, `fp:<64 lowercase hex>`, on every node:
 request authentication, grants, thread records and per-principal storage keys
 all use that one spelling, and a handler that takes a principal from input
 accepts nothing else (`principal_storage_key` refuses any other form). A site
 is `site:<name>`. A principal that arrives from another site is shown as
 `fp:<hex>@site:<origin>` when its grant records an origin; that string is for
 display and is never parsed back into authority.
+
+An owner is a different name: the principal that owns projects,
+`pid:v1:<sha256 of the key's inception record>`. Every key in a key's rotation
+lineage speaks for the same owner, and so does a key joined to it by a key
+link (see the CLI reference, "Rotation and keys"). A link carries ownership
+only, never scope, and expires. A key with neither lineage nor link is its own
+owner.
 
 A grant's `label` is free text for people. Two grants may share a label and
 stay distinct, and code never matches on a label. The configured operator's
