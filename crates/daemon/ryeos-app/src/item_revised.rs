@@ -402,4 +402,72 @@ mod tests {
 
         assert_eq!(rx.try_recv().unwrap().project, None);
     }
+
+    /// A checkout holding one recorded directive change, as the node's own
+    /// revision chain reads it.
+    fn checkout_with_one_revision() -> tempfile::TempDir {
+        use ryeos_node_runtime::item_revision::{ActorRole, Change, append};
+        let project = tempfile::tempdir().unwrap();
+        let directory = project.path().join(".ai/directives");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("greet.yaml"), "value: 1\n").unwrap();
+        let item = ChainItem::parse("directive:greet").unwrap();
+        append(
+            project.path(),
+            &lillux::crypto::SigningKey::from_bytes(&[11; 32]),
+            ActorRole::Authoring,
+            Change {
+                item: &item,
+                file_ext: ".yaml",
+                before: None,
+                after: Some("value: 1\n"),
+                provenance: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        project
+    }
+
+    #[test]
+    fn startup_reconcile_announces_the_registry_identity_and_no_path() {
+        let project = checkout_with_one_revision();
+        let checkout = RevisionHeads::project_key(project.path()).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let hub = ItemRevisedHub::new(4);
+        let cursor = PublishedHeads::open(state.path());
+        let mut rx = hub.subscribe();
+        let registered = identity('a', "acme");
+
+        let report = reconcile_projects(&hub, &cursor, std::slice::from_ref(&checkout), &|_| {
+            Some(registered.clone())
+        });
+
+        assert_eq!(report.announced, 1);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.project, Some(registered));
+        assert_eq!(event.item_ref, "directive:greet");
+        let wire = serde_json::to_string(&event).unwrap();
+        assert!(
+            !wire.contains(&checkout),
+            "the announced event names the checkout path: {wire}"
+        );
+        // The cursor is keyed by the checkout, so a second run announces nothing.
+        assert_eq!(cursor.read(&checkout).unwrap().len(), 1);
+        let again = reconcile_projects(&hub, &cursor, &[checkout], &|_| None);
+        assert_eq!(again.announced, 0);
+    }
+
+    #[test]
+    fn startup_reconcile_of_an_unregistered_checkout_announces_with_none() {
+        let project = checkout_with_one_revision();
+        let checkout = RevisionHeads::project_key(project.path()).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let hub = ItemRevisedHub::new(4);
+        let cursor = PublishedHeads::open(state.path());
+        let mut rx = hub.subscribe();
+
+        reconcile_projects(&hub, &cursor, &[checkout], &|_| None);
+
+        assert_eq!(rx.try_recv().unwrap().project, None);
+    }
 }

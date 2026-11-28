@@ -229,3 +229,49 @@ pub fn admit_handler_live_path(
     admit_live_project_path(state, &ctx.fingerprint, operator, requested)
         .map_err(LiveProjectPathRefusal::into_handler_error)
 }
+
+#[cfg(test)]
+mod identity_resolution_tests {
+    use super::*;
+    use ryeos_state::project_identity::ProjectIdentity;
+
+    fn identity(owner_digit: char, name: &str) -> ProjectIdentity {
+        format!("pid:v1:{}/{name}", owner_digit.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_checkout_held_by_one_registration_resolves_to_its_identity() {
+        let registered = vec![
+            (PathBuf::from("/work/a"), identity('a', "acme")),
+            (PathBuf::from("/work/b"), identity('b', "other")),
+        ];
+        assert_eq!(
+            sole_identity_for_checkout(&registered, Path::new("/work/a")),
+            Some(identity('a', "acme"))
+        );
+    }
+
+    #[test]
+    fn an_unregistered_checkout_resolves_to_none() {
+        let registered = vec![(PathBuf::from("/work/a"), identity('a', "acme"))];
+        assert_eq!(
+            sole_identity_for_checkout(&registered, Path::new("/work/elsewhere")),
+            None
+        );
+        assert_eq!(sole_identity_for_checkout(&[], Path::new("/work/a")), None);
+    }
+
+    #[test]
+    fn a_checkout_two_registrations_claim_resolves_to_none() {
+        let registered = vec![
+            (PathBuf::from("/work/a"), identity('a', "acme")),
+            (PathBuf::from("/work/a"), identity('b', "acme")),
+        ];
+        assert_eq!(
+            sole_identity_for_checkout(&registered, Path::new("/work/a")),
+            None
+        );
+    }
+}
