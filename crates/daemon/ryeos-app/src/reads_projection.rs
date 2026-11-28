@@ -127,7 +127,13 @@ pub fn project_reads(events: &[PersistedEventRecord], scan_cut: bool) -> FollowR
         else {
             continue;
         };
-        if reference.is_empty() || reference.len() > MAX_FOLLOW_READ_REF_BYTES {
+        if reference.is_empty() {
+            continue;
+        }
+        if reference.len() > MAX_FOLLOW_READ_REF_BYTES {
+            // A read that cannot be listed is a read the list does not
+            // cover: say so instead of dropping it silently.
+            truncated = true;
             continue;
         }
         let key = (item.clone(), space.clone(), reference.to_owned());
@@ -359,6 +365,27 @@ mod tests {
             json!({"item_ref": 7}),
             "ok",
         ));
-        assert!(project_reads(&events, false).refs.is_empty());
+        let reads = project_reads(&events, false);
+        assert!(reads.refs.is_empty());
+        assert!(
+            reads.truncated,
+            "an over-long ref is a read the list cannot hold, so it marks the list truncated"
+        );
+    }
+
+    #[test]
+    fn a_non_string_argument_alone_does_not_mark_the_list_truncated() {
+        let mut events = vec![fetch_table()];
+        events.extend(call(
+            10,
+            "op-b",
+            "c2",
+            "tool:ryeos/core/fetch",
+            json!({"item_ref": 7}),
+            "ok",
+        ));
+        let reads = project_reads(&events, false);
+        assert!(reads.refs.is_empty());
+        assert!(!reads.truncated);
     }
 }
