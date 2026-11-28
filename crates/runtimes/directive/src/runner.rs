@@ -6,7 +6,8 @@ use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
     CompactionConfig, CompactionOnPressure, DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason,
-    ProviderMessage, ProviderMessageExt, StreamEvent, SummaryMode, TIME_LEFT_TOOL, ToolSchema,
+    PLAN_TOOL, ProviderMessage, ProviderMessageExt, StreamEvent, SummaryMode, TIME_LEFT_TOOL,
+    ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -47,8 +48,9 @@ pub(crate) fn launch_inventory(
     effective_caps: &[String],
     outputs: Option<&[OutputSpec]>,
     run_deadline: bool,
+    plan: bool,
 ) -> Vec<ToolSchema> {
-    visible_provider_tools(tools, effective_caps, outputs, true, run_deadline)
+    visible_provider_tools(tools, effective_caps, outputs, true, run_deadline, plan)
 }
 
 use request_context::{initial_messages, visible_provider_tools};
@@ -428,6 +430,14 @@ fn batch_is_lifecycle_bearing(calls: &[ToolOccurrence]) -> bool {
     calls
         .iter()
         .any(|occurrence| occurrence.call.name == DIRECTIVE_RETURN_TOOL)
+}
+
+/// What the model sees when a plan call is refused.
+fn plan_error_body(message: &str) -> String {
+    serde_json::to_string(&json!({
+        "error": {"code": "plan_refused", "message": message}
+    }))
+    .unwrap_or_else(|_| "{\"error\":{\"code\":\"plan_refused\"}}".to_string())
 }
 
 fn tool_call_limit_error() -> String {
@@ -883,6 +893,8 @@ pub struct Runner {
     /// Whether the corrective turn has been granted in this segment —
     /// bounds the nudge to exactly one extra turn.
     return_nudge_sent: bool,
+    /// The directive's plan tool bounds; `None` means no plan tool.
+    plan: Option<ryeos_directive_definition::PlanSpec>,
     /// Whether the run-deadline wrap-up input is already in the transcript.
     /// Rebuilt from the replayed record on resume, so a recovered or
     /// continued segment never repeats it.
@@ -1981,6 +1993,7 @@ pub struct RunnerConfig {
     pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     pub return_nudge: ReturnNudge,
+    pub plan: Option<ryeos_directive_definition::PlanSpec>,
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
     pub reasoning: Option<ReasoningConfig>,
@@ -2009,6 +2022,7 @@ impl Runner {
             hooks,
             outputs,
             return_nudge,
+            plan,
             continuation,
             sampling,
             reasoning,
@@ -2026,6 +2040,7 @@ impl Runner {
             harness.effective_caps(),
             outputs.as_deref(),
             harness.run_clock().is_some(),
+            plan.is_some(),
         )
         .into_iter()
         .map(|tool| tool.name)
@@ -2069,6 +2084,7 @@ impl Runner {
             hooks,
             directive_outputs: outputs,
             return_nudge,
+            plan,
             return_nudge_sent: false,
             wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
             loop_warned: std::collections::BTreeMap::new(),
@@ -2902,6 +2918,18 @@ impl Runner {
         }
     }
 
+    /// The `plan` tool's answer: the acknowledgement of a valid whole list, or
+    /// the error body the model sees. Nothing is stored here; the call and its
+    /// result are the record, and a cut reads them back.
+    fn plan_answer(&self, raw_args: &str) -> Result<Value, String> {
+        let spec = self.plan.expect("plan answered only when declared");
+        let arguments: Value = serde_json::from_str(raw_args)
+            .map_err(|error| plan_error_body(&format!("plan arguments are not JSON: {error}")))?;
+        crate::plan::validate(&arguments, &spec)
+            .map(|state| crate::plan::acknowledgement(&state))
+            .map_err(|message| plan_error_body(&message))
+    }
+
     /// The `time_left` tool's answer, read from the run clock now.
     fn time_left_report(&self) -> Value {
         crate::run_clock::time_left_report(
@@ -3328,6 +3356,7 @@ impl Runner {
                             self.directive_outputs.as_deref(),
                             self.harness.tool_calls_available(),
                             self.harness.run_clock().is_some(),
+                            self.plan.is_some(),
                         )
                     };
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
@@ -5470,10 +5499,20 @@ impl Runner {
                     // `time_left` is answered in process from the run clock; it
                     // never reaches the daemon.
                     let local_report =
-                        (tool_name == TIME_LEFT_TOOL).then(|| self.time_left_report());
+                        (tool_name == TIME_LEFT_TOOL).then(|| Ok(self.time_left_report()));
+                    // `plan` is answered in process too, when the directive
+                    // declares it; the conversation holds the state.
+                    let local_report = local_report.or_else(|| {
+                        (tool_name == PLAN_TOOL && self.plan.is_some())
+                            .then(|| self.plan_answer(&raw_args))
+                    });
                     let mut refused = false;
                     let tool_result: RenderedToolResult = match local_report {
-                        Some(report) => self.rendered_success(&tool_name, &report),
+                        Some(Ok(report)) => self.rendered_success(&tool_name, &report),
+                        Some(Err(body)) => {
+                            refused = true;
+                            Self::rendered_error_envelope(&tool_name, body)
+                        }
                         None => match self
                             .preflight_tool_call(
                                 &operation_id,
@@ -5609,7 +5648,12 @@ impl Runner {
                         } else if self.tool_refused_at_hard_stop(&tc.name) {
                             BatchWork::Immediate(tool_deadline_elapsed_error())
                         } else if occurrence.counted || self.harness.try_record_tool_call() {
-                            {
+                            if tc.name == PLAN_TOOL && self.plan.is_some() {
+                                match self.plan_answer(&raw_args) {
+                                    Ok(report) => BatchWork::Local(report),
+                                    Err(body) => BatchWork::Immediate(body),
+                                }
+                            } else {
                                 match self
                                     .preflight_tool_call(
                                         &occurrence.operation_id,
@@ -8945,6 +8989,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9029,6 +9074,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9089,6 +9135,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9153,6 +9200,7 @@ mod tests {
             hooks: vec![],
             outputs,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9223,6 +9271,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9401,6 +9450,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: Some(SamplingConfig {
                 temperature: Some(0.3),
                 seed: Some(42),
@@ -9480,6 +9530,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9556,6 +9607,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -9616,6 +9668,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         });
@@ -10855,6 +10908,7 @@ mod tests {
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
+            plan: None,
             sampling: None,
             reasoning: None,
         })

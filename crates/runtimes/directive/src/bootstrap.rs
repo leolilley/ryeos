@@ -234,6 +234,7 @@ pub fn bootstrap(
             hooks,
             outputs: header.outputs,
             return_nudge: header.return_nudge,
+            plan: header.plan,
             continuation: header.continuation,
             continuation_runtime,
             risk_policy,
@@ -315,13 +316,12 @@ fn project_tool_inventory(
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(reserved) = tools
-        .iter()
-        .find(|tool| tool.name == crate::directive::TIME_LEFT_TOOL)
-    {
+    if let Some(reserved) = tools.iter().find(|tool| {
+        tool.name == crate::directive::TIME_LEFT_TOOL || tool.name == crate::directive::PLAN_TOOL
+    }) {
         anyhow::bail!(
             "tool `{}` uses the name `{}`, which the directive runtime reserves for its \
-             built-in time-left tool",
+             built-in tools",
             reserved.item_id,
             reserved.name
         );

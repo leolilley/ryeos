@@ -2587,11 +2587,32 @@ fn carry_into_successor(
     }
     let whole: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
     let (pinned, rest): (Vec<_>, Vec<_>) = folded.into_iter().partition(|f| f.pinned);
-    let pinned: Vec<ProviderMessage> = pinned.into_iter().map(|f| f.message).collect();
+    // A pinned plan input is replaced at a cut, never carried beside a newer one.
+    let old_plan = pinned
+        .iter()
+        .filter_map(|f| f.input.as_ref())
+        .find(|input| crate::plan::pinned_rev(input).is_some())
+        .cloned();
+    let mut pinned: Vec<ProviderMessage> = pinned
+        .into_iter()
+        .filter(|f| {
+            !f.input
+                .as_ref()
+                .is_some_and(|input| crate::plan::pinned_rev(input).is_some())
+        })
+        .map(|f| f.message)
+        .collect();
     let rest: Vec<ProviderMessage> = rest.into_iter().map(|f| f.message).collect();
     let rest_len = rest.len();
+    let rest_for_plan = rest.clone();
 
-    let pinned_tokens = crate::estimate::estimate_tokens(&pinned, images);
+    // The plan's pinned input counts toward the pinned size even when the kept
+    // turns end up carrying the plan themselves: sized for the worst case.
+    let plan_pin_messages = crate::plan::pin_after_cut(old_plan.as_ref(), &rest_for_plan, &[])
+        .map(|input| crate::launch_records::messages_of(&[input]))
+        .unwrap_or_default();
+    let pinned_tokens = crate::estimate::estimate_tokens(&pinned, images)
+        + crate::estimate::estimate_tokens(&plan_pin_messages, images);
     if pinned_tokens > policy.ceiling_tokens {
         return Err(ResumeFoldError::PinnedInputsExceedWindow {
             ceiling: policy.ceiling_tokens,
@@ -2606,8 +2627,13 @@ fn carry_into_successor(
     };
 
     let mut messages = if recent.len() == rest_len {
+        // Nothing was dropped: the conversation is whole, plan input included.
         whole
     } else {
+        let dropped = &rest_for_plan[..rest_len - recent.len()];
+        if let Some(plan) = crate::plan::pin_after_cut(old_plan.as_ref(), dropped, &recent) {
+            pinned.extend(crate::launch_records::messages_of(&[plan]));
+        }
         let mut messages = pinned;
         messages.extend(recent);
         messages

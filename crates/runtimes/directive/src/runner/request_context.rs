@@ -23,6 +23,7 @@ pub(super) fn visible_provider_tools(
     directive_outputs: Option<&[OutputSpec]>,
     dispatch_tools_available: bool,
     run_deadline: bool,
+    plan: bool,
 ) -> Vec<ToolSchema> {
     let mut visible_tools_owned: Vec<_> = if dispatch_tools_available {
         crate::provider_adapter::tools::filter_tools_by_caps(tools, effective_caps)
@@ -43,7 +44,27 @@ pub(super) fn visible_provider_tools(
     if run_deadline {
         visible_tools_owned.push(build_time_left_tool());
     }
+    // A directive that declares a plan gets the in-process plan tool.
+    if plan {
+        visible_tools_owned.push(build_plan_tool());
+    }
     visible_tools_owned
+}
+
+/// Synthesize the in-process `plan` provider tool.
+fn build_plan_tool() -> ToolSchema {
+    ToolSchema {
+        name: crate::directive::PLAN_TOOL.to_string(),
+        item_id: "lifecycle:plan".to_string(),
+        description: Some(
+            "Keep your plan as a checklist. Send the whole list every time; it replaces the \
+             previous one. Each step is pending, in_progress or completed, and at most one \
+             is in_progress. The runtime stores it and shows it to you again after a \
+             context cut."
+                .to_string(),
+        ),
+        input_schema: Some(crate::plan::input_schema()),
+    }
 }
 
 /// Synthesize the in-process `time_left` provider tool.
@@ -144,7 +165,7 @@ mod tests {
 
     #[test]
     fn empty_outputs_do_not_advertise_directive_return() {
-        assert!(visible_provider_tools(&[], &[], Some(&[]), true, false).is_empty());
+        assert!(visible_provider_tools(&[], &[], Some(&[]), true, false, false).is_empty());
     }
 
     #[test]
@@ -166,17 +187,26 @@ mod tests {
             Some(&outputs),
             false,
             false,
+            false,
         );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].name, DIRECTIVE_RETURN_TOOL);
     }
 
     #[test]
+    fn a_directive_that_declares_a_plan_offers_the_plan_tool() {
+        let visible = visible_provider_tools(&[], &[], None, false, false, true);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, crate::directive::PLAN_TOOL);
+        assert!(visible_provider_tools(&[], &[], None, false, false, false).is_empty());
+    }
+
+    #[test]
     fn a_run_with_a_deadline_offers_time_left_even_without_other_tools() {
-        let visible = visible_provider_tools(&[], &[], None, false, true);
+        let visible = visible_provider_tools(&[], &[], None, false, true, false);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].name, TIME_LEFT_TOOL);
         assert_eq!(visible[0].item_id, "lifecycle:time_left");
-        assert!(visible_provider_tools(&[], &[], None, true, false).is_empty());
+        assert!(visible_provider_tools(&[], &[], None, true, false, false).is_empty());
     }
 }

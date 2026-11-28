@@ -17,6 +17,7 @@ mod harness;
 mod image_sniff;
 mod launch_records;
 mod loop_guards;
+mod plan;
 mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
@@ -491,6 +492,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         harness.effective_caps(),
         bootstrap_output.config.outputs.as_deref(),
         harness.run_clock().is_some(),
+        bootstrap_output.config.plan.is_some(),
     );
     let mut launch_frame = launch_records::build_frame(
         1,
@@ -724,6 +726,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 hooks,
                 outputs: bootstrap_output.config.outputs,
                 return_nudge: bootstrap_output.config.return_nudge,
+                plan: bootstrap_output.config.plan,
                 continuation: bootstrap_output.config.continuation,
                 context_threshold_ratio: bootstrap_output
                     .config
@@ -777,6 +780,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             hooks,
             outputs: bootstrap_output.config.outputs,
             return_nudge: bootstrap_output.config.return_nudge,
+            plan: bootstrap_output.config.plan,
             continuation: bootstrap_output.config.continuation,
             context_threshold_ratio: bootstrap_output
                 .config

@@ -60,11 +60,25 @@ pub fn plan(folded: &[FoldedMessage], keep_turns: u32) -> Option<Plan> {
     let kept_from_turn = folded[cut].turn?;
     let replaces_from_turn = folded[*replaced_turns.first()?].turn?;
     let replaces_to_turn = folded[*replaced_turns.last()?].turn?;
-    let pinned_inputs: Vec<CognitionInput> = folded[..cut]
+    let mut pinned_inputs: Vec<CognitionInput> = folded[..cut]
         .iter()
         .filter(|message| message.pinned)
         .filter_map(|message| message.input.clone())
         .collect();
+    // The plan's state crosses the cut as one pinned input, replacing any older
+    // one, unless a plan call is still in the kept turns.
+    let old_plan = pinned_inputs
+        .iter()
+        .find(|input| crate::plan::pinned_rev(input).is_some())
+        .cloned();
+    pinned_inputs.retain(|input| crate::plan::pinned_rev(input).is_none());
+    let dropped: Vec<_> = folded[..cut].iter().map(|m| m.message.clone()).collect();
+    let kept: Vec<_> = folded[cut..].iter().map(|m| m.message.clone()).collect();
+    pinned_inputs.extend(crate::plan::pin_after_cut(
+        old_plan.as_ref(),
+        &dropped,
+        &kept,
+    ));
     let replaced_messages = folded[..cut]
         .iter()
         .filter(|message| !message.pinned)

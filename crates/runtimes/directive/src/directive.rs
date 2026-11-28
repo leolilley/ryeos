@@ -14,6 +14,9 @@ pub(crate) const DIRECTIVE_RETURN_TOOL: &str = "directive_return";
 /// The built-in read-only tool that reports the run deadline's clock. The
 /// runner answers it in process; it never reaches the daemon.
 pub(crate) const TIME_LEFT_TOOL: &str = "time_left";
+/// The built-in tool that keeps the model's plan. Present only when the
+/// directive's signed header declares `plan`; answered in process.
+pub(crate) const PLAN_TOOL: &str = "plan";
 
 /// Directive-runtime continuation *behavior* config, loaded by the runtime from
 /// `ryeos-runtime/continuation` (defaults if absent) — the same mechanism as
@@ -911,6 +914,8 @@ pub struct BootstrapConfig {
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(default)]
     pub return_nudge: ReturnNudge,
+    #[serde(default)]
+    pub plan: Option<ryeos_directive_definition::PlanSpec>,
     #[serde(default)]
     pub continuation: ContinuationConfig,
     #[serde(default)]

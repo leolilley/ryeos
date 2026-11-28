@@ -33,10 +33,46 @@ pub struct DirectiveHeader {
     pub continuation: ContinuationConfig,
     #[serde(default)]
     pub return_nudge: ReturnNudge,
+    /// Opt-in plan tool: absent means the directive has none.
+    #[serde(default)]
+    pub plan: Option<PlanSpec>,
+}
+
+/// Ceilings the runtime puts on a directive's plan tool.
+pub const PLAN_MAX_STEPS_CEILING: u32 = 64;
+pub const PLAN_MAX_STEP_BYTES_CEILING: u32 = 512;
+
+/// The signed header field `plan`: the bounds of this directive's plan tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanSpec {
+    pub max_steps: u32,
+    pub max_step_bytes: u32,
+}
+
+impl PlanSpec {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_steps == 0 || self.max_steps > PLAN_MAX_STEPS_CEILING {
+            anyhow::bail!(
+                "plan.max_steps must be 1..={PLAN_MAX_STEPS_CEILING}, got {}",
+                self.max_steps
+            );
+        }
+        if self.max_step_bytes == 0 || self.max_step_bytes > PLAN_MAX_STEP_BYTES_CEILING {
+            anyhow::bail!(
+                "plan.max_step_bytes must be 1..={PLAN_MAX_STEP_BYTES_CEILING}, got {}",
+                self.max_step_bytes
+            );
+        }
+        Ok(())
+    }
 }
 
 impl DirectiveHeader {
     fn validate(&self) -> Result<()> {
+        if let Some(plan) = &self.plan {
+            plan.validate()?;
+        }
         if let Some(hooks) = &self.hooks {
             for (index, hook) in hooks.iter().enumerate() {
                 if hook.event == "continuation" && !self.continuation.enabled() {
@@ -155,6 +191,7 @@ pub const DIRECTIVE_EFFECTIVE_HEADER_KEYS: &[&str] = &[
     "hooks",
     "continuation",
     "return_nudge",
+    "plan",
 ];
 
 /// Parse the execution-facing header from one already-composed directive.

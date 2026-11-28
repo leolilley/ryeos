@@ -29,9 +29,10 @@ mod request_rejections;
 pub use cache_marks::{CACHE_MARKS_MAX, CacheMarkPosition, CacheMarksConfig};
 pub use effective::{
     ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
-    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
-    UnknownOutcomeClass, UnknownOutcomeRetryPolicy, parse_effective_header,
-    resolve_external_effect_authority, unknown_outcome_retry_ceiling,
+    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, PLAN_MAX_STEP_BYTES_CEILING,
+    PLAN_MAX_STEPS_CEILING, PlanSpec, ProviderContact, ReturnNudge, UnknownOutcomeClass,
+    UnknownOutcomeRetryPolicy, parse_effective_header, resolve_external_effect_authority,
+    unknown_outcome_retry_ceiling,
 };
 pub use empty_replies::EmptyRepliesPolicy;
 pub use image_input::{
