@@ -155,8 +155,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 fn build_prospective_remove_plan(app_root: &Path, bundle_name: &str) -> Result<BundlePlan> {
-    let installed = ryeos_bundle::installed::load_installed_plan_inputs(app_root)
-        .context("load verified installed bundle graph")?;
+    let node_trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load node trust store for removal planning")?;
+    // Raw registrations: a laned bundle the boot audit skips is still
+    // registered and must stay removable by name.
+    let registrations = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store: &node_trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
+    }
+    .load_registrations()
+    .context("load verified installed bundle registrations")?;
+    let installed = ryeos_bundle::installed::plan_inputs_from_registrations(
+        &super::bundle_install::registered_bundles(registrations),
+        &node_trust_store,
+    )
+    .context("load verified installed bundle graph")?;
     let removal = installed
         .iter()
         .find(|input| input.name == bundle_name)
@@ -187,6 +201,7 @@ fn admit_prospective_remove(
     let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     // A laned bundle that fails its boot audit is not loaded, so it is not in
     // the set this node will load after the removal either; removing another

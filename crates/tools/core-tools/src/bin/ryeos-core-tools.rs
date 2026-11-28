@@ -1379,11 +1379,21 @@ fn bundle_verify_dependency_roots(
         // reach its own manifest check, which reports an unparseable source
         // manifest as a finding instead of this resolver aborting first.
         let source_name = source_bundle_name(source_path)?;
-        let installed_roots = ryeos_bundle::installed::load_installed_bundle_records(app_root)
-            .context("bundle verify: load installed bundle registrations")?
+        let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+            .context("bundle verify: load node trust store")?;
+        let (registrations, _skipped) =
+            ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+                app_root,
+                trust_store: &trust_store,
+                cardinality:
+                    ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
+            }
+            .load_bundle_section_reporting_skipped()
+            .context("bundle verify: load installed bundle registrations")?;
+        let installed_roots = registrations
             .into_iter()
-            .filter(|r| r.bundle_root != source_path && Some(&r.name) != source_name.as_ref())
-            .map(|r| r.bundle_root);
+            .filter(|r| r.path != source_path && Some(&r.name) != source_name.as_ref())
+            .map(|r| r.path);
         dependency_roots.extend(installed_roots);
     }
     Ok(dependency_roots)
@@ -1859,6 +1869,50 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+
+    /// An initialised node's app root (a node key and its signer registry)
+    /// and a bundle source with no registry roots named.
+    fn node_and_source() -> (tempfile::TempDir, tempfile::TempDir) {
+        let node = tempfile::tempdir().unwrap();
+        let operator = SigningKey::generate(&mut OsRng);
+        ryeos_engine::test_support::pin_signer(
+            node.path(),
+            &operator.verifying_key(),
+            "operator",
+            ryeos_engine::trust::SignerRole::Operator,
+            ryeos_engine::trust::SignerScope::everywhere(),
+        );
+        (node, tempfile::tempdir().unwrap())
+    }
+
+    fn registration_refusal(error: &anyhow::Error) -> &'static str {
+        ryeos_node_runtime::bundle_bootstrap::BundleRegistrationRefusal::find(error)
+            .unwrap_or_else(|| panic!("no typed refusal in {error:#}"))
+            .code
+    }
+
+    #[test]
+    fn bundle_verify_refuses_a_node_without_a_registration_directory_with_boots_code() {
+        let (node, source) = node_and_source();
+        let error =
+            bundle_verify_dependency_roots(source.path(), Vec::new(), node.path()).unwrap_err();
+        assert_eq!(
+            registration_refusal(&error),
+            ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_MISSING
+        );
+    }
+
+    #[test]
+    fn bundle_verify_refuses_an_emptied_registration_directory_with_boots_code() {
+        let (node, source) = node_and_source();
+        std::fs::create_dir_all(node.path().join(".ai/node/bundles")).unwrap();
+        let error =
+            bundle_verify_dependency_roots(source.path(), Vec::new(), node.path()).unwrap_err();
+        assert_eq!(
+            registration_refusal(&error),
+            ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_EMPTY
+        );
+    }
 
     #[test]
     fn authorize_client_stdin_contract_carries_transition_authority() {

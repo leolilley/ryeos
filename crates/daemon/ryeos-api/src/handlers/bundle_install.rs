@@ -863,6 +863,20 @@ pub fn extract_bundle_archive(archive: &[u8], name: &str, into: &Path) -> Result
     Ok(())
 }
 
+/// The planner's view of validated registrations.
+pub(crate) fn registered_bundles(
+    records: Vec<ryeos_node_runtime::node_config_source::BundleRecord>,
+) -> Vec<ryeos_bundle::installed::RegisteredBundle> {
+    records
+        .into_iter()
+        .map(|record| ryeos_bundle::installed::RegisteredBundle {
+            name: record.name,
+            registration_path: record.source_file,
+            bundle_root: record.path,
+        })
+        .collect()
+}
+
 /// Build the exact post-operation bundle graph used for dependency closure and
 /// prospective boot admission.
 pub(crate) fn build_prospective_bundle_plan(
@@ -877,8 +891,22 @@ pub(crate) fn build_prospective_bundle_plan(
             candidate_root.display()
         )
     })?;
-    let installed = ryeos_bundle::installed::load_installed_plan_inputs(app_root)
-        .context("load verified installed bundle graph")?;
+    let node_trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load node trust store for install planning")?;
+    // A laned bundle the boot audit skips is never a dependency, so planning
+    // reads the audited registrations.
+    let (registrations, _skipped) = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store: &node_trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
+    }
+    .load_bundle_section_reporting_skipped()
+    .context("load verified installed bundle registrations")?;
+    let installed = ryeos_bundle::installed::plan_inputs_from_registrations(
+        &registered_bundles(registrations),
+        &node_trust_store,
+    )
+    .context("load verified installed bundle graph")?;
     let candidate = PlanInput {
         name: bundle_name.to_string(),
         source: BundleSource::SourceDir(candidate_root),
@@ -982,6 +1010,7 @@ pub(crate) fn admit_completed_staging(
     let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let mut current_records: std::collections::BTreeMap<
         String,
@@ -1548,6 +1577,48 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_planning_refuses_a_registration_signed_by_another_pinned_key() {
+        let root = tempfile::tempdir().unwrap();
+        // The node has its own key; the registration is signed by another.
+        std::fs::create_dir_all(root.path().join(".ai/node/identity")).unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::create(
+            &root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let publisher =
+            lillux::crypto::create_signing_key(&root.path().join("publisher.pem")).unwrap();
+        ryeos_engine::test_support::pin_signer(
+            root.path(),
+            &publisher.verifying_key(),
+            "publisher",
+            ryeos_engine::trust::SignerRole::Operator,
+            ryeos_engine::trust::SignerScope::everywhere(),
+        );
+        let bundle = root.path().join(".ai/bundles/core");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let registrations = root.path().join(".ai/node/bundles");
+        std::fs::create_dir_all(&registrations).unwrap();
+        let yaml =
+            serde_yaml::to_string(&serde_json::json!({ "kind": "node", "path": bundle })).unwrap();
+        std::fs::write(
+            registrations.join("core.yaml"),
+            lillux::signature::sign_content(&yaml, &publisher, "#", None),
+        )
+        .unwrap();
+        let candidate = root.path().join("candidate");
+        std::fs::create_dir_all(&candidate).unwrap();
+
+        let error =
+            build_prospective_bundle_plan(root.path(), "extra", &candidate, false).unwrap_err();
+        let refusal = ryeos_node_runtime::bundle_bootstrap::BundleRegistrationRefusal::find(&error)
+            .unwrap_or_else(|| panic!("no typed refusal in {error:#}"));
+        assert_eq!(
+            refusal.code,
+            ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATION_NOT_NODE_SIGNED
+        );
+    }
 
     fn replace_for_test(src: &Path, target: &Path, preserve: bool) {
         let app_root = target.ancestors().nth(3).unwrap();

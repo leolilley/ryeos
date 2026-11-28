@@ -1,13 +1,14 @@
+<!-- ryeos:signed:2026-11-28T12:58:05Z:857dad7bf5a3d720d443fab8c7e0f62c6bf2e26ee6c49b11f9d1985fc30c2bac:ynxHLNvJ1ZlGT5yAZ1mtBLLSGl6nCCG6+gOCOB+GZn16LiFtmtKuAPA3KlGrpkaLh2oB+y8ct2HjpAYTaQI7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 <!-- rye:signed:2026-05-22T03:56:56Z:471a3b533b1defc121e1c760443995f71ba241f0cee86d42720a0ce286caed8e:5uU1XljVMGlrhImdy1OKQ7rBT5OAuN18TKPUUPx3ZAgUlJauGgRircsdKY_gn8f24tWYAy2tLzJQSnDTykIqDg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future
 name: shared-bundle-registration-validator
-title: Shared Bundle Registration Validator Advanced Path
+title: Bundle Registration Validator
 entry_type: implementation_guide
 version: "1.0.0"
 author: amp
 created_at: 2026-05-22T00:00:00Z
-description: Future implementation path for extracting a shared signed bundle registration validator used by bootstrap node-config loading and bundle planning installed-state loading
+description: How the node validates its signed bundle registrations: one loader in ryeos-node-runtime, explicit cardinality, typed refusal codes, and the planner manifest step in ryeos-bundle
 tags:
   - bundles
   - planner
@@ -16,390 +17,53 @@ tags:
   - trust-boundary
 ```
 
-# Shared Bundle Registration Validator Advanced Path
+# Bundle Registration Validator
 
-## Purpose
+## One validator
 
-This note captures the optional advanced path for bundle registration loading after the planner-backed init work.
+The node's signed bundle registrations under `<app_root>/.ai/node/bundles/*.yaml` are read and validated in exactly one place: `ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader`. Daemon start-up, the CLI, install and remove planning, bundle verify, the boot plan check and the name and replacement guards all go through it. There is no second reader of that directory.
 
-The current implementation intentionally mirrors bootstrap loader semantics in `ryeos-bundle::installed` instead of doing a broad dependency redesign. That is adequate while there are only two consumers and the validation surface is small. This future path extracts one shared validator so daemon bootstrap and bundle planning cannot drift.
+The loader takes `app_root`, the node `TrustStore` and a required `cardinality`. It has no default.
 
-## Current state
+## What a registration must be
 
-Two code paths validate installed bundle registrations:
+- A regular `.yaml`/`.yml` file directly in the flat `bundles` directory. A directory, symlink, special file or non-YAML entry is refused.
+- Signed by the node's own key. A registration signed by any other pinned key, a publisher's included, is refused. Registrations are node state, written only by the node's install transaction.
+- A `kind: node` record with an absolute `path` that is an existing directory, canonicalised, and an optional well-formed `lane`.
+- Unique by name and by canonical path.
 
-1. `crates/daemon/ryeos-app/src/node_config/loader.rs`
-   - `BootstrapLoader::load_bundle_section()` scans `<system>/.ai/node/bundles/*.yaml`.
-   - It verifies signatures/trust, parses structured YAML, enforces `section == bundles`, canonicalizes paths, rejects symlinks/non-regular files, and detects collisions.
-   - This is daemon bootstrap's source of truth for effective bundle roots.
+## Cardinality
 
-2. `crates/daemon/ryeos-bundle/src/installed.rs`
-   - `load_installed_bundle_records()` scans the same registration directory for planner/preflight use.
-   - It mirrors the bootstrap semantics and additionally requires a regular signed installed `.ai/manifest.yaml` whose `provides_kinds` matches on-disk schemas.
-   - This replaced raw `.ai/bundles/*` scans so ambient unregistered state no longer affects preflight.
+`RegistrationCardinality` is stated at every construction site.
 
-The duplicated logic is deliberate for now: it avoided pulling `ryeos-app` into `ryeos-bundle` or moving node-config types during the deterministic-init fix.
+- `AtLeastOne`: an initialised node. A missing `.ai/node/bundles` directory or zero registrations is a typed refusal.
+- `Any`: only `init` before its first registration is written. Missing or empty loads as no registrations.
 
-## When to implement this
+Cardinality applies in `load_registrations`, so both `load_registrations` and `load_bundle_section[_reporting_skipped]` obey it. After the lane audit, zero remaining records is refused as `bundle_registrations_empty` under `AtLeastOne`.
 
-Implement this advanced path only when one of these triggers appears:
+## Typed refusals
 
-- a third caller needs installed bundle registration parsing;
-- registration schema or policy grows beyond `{ kind?, section, id?, path }`;
-- tests or bugs show semantic drift between bootstrap loading and planner installed loading;
-- planner modes beyond `InitSourceSet` become production paths for install/replace/update;
-- operators need a standalone `verify-installed` command that reports exactly the same records daemon bootstrap would use.
+`BundleRegistrationRefusal { code, message }` is a `std::error::Error`; `BundleRegistrationRefusal::find(&anyhow::Error)` finds it anywhere in an error chain. Codes:
 
-Do not implement this just to remove small duplication. The validator sits at a trust boundary, so a broad refactor is riskier than mirroring until reuse pressure is real.
+- `bundle_registrations_missing`: the bundles directory does not exist.
+- `bundle_registrations_empty`: no registration, or none left after the lane audit.
+- `bundle_registration_not_node_signed`: the signer is not the node key.
+- `bundle_registration_entry_refused`: the directory scan refused an entry.
+- `bundle_registration_collision`: two registrations share a name or a canonical path.
 
-## Goals
+## Audited and raw loads
 
-- Have exactly one implementation for converting a signed registration file into a canonical installed bundle record.
-- Preserve fail-closed behavior for malformed registrations.
-- Keep daemon bootstrap behavior unchanged except for using the shared helper.
-- Keep `ryeos-bundle` independent from high-level app/daemon state.
-- Make installed bundle validation reusable by planner modes and future `verify-installed` tooling.
-- Keep registration validation separate from full bundle preflight; registration loading should identify trusted roots, not validate every item in every bundle.
+- `load_bundle_section_reporting_skipped` is the audited load. A laned bundle that fails the publication-lane audit is left out and reported. Dependency roots and planner inputs take this load: install planning, bundle verify, the boot plan check, and the composition readers. A skipped laned bundle is never a dependency.
+- `load_registrations` is the raw load, with no lane audit, but the same validator and the same cardinality. Name-hold checks, replacement checks and removal planning take it, because a skipped laned bundle is still registered, still holds its name and must stay removable.
 
-## Non-goals
+## Planner manifest step
 
-- Do not redesign all node-config section loading.
-- Do not make bundles self-register; registrations still come only from the system node-config `bundles` section.
-- Do not add ambient `.ai/bundles/*` discovery fallback.
-- Do not weaken trust requirements to tolerate unsigned or untrusted registrations.
-- Do not make installed loading return an empty list on malformed state.
+`ryeos-bundle` does not read registrations. `ryeos_bundle::installed::plan_inputs_from_registrations` takes registrations the loader has validated (`RegisteredBundle`: name, registration path, canonical root) and, for each, checks that the bundle's `.ai/manifest.yaml` is a regular, signed, trusted file whose `provides_kinds` equals the kinds on disk, then builds the installed `PlanInput`. `ryeos-bundle` must not depend on `ryeos-node-runtime`; callers hand it the validated records.
 
-## Proposed module shape
+## Tests
 
-Prefer extracting a small low-level module into `ryeos-bundle`, since both `ryeos-core-tools` and `ryeos-api` already depend on it, and `ryeos-app` can depend on `ryeos-bundle` only if that does not create a cycle.
-
-First check the crate graph:
-
-```text
-ryeos-bundle ──▶ ryeos-engine
-ryeos-app    ──▶ ryeos-engine
-```
-
-If adding `ryeos-app -> ryeos-bundle` creates no cycle, use:
-
-```text
-crates/daemon/ryeos-bundle/src/registration.rs
-```
-
-If it creates an undesirable dependency, create a smaller neutral crate:
-
-```text
-crates/daemon/ryeos-bundle-registration/
-```
-
-The neutral crate should depend only on:
-
-- `anyhow`
-- `serde`
-- `serde_yaml`
-- `ryeos-engine` for signature envelope, trust classes, and trust verification
-
-Avoid depending on `ryeos-app`, daemon state, service handlers, or planner types.
-
-## Shared types
-
-Suggested shared type names:
-
-```rust
-pub struct BundleRegistrationRecord {
-    pub name: String,
-    pub registration_path: PathBuf,
-    pub bundle_root: PathBuf,
-}
-
-pub struct BundleRegistrationOptions {
-    pub require_kind_node: bool,
-    pub allow_missing_id: bool,
-}
-```
-
-Defaults should match current writer output and loader policy:
-
-```rust
-impl Default for BundleRegistrationOptions {
-    fn default() -> Self {
-        Self {
-            require_kind_node: true,
-            allow_missing_id: true,
-        }
-    }
-}
-```
-
-`allow_missing_id` remains true for backward compatibility with older records whose identity is the filename stem. If `id` is present, it must always match the filename stem.
-
-Internal parse body:
-
-```rust
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleRegistrationBody {
-    #[serde(default)]
-    kind: Option<String>,
-    section: String,
-    #[serde(default)]
-    id: Option<String>,
-    path: PathBuf,
-}
-```
-
-## Shared API
-
-Expose two levels of API.
-
-### 1. Validate one file
-
-```rust
-pub fn load_bundle_registration_file(
-    path: &Path,
-    trust_store: &TrustStore,
-    options: &BundleRegistrationOptions,
-) -> Result<Option<BundleRegistrationRecord>>
-```
-
-Behavior:
-
-- Reject symlinks and non-regular files.
-- Ignore files whose extension is not `.yaml` or `.yml` by returning `Ok(None)`.
-- Derive `name` from filename stem.
-- Read file as UTF-8 text.
-- Verify signature with YAML envelope `{ prefix: "#", suffix: None, after_shebang: false }`.
-- Require `TrustClass::Trusted`.
-- Strip signature lines.
-- Parse YAML with `deny_unknown_fields`.
-- Require `section == "bundles"`.
-- If `kind` exists and `require_kind_node`, require `kind == "node"`.
-- If `id` exists, require `id == filename_stem`.
-- Require `path` absolute.
-- Require `path` exists and is a directory.
-- Canonicalize `path` and store it as `bundle_root`.
-
-The function must not inspect `.ai/manifest.yaml`; that is bundle-root validation, not registration-file validation.
-
-### 2. Load a section directory
-
-```rust
-pub fn load_bundle_registration_dir(
-    node_bundles_dir: &Path,
-    trust_store: &TrustStore,
-    options: &BundleRegistrationOptions,
-) -> Result<Vec<BundleRegistrationRecord>>
-```
-
-Behavior:
-
-- Missing directory returns an empty vector.
-- Read immediate children only.
-- Call `load_bundle_registration_file()` for each entry.
-- Sort by `name` for deterministic output.
-- Detect collisions by name and canonical path.
-- Fail closed on any malformed YAML file in the section directory.
-
-Collision errors should include both registration file paths and both names/paths.
-
-## Bundle-root validation API
-
-Keep installed manifest validation in `ryeos-bundle`, layered above the shared registration parser:
-
-```rust
-pub fn validate_installed_bundle_root(
-    record: &BundleRegistrationRecord,
-    trust_store: &TrustStore,
-) -> Result<()>;
-```
-
-Behavior:
-
-- Require `<bundle_root>/.ai/manifest.yaml` exists.
-- Reject symlink/non-regular manifest files.
-- Verify signed/trusted manifest with YAML signature envelope.
-- Parse manifest via `parse_manifest(bundle_root, &record.name)`.
-- Require parsed manifest name matches the registration name.
-- Require `manifest.provides_kinds` equals `derive_provides_kinds(bundle_root/.ai)` after sorting.
-
-This validation should remain separate so daemon bootstrap can choose whether to require manifest validation during early startup. For planner installed loading and `preflight_verify_bundle()` compatibility, it should be required.
-
-## Migration steps
-
-### Step 1: Extract shared registration code
-
-Create `registration.rs` in the chosen low-level crate.
-
-Move these concepts out of `crates/daemon/ryeos-bundle/src/installed.rs`:
-
-- `BundleRegistrationBody`
-- YAML signature envelope helper
-- signature/trust verification for registration files
-- signature stripping helper
-- symlink/non-regular file rejection for registration files
-- structured YAML parsing and section/kind/id/path policy
-- canonical path collision detection
-
-Keep installed manifest validation in `installed.rs`.
-
-Expected `installed.rs` shape after extraction:
-
-```rust
-pub fn load_installed_bundle_records_with_trust(
-    system_space_dir: &Path,
-    trust_store: &TrustStore,
-) -> Result<Vec<InstalledBundleRecord>> {
-    let bundles_dir = system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("bundles");
-
-    let records = registration::load_bundle_registration_dir(
-        &bundles_dir,
-        trust_store,
-        &BundleRegistrationOptions::default(),
-    )?;
-
-    for record in &records {
-        validate_installed_bundle_root(record, trust_store)?;
-    }
-
-    Ok(records.into_iter().map(InstalledBundleRecord::from).collect())
-}
-```
-
-### Step 2: Update daemon bootstrap loader
-
-In `crates/daemon/ryeos-app/src/node_config/loader.rs`, replace the bespoke `load_bundle_section()` scan with the shared directory loader.
-
-Preserve the public return type `Vec<BundleRecord>` by mapping shared records:
-
-```rust
-BundleRecord {
-    name: record.name,
-    path: record.bundle_root,
-    source_file: record.registration_path,
-}
-```
-
-Do not make `BootstrapLoader::load_bundle_section()` call `validate_installed_bundle_root()` unless you explicitly decide daemon bootstrap should fail on manifest drift at this phase. If you do add it, update startup tests and document that daemon bootstrap now validates installed bundle manifests, not just registrations.
-
-### Step 3: Keep full node-config loader behavior aligned
-
-`BootstrapLoader::load_full()` has a second bundles-section parsing path. Either:
-
-1. leave it alone if `load_full()` only consumes already-bootstrap-validated records; or
-2. refactor bundles-section parsing in `load_full()` to call the same helper for `section_name == "bundles"`.
-
-Prefer option 2 if the code remains small. Do not refactor routes/verbs/aliases as part of this work.
-
-### Step 4: Add cross-module tests
-
-At minimum:
-
-- shared helper rejects symlink registration file;
-- shared helper rejects unsigned registration;
-- shared helper rejects untrusted signer;
-- shared helper rejects malformed YAML;
-- shared helper rejects unknown fields;
-- shared helper rejects wrong `section`;
-- shared helper rejects `kind` other than `node`;
-- shared helper rejects `id` that differs from filename stem;
-- shared helper rejects relative `path`;
-- shared helper canonicalizes registered path;
-- shared helper detects duplicate names;
-- shared helper detects duplicate canonical paths;
-- `ryeos-app::BootstrapLoader::load_bundle_section()` still loads the same valid registration fixture;
-- `ryeos-bundle::installed` still rejects missing/unsigned/symlinked/drifted installed manifests.
-
-Use the same fixture style as existing tests: generate an Ed25519 key, pin it in a temp trust store, sign registration bodies with `lillux::signature::sign_content()`.
-
-## Backward compatibility
-
-Existing registration records written by `write_node_bundle_registration()` have this form:
-
-```yaml
-kind: node
-section: bundles
-id: core
-path: /absolute/canonical/path
-```
-
-The shared validator should accept these. It may also accept records without `kind` or `id` only if existing bootstrap behavior already did; if unsure, keep `kind` optional but validate it when present, and keep `id` optional but validate it when present.
-
-Do not accept:
-
-- unsigned records;
-- records signed by untrusted keys;
-- records with unknown YAML fields;
-- symlink registration files;
-- non-regular registration files;
-- relative paths;
-- paths that do not exist or are not directories;
-- duplicate names or duplicate canonical paths.
-
-## Error handling requirements
-
-All malformed installed-state errors must fail closed.
-
-Do not do this:
-
-```rust
-let installed = load_installed_bundle_records(...).unwrap_or_default();
-```
-
-Do this:
-
-```rust
-let installed = load_installed_bundle_records(...)
-    .context("load installed bundle registrations")?;
-```
-
-Error messages should include enough operator context:
-
-- registration path;
-- bundle name;
-- declared path;
-- expected section/id/kind;
-- signer/trust failure where applicable;
-- both sides of a collision.
-
-## Verification plan
-
-Run focused tests first:
-
-```bash
-cargo test -p ryeos-bundle installed registration plan
-cargo test -p ryeos-app node_config
-cargo test -p ryeos-core-tools -- init
-cargo test -p ryeos-api bundle
-```
-
-Then run a temp reinstall smoke test:
-
-```bash
-tmp=$(mktemp -d)
-target/release/ryeos init \
-  --system-space-dir "$tmp/system" \
-  --user-root "$tmp/user" \
-  --source bundles \
-  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
-
-target/release/ryeos init \
-  --system-space-dir "$tmp/system" \
-  --user-root "$tmp/user" \
-  --source bundles \
-  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
-```
-
-Both init runs should install/replace `core` and `standard` in planner order and should not be influenced by unregistered directories under `<system>/.ai/bundles/`.
-
-## Rollout strategy
-
-1. Extract the shared helper behind tests without changing behavior.
-2. Switch `ryeos-bundle::installed` to use it.
-3. Switch `BootstrapLoader::load_bundle_section()` to use it.
-4. Run the temp reinstall smoke test.
-5. Only then consider refactoring `load_full()` bundles-section parsing.
-
-Keep each step reviewable. If the crate dependency graph becomes awkward, stop and use the neutral small crate rather than forcing a broad app/bundle dependency redesign.
+- Unit tests in `bundle_bootstrap.rs` cover each refusal code through both load paths, and missing and empty under both cardinalities.
+- The install-planning unit test in `bundle_install.rs` covers a publisher-signed registration refusing with `bundle_registration_not_node_signed`.
+- Unit tests in `ryeos-core-tools.rs` check that bundle verify refuses a node with a removed or an emptied bundles directory with the boot loader's `bundle_registrations_missing` and `bundle_registrations_empty`.
+- `ryeos-bundle`'s `installed.rs` tests cover the manifest step: a signed manifest becomes a plan input; an unsigned, a symlinked, or a `provides_kinds`-mismatched manifest is refused.
+- `bundle_registration_validator_e2e` starts a real node and checks that a publisher-signed registration, and a missing bundles directory, stop it with the typed code.

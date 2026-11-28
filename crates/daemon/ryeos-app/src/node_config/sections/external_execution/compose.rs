@@ -544,6 +544,7 @@ pub(crate) fn with_installed_bundles<T>(
     let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &trust,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section()
     .context("load installed bundle registrations")?;

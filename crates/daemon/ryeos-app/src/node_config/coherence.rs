@@ -211,6 +211,7 @@ pub(crate) fn read_installed_artifact_hashes(
     let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section()
     .context("load installed bundle registrations")?;

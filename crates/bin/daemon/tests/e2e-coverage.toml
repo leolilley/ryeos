@@ -89,6 +89,10 @@ covers = ["ryeos-directive-definition"]
 [tests.bundle_parity]
 covers = ["ryeos-bundle", "ryeos-directive-definition", "ryeos-engine", "ryeos-graph-definition", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-parser-bins"]
 
+[tests.bundle_registration_validator_e2e]
+covers = ["ryeos-bundle", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-bundle/src/installed.rs", "crates/engine/ryeos-node-runtime/src/bundle_bootstrap.rs"]
+
 [tests.bundle_staging_apply_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-http-egress", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/daemon/ryeos-api/src/handlers/bundle_install.rs", "crates/daemon/ryeos-api/src/handlers/bundle_list.rs", "crates/daemon/ryeos-api/src/handlers/bundle_stage_clear.rs", "crates/daemon/ryeos-api/src/handlers/remote_bundle_install.rs"]

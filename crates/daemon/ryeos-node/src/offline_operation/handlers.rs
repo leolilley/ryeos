@@ -2039,6 +2039,7 @@ pub(super) fn bundle_state_import(ctx: &HandlerContext<'_>) -> Result<Value> {
     let bootstrap = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root: ctx.app_root,
         trust_store: &trust_store,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let installed = bootstrap
         .load_bundle_section()

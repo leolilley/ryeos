@@ -316,6 +316,7 @@ fn load_registered_generation_under_lock(
     let loader = crate::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &trust_store,
+        cardinality: crate::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let (records, skipped) = loader
         .load_bundle_section_reporting_skipped()
@@ -1058,16 +1059,29 @@ pub fn validate_installed_bundle_plan(
     node_trust_store: &TrustStore,
 ) -> Result<ryeos_bundle::plan::BundlePlan> {
     let bundle_records = generation.records();
-    let installed: Vec<_> =
-        ryeos_bundle::installed::load_installed_plan_inputs_with_trust(app_root, node_trust_store)
-            .context("load signed installed bundle manifests")?
-            .into_iter()
-            .filter(|input| {
-                !skipped_lane_bundles
-                    .iter()
-                    .any(|skipped| skipped.name == input.name)
-            })
-            .collect();
+    let (registrations, _skipped) = crate::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store: node_trust_store,
+        cardinality: crate::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
+    }
+    .load_bundle_section_reporting_skipped()
+    .context("load signed installed bundle registrations")?;
+    let registrations: Vec<_> = registrations
+        .into_iter()
+        .filter(|record| {
+            !skipped_lane_bundles
+                .iter()
+                .any(|skipped| skipped.name == record.name)
+        })
+        .map(|record| ryeos_bundle::installed::RegisteredBundle {
+            name: record.name,
+            registration_path: record.source_file,
+            bundle_root: record.path,
+        })
+        .collect();
+    let installed =
+        ryeos_bundle::installed::plan_inputs_from_registrations(&registrations, node_trust_store)
+            .context("load signed installed bundle manifests")?;
     if installed.len() != bundle_records.len() {
         anyhow::bail!(
             "installed bundle registry views disagree: node config loaded {} record(s), manifest planner loaded {}",

@@ -117,24 +117,6 @@ fn format_preflight_issue(issue: &PreflightIssue) -> String {
     )
 }
 
-pub fn preflight_verify_bundle(
-    source_path: &Path,
-    app_root: &Path,
-    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
-) -> Result<()> {
-    // Runtime uses signed bundle registrations under `.ai/node/bundles/*.yaml`,
-    // not raw `.ai/bundles/*` scans. Generic bundle install verifies against
-    // the current verified installed set so new bundles can depend on already-
-    // installed bundles without ambient unregistered state affecting preflight.
-    let installed_bundle_roots: Vec<PathBuf> =
-        crate::installed::load_installed_bundle_records(app_root)
-            .context("preflight: load installed bundle registrations")?
-            .into_iter()
-            .map(|record| record.bundle_root)
-            .collect();
-    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, app_root, isolation)
-}
-
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],

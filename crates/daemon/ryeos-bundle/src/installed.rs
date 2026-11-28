@@ -1,191 +1,48 @@
-//! Verified installed bundle registration loader.
+//! The planner's manifest step over bundles the node has already registered.
 //!
-//! This mirrors the daemon bootstrap semantics for `.ai/node/bundles/*.yaml`
-//! without depending on `ryeos-app`: registrations must be signed, trusted,
-//! structured YAML records under `.ai/node/bundles`; paths are canonicalized;
-//! symlinks and collisions fail closed.
+//! Registrations themselves are read and validated in one place, the node
+//! runtime's `BundleBootstrapLoader`. This module takes the validated
+//! registrations it yields and checks each installed bundle's signed manifest
+//! against the tree on disk before it becomes a planner input.
 
-use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::trust::{SignerContext, TrustStore};
-use serde::Deserialize;
+use ryeos_engine::trust::TrustStore;
 
-use crate::manifest::{derive_provides_kinds, parse_manifest};
+use crate::manifest::{derive_provides_kinds, load_verified_manifest};
 use crate::plan::{BundleSource, PlanInput};
 
+/// A registration the node's validator has already accepted.
 #[derive(Debug, Clone)]
-pub struct InstalledBundleRecord {
+pub struct RegisteredBundle {
     pub name: String,
     pub registration_path: PathBuf,
+    /// The canonical bundle root.
     pub bundle_root: PathBuf,
-    /// Lane marker the node recorded at registration, if any.
-    pub lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
-impl InstalledBundleRecord {
-    pub fn into_plan_input(self) -> PlanInput {
-        PlanInput {
-            name: self.name,
-            source: BundleSource::Installed {
-                registration_path: self.registration_path,
-                bundle_root: self.bundle_root,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleRegistrationBody {
-    kind: String,
-    path: PathBuf,
-    #[serde(default)]
-    lane: Option<ryeos_engine::trust::BundleLane>,
-}
-
-/// Load installed bundles from signed node bundle registrations.
-pub fn load_installed_bundle_records(app_root: &Path) -> Result<Vec<InstalledBundleRecord>> {
-    let trust_store = TrustStore::load_node_registry(app_root)
-        .context("installed bundles: load node trust store")?;
-    load_installed_bundle_records_with_trust(app_root, &trust_store)
-}
-
-pub fn load_installed_bundle_records_with_trust(
-    app_root: &Path,
-    trust_store: &TrustStore,
-) -> Result<Vec<InstalledBundleRecord>> {
-    let bundles_dir = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("bundles");
-    if !bundles_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let envelope = yaml_signature_envelope();
-    let mut records = Vec::new();
-
-    for entry in fs::read_dir(&bundles_dir)
-        .with_context(|| format!("failed to read node bundles dir {}", bundles_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to stat {}", path.display()))?
-            .file_type();
-        if file_type.is_symlink() || !file_type.is_file() {
-            bail!(
-                "node bundle registration at {} is not a regular file (symlinks rejected)",
-                path.display()
-            );
-        }
-
-        let ext = path.extension().and_then(|ext| ext.to_str());
-        if ext != Some("yaml") && ext != Some("yml") {
-            continue;
-        }
-
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .context("node bundle registration has no filename stem")?
-            .to_string();
-
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        verify_signed_trusted_yaml(
-            &content,
-            &path,
-            trust_store,
-            &envelope,
-            &SignerContext::node("node"),
-        )
-        .with_context(|| format!("verify node bundle registration {}", path.display()))?;
-
-        let body: BundleRegistrationBody = serde_yaml::from_str(&strip_signature(&content))
-            .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
-
-        if body.kind != "node" {
-            bail!(
-                "node bundle registration {} declares kind {:?}, expected kind 'node'",
-                path.display(),
-                body.kind
-            );
-        }
-        if !body.path.is_absolute() {
-            bail!(
-                "bundle '{}' path must be absolute, got {} in {}",
-                name,
-                body.path.display(),
-                path.display()
-            );
-        }
-        if !body.path.is_dir() {
-            bail!(
-                "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                name,
-                body.path.display(),
-                path.display()
-            );
-        }
-
-        if let Some(lane) = &body.lane {
-            lane.validate_shape().map_err(|error| {
-                anyhow::anyhow!(
-                    "bundle '{}' registration {} has an invalid lane: {error}",
-                    name,
-                    path.display()
-                )
-            })?;
-        }
-
-        let canonical = body.path.canonicalize().with_context(|| {
-            format!(
-                "failed to canonicalize bundle '{}' path '{}'",
-                name,
-                body.path.display()
-            )
-        })?;
-
-        verify_installed_manifest(&name, &canonical, trust_store)
-            .with_context(|| format!("verify installed bundle '{}' manifest", name))?;
-
-        records.push(InstalledBundleRecord {
-            name,
-            registration_path: path,
-            bundle_root: canonical,
-            lane: body.lane,
-        });
-    }
-
-    records.sort_by(|a, b| a.name.cmp(&b.name));
-    check_collisions(&records)?;
-    Ok(records)
-}
-
-pub fn load_installed_plan_inputs(app_root: &Path) -> Result<Vec<PlanInput>> {
-    load_installed_bundle_records(app_root).map(|records| {
-        records
-            .into_iter()
-            .map(InstalledBundleRecord::into_plan_input)
-            .collect()
-    })
-}
-
-pub fn load_installed_plan_inputs_with_trust(
-    app_root: &Path,
+/// Planner inputs for validated registrations.
+///
+/// For each, the bundle's `.ai/manifest.yaml` must be a regular, signed,
+/// trusted file whose `provides_kinds` equals the kinds the tree provides.
+pub fn plan_inputs_from_registrations(
+    registrations: &[RegisteredBundle],
     trust_store: &TrustStore,
 ) -> Result<Vec<PlanInput>> {
-    load_installed_bundle_records_with_trust(app_root, trust_store).map(|records| {
-        records
-            .into_iter()
-            .map(InstalledBundleRecord::into_plan_input)
-            .collect()
-    })
+    let mut inputs = Vec::with_capacity(registrations.len());
+    for registration in registrations {
+        verify_installed_manifest(&registration.name, &registration.bundle_root, trust_store)
+            .with_context(|| format!("verify installed bundle '{}' manifest", registration.name))?;
+        inputs.push(PlanInput {
+            name: registration.name.clone(),
+            source: BundleSource::Installed {
+                registration_path: registration.registration_path.clone(),
+                bundle_root: registration.bundle_root.clone(),
+            },
+        });
+    }
+    Ok(inputs)
 }
 
 fn verify_installed_manifest(
@@ -193,31 +50,9 @@ fn verify_installed_manifest(
     bundle_root: &Path,
     trust_store: &TrustStore,
 ) -> Result<()> {
-    let manifest_path = bundle_root.join(ryeos_engine::AI_DIR).join("manifest.yaml");
-    let file_type = fs::symlink_metadata(&manifest_path)
-        .with_context(|| format!("failed to stat {}", manifest_path.display()))?
-        .file_type();
-    if file_type.is_symlink() || !file_type.is_file() {
-        bail!(
-            "installed bundle '{}' at {} has no regular signed .ai/manifest.yaml (symlinks rejected)",
-            name,
-            bundle_root.display()
-        );
-    }
-
-    let envelope = yaml_signature_envelope();
-    let content = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    verify_signed_trusted_yaml(
-        &content,
-        &manifest_path,
-        trust_store,
-        &envelope,
-        &SignerContext::bundle("bundle_manifest"),
-    )?;
-    let manifest = parse_manifest(bundle_root, name)
-        .with_context(|| format!("parse installed bundle '{}' manifest", name))?;
-    let mut expected_provides = derive_provides_kinds(&bundle_root.join(ryeos_engine::AI_DIR))?;
+    let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+    let manifest = load_verified_manifest(&ai_dir, name, trust_store)?.manifest;
+    let mut expected_provides = derive_provides_kinds(&ai_dir)?;
     let mut claimed_provides = manifest.provides_kinds.clone();
     expected_provides.sort();
     claimed_provides.sort();
@@ -232,94 +67,25 @@ fn verify_installed_manifest(
     Ok(())
 }
 
-fn verify_signed_trusted_yaml(
-    content: &str,
-    path: &Path,
-    trust_store: &TrustStore,
-    envelope: &SignatureEnvelope,
-    ctx: &SignerContext,
-) -> Result<()> {
-    let header = ryeos_engine::item_resolution::parse_signature_header(content, envelope)
-        .context(format!("{} has no valid signature line", path.display()))?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, envelope, trust_store, ctx)
-            .with_context(|| format!("signature verification failed for {}", path.display()))?;
-    if trust_class != TrustClass::Trusted {
-        bail!(
-            "{} is not trusted (trust_class: {:?}); only trusted registrations are allowed",
-            path.display(),
-            trust_class
-        );
-    }
-    Ok(())
-}
-
-fn yaml_signature_envelope() -> SignatureEnvelope {
-    SignatureEnvelope {
-        prefix: "#".into(),
-        suffix: None,
-        after_shebang: false,
-    }
-}
-
-fn strip_signature(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|line| line.starts_with("# ryeos:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_start()
-        .to_string()
-}
-
-fn check_collisions(records: &[InstalledBundleRecord]) -> Result<()> {
-    let mut by_name: HashMap<&str, &InstalledBundleRecord> = HashMap::new();
-    let mut by_path: HashMap<&Path, &InstalledBundleRecord> = HashMap::new();
-
-    for record in records {
-        if let Some(prev) = by_name.get(record.name.as_str()) {
-            bail!(
-                "node config section 'bundles' has duplicate name '{}': first registered from '{}', second from '{}'",
-                record.name,
-                prev.registration_path.display(),
-                record.registration_path.display()
-            );
-        }
-        if let Some(prev) = by_path.get(record.bundle_root.as_path()) {
-            bail!(
-                "node config section 'bundles' has duplicate canonical path '{}': first registered as '{}' (from {}), second as '{}' (from {})",
-                record.bundle_root.display(),
-                prev.name,
-                prev.registration_path.display(),
-                record.name,
-                record.registration_path.display()
-            );
-        }
-        by_name.insert(record.name.as_str(), record);
-        by_path.insert(record.bundle_root.as_path(), record);
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+    use std::fs;
 
     struct Layout {
         _tmp: tempfile::TempDir,
-        system: PathBuf,
-        user: PathBuf,
+        root: PathBuf,
         key: SigningKey,
+        trust: TrustStore,
     }
 
     impl Layout {
         fn new() -> Self {
             let tmp = tempfile::tempdir().unwrap();
-            let system = tmp.path().join("system");
-            let user = tmp.path().join("user");
+            let root = tmp.path().to_path_buf();
+            let user = root.join("user");
             fs::create_dir_all(&user).unwrap();
             let key = SigningKey::generate(&mut OsRng);
             ryeos_engine::test_support::pin_signer(
@@ -329,201 +95,82 @@ mod tests {
                 ryeos_engine::trust::SignerRole::Operator,
                 ryeos_engine::trust::SignerScope::everywhere(),
             );
+            let trust = TrustStore::load_node_registry(&user).unwrap();
             Self {
                 _tmp: tmp,
-                system,
-                user,
+                root,
                 key,
+                trust,
             }
         }
 
-        fn trust_store(&self) -> TrustStore {
-            TrustStore::load_node_registry(&self.user).unwrap()
-        }
-
-        fn write_bundle(&self, name: &str) -> PathBuf {
-            let bundle = self.system.join(".ai/bundles").join(name);
+        fn write_bundle(&self, name: &str) -> RegisteredBundle {
+            let bundle = self.root.join("bundles").join(name);
             fs::create_dir_all(bundle.join(".ai")).unwrap();
             let manifest = format!(
                 "name: {name}\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n"
             );
             let signed = lillux::signature::sign_content(&manifest, &self.key, "#", None);
             fs::write(bundle.join(".ai/manifest.yaml"), signed).unwrap();
-            bundle
-        }
-
-        fn write_registration(&self, name: &str, bundle: &Path) -> PathBuf {
-            let dir = self.system.join(".ai/node/bundles");
-            fs::create_dir_all(&dir).unwrap();
-            let body = format!("kind: node\npath: {}\n", bundle.display());
-            let signed = lillux::signature::sign_content(&body, &self.key, "#", None);
-            let path = dir.join(format!("{name}.yaml"));
-            fs::write(&path, signed).unwrap();
-            path
+            RegisteredBundle {
+                name: name.to_string(),
+                registration_path: self.root.join(format!("{name}.yaml")),
+                bundle_root: bundle.canonicalize().unwrap(),
+            }
         }
     }
 
     #[test]
-    fn loads_signed_registered_installed_bundle() {
+    fn a_signed_manifest_becomes_an_installed_plan_input() {
         let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        let reg = layout.write_registration("core", &bundle);
-
-        let records =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap();
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].name, "core");
-        assert_eq!(records[0].registration_path, reg);
-        assert_eq!(records[0].bundle_root, bundle.canonicalize().unwrap());
+        let core = layout.write_bundle("core");
+        let inputs =
+            plan_inputs_from_registrations(std::slice::from_ref(&core), &layout.trust).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "core");
+        assert_eq!(inputs[0].source.root_path(), &core.bundle_root);
     }
 
     #[test]
-    fn rejects_unsigned_registration() {
+    fn an_unsigned_manifest_is_refused() {
         let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        let dir = layout.system.join(".ai/node/bundles");
-        fs::create_dir_all(&dir).unwrap();
+        let core = layout.write_bundle("core");
         fs::write(
-            dir.join("core.yaml"),
-            format!("kind: node\npath: {}\n", bundle.display()),
+            core.bundle_root.join(".ai/manifest.yaml"),
+            "name: core\nversion: '1.0'\nprovides_kinds: []\n",
         )
         .unwrap();
-
-        let err = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("signature"), "expected signature error: {msg}");
+        let error = plan_inputs_from_registrations(&[core], &layout.trust).unwrap_err();
+        assert!(format!("{error:#}").contains("signature"), "{error:#}");
     }
 
     #[test]
-    fn rejects_legacy_registration_id_field() {
+    fn a_symlinked_manifest_is_refused() {
         let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        let dir = layout.system.join(".ai/node/bundles");
-        fs::create_dir_all(&dir).unwrap();
-        let body = format!("kind: node\nid: wrong\npath: {}\n", bundle.display());
-        let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
-        fs::write(dir.join("core.yaml"), signed).unwrap();
-
-        let err = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("unknown field `id`"),
-            "expected id rejection: {msg}"
-        );
-    }
-
-    #[test]
-    fn rejects_registration_without_kind() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        let dir = layout.system.join(".ai/node/bundles");
-        fs::create_dir_all(&dir).unwrap();
-        let body = format!("path: {}\n", bundle.display());
-        let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
-        fs::write(dir.join("core.yaml"), signed).unwrap();
-
-        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        assert!(format!("{error:?}").contains("missing field `kind`"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_installed_manifest() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        layout.write_registration("core", &bundle);
-        let manifest = bundle.join(".ai/manifest.yaml");
-        let target = bundle.join(".ai/manifest-real.yaml");
+        let core = layout.write_bundle("core");
+        let manifest = core.bundle_root.join(".ai/manifest.yaml");
+        let target = core.bundle_root.join(".ai/manifest-real.yaml");
         fs::rename(&manifest, &target).unwrap();
-        std::os::unix::fs::symlink(&target, &manifest).unwrap();
-
-        let err = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("regular signed"),
-            "expected regular-file rejection: {msg}"
-        );
+        lillux::tree_entry::test_support::make_symlink(&target, &manifest).unwrap();
+        let error = plan_inputs_from_registrations(&[core], &layout.trust).unwrap_err();
+        assert!(format!("{error:#}").contains("regular"), "{error:#}");
     }
 
     #[test]
-    fn rejects_installed_manifest_provides_mismatch() {
+    fn a_manifest_that_misdeclares_the_provided_kinds_is_refused() {
         let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        layout.write_registration("core", &bundle);
-        let schema_dir = bundle.join(".ai/node/engine/kinds/extra");
+        let core = layout.write_bundle("core");
+        let schema_dir = core.bundle_root.join(".ai/node/engine/kinds/extra");
         fs::create_dir_all(&schema_dir).unwrap();
         fs::write(
             schema_dir.join("extra.kind-schema.yaml"),
             "kind: config\ndirectory: extra\nextensions: []\n",
         )
         .unwrap();
-
-        let err = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        let msg = format!("{err:?}");
+        let error = plan_inputs_from_registrations(&[core], &layout.trust).unwrap_err();
         assert!(
-            msg.contains("provides_kinds mismatch"),
-            "expected provides mismatch: {msg}"
+            format!("{error:#}").contains("provides_kinds mismatch"),
+            "{error:#}"
         );
-    }
-    fn write_laned_registration(layout: &Layout, name: &str, bundle: &Path, lane: &str) {
-        let dir = layout.system.join(".ai/node/bundles");
-        fs::create_dir_all(&dir).unwrap();
-        let body = format!("kind: node\npath: {}\nlane:\n{lane}", bundle.display());
-        let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
-        fs::write(dir.join(format!("{name}.yaml")), signed).unwrap();
-    }
-
-    fn lane_yaml(record_hash: &str) -> String {
-        format!(
-            "  name: publication\n  publisher_fingerprint: {a}\n  record_hash: {record_hash}\n  node_fingerprint: {c}\n  bundle_version: '1.0'\n",
-            a = "a".repeat(64),
-            c = "c".repeat(64)
-        )
-    }
-
-    #[test]
-    fn laned_registration_loads_and_carries_the_lane() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("pulled");
-        write_laned_registration(&layout, "pulled", &bundle, &lane_yaml(&"b".repeat(64)));
-
-        let records =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap();
-        let lane = records[0].lane.as_ref().expect("lane");
-        assert_eq!(lane.name, "publication");
-        assert_eq!(lane.record_hash, "b".repeat(64));
-    }
-
-    #[test]
-    fn malformed_lane_fails_the_load() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("pulled");
-        write_laned_registration(&layout, "pulled", &bundle, &lane_yaml("nothex"));
-
-        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("record_hash"), "{error:#}");
-    }
-
-    #[test]
-    fn native_registration_may_ship_a_native_executable() {
-        let layout = Layout::new();
-        let bundle = layout.write_bundle("core");
-        layout.write_registration("core", &bundle);
-        fs::create_dir_all(bundle.join("bin")).unwrap();
-        fs::write(bundle.join("bin/tool"), b"x").unwrap();
-
-        let records =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap();
-        assert!(records[0].lane.is_none());
     }
 }

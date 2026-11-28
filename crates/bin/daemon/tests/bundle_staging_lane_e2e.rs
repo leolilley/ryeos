@@ -860,6 +860,7 @@ async fn a_laned_bundle_whose_tree_changed_after_apply_is_skipped_and_the_node_s
     let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root: &b.state_path,
         trust_store: &trust,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let (_, skipped) = loader
         .load_bundle_section_reporting_skipped()
@@ -924,6 +925,7 @@ async fn a_skipped_laned_bundle_is_removed_through_bundle_remove_and_the_node_bo
     let (_, skipped) = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root: &b.state_path,
         trust_store: &trust,
+        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section_reporting_skipped()
     .expect("load the bundle section");

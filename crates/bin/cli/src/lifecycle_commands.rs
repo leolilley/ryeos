@@ -3475,6 +3475,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         (ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
                             app_root: &config.app_root,
                             trust_store: &trust,
+                            cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
                         })
                         .load_bundle_section_reporting_skipped()
                 {

@@ -48,6 +48,7 @@ ryeos-vault.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+lillux = { workspace = true, features = ["test-support"] }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 
