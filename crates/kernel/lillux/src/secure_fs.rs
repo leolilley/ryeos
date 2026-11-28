@@ -6828,6 +6828,68 @@ impl PinnedDirectory {
         ))
     }
 
+    /// Regular entries whose name is exactly the form
+    /// `move_regular_to_unique_quarantine` produces: `.ryeos-quarantine.<pid>.<seq>`
+    /// with canonical decimal numbers. A near-miss name is not listed, so the
+    /// caller's strict scan still refuses it.
+    pub fn quarantine_leftovers(&self) -> Result<Vec<QuarantineLeftover>> {
+        let mut found = Vec::new();
+        for entry in self.regular_files()? {
+            if let Some(leftover) = QuarantineLeftover::parse(entry.name()) {
+                found.push(leftover);
+            }
+        }
+        found.sort_by(|a, b| (a.pid, a.sequence).cmp(&(b.pid, b.sequence)));
+        Ok(found)
+    }
+
+    /// Rename a leftover back to `target` without replacing anything.
+    /// `Ok(false)` means `target` is occupied and nothing changed.
+    pub fn restore_quarantine_leftover(
+        &self,
+        leftover: &QuarantineLeftover,
+        target: &OsStr,
+    ) -> Result<bool> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (leftover, target);
+            anyhow::bail!("quarantine restore requires Linux renameat2");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(target)?;
+            let from = std::ffi::CString::new(leftover.name.as_bytes())?;
+            let to = std::ffi::CString::new(target.as_bytes())?;
+            match rename_noreplace_between(&self.directory, &from, &self.directory, &to) {
+                Ok(()) => {
+                    self.directory.sync_all()?;
+                    Ok(true)
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EEXIST) => Ok(false),
+                Err(error) => Err(anyhow::Error::new(error).context("restore quarantine leftover")),
+            }
+        }
+    }
+
+    /// Unlink a leftover (no-follow, by name in the pinned directory).
+    pub fn remove_quarantine_leftover(&self, leftover: &QuarantineLeftover) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = leftover;
+            anyhow::bail!("quarantine removal requires Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let name = std::ffi::CString::new(leftover.name.as_bytes())?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(anyhow::Error::new(std::io::Error::last_os_error())
+                    .context("remove quarantine leftover"));
+            }
+            self.directory.sync_all()?;
+            Ok(())
+        }
+    }
+
     /// Enumerate a strict flat namespace and return open handles for every
     /// regular entry. Directories, links, sockets, and devices are errors.
     pub fn regular_files(&self) -> Result<Vec<PinnedRegularFile>> {
@@ -9440,6 +9502,36 @@ fn rename_noreplace_between(
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// A file left under Lillux's quarantine name by a process that stopped
+/// between the quarantine move and the unlink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineLeftover {
+    name: OsString,
+    pub pid: u32,
+    pub sequence: u64,
+}
+
+impl QuarantineLeftover {
+    const PREFIX: &'static str = ".ryeos-quarantine.";
+
+    /// Exactly `.ryeos-quarantine.<pid>.<seq>`, canonical decimal, nothing else.
+    pub fn parse(name: &OsStr) -> Option<Self> {
+        let rest = name.to_str()?.strip_prefix(Self::PREFIX)?;
+        let (pid, sequence) = rest.split_once('.')?;
+        let pid_n: u32 = pid.parse().ok()?;
+        let sequence_n: u64 = sequence.parse().ok()?;
+        (format!("{pid_n}.{sequence_n}") == rest).then(|| Self {
+            name: name.to_os_string(),
+            pid: pid_n,
+            sequence: sequence_n,
+        })
+    }
+
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
 }
 
 #[cfg(target_os = "linux")]

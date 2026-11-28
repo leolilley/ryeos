@@ -140,6 +140,7 @@ pub use exec::{
 };
 #[cfg(unix)]
 pub use secure_fs::PATH_MAX_BYTES;
+pub use secure_fs::QuarantineLeftover;
 pub use secure_fs::{
     AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
     ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,

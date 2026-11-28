@@ -2480,6 +2480,94 @@ fn current_guard_file_for_pinned_runtime(
     Ok(held)
 }
 
+/// What node-start settlement did with files a dead process left under
+/// Lillux's quarantine name in the pending-transition directory.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct QuarantineSettlement {
+    pub restored: Vec<String>,
+    pub removed: Vec<String>,
+    pub deferred_live_pid: Vec<String>,
+}
+
+/// Settle quarantine leftovers in the pending-transition directory. Runs once
+/// at node start, with the node's exclusive state lock held, before any
+/// recovery worker reads the directory. A leftover is the file a conditional
+/// remove had moved aside before its process stopped; its identity check may
+/// not have run, so it is never deleted unless an identical canonical file
+/// exists: it is renamed back (never replacing anything) and replayed by the
+/// normal scan. An undecodable file, a differing canonical file, or any
+/// near-miss name is refused with paths named. A leftover whose pid is still
+/// live is left alone (deferred, never removed).
+pub fn settle_pending_quarantine_leftovers_at_node_start(
+    runtime_state_dir: &Path,
+) -> Result<QuarantineSettlement> {
+    let mut report = QuarantineSettlement::default();
+    let Some(runtime) = lillux::PinnedDirectory::open(runtime_state_dir)? else {
+        return Ok(report);
+    };
+    let Some(recovery) = runtime.open_child_directory(std::ffi::OsStr::new("recovery"))? else {
+        return Ok(report);
+    };
+    let Some(projection) =
+        recovery.open_child_directory(std::ffi::OsStr::new("thread-projection"))?
+    else {
+        return Ok(report);
+    };
+    let Some(pending) = projection.open_child_directory(std::ffi::OsStr::new("pending"))? else {
+        return Ok(report);
+    };
+    for leftover in pending.quarantine_leftovers()? {
+        let path = pending.path().join(leftover.name());
+        if lillux::is_alive(leftover.pid) {
+            report.deferred_live_pid.push(path.display().to_string());
+            continue;
+        }
+        let file = pending
+            .open_regular(leftover.name(), false)?
+            .ok_or_else(|| anyhow::anyhow!("quarantine leftover {} vanished", path.display()))?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut &file, &mut bytes)
+            .with_context(|| format!("read quarantine leftover {}", path.display()))?;
+        let record: PendingChainHeadTransition =
+            serde_json::from_slice(&bytes).with_context(|| {
+                format!(
+                    "quarantine leftover {} is not a pending transition",
+                    path.display()
+                )
+            })?;
+        record.validate().with_context(|| {
+            format!(
+                "quarantine leftover {} is not a valid pending transition",
+                path.display()
+            )
+        })?;
+        validate_chain_root_id(&record.chain_root_id)?;
+        let canonical = format!("{}.json", record.chain_root_id);
+        let canonical_os = std::ffi::OsStr::new(&canonical);
+        if pending.restore_quarantine_leftover(&leftover, canonical_os)? {
+            report.restored.push(path.display().to_string());
+            continue;
+        }
+        let existing = pending.open_regular(canonical_os, false)?;
+        let mut existing_bytes = Vec::new();
+        if let Some(existing) = existing {
+            std::io::Read::read_to_end(&mut &existing, &mut existing_bytes)
+                .with_context(|| format!("read {}", pending.path().join(&canonical).display()))?;
+        }
+        if existing_bytes == bytes {
+            pending.remove_quarantine_leftover(&leftover)?;
+            report.removed.push(path.display().to_string());
+        } else {
+            anyhow::bail!(
+                "quarantine leftover {} differs from {}; the order cannot be decided, resolve by hand",
+                path.display(),
+                pending.path().join(&canonical).display()
+            );
+        }
+    }
+    Ok(report)
+}
+
 impl RecoveryStore {
     /// Borrow the SAME pinned directory allocations while preserving the
     /// typed semantic recovery owner. This cannot acknowledge recovery or
@@ -5208,6 +5296,145 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
         assert!(store.read_pending("../escape").is_err());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn pending_dir(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("recovery/thread-projection/pending")
+    }
+
+    /// Stand in for a daemon stopped after Lillux moved the pending file to
+    /// its quarantine name and before it unlinked it.
+    fn kill_after_quarantine_move(root: &std::path::Path, chain: &str) -> std::path::PathBuf {
+        let dir = pending_dir(root);
+        let quarantined = dir.join(format!(".ryeos-quarantine.{}.7", dead_pid()));
+        std::fs::rename(dir.join(format!("{chain}.json")), &quarantined).unwrap();
+        quarantined
+    }
+
+    #[test]
+    fn a_leftover_from_a_killed_remove_is_restored_and_replayed_at_node_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-kill");
+        store
+            .prepare_set(&lock, "T-kill", None, &hash("a"))
+            .unwrap();
+        let quarantined = kill_after_quarantine_move(temp.path(), "T-kill");
+        assert!(
+            store.list_pending().is_err(),
+            "the scan refuses before settlement"
+        );
+
+        let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
+        assert_eq!(report.restored, vec![quarantined.display().to_string()]);
+        assert!(!quarantined.exists());
+        let pending = store.list_pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].chain_root_id, "T-kill");
+    }
+
+    #[test]
+    fn an_identical_canonical_file_lets_the_leftover_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-same");
+        store
+            .prepare_set(&lock, "T-same", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let copy = dir.join(format!(".ryeos-quarantine.{}.9", dead_pid()));
+        std::fs::copy(dir.join("T-same.json"), &copy).unwrap();
+        let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
+        assert_eq!(report.removed, vec![copy.display().to_string()]);
+        assert!(!copy.exists());
+        assert_eq!(store.list_pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_differing_canonical_file_refuses_with_both_paths_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-diff");
+        store
+            .prepare_set(&lock, "T-diff", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let copy = dir.join(format!(".ryeos-quarantine.{}.9", dead_pid()));
+        std::fs::copy(dir.join("T-diff.json"), &copy).unwrap();
+        let mut record: PendingChainHeadTransition =
+            serde_json::from_slice(&std::fs::read(&copy).unwrap()).unwrap();
+        record.transition_id = "transition-other".into();
+        std::fs::write(&copy, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = settle_pending_quarantine_leftovers_at_node_start(temp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&copy.display().to_string()), "{error}");
+        assert!(error.contains("T-diff.json"), "{error}");
+        assert!(copy.exists(), "a refused leftover is kept");
+    }
+
+    #[test]
+    fn an_undecodable_leftover_refuses_and_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let _store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let dir = pending_dir(temp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join(format!(".ryeos-quarantine.{}.3", dead_pid()));
+        std::fs::write(&junk, b"not json").unwrap();
+        let error = format!(
+            "{:#}",
+            settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap_err()
+        );
+        assert!(error.contains(&junk.display().to_string()), "{error}");
+        assert!(junk.exists());
+    }
+
+    #[test]
+    fn a_near_miss_name_is_never_settled_and_still_refuses_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-near");
+        store
+            .prepare_set(&lock, "T-near", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        for name in [
+            format!(".ryeos-quarantine.{}.07", dead_pid()),
+            format!(".ryeos-quarantine.{}", dead_pid()),
+            format!(".ryeos-quarantine.x.7"),
+            format!("ryeos-quarantine.{}.7", dead_pid()),
+        ] {
+            let path = dir.join(&name);
+            std::fs::copy(dir.join("T-near.json"), &path).unwrap();
+            let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
+            assert_eq!(report, QuarantineSettlement::default(), "{name}");
+            assert!(path.exists(), "{name}");
+            assert!(store.list_pending().is_err(), "{name} must still refuse");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_leftover_whose_pid_is_live_is_deferred_never_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-live");
+        store
+            .prepare_set(&lock, "T-live", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let live = dir.join(format!(".ryeos-quarantine.{}.1", std::process::id()));
+        std::fs::rename(dir.join("T-live.json"), &live).unwrap();
+        let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
+        assert_eq!(report.deferred_live_pid, vec![live.display().to_string()]);
+        assert!(live.exists());
     }
 
     #[test]

@@ -133,6 +133,7 @@ pub use provider_call_observation::{
     ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
+    settle_pending_quarantine_leftovers_at_node_start, QuarantineSettlement,
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
     DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, EvidenceValidator,
     HeadOperation, PendingChainHeadTransition, PendingTransitionCursor,
