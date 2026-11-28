@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T05:07:31Z:7ab3a95d3760e9af88a2b726e07421de00f97a52def0c146982bc53980d3147a:h2ExKuM+eqs7gqNKZCgNzgQRzHRC5y+LyrIKc9AZoo17jqUnSreTVXFfKclqdkLyx893tnB22DixGytpnrteAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T18:44:13Z:c04312c741ff14899523a3723f51f53898372abf4c2d2970cc9570e1a4ef3901:ddf4VWgJkHCeFkw+zcv6yZHLSXkAh559k7QiHuLIhlP1oU5XIRX3hBliKHCEqDAh3w4wtCRkV9muslQaxbrAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/registry-production
 #   version: "1.0.4"
@@ -30,7 +30,7 @@
 #     - id: registry-inputs
 #       kind: tree
 #       mode: pinned
-#       digest: 103fd314822803558880d093ad1816452976297861af67cb290028019a73d7b8
+#       digest: 2a91ea6de6974818aa6276fd997ca0de4cfb4c60b1fecb9d1273822a57af7a16
 #       mount_root: execution_runtime
 #       mount: registry-inputs
 

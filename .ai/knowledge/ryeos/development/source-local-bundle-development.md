@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T06:50:21Z:f72582eabd39346b7f23fa190ec523342e3f46b5b3e82be7c5c605769b83bdd7:xnP+MjgCJv9fk+JXwE1Q1Du9CrAPxf1EQ1yxiS8ffKhdrVTYqctNgGLnf1VpGDKKM9ckWy40ngBw8+CR811zAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T18:44:13Z:2634af46c85b3ee108020721d1b43915c137f08f71912e000b9cd37d1de7fe30:ZBTtea3tuvDNLWJ8QWnqXm64ZB9mpQdjyFggM8QQj4g4DeNwh6fviHhBdr3ScECwyiWnSh6LOt9+FN522TcVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -1499,19 +1499,15 @@ refuses any other source. The browser renderer, whose Rune dependencies come
 from git, is therefore its own Cargo workspace with its own lock
 (`crates/clients/rune`), outside what the release chain vendors.
 
-Current release-authority acquisition (2026-11-18) used this entry and the
-crates.io-only root lock (437 locked registry entries). The finished tree is
-retained at
-`/home/leo/.local/share/ryeos-release-authority-imports/development-registry-inputs-c4e58a807`.
-Node import under the declared `release-imports` root measured 1,199 entries,
-75,076,744 bytes and manifest
-`103fd314822803558880d093ad1816452976297861af67cb290028019a73d7b8`
-(request `9fb3a6a463b13397785f949f746d9a0874eb63ed10062b8e2886e010d11b5ca3`,
-staging `upload-18e90b5fa3f68e62-7df-25`). The signed registry-production Tool
+Current release-authority acquisition (2026-11-28) used this entry and the
+crates.io-only root lock (sha256 `ae121e683588ac61fca4e4df2b27ca65f79849dc874d3df24ce1fb045e14ba23`,
+437 locked registry entries). A node import under a declared `release-imports`
+root measured 1,199 entries, 75,080,176 bytes and manifest
+`2a91ea6de6974818aa6276fd997ca0de4cfb4c60b1fecb9d1273822a57af7a16`
+(request `7613eabd5c19eb9c5b1f31cdb466cf18968538728f05ff82138d34d76d01802e`,
+staging `upload-18ec49ba25536d1e-5aff-3`). The signed registry-production Tool
 pins this measured input. Any change to the root lock's registry packages
-needs a new acquisition, import and pin. The September tree
-(`development-registry-inputs`, manifest `9de03677...`, 414 entries) no longer
-matches the lock.
+needs a new acquisition, import and pin.
 
 The signed `registry-production/assemble` Tool takes the same lock and public
 selection Config plus `config:development/ryeos/registry-production` for project

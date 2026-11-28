@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T03:53:24Z:def5b90c536b19b8867e3454b87d8a394c71443b61632c5955f1230b3e3450b7:bPlVENfKsqr2gjA1VCayZujhZd4D2qK1yBV0aI26aEkD0RowD1rOtiG8kapNfUA7/cgecNraw8W/sshrsit+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T18:44:13Z:718a3f12994d4b8c413e097233fcf175050b9a4bea54ba63fff9c71c70b1808c:lUPA7w0wCXVbh+j/ylQc85AN/MJq9jE99xCngKVAwmdW2VC/BEyzQU3hnyX6MHqZCcdZw6mqaVspMsYchkwnBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 name: cargo-vendor-lock-intent
 version: "1.0.0"
@@ -8,4 +8,4 @@ schema: ryeos.cargo_vendor_lock_intent.v1
 # Standard manifest to share the installed publisher's trusted signature.
 # Exact lock for this authored source generation; later changes require
 # a newly signed intent, never a runtime-derived expected value.
-expected_sha256: c260263c09e021af12f66db51ba81af9bab4165db43837dd3e229ff7ab3ec7d8
+expected_sha256: ae121e683588ac61fca4e4df2b27ca65f79849dc874d3df24ce1fb045e14ba23
