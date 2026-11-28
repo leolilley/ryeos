@@ -117,6 +117,10 @@ impl RequestOwners {
 }
 
 #[cfg(test)]
+#[path = "../../../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
@@ -172,12 +176,10 @@ mod tests {
         assert_eq!(owners.close_and_join(Duration::from_millis(50)).await, 1);
     }
 
-    #[path = "../../../../../../../../tests/support/rust_source_text.rs"]
-    mod rust_source_text;
-
     #[test]
     fn shutdown_joins_the_request_owners_before_the_scheduler_database_closes() {
-        let main = rust_source_text::production_text("daemon main", include_str!("../../main.rs"));
+        let main =
+            super::rust_source_text::production_text("daemon main", include_str!("../../main.rs"));
         let join = main
             .find("join_request_owners(")
             .expect("shutdown joins the request owners");
@@ -193,7 +195,7 @@ mod tests {
     #[test]
     fn the_transport_runs_every_request_owner_through_the_tracker() {
         let transport =
-            rust_source_text::production_text("uds transport", include_str!("transport.rs"));
+            super::rust_source_text::production_text("uds transport", include_str!("transport.rs"));
         assert!(
             transport.contains("request_owners().spawn("),
             "a request owner is spawned through the tracker"
