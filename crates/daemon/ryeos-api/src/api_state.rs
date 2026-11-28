@@ -10,8 +10,6 @@
 //! webhook dedupe store via the invocation context.
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-
 use crate::routes::RouteTable;
 use crate::routes::webhook_dedupe::WebhookDedupeStore;
 use ryeos_app::state::AppState;
@@ -23,7 +21,9 @@ pub struct ApiState {
     /// publication requires this to be present.
     pub publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
     pub app: Arc<AppState>,
-    pub route_table: Arc<ArcSwap<RouteTable>>,
+    /// Built once at boot from the node's configuration and never replaced:
+    /// a running node's routes do not change.
+    pub route_table: Arc<RouteTable>,
     pub webhook_dedupe: Arc<WebhookDedupeStore>,
 }
 

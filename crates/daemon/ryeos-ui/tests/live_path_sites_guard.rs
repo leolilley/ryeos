@@ -5,11 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
 /// What marks a file as choosing a live filesystem project.
 const LIVE_MARKERS: &[&str] = &[
     "ProjectSource::LiveFs",
     "ProjectSource::CaptureLiveFullProject",
     "SubjectResolutionAuthority::LiveFs",
+    "for_live_project_root(",
 ];
 
 /// What counts as calling the admission function.
@@ -24,6 +28,7 @@ const MUST_ADMIT: &[&str] = &[
     "crates/bin/daemon/src/scheduler_impl.rs",
     "crates/daemon/ryeos-api/src/handlers/bundle_release.rs",
     "crates/daemon/ryeos-api/src/handlers/bundle_smoke.rs",
+    "crates/daemon/ryeos-api/src/handlers/items_effective.rs",
     "crates/daemon/ryeos-api/src/handlers/scheduler_register.rs",
     "crates/daemon/ryeos-api/src/handlers/threads_input.rs",
     "crates/daemon/ryeos-api/src/handlers/tool_env_check.rs",
@@ -97,6 +102,10 @@ const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
         "executor project-source resolution given an already-admitted path",
     ),
     (
+        "crates/daemon/ryeos-app/src/thread_lifecycle.rs",
+        "its live markers are a validation match arm and the live non-execution root context, whose production callers are pinned below: admit_non_execution_root takes the node's app root, and the pinned-directory variant takes an admitted binding attachment's retained directory",
+    ),
+    (
         "crates/tools/core-tools/src/actions/doctor.rs",
         "tool subprocess; its path arguments are the V3 item, and the tool is kept out of every non-operator class until a structural fix lands",
     ),
@@ -107,6 +116,38 @@ const NEEDS_NO_ADMISSION: &[(&str, &str)] = &[
     (
         "crates/tools/core-tools/src/actions/inspect/verify.rs",
         "tool subprocess; see doctor.rs",
+    ),
+    (
+        "crates/daemon/ryeos-api/src/surface_views.rs",
+        "embeds a surface's views under a root its caller already holds; its only non-test callers are items_effective.rs (admitted) and ui_launch_mint.rs (operator-only), pinned below",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_field_project.rs",
+        "the request has no project parameter; the root is the retained project of the admitted UI session, or none",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_items.rs",
+        "a seat bound to a project reads that project; only the admitted operator's own seat may name one, and any other seat naming a path is refused (pinned below)",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs",
+        "its project root comes from authorize_launch_project, which admits only the node's operator (project_seat_operator_only for any other key); revalidation reuses the stored binding's root (pinned below)",
+    ),
+    (
+        "crates/daemon/ryeos-ui/src/themes.rs",
+        "loads installed themes with no project: the root is None",
+    ),
+    (
+        "crates/bin/cli/src/effective_metadata.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
+    ),
+    (
+        "crates/bin/cli/src/lifecycle_host_access.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
+    ),
+    (
+        "crates/bin/cli/src/offline_dispatch.rs",
+        "local process on the operator's own machine; the path is the operator's command line, not a key's request",
     ),
 ];
 
@@ -129,6 +170,14 @@ const PINNED_MARKER_LINES: &[(&str, &[&str])] = &[
     (
         "crates/daemon/ryeos-app/src/execution_provenance.rs",
         &["ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs"],
+    ),
+    (
+        "crates/daemon/ryeos-app/src/thread_lifecycle.rs",
+        &[
+            "ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,",
+            "&ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,",
+            "subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,",
+        ],
     ),
     (
         "crates/daemon/ryeos-app/src/resolution_cache.rs",
@@ -160,6 +209,9 @@ const ROOT_LIVE_FS_CALLERS: &[&str] = &[
     "crates/daemon/ryeos-api/src/routes/invokers/launch_invocation.rs",
     "crates/daemon/ryeos-ui/src/handlers/ui_invocations_dispatch.rs",
     "crates/daemon/ryeos-app/src/execution_provenance.rs",
+    // Resume: the path is the stored record's recorded project root, refused
+    // unless it still canonicalizes to itself and is a directory.
+    "crates/engine/ryeos-executor/src/execution/runner.rs",
 ];
 
 /// Production files that name a root or child live provenance variant: the
@@ -171,6 +223,9 @@ const ROOT_LIVE_FS_CALLERS: &[&str] = &[
 const LIVE_VARIANT_FILES: &[&str] = &[
     "crates/daemon/ryeos-app/src/execution_provenance.rs",
     "crates/daemon/ryeos-app/src/launch_metadata.rs",
+    // A reader: one match arm maps a built live provenance to the admitted
+    // project materialization; it chooses no path and builds no provenance.
+    "crates/daemon/ryeos-app/src/thread_lifecycle.rs",
     "crates/daemon/ryeos-app/src/thread_lifecycle/sealed_request.rs",
     "crates/engine/ryeos-executor/src/execution/runner.rs",
 ];
@@ -185,7 +240,7 @@ fn live_provenance_has_only_the_listed_constructors_and_matchers() {
     let mut root_variant = std::collections::BTreeSet::new();
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let body = non_test_text(&text);
+        let body = non_test_text(&file.to_string_lossy(), &text);
         let name = file.to_string_lossy().replace('\\', "/");
         if body.contains("root_live_fs(") {
             roots.insert(name.clone());
@@ -222,7 +277,8 @@ fn the_matcher_files_have_exactly_their_pinned_live_path_lines() {
     let root = ryeos_engine::test_support::workspace_root();
     for (path, pinned) in PINNED_MARKER_LINES {
         let text = std::fs::read_to_string(root.join(path)).unwrap();
-        let found: Vec<&str> = non_test_text(&text)
+        let production = non_test_text(path, &text);
+        let found: Vec<&str> = production
             .lines()
             .map(str::trim)
             .filter(|line| LIVE_MARKERS.iter().any(|marker| line.contains(marker)))
@@ -249,39 +305,20 @@ fn workspace_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Where a source file's test module starts: a `#[cfg(test)]` line directly
-/// followed by `mod`, `pub mod` or `pub(crate) mod`. An item-level
-/// `#[cfg(test)]` is legal anywhere and is not the end of production code.
-fn test_module_start(text: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(at) = text[from..].find("\n#[cfg(test)]\n") {
-        let start = from + at;
-        let next = text[start + "\n#[cfg(test)]\n".len()..].trim_start();
-        if next.starts_with("mod ")
-            || next.starts_with("pub mod ")
-            || next.starts_with("pub(crate) mod ")
-            || next.starts_with("pub(super) mod ")
-        {
-            return Some(start);
-        }
-        from = start + 1;
-    }
-    None
-}
-
-/// The production text of a source file. A file with no test module is
-/// production in full; the sweep asserts that many files do have one, so a
-/// cut that stops matching fails the guard instead of passing silently.
-fn non_test_text(text: &str) -> &str {
-    test_module_start(text).map_or(text, |end| &text[..end])
+/// The production text of a source file: the file without its `#[cfg(test)]`
+/// items (the shared helper), so code after a test module is read too. The
+/// sweep asserts that many files lose text, so a cut that stops matching fails
+/// the guard instead of passing silently.
+fn non_test_text(label: &str, text: &str) -> String {
+    rust_source_text::production_text(label, text)
 }
 
 #[test]
 fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     // A new site or a moved exemption changes these counts and so fails here:
     // add the file to the right list, with a reason if it is exempt.
-    assert_eq!(MUST_ADMIT.len(), 7, "the must-admit list changed");
-    assert_eq!(NEEDS_NO_ADMISSION.len(), 19, "the exemption list changed");
+    assert_eq!(MUST_ADMIT.len(), 8, "the must-admit list changed");
+    assert_eq!(NEEDS_NO_ADMISSION.len(), 28, "the exemption list changed");
     let root = ryeos_engine::test_support::workspace_root();
     let mut files = Vec::new();
     workspace_files(&root, &root.join("crates"), &mut files);
@@ -292,8 +329,12 @@ fn every_live_project_site_admits_its_path_or_is_named_with_a_reason() {
     let mut with_test_module = 0_usize;
     for file in &files {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        with_test_module += usize::from(test_module_start(&text).is_some());
-        let body = non_test_text(&text);
+        with_test_module += usize::from(
+            non_test_text(&file.to_string_lossy(), &text)
+                .lines()
+                .ne(text.lines()),
+        );
+        let body = non_test_text(&file.to_string_lossy(), &text);
         if !LIVE_MARKERS.iter().any(|marker| body.contains(marker)) {
             continue;
         }
@@ -383,7 +424,11 @@ fn the_route_loader_scans_node_space_and_installed_bundles_only() {
     let text =
         std::fs::read_to_string(root.join("crates/daemon/ryeos-app/src/node_config/loader.rs"))
             .unwrap();
-    let production = &text[..test_module_start(&text).expect("loader.rs has a test module")];
+    let production = non_test_text("node_config/loader.rs", &text);
+    assert!(
+        production.lines().ne(text.lines()),
+        "loader.rs has a test module and the cut still removes it"
+    );
     assert!(production.contains("fn system_scan_root"));
     assert!(production.contains("fn bundle_scan_root"));
     for forbidden in [
@@ -427,7 +472,7 @@ fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
-        let body = non_test_text(&text);
+        let body = non_test_text(&path.display().to_string(), &text);
         if !body.contains("project_path") {
             continue;
         }
@@ -453,4 +498,204 @@ fn every_response_mode_that_carries_a_project_path_checks_it_is_literal() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The exact lines that name a provenance constructor or variant in the two
+/// files the shared production-text cut newly reads. A second, different line
+/// there is a new site and trips the guard.
+const PINNED_PROVENANCE_LINES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "crates/engine/ryeos-executor/src/execution/runner.rs",
+        &["root_live_fs("],
+        &["let provenance = ExecutionProvenance::root_live_fs("],
+    ),
+    (
+        "crates/daemon/ryeos-app/src/thread_lifecycle.rs",
+        &["RootLiveProject {", "ChildLiveProject {"],
+        &[
+            "crate::execution_provenance::ExecutionProvenance::RootLiveProject { .. }",
+            "| crate::execution_provenance::ExecutionProvenance::ChildLiveProject { .. } => {",
+        ],
+    ),
+];
+
+#[test]
+fn the_resume_and_materialization_provenance_sites_have_exactly_their_pinned_lines() {
+    let root = ryeos_engine::test_support::workspace_root();
+    for (path, needles, pinned) in PINNED_PROVENANCE_LINES {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        let production = non_test_text(path, &text);
+        let found: Vec<&str> = production
+            .lines()
+            .map(str::trim)
+            .filter(|line| needles.iter().any(|needle| line.contains(needle)))
+            .collect();
+        assert_eq!(&found, pinned, "{path}: its live provenance lines changed");
+    }
+}
+
+/// `admit_non_execution_root` takes any path and resolves a live project from
+/// it, so its callers are pinned: the only production caller is the UI seat
+/// admission, which hands it the node's own app root, never a path a caller
+/// named; the pinned-directory variant is handed the retained directory of an
+/// admitted binding attachment. A new caller, or a different argument, fails.
+/// (The structural fix, an admission that takes no path, is carried on IH-77.)
+#[test]
+fn the_non_execution_root_admissions_are_called_only_with_the_node_root_or_an_admitted_directory() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let mut files = Vec::new();
+    workspace_files(&root, &root.join("crates"), &mut files);
+    let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut by_path = Vec::new();
+    let mut by_directory = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        let production = squash(&non_test_text(&file.to_string_lossy(), &text));
+        let name = file.to_string_lossy().replace('\\', "/");
+        if production.contains("::admit_non_execution_root(") {
+            by_path.push((name.clone(), production.clone()));
+        }
+        if production.contains("::admit_non_execution_root_under_project_authority(") {
+            by_directory.push((name, production));
+        }
+    }
+    let seat = "crates/daemon/ryeos-ui/src/handlers/ui_seat.rs";
+    assert_eq!(
+        by_path
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        [seat],
+        "the production callers of admit_non_execution_root changed"
+    );
+    assert!(
+        by_path[0].1.contains(
+            "::admit_non_execution_root( &state.engine, node_history_policy, &state.config.app_root, request, )"
+        ),
+        "admit_non_execution_root is no longer handed exactly the node's app root"
+    );
+    assert_eq!(
+        by_directory
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        [seat],
+        "the production callers of admit_non_execution_root_under_project_authority changed"
+    );
+    assert!(
+        by_directory[0].1.contains(
+            "::admit_non_execution_root_under_project_authority( &state.engine, node_history_policy, access.directory(), request, )"
+        ),
+        "the pinned-directory admission is no longer handed exactly an admitted attachment's directory"
+    );
+}
+
+/// `items.effective` resolves items from the request's `project_path` through
+/// `SubjectResolutionAuthority::for_live_project_root`, a spelling the marker
+/// scan above does not see, so its admission is pinned here by the call chain:
+/// the path reaches the engine only as the admitted canonical root, and the
+/// handler never builds a path from the request text itself.
+#[test]
+fn items_effective_resolves_only_from_an_admitted_project_path() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let text = std::fs::read_to_string(
+        root.join("crates/daemon/ryeos-api/src/handlers/items_effective.rs"),
+    )
+    .unwrap();
+    let body = non_test_text("items_effective.rs", &text);
+    let admit = body
+        .find("ryeos_app::live_project_path::admit_handler_live_path(")
+        .expect("items.effective admits its project path with admit_handler_live_path");
+    let first_use = body
+        .find("for_live_project_root(")
+        .expect("items.effective builds the live authority from the project root");
+    assert!(admit < first_use, "the path is admitted before it is used");
+    assert!(
+        body[admit..first_use].contains(".canonical"),
+        "the root the engine receives is the admitted canonical path"
+    );
+    assert_eq!(
+        body.matches("req.project_path").count(),
+        1,
+        "the request's project_path is read once, to be admitted"
+    );
+    for forbidden in ["PathBuf::from(", "std::fs::canonicalize("] {
+        assert!(
+            !body.contains(forbidden),
+            "items.effective must not build or canonicalise a path from the request: `{forbidden}`"
+        );
+    }
+}
+
+/// The exempt daemon sites that hand a root on or take it from a seat, pinned
+/// by call chain: who may reach `surface_views`, how `ui.launch.mint` gets its
+/// root, and how `ui.items` decides which project a seat reads.
+#[test]
+fn the_exempt_daemon_sites_get_their_roots_only_from_admission() {
+    let root = ryeos_engine::test_support::workspace_root();
+    let mut files = Vec::new();
+    workspace_files(&root, &root.join("crates"), &mut files);
+    let mut callers = std::collections::BTreeSet::new();
+    for file in &files {
+        let name = file.to_string_lossy().replace('\\', "/");
+        if name == "crates/daemon/ryeos-api/src/surface_views.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        if non_test_text(&name, &text).contains("surface_views::embed_") {
+            callers.insert(name);
+        }
+    }
+    assert_eq!(
+        callers.into_iter().collect::<Vec<_>>(),
+        [
+            "crates/daemon/ryeos-api/src/handlers/items_effective.rs",
+            "crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs",
+        ],
+        "a new caller of surface_views must be admitted or operator-only, and named here"
+    );
+
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    let mint = read("crates/daemon/ryeos-ui/src/handlers/ui_launch_mint.rs");
+    let mint = non_test_text("ui_launch_mint.rs", &mint);
+    assert!(
+        mint.contains("ui_projects::authorize_launch_project("),
+        "ui.launch.mint takes its project from authorize_launch_project"
+    );
+    // rustfmt may split `req.project_path` across lines, so count it with the
+    // whitespace removed.
+    let compact: String = mint.chars().filter(|c| !c.is_whitespace()).collect();
+    assert_eq!(
+        compact.matches("req.project_path").count(),
+        1,
+        "the request's project_path is read once, to be authorized"
+    );
+    let projects = read("crates/daemon/ryeos-ui/src/handlers/ui_projects.rs");
+    let projects = non_test_text("ui_projects.rs", &projects);
+    let start = projects
+        .find("fn authorize_launch_project(")
+        .expect("authorize_launch_project exists");
+    let end = projects[start..].find("\n}\n").expect("the function ends") + start;
+    let body = &projects[start..end];
+    assert!(
+        body.contains("require_admitted_operator(") && body.contains("project_seat_operator_only"),
+        "authorize_launch_project admits only the operator and refuses every other key"
+    );
+
+    let items = read("crates/daemon/ryeos-ui/src/handlers/ui_items.rs");
+    let items = non_test_text("ui_items.rs", &items);
+    assert_eq!(
+        items.matches("seat_project_path(&caller").count(),
+        2,
+        "items.list and item.inspect both choose their project with seat_project_path"
+    );
+    assert_eq!(
+        items.matches("get(\"project_path\")").count(),
+        1,
+        "the request's project_path is read only in seat_project_path"
+    );
+    assert!(
+        items.contains("SeatCaller::Operator { .. }, named)"),
+        "only the operator's seat may name a project"
+    );
 }

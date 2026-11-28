@@ -9,12 +9,15 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
 /// (function, expected count of `name(` occurrences in non-test source outside
-/// operator_authority.rs, up to the file's top-level test module: an item-level
-/// `#[cfg(test)]` earlier in a file is not the end of its production code). The seventh is a substring of the third, as the
+/// operator_authority.rs: the file without its `#[cfg(test)]` items, so code
+/// after a test module counts). The seventh is a substring of the third, as the
 /// scan counts text.
 const EXPECTED: &[(&str, usize)] = &[
-    ("require_admitted_operator(", 75),
+    ("require_admitted_operator(", 80),
     ("disclosure_class_for(", 10),
     ("admitted_operator_authority_digest(", 11),
     ("admitted_operator_authority_for_principal(", 10),
@@ -48,19 +51,18 @@ fn the_operator_decision_functions_have_exactly_the_callers_the_impact_table_lis
     sources(&root, &root.join("crates"), &mut files);
     assert!(files.len() > 500, "the sweep found {} files", files.len());
     let mut counts = vec![0_usize; EXPECTED.len()];
-    // A file with no top-level test module is production in full. An
-    // item-level `#[cfg(test)]` is legal anywhere, so only the module ends
-    // production text; the floor fails the guard if the marker's spelling
-    // stops matching and the cut silently stops applying.
+    // Production text is the file without its `#[cfg(test)]` items (the shared
+    // helper blanks each item and keeps the code around it); the floor fails
+    // the guard if the marker's spelling stops matching and the cut silently
+    // stops applying.
     let mut with_test_module = 0_usize;
     for file in &files {
         if file.to_string_lossy() == "crates/daemon/ryeos-app/src/operator_authority.rs" {
             continue;
         }
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let end = text.find("\n#[cfg(test)]\nmod ");
-        with_test_module += usize::from(end.is_some());
-        let body = end.map_or(text.as_str(), |end| &text[..end]);
+        let body = rust_source_text::production_text(&file.to_string_lossy(), &text);
+        with_test_module += usize::from(body.lines().ne(text.lines()));
         for (index, (name, _)) in EXPECTED.iter().enumerate() {
             counts[index] += body.matches(name).count();
         }
