@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T00:35:01Z:7e5edc5f14b3a392e29c9480b2bd6d833b846b36dc43a4a8b2a66a155ad002cd:CXXz/uyFfe+96DY74Mq3x4Xx+H6aQtf+nyIS1yVMhMZXpVk/2e1/kSmhOMGLs+oWCdFRUsmQ/qlgyUYSMlf4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:57:27Z:24e0cdd095d8f7d3051867be3a1335cb615c8d841d40b0b70269162c19ece680:CVS9X6J5im0/4PBiEP1w/w+EzHMoT2YhJJUFTXbLjzdTi+E1N/GmSpmW7fdaDdSkd3mgFxpjPdPcwEhF2Es7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -203,11 +203,15 @@ being admitted.
 - **Refusals:** `admission_token_stale`, `admission_token_invalid` (400);
   `admission_class_mismatch`, `admission_origin_site_mismatch`,
   `admission_cosignature_missing`, `admission_cosignature_invalid` (403)
-- **Membership:** the token names the membership class of the admitted key,
-  and later requests by that key are judged against it: a grant whose retained
-  token record is missing, altered, classless or names a class the node's
-  membership policy does not hold is refused `membership_class_unknown` (403),
-  and the key's scopes are cut by the class scope ceiling.
+- **Membership:** the token names the membership class of the admitted key.
+  The node signs the token record at mint and checks the signature at claim
+  and on every later request. A person's key (`local_client` or
+  `remote_principal`) is judged against its class on every request: a grant
+  whose retained token record is missing, unsigned, altered, classless or names
+  a class the node's membership policy does not hold is refused
+  `membership_class_unknown` (403), and the key's scopes are cut by the class
+  scope ceiling. A `remote_node` grant (a peer node) is never a member and keeps
+  its explicit scopes; only the local operator may mint one.
 - **Used by:** `ryeos remote admit`
 
 ## Thread Routes

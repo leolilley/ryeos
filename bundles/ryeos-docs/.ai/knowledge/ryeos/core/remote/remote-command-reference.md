@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T00:35:01Z:9558186ce9b3fce3161ee8c5e29c414d034b2f9d29e65c3f9622fb983c013087:Ak8Nraw85uvGnRS6ibQUVpDpup3+e21LaRPbr7prX7UEFDYohBAeedb8BP51s4XkxJ/M76w0XOH2Efe3K8B5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:57:27Z:12160417b514340009a161b2a00ef19b9531c6b685d9f3c155694b28b9e5135c:xP5SkOFyOXS8E3vsnjqvPDTLE86oSMvsDpGwZQelVd5KfWfsTqGOwDTALZhXDYyFm/rij/tyD1/jAeTjsXgyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -274,14 +274,18 @@ the claimant must also sign the claim with the key being admitted.
 | `remote_principal` | a principal key forwarded by its home site | the principal signature and a co-signature by an admitted node of the token's origin site |
 
 `--membership-class` is required and names a class of the node's membership
-policy (`guest` above). The token file records it and keeps it after the claim,
-and the admitted key is a member of that class: whatever scopes the claim
-holds, its effective scopes are cut by the class scope ceiling on every
-request. A class the policy does not name is refused at mint with
-`membership_class_unknown`. The class ceiling must therefore cover the scopes
-the token grants, including `ryeos.attest.request.forwarded-operator` for a
-forwarding node. A key that speaks for the node operator's owner, and a key the
-operator authorizes directly (`authorize-key`), is never a member.
+policy (`guest` above). The node signs the token record, the class included,
+and keeps it after the claim. A person's key (`--class local_client` or
+`remote_principal`) admitted by it is a member of that class: whatever scopes
+the claim holds, its effective scopes are cut by the class scope ceiling on
+every request, and an unsigned or altered record admits nothing. A class the
+policy does not name is refused at mint with `membership_class_unknown`. A
+`--class remote_node` token admits a peer node, which is never a member and
+keeps the scopes the token grants (including
+`ryeos.attest.request.forwarded-operator` for a forwarding node); only the
+local operator may mint one. A key that speaks for the node operator's owner,
+and a key the operator authorizes directly (`authorize-key`), is never a
+member.
 
 A `remote_principal` token also needs `--origin-site-id "site:<home>"`; no
 other class accepts one. `--grant-lifetime-secs` optionally shortens the

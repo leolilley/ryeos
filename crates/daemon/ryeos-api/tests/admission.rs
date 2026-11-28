@@ -195,7 +195,7 @@ async fn a_token_record_the_node_did_not_sign_is_refused_at_claim() {
     let cases: [(&str, Box<dyn Fn(&str) -> String>); 3] = [
         (
             "unsigned-token",
-            Box::new(|body| lillux::signature::strip_signature_lines(body)),
+            Box::new(lillux::signature::strip_signature_lines),
         ),
         (
             "wrong-signer-token",
