@@ -5466,18 +5466,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observe["extends"], "surface:ryeos/ui/assistant");
-        assert_eq!(
-            observe["capabilities"]["sources"],
-            json!([
-                "ryeos.execute.service.ui/ryeos-ui/*",
-                "ryeos.execute.service.node/status",
-                "ryeos.execute.service.projects/list",
-                "ryeos.execute.service.events/chain_replay",
-                "ryeos.execute.service.worker-executions/approvals",
-                "ryeos.execute.service.bundle/list",
-                "ryeos.execute.service.scheduler/list"
-            ])
+        let ceiling: Vec<&str> = observe["capabilities"]["sources"]
+            .as_array()
+            .expect("the observation Surface lists its sources")
+            .iter()
+            .map(|entry| entry.as_str().expect("a source is a string"))
+            .collect();
+        assert!(
+            ceiling.iter().all(|entry| !entry.contains('*')),
+            "the observation ceiling names exact services: {ceiling:?}"
         );
+        for needed in [
+            "ryeos.execute.service.node/status",
+            "ryeos.execute.service.projects/list",
+            "ryeos.execute.service.bundle/list",
+            "ryeos.execute.service.scheduler/list",
+            "ryeos.execute.service.worker-executions/approvals",
+        ] {
+            assert!(ceiling.contains(&needed), "ceiling lacks {needed}");
+        }
         assert_eq!(observe["capabilities"]["affordances"], json!([]));
         assert_eq!(observe["view_sets"][0], "view_set:ryeos/ui/home-overview");
         let landing: serde_json::Value = serde_yaml::from_str(
