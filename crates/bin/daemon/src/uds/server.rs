@@ -39,6 +39,7 @@ use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 mod accounting;
 mod consumer_verification;
 mod dedicated_sessions;
+mod request_owners;
 mod routing;
 #[cfg(feature = "crash-qualification-test-support")]
 mod runtime_phase_cut;
@@ -52,6 +53,7 @@ pub(crate) use routing::dispatch;
 struct DynamicServerInner {
     lifecycle: ArcSwap<ryeos_node::LifecycleResponse>,
     application: ArcSwapOption<ryeos_executor::SelectedApplicationPublication>,
+    request_owners: request_owners::RequestOwners,
 }
 
 /// Request-level UDS publication state. The listener can begin serving with
@@ -72,6 +74,7 @@ impl DynamicServerState {
             inner: Arc::new(DynamicServerInner {
                 lifecycle: ArcSwap::from_pointee(lifecycle),
                 application: ArcSwapOption::empty(),
+                request_owners: request_owners::RequestOwners::default(),
             }),
         })
     }
@@ -110,6 +113,19 @@ impl DynamicServerState {
 
     pub fn lifecycle(&self) -> Arc<ryeos_node::LifecycleResponse> {
         self.inner.lifecycle.load_full()
+    }
+
+    /// Close admission of new requests and wait for every in-flight request
+    /// task to finish. Shutdown calls this before it closes the scheduler
+    /// database and the live Store, because a request task holds a clone of
+    /// the application state until it returns. Returns how many tasks were
+    /// still running when `deadline` passed.
+    pub async fn join_request_owners(&self, deadline: std::time::Duration) -> usize {
+        self.inner.request_owners.close_and_join(deadline).await
+    }
+
+    fn request_owners(&self) -> &request_owners::RequestOwners {
+        &self.inner.request_owners
     }
 
     pub fn application_is_published(&self) -> bool {

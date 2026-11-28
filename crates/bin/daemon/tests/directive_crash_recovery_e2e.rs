@@ -1607,3 +1607,98 @@ async fn planned_rollover_with_a_settling_follow_child_exits_75_and_the_run_resu
         .await
         .expect("stop resumed daemon before the test ends");
 }
+
+/// X-39: an orderly stop while a runtime callback request is in flight. The
+/// request task holds the application state, and with it the live Store and
+/// the scheduler gate, until it returns; shutdown must join it before it closes
+/// the scheduler database, so the stop exits 0 with a clean close. The gate
+/// parks the callback at a proven boundary (no timing), and the daemon ends it
+/// on shutdown.
+#[tokio::test(flavor = "multi_thread")]
+async fn orderly_stop_with_a_runtime_request_in_flight_closes_clean_and_exits_0() {
+    let stage = "provider_effect_settled";
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::Text("recovery complete".to_string()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)
+        };
+    let (mut phase_gate, mut phase_child) =
+        RuntimePhaseCutGate::pair(stage).expect("create exact directive phase-cut gate");
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, |command| {
+        phase_child
+            .configure_command(command, stage)
+            .expect("configure exact directive phase-cut channel");
+        command.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
+        command.env(
+            "RUST_LOG",
+            "info,ryeos_directive_runtime=debug,ryeosd=debug",
+        );
+    })
+    .await
+    .expect("start directive daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, false)
+        .expect("plant directive");
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::ZERO,
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+
+    let mut execute_request = start_execute_request(&harness, project.path()).await;
+    let _root_thread_id = await_root_thread(&mut harness, &mut execute_request).await;
+    tokio::select! {
+        result = phase_gate.wait_reached() => {
+            if let Err(error) = result {
+                let stderr = harness.drain_stderr_nonblocking().await;
+                panic!("directive did not report the {stage} boundary: {error:#}\n--- daemon stderr ---\n{stderr}");
+            }
+        }
+        result = &mut execute_request => {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            panic!("execute request settled before the {stage} boundary: {result:?}\n--- daemon stderr ---\n{stderr}");
+        }
+    }
+
+    // The runtime's callback request is now parked inside the daemon.
+    harness
+        .stop_gracefully()
+        .await
+        .expect("an orderly stop with a request in flight exits 0");
+    execute_request.abort();
+    let stderr = harness.stderr_so_far();
+    assert!(
+        !stderr.contains("scheduler database close did not complete"),
+        "the scheduler database must close cleanly\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("still has service owners"),
+        "no request task may still hold the live Store at close\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("native custody remains held"),
+        "an orderly stop must not end in held custody\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&harness.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+}

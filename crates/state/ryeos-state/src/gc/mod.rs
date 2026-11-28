@@ -633,6 +633,10 @@ fn sweep_sharded_directory(
     };
 
     for shard1_name in namespace_dir.entry_names()? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&shard1_name) {
+            continue;
+        }
         let shard1_text = shard1_name
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 CAS shard under {}", dir.display()))?;
@@ -653,6 +657,10 @@ fn sweep_sharded_directory(
             .ok_or_else(|| anyhow::anyhow!("CAS shard is not a directory: {shard1_text}"))?;
 
         for shard2_name in shard1.entry_names()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&shard2_name) {
+                continue;
+            }
             let shard2_text = shard2_name.to_str().ok_or_else(|| {
                 anyhow::anyhow!("non-UTF8 CAS sub-shard under {}", shard1.path().display())
             })?;
@@ -662,6 +670,10 @@ fn sweep_sharded_directory(
             })?;
 
             for file_name in shard2.entry_names()? {
+                // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+                if lillux::is_quarantine_leftover_name(&file_name) {
+                    continue;
+                }
                 let file = match shard2.open_entry(&file_name, false)? {
                     Some(lillux::PinnedDirectoryEntry::Directory(_)) => anyhow::bail!(
                         "CAS leaf contains unexpected directory: {}",
@@ -824,6 +836,10 @@ fn remove_directory_contents(
     result: &mut GcResult,
 ) -> Result<()> {
     for name in directory.entry_names()? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&name) {
+            continue;
+        }
         let entry = directory.open_entry(&name, false)?;
         match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
@@ -843,7 +859,7 @@ fn remove_directory_contents(
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
                 let file_size = file.metadata()?.len();
                 if !dry_run {
-                    directory.remove_if_same(&name, &file)?;
+                    directory.remove_if_same_plain_atomic(&name, &file)?;
                 }
                 result.deleted_runtime_files += 1;
                 result.freed_bytes += file_size;
@@ -901,7 +917,7 @@ fn remove_rebuildable_cache_directory(
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
                 let file_size = file.metadata()?.len();
                 if !dry_run {
-                    cache_directory.remove_if_same(&name, &file)?;
+                    cache_directory.remove_if_same_plain_atomic(&name, &file)?;
                 }
                 result.deleted_runtime_files += 1;
                 result.freed_bytes += file_size;
@@ -1681,6 +1697,46 @@ mod tests {
         assert!(message.contains("rerun GC"), "{message}");
         assert!(retired_format.is_file());
         assert!(foreign.is_file());
+    }
+
+    #[test]
+    fn sweep_skips_exact_quarantine_name_but_refuses_near_miss() {
+        use std::collections::HashSet;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("cas");
+        let hash = lillux::sha256_hex(b"quarantine-skip");
+        let shard = lillux::shard_path(&cas_root, "objects", &hash, ".json")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&shard).unwrap();
+        let exact = shard.join(".ryeos-quarantine.4242.1.YS5qc29u");
+        fs::write(&exact, b"owned by a live remove").unwrap();
+        sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &HashSet::new(),
+            false,
+            &mut GcResult::default(),
+        )
+        .unwrap();
+        assert!(exact.is_file());
+
+        fs::write(shard.join(".ryeos-quarantine.4242.01.YS5qc29u"), b"x").unwrap();
+        assert!(
+            sweep_sharded_dir(
+                &cas_root,
+                "objects",
+                ".json",
+                &HashSet::new(),
+                false,
+                &mut GcResult::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

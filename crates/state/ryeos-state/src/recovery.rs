@@ -2480,6 +2480,59 @@ fn current_guard_file_for_pinned_runtime(
     Ok(held)
 }
 
+/// Settle what a process stopped between Lillux's quarantine move and its
+/// unlink left behind, at node start only. The caller holds the node's
+/// exclusive state lock, so no process is using these directories and the
+/// pid in a leftover's name is never consulted. Covered: the
+/// pending-transition directory and every directory under `<app>/.ai/node`
+/// (node-config sections, schedule sources, project registrations). Each
+/// leftover's name records the file it came from: it is renamed back (what
+/// the failing path would have done), or removed when a byte-identical file
+/// holds the original name. A differing file, or a leftover an older build
+/// wrote (no recorded name), refuses with the path and the operator's step.
+/// Nothing settles while the node runs.
+pub fn settle_quarantine_leftovers_at_node_start(
+    app_root: &Path,
+    runtime_state_dir: &Path,
+) -> Result<lillux::QuarantineSettlement> {
+    let mut report = settle_node_config_quarantine_leftovers(app_root)?;
+    let pending = settle_pending_quarantine_leftovers(runtime_state_dir)?;
+    report.restored.extend(pending.restored);
+    report.removed.extend(pending.removed);
+    Ok(report)
+}
+
+/// The node-config half of start settlement: every directory under
+/// `<app>/.ai/node`. The caller holds the node's exclusive state lock and
+/// calls this before the first read of node configuration, so a section that
+/// a failed removal left in quarantine is back in place before the policy is
+/// composed.
+pub fn settle_node_config_quarantine_leftovers(
+    app_root: &Path,
+) -> Result<lillux::QuarantineSettlement> {
+    match lillux::PinnedDirectory::open(&app_root.join(".ai").join("node"))? {
+        Some(node) => Ok(node.settle_quarantine_leftovers_tree(MAX_RECOVERY_RECORD_BYTES)?),
+        None => Ok(lillux::QuarantineSettlement::default()),
+    }
+}
+
+/// The pending-transition half of start settlement, same exclusion rule.
+pub fn settle_pending_quarantine_leftovers(
+    runtime_state_dir: &Path,
+) -> Result<lillux::QuarantineSettlement> {
+    let mut directory = lillux::PinnedDirectory::open(runtime_state_dir)?;
+    for child in ["recovery", "thread-projection", "pending"] {
+        directory = match directory {
+            Some(parent) => parent.open_child_directory(std::ffi::OsStr::new(child))?,
+            None => None,
+        };
+    }
+    match directory {
+        Some(pending) => Ok(pending.settle_quarantine_leftovers(MAX_RECOVERY_RECORD_BYTES)?),
+        None => Ok(lillux::QuarantineSettlement::default()),
+    }
+}
+
 impl RecoveryStore {
     /// Borrow the SAME pinned directory allocations while preserving the
     /// typed semantic recovery owner. This cannot acknowledge recovery or
@@ -2802,7 +2855,11 @@ impl RecoveryStore {
         let Some(directory) = self.open_child_directory("pending")? else {
             return Ok(0);
         };
-        let entries = directory.regular_files()?;
+        let entries: Vec<_> = directory
+            .regular_files()?
+            .into_iter()
+            .filter(|entry| !lillux::is_quarantine_leftover_name(entry.name()))
+            .collect();
         for entry in &entries {
             if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 anyhow::bail!(
@@ -3008,6 +3065,11 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
+            // A live conditional remove may own an exactly-named quarantine
+            // file; settlement happens only at node start.
+            if lillux::is_quarantine_leftover_name(entry.name()) {
+                continue;
+            }
             match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
@@ -3103,6 +3165,11 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
+            // A live conditional remove may own an exactly-named quarantine
+            // file; settlement happens only at node start.
+            if lillux::is_quarantine_leftover_name(entry.name()) {
+                continue;
+            }
             match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
@@ -3193,6 +3260,11 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
+            // A live conditional remove may own an exactly-named quarantine
+            // file; settlement happens only at node start.
+            if lillux::is_quarantine_leftover_name(entry.name()) {
+                continue;
+            }
             match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
@@ -3319,7 +3391,11 @@ impl RecoveryStore {
         let Some(directory) = self.open_child_directory("pending")? else {
             return Ok(Vec::new());
         };
-        let entries = directory.regular_files()?;
+        let entries: Vec<_> = directory
+            .regular_files()?
+            .into_iter()
+            .filter(|entry| !lillux::is_quarantine_leftover_name(entry.name()))
+            .collect();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
             let path = entry.path();
@@ -3354,6 +3430,11 @@ impl RecoveryStore {
         let directory = self.open_child_directory("pending")?;
         if let Some(directory) = directory.as_ref() {
             for entry in directory.regular_files()? {
+                // A live conditional remove may own an exactly-named quarantine
+                // file; settlement happens only at node start.
+                if lillux::is_quarantine_leftover_name(entry.name()) {
+                    continue;
+                }
                 check()?;
                 entries.push(entry.name().to_os_string());
             }
@@ -3638,6 +3719,11 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
+            // A live conditional remove may own an exactly-named quarantine
+            // file; settlement happens only at node start.
+            if lillux::is_quarantine_leftover_name(entry.name()) {
+                continue;
+            }
             match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
@@ -3799,9 +3885,14 @@ fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUp
     Ok(record)
 }
 
+/// The longest chain root id: a thread id is `T-` and at most 126 more
+/// bytes. Bounded so the `<id>.json` pending file name always fits the
+/// quarantine name (153 bytes of original).
+pub(crate) const MAX_CHAIN_ROOT_ID_BYTES: usize = 128;
+
 pub(crate) fn validate_chain_root_id(value: &str) -> Result<()> {
     if value.is_empty()
-        || value.len() > 255
+        || value.len() > MAX_CHAIN_ROOT_ID_BYTES
         || value == "."
         || value == ".."
         || value.contains('/')
@@ -5208,6 +5299,338 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
         assert!(store.read_pending("../escape").is_err());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn pending_dir(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("recovery/thread-projection/pending")
+    }
+
+    fn leftover_name(original: &str, pid: u32, seq: u64) -> std::ffi::OsString {
+        lillux::quarantine_name(std::ffi::OsStr::new(original), pid, seq).unwrap()
+    }
+
+    fn settle(
+        app: &std::path::Path,
+        runtime: &std::path::Path,
+    ) -> Result<lillux::QuarantineSettlement> {
+        settle_quarantine_leftovers_at_node_start(app, runtime)
+    }
+
+    /// Stand in for a daemon stopped after Lillux moved a file to its
+    /// quarantine name and before it unlinked it.
+    fn plant_leftover(dir: &std::path::Path, original: &str, body: &[u8]) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(leftover_name(original, dead_pid(), 7));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_process_killed_inside_the_conditional_remove_is_settled_at_the_next_start() {
+        const CHILD: &str = "RYEOS_X35_KILL_CHILD_DIR";
+        if let Ok(dir) = std::env::var(CHILD) {
+            let directory = lillux::PinnedDirectory::open(std::path::Path::new(&dir))
+                .unwrap()
+                .unwrap();
+            let name = std::ffi::OsStr::new("T-real.json");
+            let file = directory.open_regular(name, false).unwrap().unwrap();
+            let _ =
+                directory.remove_if_same_validated_atomic(name, &file, |_| std::process::abort());
+            std::process::exit(3);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-real");
+        store
+            .prepare_set(&lock, "T-real", None, &hash("a"))
+            .unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recovery::tests::a_process_killed_inside_the_conditional_remove_is_settled_at_the_next_start",
+                "--test-threads",
+                "1",
+            ])
+            .env(CHILD, pending_dir(temp.path()))
+            .output()
+            .unwrap();
+        assert!(
+            !child.status.success(),
+            "the child must die at the kill point"
+        );
+        assert!(!pending_dir(temp.path()).join("T-real.json").exists());
+
+        let app = tempfile::tempdir().unwrap();
+        let report = settle(app.path(), temp.path()).unwrap();
+        assert_eq!(report.restored.len(), 1, "{report:?}");
+        let pending = store.list_pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].chain_root_id, "T-real");
+    }
+
+    #[test]
+    fn a_leftover_named_with_a_live_unrelated_pid_is_still_settled_at_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-live");
+        store
+            .prepare_set(&lock, "T-live", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let live = dir.join(leftover_name("T-live.json", std::process::id(), 1));
+        std::fs::rename(dir.join("T-live.json"), &live).unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let report = settle(app.path(), temp.path()).unwrap();
+        assert_eq!(report.restored, vec![live]);
+        assert_eq!(store.list_pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_identical_original_lets_the_leftover_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-same");
+        store
+            .prepare_set(&lock, "T-same", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let copy = dir.join(leftover_name("T-same.json", dead_pid(), 9));
+        std::fs::copy(dir.join("T-same.json"), &copy).unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let report = settle(app.path(), temp.path()).unwrap();
+        assert_eq!(report.removed, vec![copy.clone()]);
+        assert!(!copy.exists());
+        assert_eq!(store.list_pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_differing_original_refuses_with_both_paths_named_and_keeps_the_leftover() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-diff");
+        store
+            .prepare_set(&lock, "T-diff", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let copy = dir.join(leftover_name("T-diff.json", dead_pid(), 9));
+        std::fs::write(&copy, b"{}").unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let error = format!("{:#}", settle(app.path(), temp.path()).unwrap_err());
+        assert!(error.contains(&copy.display().to_string()), "{error}");
+        assert!(error.contains("T-diff.json"), "{error}");
+        assert!(copy.exists());
+    }
+
+    #[test]
+    fn a_plain_leftover_in_a_node_controlled_directory_refuses_start_with_a_typed_error_naming_the_path()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let _store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        std::fs::create_dir_all(pending_dir(temp.path())).unwrap();
+        let old = pending_dir(temp.path()).join(format!(".ryeos-quarantine.{}.3", dead_pid()));
+        std::fs::write(&old, b"{}").unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let error = settle(app.path(), temp.path()).unwrap_err();
+        let typed = error
+            .downcast_ref::<lillux::PlainQuarantineLeftover>()
+            .unwrap();
+        assert_eq!(typed.path, old);
+        assert!(error.to_string().contains("rename it back"), "{error}");
+        assert!(old.exists());
+    }
+
+    #[test]
+    fn a_near_miss_name_is_never_settled_and_still_refuses_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-near");
+        store
+            .prepare_set(&lock, "T-near", None, &hash("a"))
+            .unwrap();
+        let dir = pending_dir(temp.path());
+        let good = leftover_name("T-near.json", dead_pid(), 7)
+            .into_string()
+            .unwrap();
+        let encoded = good.rsplit('.').next().unwrap().to_string();
+        let pid = dead_pid();
+        for name in [
+            format!(".ryeos-quarantine.{pid}.07.{encoded}"),
+            format!(".ryeos-quarantine.{pid}.7.{encoded}="),
+            format!(".ryeos-quarantine.{pid}.7.{encoded}+"),
+            format!(".ryeos-quarantine.{pid}.7.{encoded}.x"),
+            format!(".ryeos-quarantine.x.7.{encoded}"),
+            format!("ryeos-quarantine.{pid}.7.{encoded}"),
+        ] {
+            let path = dir.join(&name);
+            std::fs::copy(dir.join("T-near.json"), &path).unwrap();
+            let app = tempfile::tempdir().unwrap();
+            let report = settle(app.path(), temp.path()).unwrap();
+            assert!(
+                report.restored.is_empty() && report.removed.is_empty(),
+                "{name}"
+            );
+            assert!(path.exists(), "{name}");
+            assert!(store.list_pending().is_err(), "{name} must still refuse");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_exactly_named_leftover_is_skipped_by_a_scan_during_a_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-run");
+        store.prepare_set(&lock, "T-run", None, &hash("a")).unwrap();
+        let dir = pending_dir(temp.path());
+        let owned = dir.join(leftover_name("T-other.json", std::process::id(), 2));
+        std::fs::write(&owned, b"{}").unwrap();
+        assert_eq!(store.list_pending().unwrap().len(), 1);
+        assert!(owned.exists(), "a scan never settles or removes it");
+    }
+
+    #[test]
+    fn an_oversize_leftover_refuses_without_being_read_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-big");
+        store.prepare_set(&lock, "T-big", None, &hash("a")).unwrap();
+        let dir = pending_dir(temp.path());
+        let big = dir.join(leftover_name("T-big.json", dead_pid(), 5));
+        std::fs::write(&big, vec![b' '; MAX_RECOVERY_RECORD_BYTES as usize + 1]).unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let error = format!("{:#}", settle(app.path(), temp.path()).unwrap_err());
+        assert!(error.contains("larger than"), "{error}");
+        assert!(big.exists());
+    }
+
+    #[test]
+    fn leftovers_under_dot_ai_node_are_settled_in_every_directory_the_node_reads() {
+        let runtime = tempfile::tempdir().unwrap();
+        let _store = RecoveryStore::from_runtime_state_dir(runtime.path()).unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let node = app.path().join(".ai/node");
+        let cases = [
+            ("schedules", "nightly.yaml"),
+            ("external-execution", "binding-one.yaml"),
+            ("runtime-snapshot-production", "p.yaml"),
+            ("runtime-snapshot-qualification", "q.yaml"),
+            ("projects/owner-1", "demo.yaml"),
+        ];
+        for (dir, name) in cases {
+            plant_leftover(&node.join(dir), name, b"body: 1\n");
+        }
+        let report = settle(app.path(), runtime.path()).unwrap();
+        assert_eq!(report.restored.len(), cases.len(), "{report:?}");
+        for (dir, name) in cases {
+            assert_eq!(
+                std::fs::read(node.join(dir).join(name)).unwrap(),
+                b"body: 1\n",
+                "{dir}/{name}"
+            );
+            assert!(
+                std::fs::read_dir(node.join(dir))
+                    .unwrap()
+                    .all(|entry| !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".ryeos-quarantine.")),
+                "{dir}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_directorys_longest_file_name_fits_a_quarantine_name() {
+        let longest: &[(&str, usize)] = &[
+            (
+                "pending <chain_root_id>.json",
+                MAX_CHAIN_ROOT_ID_BYTES + ".json".len(),
+            ),
+            ("schedules <id>.yaml (id <= 128)", 128 + ".yaml".len()),
+            (
+                "node-config <document id>.yaml (id <= 128)",
+                128 + ".yaml".len(),
+            ),
+            ("projects <name>.yaml (name <= 64)", 64 + ".yaml".len()),
+            (
+                "staged/durable <unique_id>.json (type limit)",
+                6 + 1 + 32 + 1 + 8 + 1 + 16 + ".json".len(),
+            ),
+            (
+                "projection <unique_id>.sqlite3 + .lease (type limit)",
+                10 + 1 + 32 + 1 + 8 + 1 + 16 + ".lease".len() + 11,
+            ),
+            ("CAS leaf <hash>.json", 64 + ".json".len()),
+            ("CAS atomic-write temp", 1 + 64 + 5 + 5 + 10 + 1 + 20),
+            (
+                "large-objects reference-unregister-<hash>",
+                "reference-unregister-".len() + 64,
+            ),
+            ("chain-head ref temp", ".ryeos-ref.tmp.".len() + 10 + 1 + 20),
+            (
+                "retirement evidence <sha>.released.json",
+                64 + ".released.json".len(),
+            ),
+            ("authorized key <fp>.toml", 72 + ".toml".len()),
+            (
+                "remote delegation <name>.toml (name <= 64)",
+                64 + ".toml".len(),
+            ),
+            (
+                "publisher recovery marker",
+                64 + ".exchange-recovery.json".len(),
+            ),
+            ("executor cache staging", 1 + 64 + 9 + 10 + 1 + 20),
+        ];
+        for (grammar, len) in longest {
+            assert!(
+                *len <= lillux::QUARANTINE_ORIGINAL_NAME_MAX,
+                "{grammar}: {len} bytes exceeds {}",
+                lillux::QUARANTINE_ORIGINAL_NAME_MAX
+            );
+            let name = "n".repeat(*len);
+            let encoded =
+                lillux::quarantine_name(std::ffi::OsStr::new(&name), u32::MAX, u64::MAX).unwrap();
+            assert!(encoded.len() <= 255, "{grammar}");
+        }
+        assert!(validate_chain_root_id(&"T".repeat(MAX_CHAIN_ROOT_ID_BYTES)).is_ok());
+        assert!(validate_chain_root_id(&"T".repeat(MAX_CHAIN_ROOT_ID_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn a_remove_whose_name_cannot_be_recorded_fails_loudly_before_anything_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let too_long = "n".repeat(lillux::QUARANTINE_ORIGINAL_NAME_MAX + 1);
+        let path = temp.path().join(&too_long);
+        std::fs::write(&path, b"x").unwrap();
+        let file = directory
+            .open_regular(std::ffi::OsStr::new(&too_long), false)
+            .unwrap()
+            .unwrap();
+        let error = directory
+            .remove_if_same_atomic(std::ffi::OsStr::new(&too_long), &file)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("quarantine name can record"),
+            "{error:#}"
+        );
+        assert!(path.exists(), "nothing moved");
+        let fits = "n".repeat(lillux::QUARANTINE_ORIGINAL_NAME_MAX);
+        assert!(
+            lillux::quarantine_name(std::ffi::OsStr::new(&fits), u32::MAX, u64::MAX)
+                .unwrap()
+                .len()
+                <= 255
+        );
     }
 
     #[test]

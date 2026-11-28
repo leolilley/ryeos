@@ -69,21 +69,26 @@ pub(super) async fn handle_connection(
         // detaches (rather than aborts) the owner; shutdown's process-admission
         // fence and exact-identity drain can then settle any subprocess it owns.
         let request_state = state.clone();
-        let request_owner = tokio::spawn(tracing::Instrument::instrument(
-            async move {
-                let _frame_permit = frame_permit;
-                let response = super::routing::dispatch_dynamic(
-                    request,
-                    &request_state,
-                    peer.as_ref(),
-                    surface,
-                )
-                .await;
-                drop(_frame_permit);
-                response
-            },
-            span,
-        ));
+        // The owner is registered with the server state's request tracker, which
+        // shutdown joins before it closes the scheduler database and the live
+        // Store: a detached owner would otherwise keep a clone of both alive.
+        let request_owner = state
+            .request_owners()
+            .spawn(tracing::Instrument::instrument(
+                async move {
+                    let _frame_permit = frame_permit;
+                    let response = super::routing::dispatch_dynamic(
+                        request,
+                        &request_state,
+                        peer.as_ref(),
+                        surface,
+                    )
+                    .await;
+                    drop(_frame_permit);
+                    response
+                },
+                span,
+            ))?;
         let response = request_owner
             .await
             .context("UDS request owner task failed")?;

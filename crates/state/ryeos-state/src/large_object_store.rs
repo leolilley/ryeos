@@ -590,6 +590,10 @@ impl LargeObjectStore {
         let mut total = 0_u64;
         for directory in [&self.objects, &self.executables] {
             for entry in directory.entries_no_follow()? {
+                // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+                if lillux::is_quarantine_leftover_name(&entry.name) {
+                    continue;
+                }
                 if entry.entry_type != lillux::PinnedEntryType::Regular {
                     anyhow::bail!("large-object namespace contains a non-regular entry");
                 }
@@ -1510,6 +1514,10 @@ impl LargeObjectStore {
         let mut report = LargeObjectSweepReport::default();
         let mut candidates = Vec::new();
         for entry in self.objects.entries_no_follow()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&entry.name) {
+                continue;
+            }
             if entry.entry_type != lillux::PinnedEntryType::Regular {
                 anyhow::bail!("large-object namespace contains a non-regular entry");
             }
@@ -1622,6 +1630,10 @@ impl LargeObjectStore {
     ) -> anyhow::Result<LargeObjectStagingSweepReport> {
         let mut report = LargeObjectStagingSweepReport::default();
         for entry in self.staging.entries_no_follow()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&entry.name) {
+                continue;
+            }
             if entry.entry_type != lillux::PinnedEntryType::Regular {
                 anyhow::bail!("large-object staging namespace contains a non-regular entry");
             }
@@ -1667,6 +1679,10 @@ impl LargeObjectStore {
     pub fn scrub_all(&self) -> anyhow::Result<LargeObjectScrubReport> {
         let mut report = LargeObjectScrubReport::default();
         for entry in self.objects.entries_no_follow()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&entry.name) {
+                continue;
+            }
             let name = entry
                 .name
                 .to_str()
@@ -1695,6 +1711,10 @@ impl LargeObjectStore {
             }
         }
         for entry in self.references.entries_no_follow()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&entry.name) {
+                continue;
+            }
             let name = entry
                 .name
                 .to_str()
@@ -3129,6 +3149,23 @@ mod tests {
             )),
             "got: {findings:?}"
         );
+    }
+
+    #[test]
+    fn scrub_skips_exact_quarantine_name_but_reports_near_miss() {
+        let (dir, store) = store(8);
+        let objects = dir.path().join("large-objects/objects");
+        fs::write(objects.join(".ryeos-quarantine.4242.1.YS5qc29u"), b"live").unwrap();
+        assert!(store.scrub_all().unwrap().findings.is_empty());
+        assert_eq!(store.total_stored_bytes().unwrap(), 0);
+
+        fs::write(objects.join(".ryeos-quarantine.4242.01.YS5qc29u"), b"x").unwrap();
+        let report = store.scrub_all().unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert!(matches!(
+            report.findings[0],
+            LargeObjectIntegrityFinding::ForeignEntry { .. }
+        ));
     }
 
     #[test]

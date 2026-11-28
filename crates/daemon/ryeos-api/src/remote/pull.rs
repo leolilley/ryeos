@@ -960,7 +960,7 @@ fn apply_with_rollback(
                     let staged = staging
                         .open_regular(&artifact, false)?
                         .ok_or_else(|| anyhow::anyhow!("staged remote result disappeared"))?;
-                    if let Err(error) = live_parent.replace_regular_from_if_matches_atomic(
+                    if let Err(error) = live_parent.replace_regular_from_if_matches_plain_atomic(
                         &live_name,
                         expected_live.as_ref(),
                         |expected| {
@@ -1012,7 +1012,7 @@ fn apply_with_rollback(
                         Some(expected_blob_hash),
                         Some(*expected_mode),
                     )?;
-                    if let Err(error) = live_parent.remove_if_same_validated_atomic(
+                    if let Err(error) = live_parent.remove_if_same_validated_plain_atomic(
                         &live_name,
                         expected_live,
                         |expected| {
@@ -1089,7 +1089,7 @@ fn rollback_pinned_changes(
             match backup.open_regular(&artifact, false)? {
                 Some(saved) => {
                     live_parent
-                        .replace_regular_from_if_matches_atomic(
+                        .replace_regular_from_if_matches_plain_atomic(
                             &live_name,
                             Some(&applied.installed),
                             |_| Ok(()),
@@ -1101,7 +1101,7 @@ fn rollback_pinned_changes(
                 }
                 None => {
                     live_parent
-                        .remove_if_same_atomic(&live_name, &applied.installed)
+                        .remove_if_same_plain_atomic(&live_name, &applied.installed)
                         .map_err(anyhow::Error::from)?;
                 }
             }
@@ -1121,7 +1121,7 @@ fn rollback_pinned_changes(
                 .open_regular(&artifact, false)?
                 .ok_or_else(|| anyhow::anyhow!("rollback backup disappeared"))?;
             live_parent
-                .replace_regular_from_if_matches_atomic(
+                .replace_regular_from_if_matches_plain_atomic(
                     &live_name,
                     None,
                     |_| Ok(()),
@@ -2713,6 +2713,62 @@ mod tests {
             !root.join("a.txt").exists(),
             "nothing of the result is written"
         );
+    }
+
+    #[tokio::test]
+    async fn a_plain_quarantine_leftover_at_the_root_or_nested_is_reported_by_the_recovery_gate() {
+        for planted in [".ryeos-quarantine.4242.1", "sub/.ryeos-quarantine.4242.1"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("project");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            std::fs::write(root.join(planted), b"left behind").unwrap();
+            let cas = CasStore::new(tmp.path().join("cas"));
+            let new = store_project_file(&cas, b"new");
+            let result = make_tree(&[("a.txt", &new)]);
+            let error = apply_tree_diff(&cas, &root, &make_tree(&[]), &result, &[7_u8; 32])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, PullResultsError::RecoveryRequired(_)),
+                "{planted}: expected RecoveryRequired, got {error:?}"
+            );
+            assert!(
+                !root.join("a.txt").exists(),
+                "{planted}: nothing is written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pull_replaces_and_removes_a_file_with_a_legal_name_over_the_quarantine_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let long = format!("{}.txt", "n".repeat(200));
+        std::fs::write(root.join(&long), b"old").unwrap();
+        let cas = CasStore::new(tmp.path().join("cas"));
+        let old = store_project_file(&cas, b"old");
+        let new = store_project_file(&cas, b"new");
+        apply_tree_diff(
+            &cas,
+            &root,
+            &make_tree(&[(long.as_str(), &old)]),
+            &make_tree(&[(long.as_str(), &new)]),
+            &[7_u8; 32],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(root.join(&long)).unwrap(), b"new");
+        apply_tree_diff(
+            &cas,
+            &root,
+            &make_tree(&[(long.as_str(), &new)]),
+            &make_tree(&[]),
+            &[7_u8; 32],
+        )
+        .await
+        .unwrap();
+        assert!(!root.join(&long).exists());
     }
 
     // ── extract_snapshot_hash coverage ──

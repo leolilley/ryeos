@@ -295,7 +295,9 @@ pub(crate) fn admitted_source_mount(
     let Some((binding, _manifest, _projection)) = retained_source_records(&cas, resolution)? else {
         return Ok(None);
     };
-    Ok(Some(logical_mount(&binding)?))
+    let mount = logical_mount(&binding)?;
+    super::external_content::require_mount_within_quarantine_cap(&mount)?;
+    Ok(Some(mount))
 }
 
 /// Compare destinations within the selected mount root. Runtime source does
@@ -325,6 +327,7 @@ pub(crate) fn validate_external_mount_separation(
         .iter()
         .filter(|entry| entry.mount_root == placement.mount_root())
     {
+        super::external_content::require_mount_within_quarantine_cap(&entry.mount)?;
         let external = Path::new(&entry.mount);
         if mount_destinations_overlap(source, external) {
             anyhow::bail!("admitted source and external realization destinations overlap");

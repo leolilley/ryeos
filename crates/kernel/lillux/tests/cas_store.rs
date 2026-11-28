@@ -322,6 +322,23 @@ fn blob_capture_prune_rejects_unknown_staging_entries() {
 }
 
 #[test]
+fn blob_capture_prune_skips_exact_quarantine_name_but_refuses_near_miss() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let staging = tmp.path().join("blobs/.staging");
+    fs::create_dir_all(&staging).expect("create staging");
+    let exact = staging.join(".ryeos-quarantine.4242.1.YS5qc29u");
+    fs::write(&exact, b"live").expect("write exact");
+    store
+        .prune_abandoned_blob_captures(false)
+        .expect("exact quarantine name is skipped");
+    assert!(exact.is_file());
+
+    fs::write(staging.join(".ryeos-quarantine.4242.01.YS5qc29u"), b"x").expect("near miss");
+    assert!(store.prune_abandoned_blob_captures(false).is_err());
+}
+
+#[test]
 fn corrupt_existing_entry_is_an_error_and_is_never_replaced() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());

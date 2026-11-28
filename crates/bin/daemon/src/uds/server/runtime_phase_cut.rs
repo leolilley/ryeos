@@ -3,8 +3,8 @@
 //! Runtime phase names are opaque to the daemon. A qualifying parent selects
 //! one bounded name and supplies one exact inherited Lillux channel. When the
 //! authenticated runtime reports that name, the daemon writes one record and
-//! parks the callback forever so the parent can SIGKILL the process at a proven
-//! boundary. No production build serves this RPC.
+//! parks the callback until the daemon is stopped, so the parent can SIGKILL the
+//! process at a proven boundary or stop it in order with the request in flight. No production build serves this RPC.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub(crate) const PHASE_ENV: &str = "RYEOSD_TEST_RUNTIME_PHASE_CUT";
 pub(crate) const CHANNEL_FD_ENV: &str = "RYEOSD_TEST_RUNTIME_PHASE_CUT_FD";
@@ -106,6 +106,30 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
             .flush()
             .context("flush runtime phase-cut evidence")?;
     }
-    std::future::pending::<()>().await;
-    Ok(json!({"reached": true}))
+    // Park the callback while the daemon runs. A SIGKILL ends it with the
+    // process; an orderly stop ends it, a few seconds after the stop begins,
+    // with an error so the request task returns and shutdown can join it
+    // before the Store closes.
+    let mut shutdown = crate::subscribe_shutdown();
+    if !crate::shutdown_requested() {
+        match shutdown.as_mut() {
+            Some(receiver) => {
+                let _ = receiver.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+    // Keep the request task alive past the drain, so a stop that does not join
+    // its request tasks reaches the Store close while this one still holds the
+    // application state. The hold is shorter than the shutdown grace, so a
+    // stop that does join waits it out.
+    // Half the shutdown grace, derived from the constant the join is bounded
+    // by: long enough to outlive the Store close of a stop that does not join,
+    // and well inside the grace so a loaded runner cannot push the join past
+    // its deadline.
+    tokio::time::sleep(std::time::Duration::from_secs(
+        ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS / 2,
+    ))
+    .await;
+    bail!("runtime phase-cut callback ended by daemon shutdown")
 }

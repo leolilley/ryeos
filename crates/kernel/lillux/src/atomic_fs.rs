@@ -561,9 +561,66 @@ fn injected_parent_sync_result() -> std::io::Result<()> {
     Ok(())
 }
 
+/// A file name longer than the cap a quarantine name can record.
+///
+/// Returned (inside an `anyhow::Error`, downcastable) by
+/// [`require_name_within_quarantine_cap`] so a caller refuses an over-cap
+/// name when it is declared or planned, never in the middle of an apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameOverQuarantineCap {
+    pub path: std::path::PathBuf,
+    pub len: usize,
+    pub cap: usize,
+}
+
+impl std::fmt::Display for NameOverQuarantineCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "file name of {} bytes at `{}` is longer than the {} bytes a quarantine name can record",
+            self.len,
+            self.path.display(),
+            self.cap
+        )
+    }
+}
+
+impl std::error::Error for NameOverQuarantineCap {}
+
+/// Refuse a path whose final component (the file name, extension included)
+/// is longer than [`crate::QUARANTINE_ORIGINAL_NAME_MAX`] bytes.
+pub fn require_name_within_quarantine_cap(path: &Path) -> Result<()> {
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let len = name.len();
+    let cap = crate::QUARANTINE_ORIGINAL_NAME_MAX;
+    if len > cap {
+        return Err(NameOverQuarantineCap {
+            path: path.to_path_buf(),
+            len,
+            cap,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_cap_accepts_exact_and_refuses_one_over() {
+        let cap = crate::QUARANTINE_ORIGINAL_NAME_MAX;
+        let ok = Path::new("/a/b").join("x".repeat(cap));
+        require_name_within_quarantine_cap(&ok).unwrap();
+        let over = Path::new("/a/b").join("x".repeat(cap + 1));
+        let err = require_name_within_quarantine_cap(&over).unwrap_err();
+        let typed = err.downcast_ref::<NameOverQuarantineCap>().unwrap();
+        assert_eq!((typed.len, typed.cap, &typed.path), (cap + 1, cap, &over));
+        assert!(err.to_string().contains(&cap.to_string()));
+    }
 
     #[cfg(unix)]
     fn fail_next_parent_sync() {
