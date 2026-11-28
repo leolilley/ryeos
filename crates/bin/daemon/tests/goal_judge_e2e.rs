@@ -228,6 +228,11 @@ async fn run_goal_with(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
+    // Printed on a failing test: what the daemon said while the graph ran.
+    eprintln!(
+        "--- daemon stderr ---\n{}",
+        h.drain_stderr_nonblocking().await
+    );
     // Let the daemon's own terminal events land before reading them.
     tokio::time::sleep(Duration::from_secs(2)).await;
     let events = h
