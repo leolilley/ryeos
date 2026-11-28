@@ -11,7 +11,8 @@
 //!
 //! "Shared" is structural. A crate is a product crate when its package name
 //! holds a product word. Host-adapter crates (`crates/host-adapters/`) run a
-//! named workload on purpose and are out of both guards. Test code is out:
+//! named workload on purpose and are out of both guards, as are the workspace
+//! members under `tests/` in the dependency guard. Test code is out:
 //! files under any `tests` directory, `tests.rs`, `*_tests.rs`, and items
 //! behind `#[cfg(test)]`. Non-Rust files are out.
 
@@ -125,6 +126,12 @@ const PINS: &[Pin] = &[
         word: "openai",
         count: 3,
         row: "Q-20",
+    },
+    Pin {
+        path: "crates/daemon/ryeos-app/src/node_config/sections/external_execution.rs",
+        word: "codex",
+        count: 1,
+        row: "W-50",
     },
     Pin {
         path: "crates/state/ryeos-state/src/external_execution/admission.rs",
@@ -348,7 +355,12 @@ fn no_shared_crate_depends_on_a_product_crate_outside_the_pinned_edges() {
     for package in packages {
         let name = package["name"].as_str().expect("package name");
         let manifest = package["manifest_path"].as_str().expect("manifest path");
-        if names_a_product(name) || manifest.contains(&format!("/{HOST_ADAPTERS}")) {
+        // Product crates, host adapters and the workspace members under
+        // `tests/` (end-to-end fixtures that nothing depends on) are out.
+        if names_a_product(name)
+            || manifest.contains(&format!("/{HOST_ADAPTERS}"))
+            || Path::new(manifest).starts_with(root.join("tests"))
+        {
             continue;
         }
         for dependency in package["dependencies"].as_array().expect("dependencies") {

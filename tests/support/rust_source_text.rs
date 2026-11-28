@@ -168,6 +168,43 @@ fn first_word(line: &str) -> &str {
     &text[..end]
 }
 
+/// Whether an attribute line is a cfg that can only be true under test:
+/// `#[cfg(test)]`, or `#[cfg(all(..))]` with `test` as one of the conjuncts.
+fn is_test_only_cfg(attribute: &str) -> bool {
+    let Some(inner) = attribute
+        .strip_prefix("#[cfg(")
+        .and_then(|rest| rest.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    let inner = inner.trim();
+    if inner == "test" {
+        return true;
+    }
+    let Some(conjuncts) = inner
+        .strip_prefix("all(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut depth = 0_i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (position, character) in conjuncts.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&conjuncts[start..position]);
+                start = position + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&conjuncts[start..]);
+    depth == 0 && parts.iter().any(|part| part.trim() == "test")
+}
+
 /// `source` with every `#[cfg(test)]` item blanked, line for line: a
 /// `;`-terminated item (`mod x;`, `use ..;`) ends at its `;`, a braced item
 /// (`mod tests { .. }`, `fn f() { .. }`) ends where its braces balance, and the
@@ -177,9 +214,10 @@ fn first_word(line: &str) -> &str {
 /// Every blanked line stays as an empty line, so line numbers in the result are
 /// the line numbers in `source`.
 ///
-/// Only a `#[cfg(test)]` alone on its line and in code is recognised
-/// (`#[cfg(not(test))]` and `#[cfg(all(test, ..))]` are left alone: their items
-/// stay visible). `label` names the file in the panic raised when an item does
+/// Only a cfg alone on its line and in code that can be true only under test is
+/// recognised: `#[cfg(test)]`, and `#[cfg(all(.., test, ..))]` with `test` a
+/// direct conjunct. `#[cfg(any(test, ..))]`, `#[cfg(not(test))]` and every
+/// other form stay visible: too much, never too little. `label` names the file in the panic raised when an item does
 /// not end cleanly (end of file, a closing brace below depth zero, a multi-line
 /// attribute): a guard must fail loudly, not read a half-blanked file.
 #[allow(dead_code)]
@@ -236,7 +274,7 @@ pub fn production_text(label: &str, source: &str) -> String {
     let mut index = 0;
     while index < lines.len() {
         let indent = lines[index].len() - lines[index].trim_start().len();
-        if lines[index].trim() != "#[cfg(test)]" || !mask[starts[index] + indent] {
+        if !is_test_only_cfg(lines[index].trim()) || !mask[starts[index] + indent] {
             index += 1;
             continue;
         }
@@ -313,6 +351,45 @@ mod tests {
         let lines = shown(source);
         assert_eq!(lines.last().map(String::as_str), Some("fn production() {}"));
         assert!(lines[..lines.len() - 1].iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn a_cfg_that_can_only_be_true_under_test_is_blanked_in_every_all_shape() {
+        for attribute in [
+            "#[cfg(all(test, unix))]",
+            "#[cfg(all(unix, test))]",
+            "#[cfg(all(test))]",
+            "#[cfg(all(unix, test, target_pointer_width = \"64\"))]",
+            "#[cfg(all(test, any(unix, windows)))]",
+        ] {
+            let source = format!(
+                "fn a() {{}}\n{attribute}\nmod tests {{\n    fn t() {{}}\n}}\nfn b() {{}}\n"
+            );
+            let lines = shown(&source);
+            assert_eq!(lines[0], "fn a() {}", "{attribute}");
+            assert!(lines[1..5].iter().all(String::is_empty), "{attribute}");
+            assert_eq!(lines[5], "fn b() {}", "{attribute}");
+        }
+    }
+
+    #[test]
+    fn a_cfg_that_can_be_true_outside_test_stays_visible() {
+        for attribute in [
+            "#[cfg(any(test, unix))]",
+            "#[cfg(not(test))]",
+            "#[cfg(all(not(test), unix))]",
+            "#[cfg(all(unix, any(test, windows)))]",
+            "#[cfg(all(feature = \"test\", unix))]",
+            "#[cfg(feature = \"test-support\")]",
+            "#[cfg(all(unix, windows))]",
+        ] {
+            let source =
+                format!("fn a() {{}}\n{attribute}\nmod m {{\n    fn t() {{}}\n}}\nfn b() {{}}\n");
+            let lines = shown(&source);
+            assert_eq!(lines.len(), source.lines().count(), "{attribute}");
+            assert_eq!(lines[1], attribute, "{attribute}");
+            assert_eq!(lines[3], "    fn t() {}", "{attribute}");
+        }
     }
 
     #[test]
