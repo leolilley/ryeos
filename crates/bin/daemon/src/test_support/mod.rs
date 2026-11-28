@@ -1200,6 +1200,29 @@ impl DaemonHarness {
         .await
     }
 
+    /// [`start_fast_core_knowledge_with_node_and_user_keys`] with a `plant`
+    /// step that runs after the profile's policy generation is written and
+    /// before the initialization is sealed, so a test can replace one policy
+    /// member (re-signed with the fixture's node key) and have the sealed
+    /// generation carry it.
+    pub async fn start_fast_core_knowledge_with_node_and_user_keys_and_plant<S>(
+        node_key: SigningKey,
+        user_key: SigningKey,
+        plant: S,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+    {
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::CoreKnowledge,
+            plant,
+            |_| {},
+        )
+        .await
+    }
+
     /// Cross-site fixture with distinct node and operator identities. This is
     /// the faithful shape for forwarding tests: the source operator must be an
     /// origin-bound remote authority on the target, never its local operator.

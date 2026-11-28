@@ -846,6 +846,7 @@ mod tests {
         fs::copy(&path, bundle_section.join("primary.yaml")).unwrap();
         let contributed = BundleRecord {
             name: "test".into(),
+            lane: None,
             path: bundle.path().into(),
             source_file: path.clone(),
         };
@@ -1056,6 +1057,7 @@ mod tests {
     fn make_record(name: &str, path: &str, source: &str) -> BundleRecord {
         BundleRecord {
             name: name.into(),
+            lane: None,
             path: std::path::PathBuf::from(path),
             source_file: std::path::PathBuf::from(source),
         }
@@ -1334,6 +1336,7 @@ mod tests {
         let ryeos_ui = temp_bundle_with_node_section(&workspace.join("bundles/ryeos-ui"), "routes");
         let bundles = vec![BundleRecord {
             name: "ryeos-ui".into(),
+            lane: None,
             path: ryeos_ui.path().to_path_buf(),
             source_file: workspace.join("bundles/core/.ai/node/bundles/ryeos-ui.yaml"),
         }];
@@ -1635,6 +1638,7 @@ mod tests {
             temp_bundle_with_node_section(&workspace.join("bundles").join(bundle_name), section);
         let bundles = vec![BundleRecord {
             name: bundle_name.into(),
+            lane: None,
             path: bundle.path().to_path_buf(),
             source_file: system
                 .path()
@@ -1699,11 +1703,13 @@ mod tests {
         policy.system_source_caps = vec!["ryeos.register.command.root.execute".into()];
         let core = BundleRecord {
             name: "core".into(),
+            lane: None,
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/core.yaml"),
         };
         let knowledge = BundleRecord {
             name: "knowledge".into(),
+            lane: None,
             path: std::path::PathBuf::from("/system/.ai/bundles/knowledge"),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/knowledge.yaml"),
         };

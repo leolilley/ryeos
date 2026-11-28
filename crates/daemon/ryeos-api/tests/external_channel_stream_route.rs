@@ -56,6 +56,7 @@ async fn signed_stream_route_keeps_the_upgrade_through_the_dispatcher_and_refuse
     let api_state = ApiState {
         app: Arc::new(state.clone()),
         route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: None,
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-24T13:41:53Z:46b5df4243485730896c11a34de0b5c04006e48e2a2d1e468fcf53716d4dd0a7:SlrXiK76LbeSCB6Ay1hgR2fwTInvjq4y6mDYaRK4NvDOKb41059i0x4oL18F0njZk+bdnunqtfAIP/x4Z1HjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T03:36:49Z:d0e9a6d1c1a572dd4ae828cdd20e55d520f93042e2fc8306aa05d36b7a9f49c0:eKOx8W5kOLux+Pf6a5BWe3NabL1/svcgDZmjLHrJTKxKcmXoT+YDGtXw3ZIf6hdkLuvenqWRQkgi2AlYLhhVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -375,6 +375,25 @@ def add_source_guards(root: str, paths: list[str], packages: list[dict]) -> list
     return sorted(packages, key=lambda p: p["package"])
 
 
+def add_authority_packages(root: str, base: str, paths: list[str], packages: list[dict]) -> list[dict]:
+    """Add the authority packages when the change touches operator authority.
+
+    A package already selected keeps its entry. A named package that is not a
+    root-workspace member raises, so a rename is a classifier error.
+    """
+    chosen = select_authority(root, base, paths)
+    if not chosen["selected"]:
+        return packages
+    members = workspace_packages(Path(root).resolve())
+    have = {p["package"] for p in packages}
+    for package in chosen["packages"]:
+        if package not in members:
+            raise RuntimeError(f"authority package {package} is not a workspace member")
+        if package not in have:
+            packages.append({"package": package, "manifest": None, "args": []})
+    return sorted(packages, key=lambda p: p["package"])
+
+
 # The coverage map of the daemon's end-to-end test binaries. Each
 # `[tests.<binary>]` table names the packages (`covers`) whose changes select
 # that binary, and optionally path globs (`paths`) for finer grain inside
@@ -420,27 +439,118 @@ def e2e_test_names(root: Path) -> list[str]:
 
 
 def load_e2e_coverage(root: Path) -> dict[str, dict]:
-    """Read the coverage map as {binary: {"covers": [...], "paths": [...]}}.
+    """Read the coverage map as {binary: {"covers": [...], "paths": [...], "authority": bool}}.
 
     Raises ValueError on any shape fault, so a broken map is an error, never
-    an empty selection.
+    an empty selection. The `[authority]` table is read by `load_authority`.
     """
     doc = tomllib.loads((root / E2E_COVERAGE).read_text())
     tests = doc.get("tests")
-    if not isinstance(tests, dict) or set(doc) != {"tests"}:
-        raise ValueError(f"{E2E_COVERAGE} must hold only [tests.<binary>] tables")
+    if not isinstance(tests, dict) or not set(doc) <= {"tests", "authority"}:
+        raise ValueError(f"{E2E_COVERAGE} must hold only [tests.<binary>] tables and [authority]")
     out: dict[str, dict] = {}
     for name, entry in tests.items():
-        if not isinstance(entry, dict) or not set(entry) <= {"covers", "paths"} or "covers" not in entry:
-            raise ValueError(f"[tests.{name}] needs `covers` and may have `paths`, nothing else")
+        if not isinstance(entry, dict) or not set(entry) <= {"covers", "paths", "authority"} or "covers" not in entry:
+            raise ValueError(f"[tests.{name}] needs `covers` and may have `paths` and `authority`, nothing else")
         lists = {}
         for key in ("covers", "paths"):
             value = entry.get(key, [])
             if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
                 raise ValueError(f"[tests.{name}].{key} must be a list of non-empty strings")
             lists[key] = value
+        if "authority" in entry and entry["authority"] is not True:
+            raise ValueError(f"[tests.{name}].authority must be true when present")
+        lists["authority"] = entry.get("authority") is True
         out[name] = lists
     return out
+
+
+def load_authority(root: Path) -> dict | None:
+    """Read the `[authority]` table, or None when the map has none.
+
+    paths:    globs naming the operator-authority and trust-store sources.
+    tokens:   identifiers searched in the changed lines of changed Rust files
+              (a comment or a test module counts; over-selecting is cheap).
+    packages: extra test packages a matching change adds to the gate.
+    smoke:    {suite, test}: the one real-isolation test a matching change runs.
+    """
+    doc = tomllib.loads((root / E2E_COVERAGE).read_text())
+    table = doc.get("authority")
+    if table is None:
+        return None
+    if not isinstance(table, dict) or not set(table) <= {"paths", "tokens", "packages", "smoke"}:
+        raise ValueError("[authority] may hold only paths, tokens, packages and smoke")
+    out: dict = {}
+    for key in ("paths", "tokens", "packages"):
+        value = table.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+            raise ValueError(f"[authority].{key} must be a list of non-empty strings")
+        out[key] = value
+    smoke = table.get("smoke")
+    if smoke is not None:
+        if not isinstance(smoke, dict) or set(smoke) != {"suite", "test"} or not all(
+            isinstance(v, str) and v for v in smoke.values()
+        ):
+            raise ValueError("[authority.smoke] needs `suite` and `test`, both non-empty strings")
+    out["smoke"] = smoke
+    return out
+
+
+def changed_rust_lines(root: str, base: str, path: str) -> list[str]:
+    """The added and removed lines of one Rust file's diff (no context lines)."""
+    if not path.endswith(".rs"):
+        return []
+    diff = git(root, "diff", "-U0", "--no-renames", base, "HEAD", "--", path).decode(errors="replace")
+    return [
+        line[1:]
+        for line in diff.splitlines()
+        if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    ]
+
+
+def select_authority(root: str, base: str, paths: list[str]) -> dict:
+    """Decide whether the change touches operator authority or the trust store.
+
+    Returns {"selected", "reason", "tests", "packages", "suites"}. A change
+    selects when a changed path matches an `[authority].paths` glob, or a
+    changed line of a changed Rust file holds an `[authority].tokens`
+    identifier. Documentation never selects. When it selects, `tests` are the
+    binaries tagged `authority = true`, `packages` the extra test packages and
+    `suites` the one real-isolation smoke test.
+    """
+    top = Path(root).resolve()
+    authority = load_authority(top)
+    none = {"selected": False, "reason": "no authority change", "tests": [], "packages": [], "suites": []}
+    if authority is None:
+        return none
+    patterns = [glob_regex(g) for g in authority["paths"]]
+    token_re = re.compile("|".join(re.escape(t) for t in authority["tokens"])) if authority["tokens"] else None
+    reason = None
+    for path in paths:
+        if path.startswith("vendor/") or path.endswith(DOC_SUFFIXES):
+            continue
+        if any(p.match(path) for p in patterns):
+            reason = f"{path} is a named authority path"
+            break
+        if token_re is not None:
+            for line in changed_rust_lines(root, base, path):
+                hit = token_re.search(line)
+                if hit:
+                    reason = f"{path} changes a line naming {hit.group(0)}"
+                    break
+            if reason:
+                break
+    if reason is None:
+        return none
+    coverage = load_e2e_coverage(top)
+    suites = [authority["smoke"]] if authority["smoke"] else []
+    return {
+        "selected": True,
+        "reason": reason,
+        "tests": sorted(name for name, entry in coverage.items() if entry["authority"]),
+        "packages": sorted(authority["packages"]),
+        "suites": suites,
+    }
 
 
 def workspace_packages(root: Path) -> dict[str, str]:
@@ -618,6 +728,29 @@ def check_e2e_coverage(root: str) -> tuple[list[str], list[str]]:
             if not matched:
                 faults.append(f"[tests.{name}] path glob {pattern!r} matches no tracked file")
             by_path |= {p for p, d in packages.items() if any(f.startswith(d + "/") for f in matched)}
+    try:
+        authority = load_authority(top)
+    except (ValueError, tomllib.TOMLDecodeError) as error:
+        return [f"{E2E_COVERAGE}: {error}"], []
+    if authority is not None:
+        for pattern in authority["paths"]:
+            regex = glob_regex(pattern)
+            if not any(regex.match(f) for f in files):
+                faults.append(f"[authority] path glob {pattern!r} matches no tracked file")
+        for package in authority["packages"]:
+            if package not in packages:
+                faults.append(f"[authority] packages names unknown package {package!r}")
+        smoke = authority["smoke"]
+        if smoke is not None:
+            suite, test = smoke["suite"], smoke["test"]
+            source = top / E2E_COVERAGE
+            source = source.parent / f"{suite}.rs"
+            if suite not in coverage:
+                faults.append(f"[authority.smoke] suite {suite!r} has no [tests.{suite}] entry")
+            elif not coverage[suite]["authority"]:
+                faults.append(f"[authority.smoke] smoke suite {suite!r} is not tagged authority = true")
+            if not source.is_file() or not re.search(rf"\bfn {re.escape(test)}\b", source.read_text()):
+                faults.append(f"[authority.smoke] smoke test {test!r} is not a function in tests/{suite}.rs")
     covered = {p for entry in coverage.values() for p in entry["covers"]} | by_path
     gaps = sorted(set(packages) - covered - {E2E_PACKAGE})
     return faults, gaps
@@ -685,6 +818,7 @@ def main() -> None:
         if mode == "ui-only":
             packages = [p for p in packages if p["package"] not in UI_GATE_PACKAGES]
         packages = add_source_guards(args.root, paths, packages)
+        packages = add_authority_packages(args.root, base, paths, packages)
         test_packages = json.dumps(packages, separators=(",", ":"))
     except BaseException as error:  # a fault must not read as "no tests to run"
         test_packages = "ERROR"
@@ -693,17 +827,26 @@ def main() -> None:
         if not paths and reason != "no changed paths":
             raise RuntimeError(reason)
         e2e, uncovered, e2e_reason = select_e2e_tests(args.root, paths)
+        base = git(args.root, "merge-base", "HEAD", args.base_ref).decode().strip()
+        authority = select_authority(args.root, base, paths)
+        suites = authority["suites"]
+        if authority["selected"]:
+            e2e = sorted(set(e2e) | set(authority["tests"]) & set(e2e_test_names(Path(args.root).resolve())))
+            e2e_reason += f"; authority change: {authority['reason']}"
+        process_scope_suites = json.dumps(suites, separators=(",", ":"))
         e2e_tests = json.dumps(e2e, separators=(",", ":"))
         # Never empty: a matrix with no values is a workflow error even when the job is skipped.
         e2e_shards = json.dumps(list(range(1, e2e_shard_count(len(e2e)) + 1)))
         e2e_uncovered = json.dumps(uncovered, separators=(",", ":"))
     except BaseException as error:  # a fault must not read as "no e2e tests"
         e2e_tests, e2e_shards, e2e_uncovered = "ERROR", "[1]", "[]"
+        process_scope_suites, authority = "ERROR", {"selected": False, "packages": []}
         e2e_reason = f"e2e selection failed: {error}"
     print(f"test_packages={test_packages}")
     print(f"e2e_tests={e2e_tests}")
     print(f"e2e_shards={e2e_shards}")
     print(f"e2e_uncovered={e2e_uncovered}")
+    print(f"process_scope_suites={process_scope_suites}")
     print(f"mode={mode}")
     print(f"bundles_changed={'true' if bundles_changed else 'false'}")
     print(f"# classification: {mode} ({reason})")
