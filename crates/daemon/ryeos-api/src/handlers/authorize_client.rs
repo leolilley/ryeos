@@ -38,6 +38,10 @@ pub async fn handle(
     }
     // The operation table decides which arguments a grant may bind.
     ryeos_node::offline_operation::table::validate_grant_constraints(&params.offline_constraints)?;
+    ryeos_node::offline_operation::table::validate_scopes_carry_required_constraints(
+        &params.scopes,
+        &params.offline_constraints,
+    )?;
     let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
         &params,
         lifetime_secs,

@@ -1253,6 +1253,42 @@ pub fn lookup(id: &str) -> Option<&'static OperationSpec> {
 /// operation lets a grant bind. The grant writer checks the constraints'
 /// shape; the table, which only this crate sees, decides what may be bound.
 pub fn validate_grant_constraints(constraints: &[OfflineConstraint]) -> Result<()> {
+    validate_grant_constraints_within(constraints, grant_not_after_ceiling())
+}
+
+/// The latest `not_after` a single-use constraint may carry. It is node data
+/// that no signed section carries yet, so none is applied and a single-use
+/// grant can be neither issued nor used until a cut carries the ceiling.
+pub fn grant_not_after_ceiling() -> Option<u64> {
+    None
+}
+
+/// A grant that names a scope whose operation requires a constraint must
+/// carry one for it: otherwise every use of the grant is refused.
+pub fn validate_scopes_carry_required_constraints(
+    scopes: &[String],
+    constraints: &[OfflineConstraint],
+) -> Result<()> {
+    for spec in operations()
+        .iter()
+        .filter(|spec| spec.requires_grant_constraint)
+    {
+        let scope = spec.scope();
+        if scopes.iter().any(|granted| *granted == scope) {
+            ensure!(
+                constraints.iter().any(|constraint| constraint.scope == scope),
+                "the grant names `{scope}`, which takes only a grant with a constraint for it"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// [`validate_grant_constraints`] against an explicit ceiling.
+fn validate_grant_constraints_within(
+    constraints: &[OfflineConstraint],
+    ceiling: Option<u64>,
+) -> Result<()> {
     for constraint in constraints {
         let Some(spec) = operations()
             .iter()
@@ -1283,12 +1319,25 @@ pub fn validate_grant_constraints(constraints: &[OfflineConstraint]) -> Result<(
                 constraint.argument,
                 constraint.max_uses
             );
-            ensure!(
-                constraint.not_after.is_some(),
-                "operation `{}` takes only a grant whose constraint on `{}` names a `not_after`",
-                spec.id,
-                constraint.argument
-            );
+            let Some(not_after) = constraint.not_after else {
+                bail!(
+                    "operation `{}` takes only a grant whose constraint on `{}` names a `not_after`",
+                    spec.id,
+                    constraint.argument
+                );
+            };
+            match ceiling {
+                None => bail!(
+                    "grant_ceiling_unavailable: operation `{}` takes only a single-use grant that ends within the node's ceiling, and this node carries none yet",
+                    spec.id
+                ),
+                Some(ceiling) => ensure!(
+                    not_after <= ceiling,
+                    "operation `{}` takes only a grant that ends by {ceiling}, and the constraint on `{}` ends at {not_after}",
+                    spec.id,
+                    constraint.argument
+                ),
+            }
         }
     }
     for spec in operations()
@@ -1418,11 +1467,42 @@ mod tests {
     }
 
     #[test]
+    fn a_single_use_grant_is_refused_without_a_ceiling_and_beyond_one() {
+        let link = "ryeos.offline.node.key.link";
+        let one = constraint(link, "/link/body/key");
+        // No ceiling exists yet: the node refuses to issue what no use admits.
+        let refused = validate_grant_constraints(&[one.clone()]).unwrap_err();
+        assert!(refused.to_string().starts_with("grant_ceiling_unavailable"));
+        // With a ceiling, a not_after at or under it passes and one past it fails.
+        validate_grant_constraints_within(&[one.clone()], Some(2_000_000_000)).unwrap();
+        let err = validate_grant_constraints_within(&[one], Some(1_999_999_999)).unwrap_err();
+        assert!(err.to_string().contains("ends by"));
+    }
+
+    #[test]
+    fn a_grant_naming_a_constrained_scope_must_carry_its_constraint() {
+        let link = "ryeos.offline.node.key.link".to_owned();
+        let scopes = [link.clone()];
+        assert!(validate_scopes_carry_required_constraints(&scopes, &[]).is_err());
+        validate_scopes_carry_required_constraints(&scopes, &[constraint(&link, "/link/body/key")])
+            .unwrap();
+        // A scope that needs no constraint is unaffected.
+        validate_scopes_carry_required_constraints(
+            &["ryeos.offline.node.allow-restart".to_owned()],
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn a_grant_may_bind_only_a_pointer_the_operation_lists() {
         let link = "ryeos.offline.node.key.link";
-        validate_grant_constraints(&[constraint(link, "/link/body/key")]).unwrap();
-        assert!(validate_grant_constraints(&[constraint(link, "/link/body/principal")]).is_err());
-        assert!(validate_grant_constraints(&[constraint(link, "/link")]).is_err());
+        let within = |constraints: &[OfflineConstraint]| {
+            validate_grant_constraints_within(constraints, Some(3_000_000_000))
+        };
+        within(&[constraint(link, "/link/body/key")]).unwrap();
+        assert!(within(&[constraint(link, "/link/body/principal")]).is_err());
+        assert!(within(&[constraint(link, "/link")]).is_err());
         assert!(
             validate_grant_constraints(&[constraint(
                 "ryeos.offline.node.allow-restart",

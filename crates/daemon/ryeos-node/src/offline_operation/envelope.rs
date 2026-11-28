@@ -339,7 +339,7 @@ impl Envelope<'_> {
     /// ahead a delegated grant may reach plugs in: it is node data, and no
     /// such data exists yet, so no bound is applied.
     fn grant_not_after_ceiling(&self) -> Option<u64> {
-        None
+        super::table::grant_not_after_ceiling()
     }
 
     /// The grant must have been asked for by an active key of the principal
