@@ -215,7 +215,7 @@ impl VerifiedContentFile {
             }
         })();
         if result.is_err() {
-            let _ = destination_parent.remove_if_same(destination_name, &destination);
+            let _ = destination_parent.remove_if_same_plain_atomic(destination_name, &destination);
         }
         result
     }

@@ -214,6 +214,11 @@ impl RecoveryStore {
         let mut fences = Vec::new();
         let mut released = BTreeSet::new();
         for name in directory.entry_names()? {
+            // A removal killed mid-move can leave its file under Lillux's
+            // quarantine name; the directory sweep below removes it.
+            if lillux::is_quarantine_leftover_name(&name) {
+                continue;
+            }
             ensure_state_name(&name)?;
             let text = name
                 .to_str()
@@ -274,6 +279,11 @@ impl RecoveryStore {
         };
         let mut holders = BTreeSet::new();
         for name in directory.entry_names()? {
+            // A removal killed mid-move can leave its file under Lillux's
+            // quarantine name; the directory sweep below removes it.
+            if lillux::is_quarantine_leftover_name(&name) {
+                continue;
+            }
             ensure_state_name(&name)?;
             let text = name
                 .to_str()
@@ -523,6 +533,11 @@ impl RecoveryStore {
         let mut discard = RetirementEvidenceDiscard::default();
         if let Some(directory) = self.fence_directory()? {
             for name in directory.entry_names()? {
+                // A removal killed mid-move can leave its file under Lillux's
+                // quarantine name; the directory sweep below removes it.
+                if lillux::is_quarantine_leftover_name(&name) {
+                    continue;
+                }
                 ensure_state_name(&name)?;
                 let text = name.to_string_lossy();
                 anyhow::ensure!(
@@ -793,6 +808,16 @@ mod tests {
                 .is_empty()
         );
         assert!(f.release("Y", &[]).is_err(), "no fence, nothing to release");
+    }
+
+    #[test]
+    fn a_quarantine_leftover_in_the_fence_directory_does_not_break_the_scan() {
+        let fixture = fixture();
+        fixture.fence("chain-a");
+        let name = lillux::quarantine_name(std::ffi::OsStr::new("x.json"), 4242, 1).unwrap();
+        std::fs::write(fixture.fences().join(name), b"q").unwrap();
+        let fences = fixture.store.unreleased_retired_chains().unwrap();
+        assert_eq!(fences.len(), 1);
     }
 
     #[test]

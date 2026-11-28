@@ -859,7 +859,7 @@ fn remove_directory_contents(
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
                 let file_size = file.metadata()?.len();
                 if !dry_run {
-                    directory.remove_if_same(&name, &file)?;
+                    directory.remove_if_same_plain_atomic(&name, &file)?;
                 }
                 result.deleted_runtime_files += 1;
                 result.freed_bytes += file_size;
@@ -917,7 +917,7 @@ fn remove_rebuildable_cache_directory(
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
                 let file_size = file.metadata()?.len();
                 if !dry_run {
-                    cache_directory.remove_if_same(&name, &file)?;
+                    cache_directory.remove_if_same_plain_atomic(&name, &file)?;
                 }
                 result.deleted_runtime_files += 1;
                 result.freed_bytes += file_size;

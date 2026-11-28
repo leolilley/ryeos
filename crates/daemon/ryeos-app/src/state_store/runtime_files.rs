@@ -345,7 +345,7 @@ pub(super) fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) 
                     .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
             }
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
-                directory.remove_if_same(&name, &file)?;
+                directory.remove_if_same_plain_atomic(&name, &file)?;
                 deleted = deleted
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
