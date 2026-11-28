@@ -25,6 +25,14 @@ const LAUNCH_CAPABILITY_PROBES: [&str; 3] = [
     "ryeos.execute.tool.x",
 ];
 
+/// The capability namespaces of the launch kinds. A ceiling pattern inside
+/// one of them names a launch capability, literal or wildcard.
+const LAUNCH_CAPABILITY_NAMESPACES: [&str; 3] = [
+    "ryeos.execute.directive.",
+    "ryeos.execute.graph.",
+    "ryeos.execute.tool.",
+];
+
 const MAX_CLASS_ID_LEN: usize = 64;
 
 /// How a key is placed in a class. A closed set: only the admission-token
@@ -138,6 +146,14 @@ impl MembershipClass {
         for pattern in &self.scope_ceiling {
             if pattern.is_empty() {
                 bail!("membership class `{id}` has an empty scope_ceiling pattern");
+            }
+            if let Some(namespace) = LAUNCH_CAPABILITY_NAMESPACES
+                .iter()
+                .find(|namespace| pattern.starts_with(*namespace))
+            {
+                bail!(
+                    "membership class `{id}` scope_ceiling `{pattern}` names a launch capability (under `{namespace}`); a member holds no launch capability"
+                );
             }
             if let Some(probe) = LAUNCH_CAPABILITY_PROBES
                 .iter()
@@ -332,6 +348,9 @@ mod tests {
     #[test]
     fn a_launch_capability_ceiling_is_refused() {
         for pattern in [
+            "ryeos.execute.tool.ryeos/core/fetch",
+            "ryeos.execute.graph.ryeos/bundle-release/submit",
+            "ryeos.execute.directive.ryeos/core/hello",
             "ryeos.execute.directive.x",
             "ryeos.execute.directive.*",
             "ryeos.execute.graph.*",
