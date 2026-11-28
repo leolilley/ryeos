@@ -940,6 +940,74 @@ pub fn value_contains_secret<S: AsRef<str>>(value: &Value, secrets: &[S]) -> boo
     contains_any(&value.to_string()) || any_text(value, &contains_any)
 }
 
+/// What a masked secret is replaced with.
+pub const SECRET_FLOOR_MARKER: &str = "[withheld]";
+
+/// Replace every occurrence of every text form of every secret, in every
+/// string and every object key of `value`, with [`SECRET_FLOOR_MARKER`].
+/// The secrets and their forms are the ones [`value_contains_secret`] matches,
+/// including the minimum length. Returns whether anything was replaced. A
+/// secret that appears only as a number is not rewritten: a number is not
+/// text, and masking one would change the value's type.
+pub fn mask_secrets_in_place<S: AsRef<str>>(value: &mut Value, secrets: &[S]) -> bool {
+    let mut needles: Vec<String> = secrets
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|secret| secret.len() >= MIN_COLLECT_SECRET_FLOOR_BYTES)
+        .flat_map(secret_text_forms)
+        .collect();
+    if needles.is_empty() {
+        return false;
+    }
+    // Longest first, so a form that contains another is masked whole.
+    needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
+    mask_value(value, &needles)
+}
+
+fn mask_text(text: &str, needles: &[String]) -> Option<String> {
+    if !needles.iter().any(|needle| text.contains(needle.as_str())) {
+        return None;
+    }
+    let mut masked = text.to_owned();
+    for needle in needles {
+        masked = masked.replace(needle.as_str(), SECRET_FLOOR_MARKER);
+    }
+    Some(masked)
+}
+
+fn mask_value(value: &mut Value, needles: &[String]) -> bool {
+    match value {
+        Value::String(text) => match mask_text(text, needles) {
+            Some(masked) => {
+                *text = masked;
+                true
+            }
+            None => false,
+        },
+        Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |hit, item| mask_value(item, needles) | hit),
+        Value::Object(fields) => {
+            let mut hit = false;
+            let entries = std::mem::take(fields);
+            for (key, mut field) in entries {
+                hit |= mask_value(&mut field, needles);
+                match mask_text(&key, needles) {
+                    Some(masked) => {
+                        hit = true;
+                        fields.insert(masked, field);
+                    }
+                    None => {
+                        fields.insert(key, field);
+                    }
+                }
+            }
+            hit
+        }
+        _ => false,
+    }
+}
+
 /// The raw secret plus the JSON-escaped and ASCII-escaped forms of it.
 fn secret_text_forms(secret: &str) -> Vec<String> {
     let mut forms = vec![secret.to_owned()];
@@ -1706,5 +1774,74 @@ mod tests {
             &serde_json::json!("anything"),
             &[]
         ));
+    }
+
+    #[test]
+    fn masking_replaces_every_text_form_in_strings_and_keys() {
+        let secret = "clé-secrète-été".to_owned();
+        let escaped = "cl\\u00e9-secr\\u00e8te-\\u00e9t\\u00e9";
+        let mut value = serde_json::json!({
+            "keep": "unrelated",
+            "n": 7,
+            "list": [format!("a {secret} b {secret}"), escaped, "plain"],
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("k-{secret}"), serde_json::json!("v"));
+        assert!(mask_secrets_in_place(
+            &mut value,
+            std::slice::from_ref(&secret)
+        ));
+        let mut expected = serde_json::json!({
+            "keep": "unrelated",
+            "n": 7,
+            "list": [
+                format!("a {SECRET_FLOOR_MARKER} b {SECRET_FLOOR_MARKER}"),
+                SECRET_FLOOR_MARKER,
+                "plain"
+            ],
+        });
+        expected
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("k-{SECRET_FLOOR_MARKER}"), serde_json::json!("v"));
+        assert_eq!(value, expected);
+        assert!(!value_contains_secret(
+            &value,
+            std::slice::from_ref(&secret)
+        ));
+    }
+
+    #[test]
+    fn masking_handles_the_json_escaped_form_and_changes_nothing_else() {
+        let tricky = "pa\"ss\\word-1234".to_owned();
+        let escaped = serde_json::to_string(&tricky).unwrap();
+        let mut value = serde_json::json!({"echo": format!("got {escaped} end")});
+        assert!(mask_secrets_in_place(
+            &mut value,
+            std::slice::from_ref(&tricky)
+        ));
+        assert!(!value_contains_secret(
+            &value,
+            std::slice::from_ref(&tricky)
+        ));
+        let mut clean = serde_json::json!({"a": [1, null, true, "text"], "b": {"c": "d"}});
+        let before = clean.clone();
+        assert!(!mask_secrets_in_place(&mut clean, &["sk-live-0123456789"]));
+        assert_eq!(clean, before);
+    }
+
+    #[test]
+    fn masking_leaves_a_short_secret_alone() {
+        let short = "abc1234".to_owned();
+        let mut value = serde_json::json!({"x": "contains abc1234 text", "abc1234": 1});
+        let before = value.clone();
+        assert!(!mask_secrets_in_place(
+            &mut value,
+            std::slice::from_ref(&short)
+        ));
+        assert_eq!(value, before);
+        assert!(!mask_secrets_in_place::<String>(&mut value, &[]));
     }
 }
