@@ -627,6 +627,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
             authority: None,
+            public: false,
         }
     }
 
@@ -659,6 +660,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
             authority: None,
+            public: false,
         }
     }
 
@@ -1017,11 +1019,17 @@ mod tests {
         authority.authority = Some(ryeos_app::route_raw::RawRouteAuthority {
             capabilities: Vec::new(),
         });
+        let mut execute = base();
+        execute.execute = Some(ryeos_app::route_raw::RawExecute {
+            item_ref: "tool:demo/run".into(),
+            params: serde_json::Value::Null,
+        });
         for (case, raw) in [
             ("POST", post),
             ("a body limit", body_limit),
             ("a request body", body),
             ("an authority block", authority),
+            ("an execute block", execute),
         ] {
             let error = mode
                 .compile(&raw)

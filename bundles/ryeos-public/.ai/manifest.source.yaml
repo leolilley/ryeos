@@ -1,0 +1,5 @@
+name: ryeos-public
+version: "0.5.0"
+description: "The public page of a RyeOS node: keyless routes signed public, served only where the node's public_routes policy names them"
+requires_kinds: []
+uses_kinds: []

@@ -1023,6 +1023,7 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
         },
         source_file: "/test/route.yaml".into(),
         authority: None,
+        public: false,
     };
     vec![
         route(

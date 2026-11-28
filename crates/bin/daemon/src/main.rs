@@ -3661,12 +3661,20 @@ fn installed_service_refs(
 fn prospective_node_config_validator(
     ui: Arc<ryeos_ui::UiState>,
     engine: Arc<ryeos_engine::engine::Engine>,
+    public_routes: Arc<
+        ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy,
+    >,
 ) -> Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator> {
     Arc::new(
         ryeos_app::prospective_admission::ProspectiveNodeConfigValidator::new(move |snapshot| {
-            ryeosd::route_composition::compose_route_table(snapshot, ui.clone(), &engine.kinds)
-                .map(|_| ())
-                .context("prospective route-table compilation failed")
+            ryeosd::route_composition::compose_route_table(
+                snapshot,
+                &public_routes,
+                ui.clone(),
+                &engine.kinds,
+            )
+            .map(|_| ())
+            .context("prospective route-table compilation failed")
         }),
     )
 }
@@ -4675,18 +4683,37 @@ async fn run(
             // Build UI state (browser sessions + session bus).
             let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
             let ui_state_for_hints = ui_state.clone();
-            let prospective_node_config_validator =
-                prospective_node_config_validator(ui_state.clone(), engine.clone());
+            let public_routes = Arc::new(
+                node_policy_snapshot
+                    .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                    .clone(),
+            );
+            let prospective_node_config_validator = prospective_node_config_validator(
+                ui_state.clone(),
+                engine.clone(),
+                public_routes.clone(),
+            );
 
-            // Build the route table from the node-config snapshot.
-            let route_table = {
-                let table = ryeosd::route_composition::compose_route_table(
+            // Build the route table from the node-config snapshot. A public
+            // route the policy does not name is left out; the node starts
+            // without it and says so.
+            let (route_table, skipped_public_routes) = {
+                let composed = ryeosd::route_composition::compose_route_table(
                     &node_config_snapshot,
+                    &public_routes,
                     ui_state.clone(),
                     &engine.kinds,
                 )
                 .context("route table build failed at startup — check route YAML files")?;
-                Arc::new(table)
+                for skipped in &composed.skipped {
+                    tracing::warn!(
+                        route = %skipped.id,
+                        path = %skipped.path,
+                        code = skipped.reason,
+                        "public route not served: the node's public_routes policy does not name it"
+                    );
+                }
+                (Arc::new(composed.table), composed.skipped)
             };
             tracing::info!(routes = route_table.all.len(), "route table built");
 
@@ -4697,6 +4724,16 @@ async fn run(
                 route_diagnostics.publish(
                     route_table.fingerprint.clone(),
                     ryeos_api::routes::route_diagnostic_entries(&route_table),
+                    skipped_public_routes
+                        .iter()
+                        .map(
+                            |skipped| ryeos_app::route_diagnostics::SkippedRouteDiagnostic {
+                                id: skipped.id.clone(),
+                                path: skipped.path.clone(),
+                                code: skipped.reason.to_owned(),
+                            },
+                        )
+                        .collect(),
                 );
             }
 
@@ -5525,6 +5562,13 @@ async fn run(
                 app: publication.app().clone(),
                 publication: Some(publication.clone()),
                 route_table,
+                public_routes: Arc::new(
+                    ryeos_api::routes::public_limits::PublicRouteLimiter::build(
+                        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
+                        &public_routes,
+                        lillux::time::timestamp_millis(),
+                    ),
+                ),
                 webhook_dedupe,
             };
 
@@ -9275,8 +9319,15 @@ async fn run_service_standalone(
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
-    let standalone_node_config_validator =
-        prospective_node_config_validator(standalone_ui_state.clone(), engine.clone());
+    let standalone_node_config_validator = prospective_node_config_validator(
+        standalone_ui_state.clone(),
+        engine.clone(),
+        Arc::new(
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                .clone(),
+        ),
+    );
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
         daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),

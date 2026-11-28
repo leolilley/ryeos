@@ -45,6 +45,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         })
         .collect();
 
+    let skipped_public_routes: Vec<Value> = state
+        .extensions
+        .get::<RouteDiagnostics>()
+        .map(|diags| {
+            diags
+                .skipped()
+                .iter()
+                .map(|s| serde_json::to_value(s).expect("SkippedRouteDiagnostic serializes"))
+                .collect()
+        })
+        .unwrap_or_default();
     let (routes_available, fingerprint, routes) = match state.extensions.get::<RouteDiagnostics>() {
         Some(diags) => {
             let entries = diags.entries();
@@ -69,6 +80,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "route_fingerprint": fingerprint,
         "route_count": routes.len(),
         "routes": routes,
+        "skipped_public_routes": skipped_public_routes,
         "bundles": bundles,
     }))
 }

@@ -3909,6 +3909,7 @@ mod tests {
             request: RawRequest { body },
             source_file: std::path::PathBuf::from("/test/execute.yaml"),
             authority: None,
+            public: false,
         }
     }
 
