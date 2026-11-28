@@ -95,6 +95,11 @@ on:
         required: false
         default: ""
         type: string
+      rust_src:
+        description: "browser-package only: install the rust-src component before the build, so the sysroot sources exist on disk as they do on a developer machine (the package must come out byte-identical with and without it)"
+        required: false
+        default: false
+        type: boolean
       sccache:
         description: "auto uses sccache and falls back to plain rustc if its server does not start; off builds with plain rustc from the start"
         required: false
@@ -142,6 +147,10 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+
+      - name: Install the rust-src component
+        if: ${{ inputs.command == 'browser-package' && inputs.rust_src }}
+        run: rustup component add rust-src
 
       - name: Install cargo-nextest
         if: ${{ inputs.command == 'gate' }}
@@ -284,6 +293,9 @@ jobs:
           {
             echo "### Browser package"
             echo "branch \`${GITHUB_SHA}\`; recorded source_digest \`$after\` (was \`$before\`)."
+            wasm_sha="$(sha256sum crates/clients/rune/pkg/*.wasm | awk '{print $1}' | paste -sd, -)"
+            echo "rust-src installed: ${{ inputs.rust_src }}; wasm sha256 \`$wasm_sha\`."
+            echo "wasm path strings: \`.rustup\` $(cat crates/clients/rune/pkg/*.wasm | grep -a -c '\.rustup' || true), \`rustlib/src\` $(cat crates/clients/rune/pkg/*.wasm | grep -a -c 'rustlib/src' || true)."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the browser package
