@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-28T14:23:58Z:f7130732750f5dac2d81708153ac9a8aa524f2ca8fb81b74bd1e206dbe59a41c:SQgfB9sJS75N3s0FWGH+7u7IARoe51Pa8YgVXPEQYYNgCE5TdcOgPQb0Jnw7Rf/Q/OhG50CkKoimaKSfgxOOCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T16:39:11Z:d6f9be21f3363bc87a4010566669f74ed2990a0574077ab7efc164750ef378f3:q41kaRbJsRAVsmHXjhXDPAEMEJINZqfB9kpBoMRlhFsSSjsQfmKORFWlT3/n9scxnSgDrk12rCja86VI/MeRAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/standard/examples
 description: "Example: run a working directive under a goal, check its deliverable with deterministic gates, let a tool-less judge that sees only the quoted deliverable add refusals, and repeat with the author's signed repair text for a signed number of rounds. Ends failed, never successful, when the rounds run out."
@@ -8,6 +8,7 @@ requires:
       - ryeos.execute.directive.ryeos/standard/examples/goal-work
       - ryeos.execute.directive.ryeos/standard/examples/goal-judge
       - ryeos.execute.tool.ryeos/standard/examples/goal-fail
+      - ryeos.execute.tool.ryeos/standard/examples/goal-repair
 config:
   start: start_check
   max_steps: 100
@@ -30,7 +31,6 @@ config:
     verdict_pass: false
     failed: []
     repair_text: ""
-    checked: ""
     trail: ""
   nodes:
     # The signed round bound must be a whole number from 1 to 8; anything else ends
@@ -71,7 +71,7 @@ config:
         branches:
           - when: "state.gate_ok"
             to: judge
-          - to: bound
+          - to: gate_repair
 
     judge:
       node_type: action
@@ -94,18 +94,31 @@ config:
           - when: "state.verdict_pass && length(state.failed) == 0"
             to: done
           - when: "!state.verdict_pass && length(state.failed) > 0"
-            to: check
+            to: repair
           - to: bad_verdict
 
-    # Every key the judge names must be a signed criterion with repair text:
-    # a key outside the list fails this node and routes to the typed failure.
-    check:
-      node_type: foreach
-      over: "${state.failed}"
-      as: key
+    # The repair text comes only from the author's signed map. A key the judge
+    # names that is not in the map ends the run failed with judge_result_invalid
+    # inside the tool, so free text from a judge never reaches the working
+    # directive and a bad key is refused even in the last round.
+    repair:
+      action:
+        item_id: "tool:ryeos/standard/examples/goal-repair"
+        params:
+          failed: "${state.failed}"
+          repair: "${state.repair}"
       assign:
-        checked: "${state.repair[key]}"
-      on_error: bad_verdict
+        repair_text: "${result.text}"
+      next: {type: unconditional, to: bound}
+
+    gate_repair:
+      action:
+        item_id: "tool:ryeos/standard/examples/goal-repair"
+        params:
+          failed: "${state.gate_failed_keys}"
+          repair: "${state.repair}"
+      assign:
+        repair_text: "${result.text}"
       next: {type: unconditional, to: bound}
 
     bound:
@@ -115,15 +128,7 @@ config:
         branches:
           - when: "state.round >= state.max_rounds"
             to: exhausted
-          - to: repair
-
-    repair:
-      node_type: foreach
-      over: "${state.gate_ok ? state.failed : state.gate_failed_keys}"
-      as: key
-      assign:
-        repair_text: "${state.repair_text + state.repair[key] + \" \"}"
-      next: {type: unconditional, to: work}
+          - to: work
 
     bad_config:
       action:

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T15:22:04Z:e3e6239cade05763f14cf5ed58ce3833a38d8e2a483d4fc872b9f98c6db7a628:CAr4ishtwckcWmAJO/LBEh5ljFSfLdeKP/1XRnvBWSjBspi1yYIbxOfqAde2jHDKx7FYndhJRYw1+BlwXxPECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T16:39:11Z:f79e53a2eb199fa06f7b3f307a905097e10e38b48c2c8a3c1e4075857acd44fc:rfqqsQjxcW78tkvYf4fp8suD1w+BSSBu/DCjxx0Ow82PQF1H8e+uRksJJRnTJISAt69jeUzdfXjD1O/+lbm5Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
@@ -29,14 +29,14 @@ The graph kind delegates to `runtime:graph-runtime` through the runtime registry
 
 ## Example: a goal, a working directive and a judge
 
-`graph:ryeos/standard/examples/goal-judge` (in the directive bundle, with `directive:ryeos/standard/examples/goal-work`, `directive:ryeos/standard/examples/goal-judge` and `tool:ryeos/standard/examples/goal-fail`) is a signed example, not a default: no shipped graph, directive or allowlist refers to it. Copy it and change the signed state at the top of the graph.
+`graph:ryeos/standard/examples/goal-judge` (in the directive bundle, with `directive:ryeos/standard/examples/goal-work`, `directive:ryeos/standard/examples/goal-judge`, `tool:ryeos/standard/examples/goal-repair` and `tool:ryeos/standard/examples/goal-fail`) is a signed example, not a default: no shipped graph, directive or allowlist refers to it. Copy it and change the signed state at the top of the graph.
 
 What it does, each stage a followed child with a fresh context:
 
 1. The working directive is given the goal, the round number and, after a rejection, the author's repair text. It returns one `deliverable`.
 2. Deterministic gates (graph expressions over the deliverable, here its length) run first. A gate failure is final for the round: the judge is not asked, so it can never override a gate. The working directive is re-run with the signed repair text for the gate.
 3. A judge directive with no tool and no capability is given the goal, the signed criteria and the deliverable as one JSON-quoted string in a fixed frame. Nothing of the working directive's transcript, notes or claims reaches it. It returns a closed result: `pass` and `failed`, the keys of the signed criteria not met.
-4. A result outside that shape (a wrong type, or a key that is not a signed criterion) ends the graph failed with `judge_result_invalid`. A judge's own words never reach the working directive; it is only ever given the author's signed repair text for the failed keys.
+4. A result outside that shape ends the graph failed with `judge_result_invalid`: a wrong type, or a key that is not a signed criterion (the signed repair tool refuses it, in every round including the last). A judge's own words never reach the working directive; it is only ever given the author's signed repair text for the failed keys.
 5. `max_rounds` is signed state. A start gate ends the graph failed with `goal_config_invalid` before any directive runs unless it is a whole number from 1 to 8 (2.5, 0 and 9 are refused). After `max_rounds` rounds the graph ends failed with `goal_rounds_exhausted`, never successful. Rounds count against the graph's own limits (here `max_steps`; the time and spend limits of the launch apply as they do to any graph), and a limit's own failure wins: a graph stopped by `max_steps` fails with `exceeded max_steps`, not with the example's code, and never completes.
 6. The graph returns the working and judge thread ids of every round in `trail` (`work:<round>=<thread>;`, `judge:<round>=<thread>;`). Each of those threads records the model it ran on in its own `cognition_frame` event (`request_options.model`) beside the hash of the provider configuration that route resolved to, so a reader tells work from judge by the thread id. The judge may use the same route as the working directive; that is recorded, not forbidden.
 
