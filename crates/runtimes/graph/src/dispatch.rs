@@ -2083,6 +2083,7 @@ mod tests {
                 "kind": "runtime_failure",
                 "version": 99,
                 "code": "provider_protocol_error",
+                "origin": "platform",
                 "summary": "future contract",
                 "diagnostic_locator": {
                     "thread_id": "T-future",
@@ -2525,6 +2526,7 @@ mod tests {
                 "kind": "runtime_failure",
                 "version": 99,
                 "code": "provider_protocol_error",
+                "origin": "platform",
                 "summary": "future contract",
                 "diagnostic_locator": {
                     "thread_id": "T-native-child",
