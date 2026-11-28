@@ -7137,12 +7137,47 @@ async fn run_ui_hint_loop(
     }
 }
 
+/// What the node says now about project identities and who may read a project,
+/// for the item hint relay: the registry as it stands and the disclosure class
+/// of the session's key, asked at every delivery.
+struct NodeItemHintAuthority {
+    state: Arc<AppState>,
+}
+
+impl ryeos_ui::item_hints::ItemHintAuthority for NodeItemHintAuthority {
+    fn checkout_identity(
+        &self,
+        checkout: &std::path::Path,
+    ) -> Option<ryeos_state::project_identity::ProjectIdentity> {
+        ryeos_app::live_project_path::registered_identity_for_checkout(&self.state, checkout)
+    }
+
+    fn may_read(
+        &self,
+        key: &str,
+        project: Option<&ryeos_state::project_identity::ProjectIdentity>,
+    ) -> bool {
+        if ryeos_app::operator_authority::disclosure_class_for_key(&self.state, key).is_operator() {
+            return true;
+        }
+        let Some(project) = project else {
+            return false;
+        };
+        self.state
+            .engine
+            .trust_store
+            .owner_for(key)
+            .is_ok_and(|owner| &owner.principal == project.owner())
+    }
+}
+
 /// Relay item revisions to the sessions whose attachments name them. When the
 /// hub drops announcements because this relay lagged, the revision chain heads
 /// are re-read and whatever is newer is passed on.
 async fn run_ui_item_hint_loop(
     mut events: tokio::sync::broadcast::Receiver<ryeos_app::item_revised::ItemRevised>,
     ui: Arc<ryeos_ui::UiState>,
+    authority: Arc<dyn ryeos_ui::item_hints::ItemHintAuthority>,
 ) -> Result<()> {
     let fanout = Arc::new(ryeos_ui::ItemHintFanout::new());
     let shutdown = shutdown_signal();
@@ -7152,11 +7187,16 @@ async fn run_ui_item_hint_loop(
             _ = &mut shutdown => return Ok(()),
             recv = events.recv() => match recv {
                 Ok(event) => {
-                    fanout.publish(&ui, &event);
+                    fanout.publish(&ui, authority.as_ref(), &event);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     let passed =
-                        ryeos_ui::item_hints::catch_up_blocking(fanout.clone(), ui.clone()).await;
+                        ryeos_ui::item_hints::catch_up_blocking(
+                            fanout.clone(),
+                            ui.clone(),
+                            authority.clone(),
+                        )
+                        .await;
                     tracing::info!(skipped, passed, "item revision relay lagged and caught up");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -7178,8 +7218,18 @@ async fn reconcile_item_revisions(
     let app_root = state.config.app_root.clone();
     let node_key = *state.identity.verifying_key();
     let hub = hub.clone();
+    // The identity the registry holds for each checkout, resolved by the
+    // registry as it stands now; a checkout it holds none for announces with
+    // none.
+    let registered: Vec<(
+        std::path::PathBuf,
+        ryeos_state::project_identity::ProjectIdentity,
+    )> = ryeos_app::live_project_path::registered_checkout_identities(state);
     let result = tokio::task::spawn_blocking(move || {
-        ryeos_app::item_revised::reconcile_published_heads(&app_root, node_key, &hub)
+        let identity_of = |checkout: &std::path::Path| {
+            ryeos_app::live_project_path::sole_identity_for_checkout(&registered, checkout)
+        };
+        ryeos_app::item_revised::reconcile_published_heads(&app_root, node_key, &hub, &identity_of)
     })
     .await;
     match result {
@@ -7350,6 +7400,10 @@ async fn supervise_background_tasks(
     let item_revisions = state.event_streams.item_revisions().clone();
     let item_revision_events = item_revisions.subscribe();
     let item_ui = ui.clone();
+    let item_authority: Arc<dyn ryeos_ui::item_hints::ItemHintAuthority> =
+        Arc::new(NodeItemHintAuthority {
+            state: state.clone(),
+        });
     tasks.spawn(async move {
         (
             "UI hint fanout",
@@ -7359,7 +7413,7 @@ async fn supervise_background_tasks(
     tasks.spawn(async move {
         (
             "UI item hint fanout",
-            run_ui_item_hint_loop(item_revision_events, item_ui).await,
+            run_ui_item_hint_loop(item_revision_events, item_ui, item_authority).await,
         )
     });
     reconcile_item_revisions(&state, &item_revisions).await;

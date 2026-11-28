@@ -1952,8 +1952,14 @@ fn handle_runtime_author_item(
     );
     let revisions = state.event_streams.item_revisions().clone();
     let cursor = ryeos_app::item_revised::PublishedHeads::open(&state.config.app_root);
-    let announce = move |event: ryeos_app::item_revised::ItemRevised| {
-        ryeos_app::item_revised::announce(&revisions, &cursor, event);
+    let announce = move |change: ryeos_app::item_revised::RevisedAt| {
+        // The identity the registry holds for the checkout the revision was
+        // made in, which is what admitted the checkout; never the caller's key.
+        let identity = ryeos_app::live_project_path::registered_identity_for_checkout(
+            state,
+            std::path::Path::new(&change.checkout),
+        );
+        ryeos_app::item_revised::announce(&revisions, &cursor, identity, change);
     };
     serde_json::to_value(RuntimeItemAuthorService::author(
         &authoring,

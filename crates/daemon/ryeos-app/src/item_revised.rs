@@ -9,8 +9,12 @@
 //! tells a reader to look again.
 //!
 //! The event names no consumer and no kind of item. `project` is the
-//! canonical root path of the project the item lives in; it is absent for a
-//! change that is not tied to one project.
+//! identity the node established for the project the item lives in (the
+//! owner of the registration that admitted the checkout, and the name the
+//! checkout declares); it is absent when the checkout states no identity.
+//! The event never carries a checkout path. The cursor below is keyed by the
+//! checkout, as private storage, because one project can have several
+//! checkouts whose revision chains number separately.
 //!
 //! The node keeps, per project, the newest revision it has announced for each
 //! item (a cursor, not authority). Startup compares every chain head with it
@@ -23,6 +27,7 @@ use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use ryeos_node_runtime::item_revision::{self, ChainItem, RevisionHeads};
+use ryeos_state::project_identity::ProjectIdentity;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -41,8 +46,9 @@ const MAX_CURSOR_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemRevised {
-    /// Canonical root path of the project the item lives in.
-    pub project: Option<String>,
+    /// The project identity the node established for the checkout the item
+    /// lives in; absent when the checkout states none.
+    pub project: Option<ProjectIdentity>,
     /// Canonical ref of the item.
     pub item_ref: String,
     /// Digest of the item as of this revision; absent when the item was
@@ -52,6 +58,24 @@ pub struct ItemRevised {
     pub revision: u64,
     /// The change set the revision belongs to, when it was made as part of
     /// one.
+    pub change_set: Option<String>,
+}
+
+/// A recorded change as its producer knows it: the checkout it happened in,
+/// named as the node's revision heads name checkouts. The checkout is for the
+/// announcement cursor only; [`announce`] turns this into an [`ItemRevised`]
+/// carrying the identity the producer's admission established, and no path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisedAt {
+    /// Canonical root path of the checkout (the revision heads' project key).
+    pub checkout: String,
+    /// Canonical ref of the item.
+    pub item_ref: String,
+    /// Digest of the item as of this revision; absent when removed.
+    pub digest: Option<String>,
+    /// Position of the revision in the item's chain.
+    pub revision: u64,
+    /// The change set the revision belongs to, when it was made as part of one.
     pub change_set: Option<String>,
 }
 
@@ -152,21 +176,32 @@ impl PublishedHeads {
     }
 }
 
-/// Announce `event`: broadcast it, then record it in the cursor. A cursor that
-/// cannot be written is logged, never raised: the change is already durable
-/// and the next startup announces it again.
-pub fn announce(hub: &ItemRevisedHub, cursor: &PublishedHeads, event: ItemRevised) {
-    if let Some(project) = event.project.as_deref()
-        && let Err(error) = cursor.record(project, &event.item_ref, event.revision)
-    {
+/// Announce `change`: record it in the cursor (by checkout), then broadcast it
+/// as an [`ItemRevised`] carrying `project`, the identity the caller's
+/// admission established for the checkout, or `None` when it states none. A
+/// cursor that cannot be written is logged, never raised: the change is
+/// already durable and the next startup announces it again.
+pub fn announce(
+    hub: &ItemRevisedHub,
+    cursor: &PublishedHeads,
+    project: Option<ProjectIdentity>,
+    change: RevisedAt,
+) {
+    if let Err(error) = cursor.record(&change.checkout, &change.item_ref, change.revision) {
         tracing::warn!(
-            project,
-            item_ref = %event.item_ref,
+            checkout = %change.checkout,
+            item_ref = %change.item_ref,
             error = %format!("{error:#}"),
             "could not record an announced revision; startup will announce it again"
         );
     }
-    hub.publish(event);
+    hub.publish(ItemRevised {
+        project,
+        item_ref: change.item_ref,
+        digest: change.digest,
+        revision: change.revision,
+        change_set: change.change_set,
+    });
 }
 
 /// What one reconciliation pass found.
@@ -178,16 +213,20 @@ pub struct ReconcileReport {
 }
 
 /// Announce the revisions that are newer than the cursor says, for each of
-/// `projects`.
+/// `checkouts`. `identity_of` resolves a checkout to the identity the node's
+/// registry holds for it, or `None` when the registry holds none (or more than
+/// one owner claims the same path).
 pub fn reconcile_projects(
     hub: &ItemRevisedHub,
     cursor: &PublishedHeads,
-    projects: &[String],
+    checkouts: &[String],
+    identity_of: &dyn Fn(&Path) -> Option<ProjectIdentity>,
 ) -> ReconcileReport {
     let mut report = ReconcileReport::default();
-    for project in projects {
+    for project in checkouts {
         report.projects += 1;
         let root = Path::new(project);
+        let identity = identity_of(root);
         let announced = match cursor.read(project) {
             Ok(announced) => announced,
             Err(error) => {
@@ -206,9 +245,9 @@ pub fn reconcile_projects(
         };
         for chain in chains {
             match chain_head_event(project, &chain) {
-                Ok(Some(event)) => {
-                    if announced.get(&event.item_ref).copied().unwrap_or(0) < event.revision {
-                        announce(hub, cursor, event);
+                Ok(Some(change)) => {
+                    if announced.get(&change.item_ref).copied().unwrap_or(0) < change.revision {
+                        announce(hub, cursor, identity.clone(), change);
                         report.announced += 1;
                     }
                 }
@@ -234,6 +273,7 @@ pub fn reconcile_published_heads(
     app_root: &Path,
     node_key: lillux::crypto::VerifyingKey,
     hub: &ItemRevisedHub,
+    identity_of: &dyn Fn(&Path) -> Option<ProjectIdentity>,
 ) -> Result<ReconcileReport> {
     let heads = RevisionHeads::for_reader(app_root, node_key);
     let projects = heads.attested_projects()?;
@@ -241,15 +281,16 @@ pub fn reconcile_published_heads(
         hub,
         &PublishedHeads::open(app_root),
         &projects,
+        identity_of,
     ))
 }
 
-/// The event a chain's current head stands for, or `None` when the item has no
-/// chain.
-pub fn chain_head_event(project: &str, chain: &ChainItem) -> Result<Option<ItemRevised>> {
+/// The change a chain's current head stands for, or `None` when the item has
+/// no chain.
+pub fn chain_head_event(checkout: &str, chain: &ChainItem) -> Result<Option<RevisedAt>> {
     Ok(
-        item_revision::tip_summary(Path::new(project), chain)?.map(|tip| ItemRevised {
-            project: Some(project.to_owned()),
+        item_revision::tip_summary(Path::new(checkout), chain)?.map(|tip| RevisedAt {
+            checkout: checkout.to_owned(),
             item_ref: chain.item_ref(),
             digest: tip.after_digest,
             revision: tip.seq,
@@ -263,9 +304,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn event(project: &str, item_ref: &str, revision: u64) -> ItemRevised {
+    fn event(_checkout: &str, item_ref: &str, revision: u64) -> ItemRevised {
         ItemRevised {
-            project: Some(project.to_owned()),
+            project: None,
             item_ref: item_ref.to_owned(),
             digest: Some("d".repeat(64)),
             revision,
@@ -307,5 +348,58 @@ mod tests {
             BTreeMap::from([("view:a".to_owned(), 3), ("view:b".to_owned(), 1)])
         );
         assert!(cursor.read("/other").unwrap().is_empty());
+    }
+
+    fn identity(owner_digit: char, name: &str) -> ProjectIdentity {
+        format!("pid:v1:{}/{name}", owner_digit.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    fn change(checkout: &str, item_ref: &str, revision: u64) -> RevisedAt {
+        RevisedAt {
+            checkout: checkout.to_owned(),
+            item_ref: item_ref.to_owned(),
+            digest: Some("d".repeat(64)),
+            revision,
+            change_set: None,
+        }
+    }
+
+    #[test]
+    fn an_announcement_carries_the_identity_it_is_given_and_the_cursor_keeps_the_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = ItemRevisedHub::new(4);
+        let cursor = PublishedHeads::open(root.path());
+        let mut rx = hub.subscribe();
+        let alice = identity('a', "acme");
+
+        announce(
+            &hub,
+            &cursor,
+            Some(alice.clone()),
+            change("/p", "view:a", 3),
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.project, Some(alice));
+        assert_eq!(event.revision, 3);
+        // The cursor is private storage keyed by the checkout.
+        assert_eq!(
+            cursor.read("/p").unwrap(),
+            BTreeMap::from([("view:a".to_owned(), 3)])
+        );
+    }
+
+    #[test]
+    fn a_checkout_that_states_no_identity_announces_with_none() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = ItemRevisedHub::new(4);
+        let cursor = PublishedHeads::open(root.path());
+        let mut rx = hub.subscribe();
+
+        announce(&hub, &cursor, None, change("/p", "view:a", 1));
+
+        assert_eq!(rx.try_recv().unwrap().project, None);
     }
 }

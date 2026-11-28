@@ -177,6 +177,25 @@ pub fn disclosure_class_for(
     DisclosureClass::Principal
 }
 
+/// The disclosure class of a live session that holds only a key: the node's
+/// configured local operator key is the operator, any other key is a
+/// principal. A session carries no origin context, so a forwarded remote
+/// principal is never the operator here. The class comes from the key alone,
+/// never from a flag the session carries. A failure to load the operator is
+/// not the operator.
+pub fn disclosure_class_for_key(
+    state: &AppState,
+    key: &str,
+) -> ryeos_node_runtime::disclosure::DisclosureClass {
+    use ryeos_node_runtime::disclosure::DisclosureClass;
+    match ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+        &state.config.app_root,
+    ) {
+        Ok(operator) if operator.principal_id() == key => DisclosureClass::Operator,
+        _ => DisclosureClass::Principal,
+    }
+}
+
 /// Require either the exact local operator or a verified, origin-bound
 /// `remote_principal`. Remote admission never reads the target-local private
 /// key.

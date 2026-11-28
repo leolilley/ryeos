@@ -1076,8 +1076,25 @@ async fn a_rebound_surface_is_accepted_by_history_dispatch_and_detach() {
     let named = old.public_descriptor(bounds).named_items;
     assert!(!named.is_empty());
     let mut bus = ui.session_bus.subscribe(&chain.session_id);
+    struct AllowEveryRead;
+    impl ryeos_ui::item_hints::ItemHintAuthority for AllowEveryRead {
+        fn checkout_identity(
+            &self,
+            _checkout: &std::path::Path,
+        ) -> Option<ryeos_state::project_identity::ProjectIdentity> {
+            None
+        }
+        fn may_read(
+            &self,
+            _key: &str,
+            _project: Option<&ryeos_state::project_identity::ProjectIdentity>,
+        ) -> bool {
+            true
+        }
+    }
     let told = ryeos_ui::item_hints::ItemHintFanout::new().publish(
         &ui,
+        &AllowEveryRead,
         &ryeos_app::item_revised::ItemRevised {
             project: None,
             item_ref: named[0].clone(),

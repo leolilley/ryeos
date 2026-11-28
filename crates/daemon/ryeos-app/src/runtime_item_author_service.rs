@@ -20,7 +20,7 @@ use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::item_revised::ItemRevised;
+use crate::item_revised::RevisedAt;
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -201,7 +201,7 @@ impl RuntimeItemAuthorService {
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
         heads: &RevisionHeads,
-        announce: &dyn Fn(ItemRevised),
+        announce: &dyn Fn(RevisedAt),
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
         // Candidate integration and live publication are separate authorities.
@@ -518,7 +518,7 @@ impl RuntimeItemAuthorService {
         authoring: &NodeIdentity,
         engine: &ryeos_engine::engine::Engine,
         heads: &RevisionHeads,
-        announce: Option<&dyn Fn(ItemRevised)>,
+        announce: Option<&dyn Fn(RevisedAt)>,
         target: RemovalTarget<'_>,
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
@@ -628,18 +628,19 @@ impl RuntimeItemAuthorService {
 }
 
 /// The announcement of a recorded change to the item at `item_ref` in
-/// `project_root`. The project is named by its canonical root path, as the
-/// node's revision heads name it.
+/// `project_root`. The checkout is named as the node's revision heads name it;
+/// the identity the announcement carries is stamped by whoever announces it,
+/// from the registration that admitted the checkout.
 fn revised_event(
     project_root: &Path,
     item_ref: &str,
     digest: Option<String>,
     revision: u64,
-) -> ItemRevised {
-    let project = RevisionHeads::project_key(project_root)
+) -> RevisedAt {
+    let checkout = RevisionHeads::project_key(project_root)
         .unwrap_or_else(|_| project_root.display().to_string());
-    ItemRevised {
-        project: Some(project),
+    RevisedAt {
+        checkout,
         item_ref: item_ref.to_owned(),
         digest,
         revision,

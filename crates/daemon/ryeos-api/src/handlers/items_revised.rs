@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::item_revised::{ItemRevised, PublishedHeads, announce};
+use ryeos_app::item_revised::{PublishedHeads, RevisedAt, announce};
 use ryeos_app::state::AppState;
 use ryeos_engine::trust::{EndorsementIndex, EndorsementLedger, EndorsementTarget};
 use ryeos_executor::executor::ServiceAvailability;
@@ -110,9 +110,9 @@ fn project_root(project_path: &str) -> HandlerResult<(PathBuf, String)> {
     Ok((root, key))
 }
 
-fn event(project: &str, item_ref: &str, digest: Option<String>, revision: u64) -> ItemRevised {
-    ItemRevised {
-        project: Some(project.to_owned()),
+fn event(project: &str, item_ref: &str, digest: Option<String>, revision: u64) -> RevisedAt {
+    RevisedAt {
+        checkout: project.to_owned(),
         item_ref: item_ref.to_owned(),
         digest,
         revision,
@@ -127,7 +127,7 @@ fn recorded_changes(
     root: &Path,
     project: &str,
     item_refs: &[String],
-) -> HandlerResult<Vec<ItemRevised>> {
+) -> HandlerResult<Vec<RevisedAt>> {
     let heads = RevisionHeads::for_reader(&state.config.app_root, *state.identity.verifying_key());
     let mut events = Vec::with_capacity(item_refs.len());
     for item_ref in item_refs {
@@ -177,7 +177,7 @@ fn endorsed_changes(
     project: &str,
     caller: &str,
     digest: &str,
-) -> HandlerResult<Vec<ItemRevised>> {
+) -> HandlerResult<Vec<RevisedAt>> {
     let ledger = EndorsementLedger::load(&state.config.app_root, state.identity.verifying_key())
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     if ledger.is_revoked(digest) {
@@ -258,12 +258,17 @@ pub async fn handle(
     }
     let work_state = state.clone();
     let caller = ctx.fingerprint.clone();
-    let events = tokio::task::spawn_blocking(move || {
+    let (events, identity) = tokio::task::spawn_blocking(move || {
         let (root, project) = project_root(&req.project_path)?;
-        match req.endorsement.as_deref() {
+        let events = match req.endorsement.as_deref() {
             Some(digest) => endorsed_changes(&work_state, &root, &project, &caller, digest),
             None => recorded_changes(&work_state, &root, &project, &req.item_refs),
-        }
+        }?;
+        // The identity the node's registry holds for the checkout, which is
+        // what admission matched; never derived from the caller's key.
+        let identity =
+            ryeos_app::live_project_path::registered_identity_for_checkout(&work_state, &root);
+        Ok::<_, HandlerError>((events, identity))
     })
     .await
     .map_err(|error| HandlerError::Internal(format!("announce task failed: {error}")))??;
@@ -278,7 +283,7 @@ pub async fn handle(
                 "digest": event.digest,
                 "revision": event.revision,
             });
-            announce(hub, &cursor, event);
+            announce(hub, &cursor, identity.clone(), event);
             summary
         })
         .collect();

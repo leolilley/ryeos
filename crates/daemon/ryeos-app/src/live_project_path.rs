@@ -150,6 +150,59 @@ fn registered_to_key(state: &AppState, key: &str, canonical: &Path) -> bool {
     }
 }
 
+/// Every (checkout path, identity) pair the node's registry holds, one per
+/// registered path. Empty when the registry cannot be read: no revision is
+/// then announced with an identity.
+pub fn registered_checkout_identities(
+    state: &AppState,
+) -> Vec<(PathBuf, ryeos_state::project_identity::ProjectIdentity)> {
+    match crate::project_registry::load_registrations(
+        &state.config.app_root,
+        state.identity.verifying_key(),
+    ) {
+        Ok(registrations) => registrations
+            .iter()
+            .flat_map(|loaded| {
+                loaded
+                    .registration
+                    .paths
+                    .iter()
+                    .map(|path| (path.clone(), loaded.registration.identity.clone()))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "project registrations unreadable; revisions are announced with no project identity"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// The identity of the one registration that lists exactly `canonical`, or
+/// `None` when none does or when more than one does (two owners claim one
+/// checkout, so none of them is named).
+pub fn sole_identity_for_checkout(
+    registered: &[(PathBuf, ryeos_state::project_identity::ProjectIdentity)],
+    canonical: &Path,
+) -> Option<ryeos_state::project_identity::ProjectIdentity> {
+    let mut holders = registered.iter().filter(|(path, _)| path == canonical);
+    let first = holders.next()?;
+    holders.next().is_none().then(|| first.1.clone())
+}
+
+/// The project identity the node's registry holds for the checkout at
+/// `canonical`. Admission establishes it (the registration an owner made is
+/// what admits a non-operator key), so a producer announcing a revision uses
+/// this and never derives an identity from the caller's key.
+pub fn registered_identity_for_checkout(
+    state: &AppState,
+    canonical: &Path,
+) -> Option<ryeos_state::project_identity::ProjectIdentity> {
+    sole_identity_for_checkout(&registered_checkout_identities(state), canonical)
+}
+
 impl LiveProjectPathRefusal {
     /// The handler answer for this refusal: 403 for a key that is not the
     /// operator and for a node-internal root, 400 for the operator's own bad
