@@ -215,6 +215,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::new(),
             authority: None,
+            public: false,
         };
         Arc::new(CompiledRoute {
             id: id.to_string(),

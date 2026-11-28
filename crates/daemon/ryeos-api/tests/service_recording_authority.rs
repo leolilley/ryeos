@@ -260,6 +260,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
         },
         source_file: "/test/identity-public-key.yaml".into(),
         authority: None,
+        public: false,
     };
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)
@@ -270,6 +271,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
     let api_state = ApiState {
         app: publication.app().clone(),
         route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: Some(publication),
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };
@@ -330,6 +332,7 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
         },
         source_file: "/test/identity-public-key-failure.yaml".into(),
         authority: None,
+        public: false,
     };
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)
@@ -337,6 +340,7 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
     let api_state = ApiState {
         app: Arc::new(state.clone()),
         route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: None,
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };

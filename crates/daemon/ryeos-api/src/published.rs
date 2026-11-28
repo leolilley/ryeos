@@ -96,6 +96,12 @@ pub fn match_route(path: &str) -> Option<(PublishedRoute, BTreeMap<&'static str,
 
 // ── The daily byte cap ──────────────────────────────────────────────
 
+/// Mode of a served-bytes journal: node state, owner-only. Set when the file is
+/// created and on every open, never left to the umask.
+pub const LEDGER_FILE_MODE: u32 = 0o600;
+/// Mode of a journal's directory when the journal creates it.
+pub const LEDGER_DIR_MODE: u32 = 0o700;
+
 /// A rolling 24-hour journal of bytes reserved by reads, kept in a file so a
 /// restart does not reset the day. A reservation is made before the bytes are
 /// read and is never returned: bytes that were reserved and then not served
@@ -182,16 +188,18 @@ impl ByteLedger {
                 text.push_str(&format!("{at} {size}\n"));
             }
             text.push_str(&format!("{now_ms} {bytes}\n"));
-            lillux::atomic_fs::atomic_write(&self.path, text.as_bytes())
-                .map_err(|error| format!("compact the served-bytes journal: {error}"))?;
+            lillux::atomic_write_with_mode(&self.path, text.as_bytes(), LEDGER_FILE_MODE)
+                .map_err(|error| format!("compact the served-bytes journal: {error:?}"))?;
             self.appended = 0;
             return Ok(());
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| format!("open the served-bytes journal: {error}"))?;
+        if let Some(parent) = self.path.parent() {
+            lillux::create_dir_exact_mode(parent, LEDGER_DIR_MODE).map_err(|error| {
+                format!("create the served-bytes journal's directory: {error:#}")
+            })?;
+        }
+        let mut file = lillux::open_append_exact_mode(&self.path, LEDGER_FILE_MODE)
+            .map_err(|error| format!("open the served-bytes journal: {error:#}"))?;
         file.write_all(format!("{now_ms} {bytes}\n").as_bytes())
             .map_err(|error| format!("append to the served-bytes journal: {error}"))?;
         self.appended += 1;
