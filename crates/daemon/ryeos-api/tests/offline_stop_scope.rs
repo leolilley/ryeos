@@ -42,6 +42,13 @@ struct Rig {
 
 fn rig() -> Rig {
     let (dir, store_owner, state) = test_state::build_test_state();
+    // The shared fixture keeps the node key outside the default runtime
+    // paths; reading the node's facts to build a request looks for it there,
+    // so the key is copied into place inside this test's own directory.
+    let default_key = ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone())
+        .node_signing_key_path();
+    std::fs::create_dir_all(default_key.parent().unwrap()).unwrap();
+    std::fs::copy(&state.config.node_signing_key_path, &default_key).unwrap();
     let operator =
         ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap()
