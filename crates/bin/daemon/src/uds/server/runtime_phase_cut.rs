@@ -107,8 +107,9 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
             .context("flush runtime phase-cut evidence")?;
     }
     // Park the callback while the daemon runs. A SIGKILL ends it with the
-    // process; an orderly stop ends it with an error so the request task
-    // returns and shutdown can join it before the Store closes.
+    // process; an orderly stop ends it, a few seconds after the stop begins,
+    // with an error so the request task returns and shutdown can join it
+    // before the Store closes.
     let mut shutdown = crate::subscribe_shutdown();
     if !crate::shutdown_requested() {
         match shutdown.as_mut() {
@@ -118,5 +119,10 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
             None => std::future::pending::<()>().await,
         }
     }
+    // Keep the request task alive past the drain, so a stop that does not join
+    // its request tasks reaches the Store close while this one still holds the
+    // application state. The hold is shorter than the shutdown grace, so a
+    // stop that does join waits it out.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
     bail!("runtime phase-cut callback ended by daemon shutdown")
 }
