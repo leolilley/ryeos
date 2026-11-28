@@ -898,6 +898,11 @@ struct PreflightNodeRouteRecord {
     #[serde(default)]
     #[serde(rename = "request")]
     _request: PreflightRawRequest,
+    /// Signed `public: true`: served under the node's `public_routes` policy.
+    /// Install admission checks it against that policy.
+    #[serde(default)]
+    #[serde(rename = "public")]
+    _public: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2297,6 +2302,27 @@ description: "fixed parser handler for preflight tests"
             msg.contains("manifest.source.yaml must be a regular file"),
             "should reject manifest source symlink: {msg}"
         );
+    }
+
+    #[test]
+    fn validate_route_accepts_a_route_signed_public() {
+        // A public route is checked against the node's public_routes policy at
+        // install admission; generic preflight must read the field, not refuse it.
+        let public_route = serde_json::json!({
+            "id": "public/front",
+            "path": "/",
+            "methods": ["GET"],
+            "auth": "none",
+            "limits": { "body_bytes_max": 0 },
+            "response": {
+                "mode": "static",
+                "status": 200,
+                "content_type": "text/plain",
+                "body_b64": "aGVsbG8="
+            },
+            "public": true
+        });
+        validate_node_route_record(&public_route).expect("a public route passes preflight");
     }
 
     #[test]

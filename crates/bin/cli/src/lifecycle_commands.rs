@@ -3425,6 +3425,16 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Public-page routes the running node left out at its start.
+    if daemon_running {
+        checks.push(crate::doctor_public_routes::check(&config.app_root).await);
+    } else {
+        checks.push(crate::doctor_public_routes::not_checked(
+            "this row asks the running daemon, and the node is not running",
+            initialized.then_some("start the node: ryeos start"),
+        ));
+    }
+
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
