@@ -65,7 +65,12 @@ fn the_bundle_registration_body_is_pinned() {
     let pem = key.to_pkcs8_pem(Default::default()).expect("pem");
     lillux::atomic_write_private(&key_path, pem.as_bytes()).expect("write key");
 
+    // A node with no registrations: nothing laned to refuse a replacement of.
+    let app_root = dir.path().join("node");
+    let trust = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
     let signed = ryeos_app::bundle_transaction::prepare_signed_bundle_registration(
+        &app_root,
+        &trust,
         Path::new("/var/lib/node/.ai/bundles/core"),
         &key_path,
     )
