@@ -1,14 +1,17 @@
-//! `remote/bundle-install` — install a bundle from a remote node.
+//! `remote/bundle-install` — fetch a bundle from a remote node and stage it.
 //!
 //! Orchestrator: calls `bundle_export` on the remote node, fetches all
-//! file blobs via `objects_get`, materializes them into the local bundle
-//! install directory, then runs preflight verification.
+//! file blobs via `objects_get`, verifies each against its export entry and
+//! hands the tree to the node's staging area. Nothing is registered: a live
+//! node never changes its bundle registrations, which the signed init
+//! completion record pins. A stage takes effect at the next start by a signed
+//! operation, never by this call.
 //!
-//! Fail-closed: if any blob is missing or preflight fails, the entire
-//! install is aborted and the partial directory is cleaned up.
+//! Fail-closed: if any blob is missing or does not verify, or a staging cap
+//! would be passed, nothing is staged and the temporary directory is removed.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -45,6 +48,9 @@ pub struct Request {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BundleExportResponse {
+    /// The export format; an answer without the current one is refused.
+    #[serde(default)]
+    pub(crate) format: String,
     pub(crate) bundle_name: String,
     pub(crate) file_count: usize,
     pub(crate) total_bytes: u64,
@@ -61,26 +67,6 @@ pub(crate) struct BundleExportEntry {
     pub(crate) mode: u32,
 }
 
-/// A live install never changes the node's bundle registrations: they are
-/// pinned by the signed init completion record, and the running node holds
-/// that record open. Until live installs are staged and activated by a signed
-/// offline operation, they are refused before anything is fetched or written.
-pub(crate) const LIVE_INSTALLS_ARE_STAGED: bool = false;
-
-pub(crate) const LIVE_INSTALL_REFUSED_CODE: &str = "live_install_staged_unavailable";
-
-pub(crate) fn live_install_refused() -> crate::handler_error::HandlerError {
-    let message = "live installs are staged; staging is not available yet";
-    crate::handler_error::HandlerError::Structured {
-        code: LIVE_INSTALL_REFUSED_CODE.to_owned(),
-        status: 501,
-        body: serde_json::json!({
-            "code": LIVE_INSTALL_REFUSED_CODE,
-            "error": format!("{LIVE_INSTALL_REFUSED_CODE}: {message}"),
-        }),
-    }
-}
-
 pub async fn handle(
     req: Request,
     ctx: crate::handler_context::HandlerContext,
@@ -89,22 +75,11 @@ pub async fn handle(
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
-    state
-        .extensions
-        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
-        .context("prospective node-config validator is not installed at the composition root")?;
-
     if let Some(report) = precheck_install(&req.bundle_name, &state)? {
         return Ok(report);
     }
 
     let client = crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?;
-
-    // The caller is authorized to act through this remote; only now does it
-    // learn that a live install is refused, before anything is fetched.
-    if !LIVE_INSTALLS_ARE_STAGED {
-        return Err(anyhow::Error::new(live_install_refused()));
-    }
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -123,13 +98,22 @@ pub async fn handle(
             bundle_name: req.bundle_name.clone(),
         },
     };
-    install_entries(
+    stage_entries(
         &state,
         &ctx.fingerprint,
         &req.bundle_name,
         &source,
         &entries,
-        &format!("remote:{}", req.remote),
+        StageOrigin {
+            source: ryeos_node::bundle_staging::StagedSource {
+                kind: ryeos_node::bundle_staging::SOURCE_REMOTE.to_owned(),
+                origin: format!("remote:{}", req.remote),
+                publication_record_hash: None,
+                pinned_node: None,
+                manifest_hash: None,
+            },
+            evidence: Vec::new(),
+        },
     )
     .await
 }
@@ -171,259 +155,208 @@ pub(crate) fn precheck_install(bundle_name: &str, state: &AppState) -> Result<Op
     Ok(None)
 }
 
-/// Materialize `entries` from `source` into a request-unique hidden generation
-/// and install it: fetch with no bundle lock held, then take the registry and
-/// per-name locks, admit the completed staging, activate and journal it. The
-/// journal records `journal_source` as where the bundle came from.
-pub(crate) async fn install_entries<S: BlobSource>(
+/// What a stage records about where it came from, and the node-verified
+/// source documents kept beside the tree.
+pub(crate) struct StageOrigin {
+    pub(crate) source: ryeos_node::bundle_staging::StagedSource,
+    /// Evidence files by name. A later activation re-verifies from these.
+    pub(crate) evidence: Vec<(String, Vec<u8>)>,
+}
+
+/// The typed HTTP refusal for a refused stage.
+pub(crate) fn stage_refusal_error(
+    refusal: &ryeos_node::bundle_staging::StagingRefusal,
+) -> crate::handler_error::HandlerError {
+    crate::handler_error::HandlerError::Structured {
+        code: refusal.code().to_owned(),
+        status: refusal.status(),
+        body: serde_json::json!({
+            "code": refusal.code(),
+            "error": refusal.to_string(),
+        }),
+    }
+}
+
+fn stage_refusal(refusal: ryeos_node::bundle_staging::StagingRefusal) -> anyhow::Error {
+    anyhow::Error::new(stage_refusal_error(&refusal))
+}
+
+/// Materialise `entries` from `source` into `tree`, give the tree's
+/// directories mode 0o755 whatever the process umask was, and check that the
+/// bytes on disk are exactly the verified file list. Returns the files and
+/// bytes written and the tree digest.
+pub(crate) async fn materialise_verified_tree<S: BlobSource>(
+    source: &S,
+    entries: &[BundleExportEntry],
+    bundle_name: &str,
+    tree: &Path,
+) -> Result<(usize, u64, String)> {
+    use ryeos_node::bundle_staging as staging;
+
+    write_remote_fetch_heartbeat(tree).context("initialize bundle stage transfer heartbeat")?;
+    let (files_staged, total_bytes) = fetch_and_materialize_files(source, entries, tree).await?;
+    if tree.join(REMOTE_FETCH_HEARTBEAT_FILE).exists() {
+        remove_remote_fetch_heartbeat(tree)?;
+    }
+
+    // Directories made while materialising took the process umask; the staged
+    // tree's directories are exactly 0o755 whatever it was.
+    lillux::set_tree_directory_modes(tree).context("set the staged tree's directory modes")?;
+
+    // The bytes on disk must be exactly the verified entry list: recompute the
+    // digest from the materialised tree and compare it with the list's.
+    let files: Vec<staging::TreeFile> = entries
+        .iter()
+        .map(|entry| staging::TreeFile {
+            path: entry.path.clone(),
+            hash: entry.hash.clone(),
+            size: entry.size,
+            mode: entry.mode,
+        })
+        .collect();
+    let tree_digest = staging::tree_digest(bundle_name, &files).map_err(stage_refusal)?;
+    let on_disk = staging::tree_digest_from_dir(
+        bundle_name,
+        tree,
+        &staging::TreeLimits {
+            max_files: super::bundle_export::MAX_EXPORTED_BUNDLE_FILES,
+            max_bytes: super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES,
+        },
+    )
+    .map_err(stage_refusal)?;
+    if on_disk.digest != tree_digest {
+        return Err(stage_refusal(staging::StagingRefusal::Invalid(
+            "the materialised tree does not match the verified file list".to_owned(),
+        )));
+    }
+
+    Ok((files_staged, total_bytes, tree_digest))
+}
+
+/// The staging caps the node's loaded policy states. The policy is the only
+/// source: a snapshot without the section is an error, never a default.
+pub(crate) fn stage_caps(
+    policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+) -> Result<ryeos_node::bundle_staging::StagingCaps> {
+    Ok(ryeos_node::bundle_staging::StagingCaps::from_policy(
+        policy.require::<ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy>()?,
+    ))
+}
+
+/// Fetch `entries` from `source`, verify every blob against its entry, and
+/// stage the result.
+///
+/// Nothing is registered and nothing is written under the bundle roots: the
+/// verified tree goes to the node's staging area, under a temporary directory
+/// that is renamed into place, with the node-signed staging record written
+/// last. A stage over a cap, or one whose bundle manifest does not verify, is
+/// refused with a typed code, writes no record and leaves no temporary
+/// directory. The offline ledger is not touched.
+pub(crate) async fn stage_entries<S: BlobSource>(
     state: &AppState,
     actor: &str,
     bundle_name: &str,
     source: &S,
     entries: &[BundleExportEntry],
-    journal_source: &str,
+    origin: StageOrigin,
 ) -> Result<Value> {
-    let bundles_root = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("bundles");
-    let local_target = bundles_root.join(bundle_name);
-    let prospective_validator = state
-        .extensions
-        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
-        .context("prospective node-config validator is not installed at the composition root")?;
+    use ryeos_node::bundle_staging as staging;
 
-    // 2. Materialize a request-unique hidden generation in bounded CAS batches
-    // while no bundle transaction lock is held. No response or decoded
-    // bundle-wide blob map is retained: at most one bounded batch is live.
-    std::fs::create_dir_all(&bundles_root)
-        .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
-    let transfer_staging = bundles_root.join(format!(
-        ".{}.remote-fetch-{}",
+    let node_key = state.identity.signing_key();
+    let verifying = node_key.verifying_key();
+    let caps = stage_caps(&state.node_policy)?;
+    let requested_by = actor.strip_prefix("fp:").unwrap_or(actor).to_owned();
+    let declared_bytes = entries
+        .iter()
+        .fold(0u64, |sum, entry| sum.saturating_add(entry.size));
+
+    // Refuse over a cap before any blob moves. The commit checks again under
+    // the area's lock. The area handle is not held across the transfer: the
+    // temporary stage is a plain directory, removed when it drops on every
+    // refusal path.
+    let temp = {
+        let area = staging::StagingArea::open(&state.config.app_root).map_err(stage_refusal)?;
+        area.check_admission(&caps, &requested_by, declared_bytes, &verifying)
+            .map_err(stage_refusal)?;
+        area.begin().map_err(stage_refusal)?
+    };
+    let tree = temp.tree();
+    let (files_staged, total_bytes, tree_digest) =
+        materialise_verified_tree(source, entries, bundle_name, &tree).await?;
+
+    // The signed manifest inside the verified tree states what the bundle
+    // declares. A bundle that cannot state it could never be installed.
+    let verified_manifest = ryeos_bundle::manifest::load_verified_manifest(
+        &tree.join(ryeos_engine::AI_DIR),
         bundle_name,
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&transfer_staging).with_context(|| {
-        format!(
-            "create unique remote transfer staging {}",
-            transfer_staging.display()
-        )
-    })?;
-    let mut staging_cleanup = RemoteStagingCleanup::new(transfer_staging.clone());
-    write_remote_fetch_heartbeat(&transfer_staging)
-        .context("initialize remote bundle transfer heartbeat")?;
-    let (files_installed, total_bytes) =
-        fetch_and_materialize_files(source, entries, &transfer_staging).await?;
-    lillux::sync_tree_durable(&transfer_staging).with_context(|| {
-        format!(
-            "flush remote transfer staging {}",
-            transfer_staging.display()
-        )
-    })?;
-    write_remote_fetch_heartbeat(&transfer_staging)
-        .context("refresh remote bundle transfer heartbeat after durable flush")?;
-
-    // 3. Acquire the node-wide registry lock only after all remote I/O has
-    // completed, then acquire the per-name lock. Reconcile, exact re-planning,
-    // admission, activation, and registration remain serialized as one final
-    // local mutation. The private transfer generation is intentionally outside
-    // both locks.
-    let registry_lock =
-        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
-    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
-        &registry_lock,
-        bundle_name,
-    )?;
-    if let Some(report) = reconcile_remote_install(bundle_name, state, &transaction)? {
-        return Ok(report);
-    }
-    if local_target.exists() {
-        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
-            "bundle_appeared_during_transfer",
-            409,
-            format!(
-                "bundle '{}' appeared during remote transfer at {}",
-                bundle_name,
-                local_target.display()
-            ),
-        )));
-    }
-
-    // The transfer is now protected by the node-wide mutation lock, so its
-    // out-of-band liveness marker can be removed before the generation is
-    // admitted as bundle content.
-    remove_remote_fetch_heartbeat(&transfer_staging)?;
-
-    let transaction_staging = bundles_root.join(format!(".{}.remote-staging", bundle_name));
-    remove_stale_transaction_staging(&transaction_staging)?;
-    match lillux::rename_path_durable(&transfer_staging, &transaction_staging) {
-        Ok(()) => staging_cleanup.retarget(transaction_staging.clone()),
-        Err(error) => {
-            if error.namespace_committed() {
-                staging_cleanup.retarget(transaction_staging.clone());
-                staging_cleanup.cleanup_now();
-            }
-            return Err(error).with_context(|| {
-                format!(
-                    "move remote transfer generation {} to transaction staging {}",
-                    transfer_staging.display(),
-                    transaction_staging.display()
-                )
-            });
-        }
-    }
-
-    let admission = crate::handlers::bundle_install::admit_completed_staging(
-        &state.config.app_root,
-        bundle_name,
-        &transaction_staging,
-        false,
         &state.engine.node_trust_store,
-        &prospective_validator,
-        Arc::clone(&state.isolation),
-    );
-    if let Err(error) = admission {
-        // The canonical staging name is shared by transaction recovery. Remove
-        // this request's rejected generation before releasing its lock.
-        staging_cleanup.cleanup_now();
-        return Err(error)
-            .with_context(|| format!("prospective admission failed for bundle '{}'", bundle_name));
-    }
-
-    let mut cache_invalidated = false;
-    let mut durability_uncertain = false;
-    let activation: Result<(PathBuf, PathBuf)> = (|| {
-        let registration = serde_json::json!({ "kind": "node", "path": local_target });
-        transaction.begin_present(
-            ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
-            &transaction_staging,
-            registration,
-        )?;
-        match lillux::rename_path_durable(&transaction_staging, &local_target) {
-            Ok(()) => staging_cleanup.disarm(),
-            Err(error) => {
-                if error.namespace_committed() {
-                    staging_cleanup.disarm();
-                    durability_uncertain = true;
-                    tracing::warn!(
-                        bundle = %bundle_name,
-                        %error,
-                        "remote bundle activation is visible but its parent durability barrier failed"
-                    );
-                } else {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "activate remote bundle staging {} at {}",
-                            transaction_staging.display(),
-                            local_target.display()
-                        )
-                    });
-                }
-            }
-        }
-
-        // The target namespace is now visible. Invalidate immediately, before
-        // any fallible journal/registration step can return an error.
-        let new_gen = state.engine_cache.bump_system_install_generation();
-        cache_invalidated = true;
-        tracing::info!(
-            bundle = %bundle_name,
-            engine_cache_generation = new_gen,
-            "remote bundle namespace activated: bumped engine cache generation"
-        );
-
-        transaction.mark_activated()?;
-        let canonical = local_target
-            .canonicalize()
-            .context("canonicalize installed bundle path")?;
-        let registration = transaction
-            .commit_present(state.identity.signing_key())
-            .context("commit remote bundle registration")?;
-        Ok((canonical, registration))
-    })();
-
-    let (canonical_target, registration) = match activation {
-        Ok(paths) => paths,
-        Err(error) => {
-            // A durable-rename error can report failure after committing the
-            // namespace, and mark/registration writes can fail after a normal
-            // rename. Never return with a visible generation and stale engines.
-            if !cache_invalidated && local_target.is_dir() {
-                let new_gen = state.engine_cache.bump_system_install_generation();
-                tracing::warn!(
-                    bundle = %bundle_name,
-                    engine_cache_generation = new_gen,
-                    error = %format!("{error:#}"),
-                    "remote bundle activation failed after target became visible: bumped engine cache generation"
-                );
-            }
-            // If activation failed before the namespace rename, the canonical
-            // staging path still exists. Clean it while this transaction lock
-            // is held; the journal remains sufficient for fail-closed recovery.
-            staging_cleanup.cleanup_now();
-            return Err(error);
-        }
+    )
+    .map_err(|error| {
+        stage_refusal(staging::StagingRefusal::Invalid(format!(
+            "the staged bundle's signed manifest does not verify: {error:#}"
+        )))
+    })?;
+    let declared = staging::DeclaredFacets {
+        provides_kinds: verified_manifest.manifest.provides_kinds.clone(),
+        requires_kinds: verified_manifest.manifest.requires_kinds.clone(),
+        uses_kinds: verified_manifest.manifest.uses_kinds.clone(),
     };
 
-    // The install is committed; the journal records it. A journal failure is
-    // reported, never turned into a failed install.
-    let journaled = journal_install(
-        state,
-        actor,
-        bundle_name,
-        journal_source,
-        &registration,
-        files_installed,
+    // A stage from a publication is audited by the lane's own rules before
+    // anything is committed, so a bundle no lane would admit stages nothing.
+    // Staging confers nothing: the audit runs again at apply, with the policy
+    // as it stands then, and the stage records no lift.
+    let predicted_lifts = if origin.source.kind == staging::SOURCE_PUBLICATION {
+        let grants = super::stage_lane::grants_from_snapshot(&state.node_policy, bundle_name)
+            .map_err(|error| {
+                anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+                    "publication_lane_unavailable",
+                    503,
+                    format!("this node's publication_lane policy: {error:#}"),
+                ))
+            })?;
+        super::stage_lane::audit_tree(&tree, bundle_name, &state.engine.kinds, &grants)?;
+        Some(super::stage_lane::predicted_lifts(
+            &state.node_policy,
+            bundle_name,
+        ))
+    } else {
+        None
+    };
+
+    let record = staging::StagingRecord {
+        schema: staging::STAGING_SCHEMA.to_owned(),
+        bundle_name: bundle_name.to_owned(),
+        tree_digest: tree_digest.clone(),
+        source: origin.source,
+        requested_by,
+        policy_generation: state.node_policy.generation_digest().to_owned(),
+        declared: declared.clone(),
+        file_count: u64::try_from(files_staged).unwrap_or(u64::MAX),
         total_bytes,
-    );
+        evidence: std::collections::BTreeMap::new(),
+        staged_at: lillux::time::iso8601_now(),
+    };
+    let area = staging::StagingArea::open(&state.config.app_root).map_err(stage_refusal)?;
+    let committed = area
+        .commit(temp, record, &origin.evidence, &caps, node_key)
+        .map_err(stage_refusal)?;
 
-    Ok(serde_json::json!({
+    let mut answer = serde_json::json!({
         "bundle_name": bundle_name,
-        "files_installed": files_installed,
+        "status": staging::STATUS_STAGED,
+        "installed": false,
+        "tree_digest": tree_digest,
+        "files_staged": files_staged,
         "total_bytes": total_bytes,
-        "path": canonical_target.display().to_string(),
-        "durability_uncertain": durability_uncertain,
-        "journal": journaled,
-    }))
-}
-
-/// Record a committed install in the node journal; the outcome as data.
-fn journal_install(
-    state: &AppState,
-    actor: &str,
-    bundle: &str,
-    source: &str,
-    registration: &Path,
-    files: usize,
-    bytes: u64,
-) -> Value {
-    let outcome = std::fs::read(registration)
-        .with_context(|| format!("read bundle registration {}", registration.display()))
-        .map_err(|error| format!("{error:#}"))
-        .and_then(|signed| {
-            let digest = format!("sha256:{}", lillux::sha256_hex(&signed));
-            ryeos_node::node_journal::NodeJournal::for_app_root(
-                &state.config.app_root,
-                (*state.identity).clone(),
-            )
-            .record_bundle_installed(&ryeos_node::node_journal::BundleInstalledFacts {
-                bundle,
-                source,
-                registration_digest: &digest,
-                actor,
-                files: u64::try_from(files).unwrap_or(u64::MAX),
-                bytes,
-            })
-            .map_err(|error| error.to_string())
-        });
-    match outcome {
-        Ok(_) => serde_json::json!({ "recorded": true }),
-        Err(error) => {
-            tracing::error!(bundle, error = %error, "failed to journal a bundle install");
-            serde_json::json!({ "recorded": false, "error": error })
-        }
+        "already_staged": committed.already_staged,
+        "declared": declared,
+        "receipt": staging::STAGED_RECEIPT,
+    });
+    if let (Some(lifts), Some(object)) = (predicted_lifts, answer.as_object_mut()) {
+        object.insert("predicted_lifts".to_owned(), lifts);
     }
+    Ok(answer)
 }
 
 /// Reconcile one bundle transaction while the caller holds its lock. Visible
@@ -670,72 +603,6 @@ fn is_remote_fetch_generation_name(file_name: &str) -> bool {
     generation_id.hyphenated().to_string() == generation
 }
 
-fn remove_stale_transaction_staging(path: &Path) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("inspect transaction staging {}", path.display()));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        bail!(
-            "remote transaction staging {} is not a real directory",
-            path.display()
-        );
-    }
-    lillux::remove_dir_all_durable(path)
-        .with_context(|| format!("remove stale transaction staging {}", path.display()))
-}
-
-/// Best-effort cancellation/error cleanup for a request-owned hidden staging
-/// generation. Once a transaction rename commits, the guard is retargeted to
-/// the canonical staging path and finally disarmed when that path becomes live.
-struct RemoteStagingCleanup {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl RemoteStagingCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn retarget(&mut self, path: PathBuf) {
-        self.path = path;
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-
-    fn cleanup_now(&mut self) {
-        if !self.armed {
-            return;
-        }
-        match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata)
-                if metadata.file_type().is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && std::fs::remove_dir_all(&self.path).is_ok() =>
-            {
-                self.armed = false;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.armed = false;
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Drop for RemoteStagingCleanup {
-    fn drop(&mut self) {
-        self.cleanup_now();
-    }
-}
-
 /// Fetch and materialize all unique blobs in bounded batches. Reused hashes
 /// are fetched once and may materialize at multiple declared paths.
 /// A fetched blob whose content or size is not what the export declared.
@@ -947,6 +814,17 @@ pub(crate) fn validate_export_response(
     response: &BundleExportResponse,
     expected_bundle_name: &str,
 ) -> Result<()> {
+    if response.format != super::bundle_export::BUNDLE_EXPORT_FORMAT {
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "bundle_export_format_unsupported",
+            422,
+            format!(
+                "the export is format '{}'; this node reads only '{}'",
+                response.format,
+                super::bundle_export::BUNDLE_EXPORT_FORMAT
+            ),
+        )));
+    }
     if response.bundle_name != expected_bundle_name {
         bail!(
             "remote exported bundle '{}' when '{}' was requested",
@@ -1095,9 +973,9 @@ pub(crate) fn validate_export_response(
 }
 
 fn validate_unix_file_mode(mode: u32, path: &str) -> Result<()> {
-    if mode & !0o777 != 0 {
+    if !ryeos_engine::trust::is_normalised_file_mode(mode) {
         bail!(
-            "remote bundle export entry '{}' has invalid Unix file mode {mode:#o}: special permission bits are forbidden",
+            "remote bundle export entry '{}' has file mode {mode:#o}: an export records exactly 0o644 or 0o755",
             path
         );
     }
@@ -1185,17 +1063,309 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
 
+    fn snapshot(max_node_stages: u64) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
+        use ryeos_node_runtime::node_policy::sections::bundle_staging::BundleStagingPolicy;
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            BundleStagingPolicy {
+                schema: 1,
+                max_node_bytes: 1 << 20,
+                max_node_stages,
+                max_key_bytes: 1 << 20,
+                max_key_stages: max_node_stages,
+            },
+        )])
+    }
+
     #[test]
-    fn a_live_install_is_refused_with_its_typed_code_and_sentence() {
+    fn the_loaded_policy_sets_the_caps_a_stage_is_refused_by() {
+        use ryeos_node::bundle_staging as staging;
+        let node = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let area = staging::StagingArea::open(dir.path()).unwrap();
+        let caps = stage_caps(&snapshot(1)).unwrap();
+        assert_eq!(caps.max_node_stages, 1);
+
+        let digest = staging::tree_digest(
+            "demo",
+            &[staging::TreeFile {
+                path: "f.txt".into(),
+                hash: lillux::sha256_hex(b"x"),
+                size: 1,
+                mode: 0o644,
+            }],
+        )
+        .unwrap();
+        let record = staging::StagingRecord {
+            schema: staging::STAGING_SCHEMA.to_owned(),
+            bundle_name: "demo".to_owned(),
+            tree_digest: digest,
+            source: staging::StagedSource {
+                kind: staging::SOURCE_REMOTE.to_owned(),
+                origin: "remote:test".to_owned(),
+                publication_record_hash: None,
+                pinned_node: None,
+                manifest_hash: None,
+            },
+            requested_by: "aa".to_owned(),
+            policy_generation: "4".repeat(64),
+            declared: staging::DeclaredFacets::default(),
+            file_count: 1,
+            total_bytes: 1,
+            evidence: Default::default(),
+            staged_at: "2026-11-27T00:00:00Z".to_owned(),
+        };
+        let temp = area.begin().unwrap();
+        std::fs::write(temp.tree().join("f.txt"), b"x").unwrap();
+        area.commit(temp, record, &[], &caps, &node).unwrap();
+
+        // The one stage the policy allows is held: the next is refused with
+        // the typed node count code, before any transfer.
+        let refused = area
+            .check_admission(&caps, "bb", 1, &node.verifying_key())
+            .unwrap_err();
+        assert_eq!(refused.code(), "bundle_stage_node_count_cap");
+        // A policy that allows two admits it.
+        let wider = stage_caps(&snapshot(2)).unwrap();
+        area.check_admission(&wider, "bb", 1, &node.verifying_key())
+            .unwrap();
+        // A snapshot with no section is an error, not a default.
+        let empty = ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![]);
+        assert!(stage_caps(&empty).is_err());
+    }
+
+    #[test]
+    fn a_refused_stage_answers_with_its_typed_code_and_status() {
         use crate::handler_error::HandlerError;
-        let HandlerError::Structured { code, status, body } = live_install_refused() else {
+        use ryeos_node::bundle_staging::StagingRefusal;
+        let HandlerError::Structured { code, status, body } =
+            stage_refusal_error(&StagingRefusal::KeyCount { limit: 16 })
+        else {
             panic!("a structured refusal");
         };
-        assert_eq!(code, "live_install_staged_unavailable");
-        assert_eq!(status, 501);
-        assert_eq!(body["code"], "live_install_staged_unavailable");
-        let text = body["error"].as_str().expect("error text");
-        assert!(text.contains("live installs are staged; staging is not available yet"));
+        assert_eq!(code, "bundle_stage_key_count_cap");
+        assert_eq!(status, 429);
+        assert_eq!(body["code"], "bundle_stage_key_count_cap");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Nothing was staged")
+        );
+    }
+
+    #[test]
+    fn an_export_records_exactly_the_two_normalised_modes() {
+        for mode in [0o644, 0o755] {
+            validate_unix_file_mode(mode, "f").unwrap();
+        }
+        for mode in [
+            0o600, 0o500, 0o4755, 0o2755, 0o1755, 0o664, 0o646, 0o666, 0o775, 0o020, 0o002, 0o000,
+        ] {
+            assert!(validate_unix_file_mode(mode, "f").is_err(), "{mode:#o}");
+        }
+    }
+
+    #[test]
+    fn an_export_in_another_format_is_refused_with_a_typed_code() {
+        let mut old = response(vec![entry("a", 1, 1)]);
+        old.format = "ryeos.bundle-export/v1".to_owned();
+        let error = validate_export_response(&old, "demo").unwrap_err();
+        assert!(format!("{error:#}").contains("bundle_export_format_unsupported"));
+        old.format = String::new();
+        assert!(validate_export_response(&old, "demo").is_err());
+        validate_export_response(&response(vec![entry("a", 1, 1)]), "demo").unwrap();
+    }
+
+    #[test]
+    fn an_export_entry_with_another_mode_is_malformed() {
+        for mode in [0o600, 0o664, 0o4755] {
+            let mut bad = entry("a", 1, 1);
+            bad.mode = mode;
+            let error = validate_export_response(&response(vec![bad]), "demo").unwrap_err();
+            assert!(
+                format!("{error:#}").contains("exactly 0o644 or 0o755"),
+                "{mode:#o}"
+            );
+        }
+    }
+
+    /// An in-memory blob source for the materialisation tests.
+    struct MemorySource(HashMap<String, Vec<u8>>);
+
+    impl BlobSource for MemorySource {
+        async fn fetch_batch(&self, hashes: &[String]) -> Result<HashMap<String, Vec<u8>>> {
+            Ok(hashes
+                .iter()
+                .filter_map(|h| self.0.get(h).map(|b| (h.clone(), b.clone())))
+                .collect())
+        }
+
+        async fn stream_blob(&self, _hash: &str, _sink: &mut std::fs::File) -> Result<u64> {
+            bail!("the memory source streams nothing")
+        }
+    }
+
+    fn memory_bundle(modes: &[(&str, &[u8], u32)]) -> (MemorySource, Vec<BundleExportEntry>) {
+        let mut blobs = HashMap::new();
+        let mut entries = Vec::new();
+        for (path, bytes, mode) in modes {
+            let hash = lillux::sha256_hex(bytes);
+            blobs.insert(hash.clone(), bytes.to_vec());
+            entries.push(BundleExportEntry {
+                kind: super::super::bundle_export::EXPORTED_BUNDLE_ENTRY_KIND_FILE.to_string(),
+                path: (*path).to_string(),
+                hash,
+                size: bytes.len() as u64,
+                mode: *mode,
+            });
+        }
+        (MemorySource(blobs), entries)
+    }
+
+    const UMASK_CHILD: &str = "RYEOS_STAGE_UMASK_CHILD";
+
+    /// Run `test_name` again as its own process, with the umask marker set, so
+    /// the umask change cannot touch any other test.
+    fn rerun_in_child(test_name: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--test-threads", "1"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "the child ran no test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    fn materialise(
+        source: &MemorySource,
+        entries: &[BundleExportEntry],
+        tree: &Path,
+    ) -> Result<(usize, u64, String)> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(materialise_verified_tree(source, entries, "demo", tree))
+    }
+
+    /// Materialise the same entries under `mask`: the digest `materialise`
+    /// returns, the digest recomputed from the directory, and the digest of
+    /// the entry list must all be one value, whatever the umask was, and the
+    /// modes on disk are exact.
+    fn assert_same_tree_under_umask(mask: u32) {
+        use ryeos_node::bundle_staging as staging;
+        lillux::tree_entry::test_support::set_process_umask(mask);
+        let (source, entries) = memory_bundle(&[
+            (".ai/manifest.yaml", b"name: demo\n", 0o644),
+            (".ai/tools/run.sh", b"#!/bin/sh\n", 0o755),
+            (".ai/deep/er/file.txt", b"x", 0o644),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let (files, bytes, digest) = materialise(&source, &entries, &tree).unwrap();
+        assert_eq!(files, 3);
+        assert_eq!(bytes, 11 + 10 + 1);
+        let on_disk = staging::tree_digest_from_dir(
+            "demo",
+            &tree,
+            &staging::TreeLimits {
+                max_files: 100,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let listed: Vec<staging::TreeFile> = entries
+            .iter()
+            .map(|entry| staging::TreeFile {
+                path: entry.path.clone(),
+                hash: entry.hash.clone(),
+                size: entry.size,
+                mode: entry.mode,
+            })
+            .collect();
+        let from_list = staging::tree_digest("demo", &listed).unwrap();
+        assert_eq!(on_disk.digest, digest);
+        assert_eq!(digest, from_list);
+        let mode_of = |path: &str| {
+            lillux::observe_tree_entry_no_follow(&tree.join(path))
+                .unwrap()
+                .mode
+        };
+        assert_eq!(mode_of(".ai"), 0o755);
+        assert_eq!(mode_of(".ai/deep/er"), 0o755);
+        assert_eq!(mode_of(".ai/manifest.yaml"), 0o644);
+        assert_eq!(mode_of(".ai/tools/run.sh"), 0o755);
+    }
+
+    #[test]
+    fn a_tree_materialised_under_umask_002_is_staged_with_exact_modes() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_002_is_staged_with_exact_modes";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        // umask 002 would leave directories group-writable (0o775).
+        assert_same_tree_under_umask(0o002);
+    }
+
+    #[test]
+    fn a_tree_materialised_under_umask_022_is_the_same_tree() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_tree_materialised_under_umask_022_is_the_same_tree";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        assert_same_tree_under_umask(0o022);
+    }
+
+    #[test]
+    fn a_group_writable_file_is_refused_even_under_umask_002() {
+        const NAME: &str = "handlers::remote_bundle_install::tests::a_group_writable_file_is_refused_even_under_umask_002";
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return rerun_in_child(NAME);
+        }
+        lillux::tree_entry::test_support::set_process_umask(0o002);
+        // The entry validation refuses the declared mode before any transfer.
+        assert!(validate_unix_file_mode(0o664, ".ai/a").is_err());
+        // And a file whose declared mode is fine but whose bytes land
+        // group-writable on disk is refused by the on-disk check.
+        let (source, entries) = memory_bundle(&[(".ai/a", b"x", 0o644)]);
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        materialise(&source, &entries, &tree).unwrap();
+        lillux::tree_entry::test_support::set_mode(&tree.join(".ai/a"), 0o664).unwrap();
+        let on_disk = ryeos_node::bundle_staging::tree_digest_from_dir(
+            "demo",
+            &tree,
+            &ryeos_node::bundle_staging::TreeLimits {
+                max_files: 100,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let declared = ryeos_node::bundle_staging::tree_digest(
+            "demo",
+            &[ryeos_node::bundle_staging::TreeFile {
+                path: ".ai/a".into(),
+                hash: lillux::sha256_hex(b"x"),
+                size: 1,
+                mode: 0o644,
+            }],
+        )
+        .unwrap();
+        assert_ne!(
+            on_disk.digest, declared,
+            "the group-writable mode must not verify"
+        );
     }
 
     fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
@@ -1210,6 +1380,7 @@ mod tests {
 
     fn response(entries: Vec<BundleExportEntry>) -> BundleExportResponse {
         BundleExportResponse {
+            format: super::super::bundle_export::BUNDLE_EXPORT_FORMAT.to_owned(),
             bundle_name: "demo".to_string(),
             file_count: entries.len(),
             total_bytes: entries.iter().map(|entry| entry.size).sum(),

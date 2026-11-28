@@ -111,6 +111,66 @@ pub fn atomic_write_with_mode(target: &Path, data: &[u8], mode: u32) -> AtomicMu
     }
 }
 
+/// Open `target` for appending, creating it if it is absent, with exactly
+/// `mode`. The mode is applied to the open descriptor after creation and on
+/// every open of an existing file, so the process umask never decides it. A
+/// symlink at `target` is refused.
+pub fn open_append_exact_mode(target: &Path, mode: u32) -> Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(target)
+            .map_err(|error| anyhow::anyhow!("open {} for append: {error}", target.display()))?;
+        crate::secure_fs::set_open_regular_file_mode(&file, mode)?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, mode);
+        anyhow::bail!("mode-exact append files are unavailable on this platform")
+    }
+}
+
+/// Create the directory `dir` with exactly `mode` when it is absent; its
+/// parent must exist. An existing directory is left as it is: its mode is
+/// its creator's.
+pub fn create_dir_exact_mode(dir: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        match fs::DirBuilder::new().mode(mode).create(dir) {
+            Ok(()) => fs::set_permissions(dir, fs::Permissions::from_mode(mode))
+                .map_err(|error| anyhow::anyhow!("set the mode of {}: {error}", dir.display())),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+            Err(error) => anyhow::bail!("create {}: {error}", dir.display()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, mode);
+        anyhow::bail!("mode-exact directories are unavailable on this platform")
+    }
+}
+
+/// Set the process umask, returning the previous one. The umask is process
+/// wide: only a test that runs alone in its own process may use this.
+#[cfg(all(unix, feature = "test-support"))]
+pub fn set_process_umask_for_test(mask: u32) -> u32 {
+    unsafe { libc::umask(mask as libc::mode_t) as u32 }
+}
+
+/// The permission bits of `path`, not following a final symlink. For tests.
+#[cfg(all(unix, feature = "test-support"))]
+pub fn permission_mode_for_test(path: &Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    Ok(fs::symlink_metadata(path)?.permissions().mode() & 0o7777)
+}
+
 /// Atomically replace `target` with private data.
 ///
 /// On Unix the temporary file is created as `0600` before any bytes are

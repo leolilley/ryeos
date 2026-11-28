@@ -222,9 +222,14 @@ fn held_source_target(
         lillux::pin_canonical_mount_source(&executable_path).map_err(|error| error.to_string())?;
     let libraries = lillux::pin_canonical_mount_source(std::path::Path::new("/usr/lib"))
         .map_err(|error| error.to_string())?;
+    // The host's own dynamic loader, wherever its distribution keeps it
+    // (/usr/lib on Arch, /usr/lib/x86_64-linux-gnu on Debian and Ubuntu):
+    // /lib64/ld-linux-x86-64.so.2 is the kernel-visible interpreter path on
+    // every x86_64 glibc host, so its canonical target is the real file.
+    let loader_path = std::fs::canonicalize("/lib64/ld-linux-x86-64.so.2")
+        .map_err(|error| format!("resolve the host dynamic loader: {error}"))?;
     let loader =
-        lillux::pin_canonical_mount_source(std::path::Path::new("/usr/lib/ld-linux-x86-64.so.2"))
-            .map_err(|error| error.to_string())?;
+        lillux::pin_canonical_mount_source(&loader_path).map_err(|error| error.to_string())?;
     let mount_name = if wrong_source {
         "wrong-source"
     } else if alias_source {

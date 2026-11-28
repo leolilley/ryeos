@@ -47,7 +47,31 @@ use crate::roots::RuntimeRoot;
 /// Schema tag of the publication record body.
 pub const PUBLICATION_SCHEMA: &str = "ryeos.publication/v1";
 /// Schema tag of the frozen export manifest.
-pub const PUBLICATION_MANIFEST_SCHEMA: &str = "ryeos.publication.bundle-export-manifest/v1";
+pub const PUBLICATION_MANIFEST_SCHEMA: &str = "ryeos.publication.bundle-export-manifest/v2";
+
+/// Format version 1 recorded whatever mode the exporting host's files had.
+/// Version 2 records exactly one of [`NORMALISED_FILE_MODES`]; version 1 is
+/// refused, never read.
+pub const PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED: &str =
+    "ryeos.publication.bundle-export-manifest/v1";
+
+/// The only file modes a frozen export records: the executable bit is the
+/// whole content.
+pub const NORMALISED_FILE_MODES: [u32; 2] = [0o644, 0o755];
+
+/// The normalised export mode of a source file mode.
+pub fn normalised_file_mode(source_mode: u32) -> u32 {
+    if source_mode & 0o111 != 0 {
+        0o755
+    } else {
+        0o644
+    }
+}
+
+/// Whether `mode` is one of the two modes a frozen export may record.
+pub fn is_normalised_file_mode(mode: u32) -> bool {
+    NORMALISED_FILE_MODES.contains(&mode)
+}
 /// Object kind the frozen manifest carries, so the content store's
 /// reachability walk can follow its entries to their blobs.
 pub const PUBLICATION_MANIFEST_KIND: &str = "publication_manifest";
@@ -522,6 +546,7 @@ impl PublicationManifest {
         let mut total = 0_u64;
         for entry in &self.entries {
             if !is_publication_hash(&entry.hash)
+                || !is_normalised_file_mode(entry.mode)
                 || entry.path.is_empty()
                 || entry.path.starts_with('/')
                 || entry

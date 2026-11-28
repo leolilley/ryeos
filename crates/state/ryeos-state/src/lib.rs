@@ -29,6 +29,7 @@ pub mod node_guarantees;
 pub mod object_closure;
 pub mod objects;
 pub mod operational;
+pub mod owner_stamp;
 mod pending_publication;
 pub mod principal_id;
 pub mod private_cas;

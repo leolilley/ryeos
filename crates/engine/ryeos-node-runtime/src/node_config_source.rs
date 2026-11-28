@@ -31,6 +31,10 @@ pub struct NodeItemContext {
 pub struct BundleRecord {
     /// Bundle name (filename without extension).
     pub name: String,
+    /// Lane marker the node wrote when it registered the bundle, if any.
+    /// Absent for a natively installed bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<ryeos_engine::trust::BundleLane>,
     /// Absolute, canonicalized path to the bundle root directory.
     pub path: PathBuf,
     /// Path to the `.yaml` file that declared this record.

@@ -25,6 +25,11 @@ pub struct RawRouteSpec {
     pub authority: Option<RawRouteAuthority>,
     #[serde(default)]
     pub source_file: std::path::PathBuf,
+    /// The route's bundle key signs that anyone may call it, held to the
+    /// limits the node's `public_routes` policy names for its id. A public
+    /// route the policy does not name is not served. Absent reads false.
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// The authority a signed route asks for its principal.
