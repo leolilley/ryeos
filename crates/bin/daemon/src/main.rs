@@ -7141,7 +7141,7 @@ async fn run_ui_hint_loop(
 /// for the item hint relay: the registry as it stands and the disclosure class
 /// of the session's key, asked at every delivery.
 struct NodeItemHintAuthority {
-    state: Arc<AppState>,
+    state: AppState,
 }
 
 impl ryeos_ui::item_hints::ItemHintAuthority for NodeItemHintAuthority {
