@@ -10829,6 +10829,7 @@ mod node_capability_report_reader_tests {
             capacity: Default::default(),
             established_residency: None,
             publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
+            secret_floor: ryeos_node::capability_report::SecretFloorReport::current(),
         };
         report
             .sign(identity.signing_key())

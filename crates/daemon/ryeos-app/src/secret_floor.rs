@@ -17,6 +17,11 @@ use crate::state::AppState;
 /// The stable code of an answer withheld by the floor.
 pub const SECRET_FLOOR_WITHHELD: &str = "secret_floor_withheld";
 
+/// The shortest secret value the floor looks for, in bytes. A shorter value
+/// is not matched at all, because it would match ordinary text by chance.
+pub const MINIMUM_MATCHED_BYTES: usize =
+    ryeos_runtime::workload_client::MIN_COLLECT_SECRET_FLOOR_BYTES;
+
 const WITHHELD_SENTENCE: &str = "the answer was withheld from this caller";
 
 /// The secret values the node holds, for one floor decision.

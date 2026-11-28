@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T08:18:29Z:5622d68d61c7f91531d5a3e2f0ec598238b51402c8df058cbeac0c0728ae46dd:4U4YaScNQrFghgzxVgLh0ejZhAXjOO0TDInGvdnOXCGtQJXBrle0FozNzDFZYzrZkGtCioviYHoxRL+hktdUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T06:09:11Z:4de1d0241d8b1b2009b0b00cee3b7b03d48a72f95215a2c113ccbd94d42fc714:yncpDCu5Q7KX2RQLRD8mKilplqyRt+4d7o/+18TPaXS5XxJkBRGZFQkKo9dIFTb4I/PSGyZaOBBrhIR5W4iTBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -144,6 +144,17 @@ names:
 - Provider-delivered environment names keep their own ceiling in
   `provider_environment`; bundle-scoped runtime vault entries stay bound to
   their bundle and are not named here.
+
+## Secret floor under non-operator answers
+
+A service answer to a caller other than the operator that contains a secret
+value the node holds (sealed store or provider environment), byte for byte, is
+refused whole with `secret_floor_withheld`. It is an exact match on values of
+at least the report's `minimum_matched_bytes`: it does not see encoded,
+hashed, split or shortened values or values the node does not hold, a reader
+who controls answer text can confirm a guessed secret, and event and stream
+records are not yet masked. See
+[HTTP API](../core/node/http-api.md#secret-floor-secret_floor_withheld).
 
 ## The `.env` overlay only reads what was declared
 

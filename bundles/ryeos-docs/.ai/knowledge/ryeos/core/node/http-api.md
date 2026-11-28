@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T12:56:58Z:e6aa50110920da4877a19fefc8b3fe9ee1437810e640758194e4c6d95a244e85:fHxVgoyiM5C36j3X0ginjYMmU5k4Ku4j7MifnFY3E/P6bghhRuJobZlXESRz+gzh/NUYiTsQXgHtzpTOoBTECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T06:09:11Z:a0e9e20415d2a5bc536fc56c06340466400d473d24b85f4c76b26e5b4742ba00:8EVQLS62Af2lTyq0mN4/EC+f02P8l/7xHssOhyf/u6Qkhxk/JOf2XLsq6pBEqMwBd1EJbTl7FV1DmKIssnx5BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -103,6 +103,29 @@ Both are HTTP 403 and neither is retryable.
 
 A client should show the handler's reason for `service_refused` and must not
 present it as a missing capability.
+
+#### Secret floor: `secret_floor_withheld`
+
+A service answer to a caller that is not the node's operator is checked last,
+after its disclosure tier is applied. If it contains, byte for byte (raw,
+JSON-escaped or ASCII-escaped), a secret value the node holds (the sealed
+operator store or the provider environment), the whole answer is refused with
+HTTP 403 and the code `secret_floor_withheld`. The body names neither the
+value nor where it was. If the node cannot read its secrets to check, the
+answer is withheld the same way. The operator's own answers are never
+filtered.
+
+The floor has limits, and the node's capability report states them in its
+`secret_floor` section (`service_answers_withheld`, `event_streams_masked`,
+`matching`, `minimum_matched_bytes`, `note`):
+
+- The match is an equality match, so a reader who controls the text of an
+  answer can confirm a guessed secret. It protects high-entropy secrets only.
+- Secret values shorter than `minimum_matched_bytes` are not matched.
+- Encoded, hashed, split or shortened values, and values the node does not
+  hold, are not matched.
+- Event and stream records are not yet masked (`event_streams_masked` is
+  `false`); the floor covers service answers only.
 
 ### `POST /execute/stream`
 

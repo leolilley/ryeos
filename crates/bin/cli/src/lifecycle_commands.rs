@@ -7356,6 +7356,7 @@ mod tests {
             },
             established_residency: None,
             publications: ryeos_node::capability_report::PublicationsReport::empty(1 << 30),
+            secret_floor: ryeos_node::capability_report::SecretFloorReport::current(),
         };
         let row = |section: &crate::tty::Section, key: &str| {
             section

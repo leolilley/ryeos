@@ -20,7 +20,7 @@ use lillux::process_control::{
 use ryeos_engine::isolation::add_pid_namespace_containment;
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v10";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v11";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 /// Provider id of the environment the hosting provider delivers to the node
@@ -200,6 +200,43 @@ pub struct PublicationsReport {
     pub operator_key_rotation_note: String,
 }
 
+/// What the node withholds from a caller that is not its operator, and the
+/// limits of how it does so. Every value is derived from the code that
+/// enforces the floor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretFloorReport {
+    /// A service answer to a non-operator caller that contains a secret value
+    /// the node holds is refused whole, never cut or masked.
+    pub service_answers_withheld: bool,
+    /// The stable code of that refusal.
+    pub refusal_code: String,
+    /// Whether event and stream records are masked too. They are not yet.
+    pub event_streams_masked: bool,
+    /// How a secret is matched: `exact` is a byte-for-byte equality match.
+    pub matching: String,
+    /// Secret values shorter than this many bytes are never matched.
+    pub minimum_matched_bytes: u64,
+    pub note: String,
+}
+
+impl SecretFloorReport {
+    /// The floor this build enforces.
+    pub fn current() -> Self {
+        let minimum = ryeos_app::secret_floor::MINIMUM_MATCHED_BYTES;
+        Self {
+            service_answers_withheld: true,
+            refusal_code: ryeos_app::secret_floor::SECRET_FLOOR_WITHHELD.to_owned(),
+            event_streams_masked: false,
+            matching: "exact".to_owned(),
+            minimum_matched_bytes: minimum as u64,
+            note: format!(
+                "the match is an equality match on secret values of at least {minimum} bytes, in raw, JSON-escaped or ASCII-escaped form: a reader who controls answer text can confirm a guessed secret, so the floor protects high-entropy secrets only; encoded, hashed, split or shortened values, shorter secrets and values the node does not hold are not matched; event and stream records are not yet masked; the operator's own answers are never filtered"
+            ),
+        }
+    }
+}
+
 impl PublicationsReport {
     fn with_notes(as_of: String, daily_byte_cap: u64) -> Self {
         Self {
@@ -346,6 +383,8 @@ pub struct NodeCapabilityReport {
     pub established_residency: Option<ResidencyProof>,
     /// What the node publishes to strangers, and under what limits.
     pub publications: PublicationsReport,
+    /// What the node withholds from a caller that is not its operator.
+    pub secret_floor: SecretFloorReport,
 }
 
 /// The report, its canonical digest, and the node key's signature over the
@@ -496,6 +535,7 @@ impl NodeCapabilityReport {
             floor,
             established_residency: None,
             publications: inputs.publications,
+            secret_floor: SecretFloorReport::current(),
         })
     }
 
@@ -1161,7 +1201,35 @@ mod tests {
                 .retirement_note
                 .contains("does not record which operator request")
         );
-        assert!(CAPABILITY_REPORT_SCHEMA.ends_with("/v10"));
+        assert!(CAPABILITY_REPORT_SCHEMA.ends_with("/v11"));
+    }
+
+    #[test]
+    fn secret_floor_section_states_what_the_floor_does_and_does_not_do() {
+        let floor = SecretFloorReport::current();
+        assert!(floor.service_answers_withheld);
+        assert_eq!(floor.refusal_code, "secret_floor_withheld");
+        assert!(!floor.event_streams_masked);
+        assert_eq!(floor.matching, "exact");
+        assert_eq!(
+            floor.minimum_matched_bytes,
+            ryeos_app::secret_floor::MINIMUM_MATCHED_BYTES as u64
+        );
+        for part in [
+            "equality match",
+            "high-entropy secrets only",
+            "encoded, hashed, split or shortened",
+            "values the node does not hold",
+            "event and stream records are not yet masked",
+            "operator's own answers are never filtered",
+        ] {
+            assert!(floor.note.contains(part), "{part}");
+        }
+        assert!(
+            floor
+                .note
+                .contains(&format!("{} bytes", floor.minimum_matched_bytes))
+        );
     }
 
     #[test]
@@ -1286,6 +1354,7 @@ mod tests {
             capacity: BTreeMap::new(),
             established_residency: None,
             publications: PublicationsReport::empty(1 << 30),
+            secret_floor: SecretFloorReport::current(),
         }
     }
 
