@@ -1927,9 +1927,19 @@ mod original_window_tests {
         let adopted = adopt_original_bound(
             &limit,
             cleanup,
-            MonotonicDeadline::after(Duration::from_millis(100)),
+            // Far enough out that a stalled runner cannot expire it before the
+            // adoption above finishes; the contact cutoff is then waited for by
+            // observation, never by a fixed sleep.
+            MonotonicDeadline::after(Duration::from_millis(500)),
         );
-        std::thread::sleep(Duration::from_millis(120));
+        let waited = Instant::now();
+        while adopted.original_service_parts().is_ok() {
+            assert!(
+                waited.elapsed() < Duration::from_secs(8),
+                "the contact cutoff never closed the service window"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(adopted.original_service_parts().is_err());
         assert!(matches!(
             adopted.original_cleanup_window().unwrap(),
@@ -1941,14 +1951,24 @@ mod original_window_tests {
 
     #[test]
     fn borrowed_original_cleanup_and_expiry_remain_inside_original_maximum() {
-        let cleanup = Duration::from_secs(1);
-        let limit = OccupancyLimit::new(occupancy_now().unwrap(), 1_200_000_000).unwrap();
+        // The limit is the original maximum: service ends 200 ms in and the
+        // cleanup reserve fills the rest, 3 s, so a runner that stalls for a
+        // second or two between steps still observes the reserve, not expiry.
+        let cleanup = Duration::from_secs(3);
+        let limit = OccupancyLimit::new(occupancy_now().unwrap(), 3_200_000_000).unwrap();
         let adopted = adopt_original_bound(
             &limit,
             cleanup,
-            MonotonicDeadline::after(Duration::from_secs(2)),
+            MonotonicDeadline::after(Duration::from_secs(5)),
         );
-        std::thread::sleep(Duration::from_millis(220));
+        let waited = Instant::now();
+        while adopted.original_service_parts().is_ok() {
+            assert!(
+                waited.elapsed() < Duration::from_secs(2),
+                "the service window never closed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(adopted.original_service_parts().is_err());
         let remaining = match adopted.original_cleanup_window().unwrap() {
             OccupancyWindowState::Cleanup { remaining } => remaining,

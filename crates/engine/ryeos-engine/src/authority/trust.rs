@@ -2521,4 +2521,90 @@ mod tests {
         let expected = sha256_hex(vk.as_bytes());
         assert_eq!(fp, expected);
     }
+
+    /// A store whose only project signer is `root` with an `own:demo` scope,
+    /// with the principal that `own:` binds to.
+    fn own_demo_store(root: &VerifyingKey) -> (TrustStore, PrincipalId) {
+        let (_, node_vk, _) = gen_key2();
+        let store = TrustStore::from_registry(
+            node_vk,
+            vec![record_for(
+                root,
+                SignerRole::ProjectAuthor,
+                vec![SignerSpace::Project],
+                &["*"],
+                &["own:demo"],
+                SignerStatus::Active,
+            )],
+        )
+        .unwrap()
+        .with_succession_chain(&[]);
+        let principal = store
+            .signing_principal_of(&compute_fingerprint(root))
+            .unwrap();
+        (store, principal)
+    }
+
+    /// A member key with no signer record never signs a `TrustedProject`
+    /// item, even in a project named for its own principal: trust comes only
+    /// from signed trust data for that signer.
+    #[test]
+    fn member_key_project_item_without_signer_record_is_not_trusted_project() {
+        let (_, root_vk, _) = gen_key();
+        let (store, _) = own_demo_store(&root_vk);
+        let member_sk = SigningKey::from_bytes(&[23u8; 32]);
+        let member_fp = compute_fingerprint(&member_sk.verifying_key());
+        let member_principal = store.owner_for(&member_fp).unwrap().principal;
+        let own_project =
+            LogicalProject::Stated(format!("{member_principal}/demo").parse().unwrap());
+        let (content, envelope, header) = signed_with_header(&member_sk, &member_fp);
+        let (class, _) = verify_item_signature(
+            &content,
+            &header,
+            &envelope,
+            &store,
+            &SignerContext::project("tool", &own_project),
+        )
+        .unwrap();
+        assert_eq!(class, TrustClass::Untrusted);
+    }
+
+    /// A key link carries ownership and never trust: a key linked into a
+    /// principal whose signer record has an `own:` project scope signs an
+    /// item in that principal's project, and the item is untrusted (resolved
+    /// as `UntrustedProject`, which mints no runtime authority).
+    #[test]
+    fn linked_key_into_scoped_principal_resolves_untrusted_project_and_mints_nothing() {
+        let (_, root_vk, root_fp) = gen_key();
+        let (store, principal) = own_demo_store(&root_vk);
+        let linked_sk = SigningKey::from_bytes(&[29u8; 32]);
+        let linked_fp = compute_fingerprint(&linked_sk.verifying_key());
+        let now = lillux::time::unix_secs_now();
+        let store = store.with_key_links(vec![KeyLinkEntry {
+            id: "l1".to_owned(),
+            principal: principal.clone(),
+            key: linked_fp.clone(),
+            linked_by: root_fp,
+            created_at_secs: now - 60,
+            not_after_secs: now + 3_600,
+        }]);
+        assert!(
+            store.speaks_for(&linked_fp, &principal),
+            "fixture: the link is live, so the key speaks for the principal"
+        );
+        let demo = LogicalProject::Stated(format!("{principal}/demo").parse().unwrap());
+        let (content, envelope, header) = signed_with_header(&linked_sk, &linked_fp);
+        let (class, _) = verify_item_signature(
+            &content,
+            &header,
+            &envelope,
+            &store,
+            &SignerContext::project("tool", &demo),
+        )
+        .unwrap();
+        // Resolution maps an untrusted project item to `UntrustedProject`,
+        // and an `UntrustedProject` item mints no runtime authority (the
+        // executor's per-class refusal test).
+        assert_eq!(class, TrustClass::Untrusted);
+    }
 }
