@@ -63,31 +63,11 @@ impl ClientAddressPolicy {
 }
 
 /// Where a request came from, as far as the node can tell.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAddress {
-    /// A client address on the network.
+    /// A client address on the network. An unresolved request is represented
+    /// by the absence of a `SourceAddress`, never by a stand-in value.
     Network(IpAddr),
-    /// The request arrived over the node's local socket or was made in-process.
-    #[default]
-    Local,
-}
-
-impl SourceAddress {
-    /// Stable text form used to carry the address through string metadata.
-    pub fn to_text(&self) -> String {
-        match self {
-            Self::Network(ip) => ip.to_string(),
-            Self::Local => "local".to_string(),
-        }
-    }
-
-    /// Inverse of [`SourceAddress::to_text`]; `None` when the text is neither.
-    pub fn from_text(text: &str) -> Option<Self> {
-        if text == "local" {
-            return Some(Self::Local);
-        }
-        text.parse().ok().map(Self::Network)
-    }
 }
 
 /// True when `ip` lies inside the `<address>/<prefix>` network. An entry that
@@ -205,21 +185,14 @@ impl ClientAddressPolicy {
             .any(|cidr| cidr_contains(cidr, ip))
     }
 
-    /// The address a request came from. `peer` is the TCP socket peer, or
-    /// `None` for a request that did not arrive over TCP. `header_value` is
+    /// The address a request came from. `peer` is the TCP socket peer.
+    /// `header_value` is
     /// the configured header's value (multiple header lines joined with a
     /// comma). The header is read only when the peer is a trusted proxy; the
     /// answer is then the right-most address in it that is not itself a
     /// trusted proxy. An absent or malformed header, or one naming only
     /// trusted proxies, yields the peer.
-    pub fn resolve_source(
-        &self,
-        peer: Option<SocketAddr>,
-        header_value: Option<&str>,
-    ) -> SourceAddress {
-        let Some(peer) = peer else {
-            return SourceAddress::Local;
-        };
+    pub fn resolve_source(&self, peer: SocketAddr, header_value: Option<&str>) -> SourceAddress {
         let peer = peer.ip().to_canonical();
         if !self.is_trusted(peer) {
             return SourceAddress::Network(peer);
@@ -374,8 +347,8 @@ mod tests {
         }
     }
 
-    fn peer(text: &str) -> Option<SocketAddr> {
-        Some(format!("{text}:443").parse().unwrap())
+    fn peer(text: &str) -> SocketAddr {
+        format!("{text}:443").parse().unwrap()
     }
 
     fn net(text: &str) -> SourceAddress {
@@ -426,23 +399,6 @@ mod tests {
         assert_eq!(
             fwd.resolve_source(peer("10.0.0.1"), Some("for=\"not-an-address")),
             net("10.0.0.1")
-        );
-    }
-
-    #[test]
-    fn no_socket_peer_is_local() {
-        let policy = policy(&["10.0.0.0/8"], ClientAddressHeader::XForwardedFor);
-        assert_eq!(
-            policy.resolve_source(None, Some("198.51.100.7")),
-            SourceAddress::Local
-        );
-        assert_eq!(
-            SourceAddress::from_text("local"),
-            Some(SourceAddress::Local)
-        );
-        assert_eq!(
-            SourceAddress::from_text(&net("::1").to_text()),
-            Some(net("::1"))
         );
     }
 }

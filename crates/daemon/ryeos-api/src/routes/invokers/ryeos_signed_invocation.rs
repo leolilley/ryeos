@@ -89,6 +89,7 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             authenticated_origin_site_id: principal.authenticated_site_id,
             authenticated_grant_authority: Some(principal.grant_authority),
             minted_session_grant: None,
+            source_address: None,
             metadata,
         }))
     }

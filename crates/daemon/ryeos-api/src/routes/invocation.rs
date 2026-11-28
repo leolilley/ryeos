@@ -48,6 +48,12 @@ pub struct RoutePrincipal {
     /// The grant of the live browser session this principal was admitted
     /// from. Only the session verifier sets it, from the session it loaded.
     pub minted_session_grant: Option<ryeos_app::handler_context::MintedSessionGrant>,
+    /// Where the request came from. Set only by the route dispatcher after
+    /// authentication, overwriting anything present; auth verifiers leave it
+    /// `None`. `None` means the source was not resolved, and a consumer that
+    /// limits by address must refuse.
+    pub source_address:
+        Option<ryeos_node_runtime::node_policy::sections::client_address::SourceAddress>,
     /// Verifier-supplied metadata for downstream consumption.
     ///
     /// `BTreeMap` for deterministic JSON serialization order.
@@ -62,10 +68,6 @@ pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_dige
 /// node that forwarded a delegated request.
 pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
 
-/// Metadata key under which the dispatcher records the resolved source
-/// address of the request, after authentication.
-pub(crate) const SOURCE_ADDRESS_METADATA_KEY: &str = "source_address";
-
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
     pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
@@ -78,6 +80,7 @@ impl RoutePrincipal {
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
             minted_session_grant: None,
+            source_address: None,
             metadata: BTreeMap::new(),
         }
     }
@@ -115,14 +118,7 @@ impl RoutePrincipal {
             .with_minted_session_grant(self.minted_session_grant.clone())
             .with_signed_request_digest(signed_request_digest)
             .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
-            .with_source_address(
-                self.metadata
-                    .get(SOURCE_ADDRESS_METADATA_KEY)
-                    .and_then(|text| {
-                        ryeos_node_runtime::node_policy::sections::client_address::SourceAddress::from_text(text)
-                    })
-                    .unwrap_or_default(),
-            )
+            .with_source_address(self.source_address)
     }
 }
 
@@ -442,19 +438,13 @@ mod source_address_tests {
     use ryeos_node_runtime::node_policy::sections::client_address::SourceAddress;
 
     #[test]
-    fn handler_context_carries_the_recorded_source_address() {
+    fn handler_context_carries_the_typed_source_address() {
         let mut principal = RoutePrincipal::anonymous("anon".into(), "none");
+        assert_eq!(principal.handler_context().source_address, None);
+        principal.source_address = Some(SourceAddress::Network("203.0.113.9".parse().unwrap()));
         assert_eq!(
             principal.handler_context().source_address,
-            SourceAddress::Local
-        );
-        principal.metadata.insert(
-            SOURCE_ADDRESS_METADATA_KEY.to_string(),
-            SourceAddress::Network("203.0.113.9".parse().unwrap()).to_text(),
-        );
-        assert_eq!(
-            principal.handler_context().source_address,
-            SourceAddress::Network("203.0.113.9".parse().unwrap())
+            Some(SourceAddress::Network("203.0.113.9".parse().unwrap()))
         );
     }
 }

@@ -251,6 +251,7 @@ mod tests {
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
             minted_session_grant: None,
+            source_address: None,
             metadata: BTreeMap::new(),
         };
 
@@ -274,6 +275,7 @@ mod tests {
             authenticated_origin_site_id: Some("site:remote".to_string()),
             authenticated_grant_authority: None,
             minted_session_grant: None,
+            source_address: None,
             metadata: BTreeMap::new(),
         };
 

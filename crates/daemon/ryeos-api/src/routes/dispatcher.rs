@@ -192,8 +192,8 @@ pub async fn route_dispatcher_from_ingress(
         return resp;
     }
 
-    // The socket peer exists only for requests served over TCP; the local
-    // unix socket carries no connect info and resolves to `Local`.
+    // The socket peer exists only for requests served over TCP. A request
+    // without one has no resolvable source and stays unresolved.
     let socket_peer = request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -256,7 +256,7 @@ pub async fn route_dispatcher_from_ingress(
     let source_address = match app_state.node_policy.require::<ClientAddressPolicy>() {
         Ok(policy) => {
             let header_value = join_header_values(&parts.headers, policy.header_name());
-            policy.resolve_source(socket_peer, header_value.as_deref())
+            socket_peer.map(|peer| policy.resolve_source(peer, header_value.as_deref()))
         }
         Err(error) => {
             tracing::error!(%error, "client address policy unavailable");
@@ -267,10 +267,7 @@ pub async fn route_dispatcher_from_ingress(
                 .into_response();
         }
     };
-    principal.metadata.insert(
-        crate::routes::invocation::SOURCE_ADDRESS_METADATA_KEY.to_string(),
-        source_address.to_text(),
-    );
+    principal.source_address = source_address;
     // A route with no human caller lends its principal the authority its
     // signed declaration states, once its bundle's signed manifest backs it.
     if let Err(error) =

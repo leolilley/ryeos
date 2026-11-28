@@ -191,11 +191,14 @@ pub struct HandlerContext {
     #[serde(skip)]
     pub delegated_via: Option<String>,
     /// Where the request came from, resolved once at admission from the TCP
-    /// peer and the node's client-address policy. `Local` for requests that
-    /// did not arrive over TCP. Local dispatch context only: never serialized
-    /// and never caller input.
+    /// peer and the node's client-address policy. `None` means the request's
+    /// source was not resolved (in-process or synthetic contexts, or a
+    /// request with no socket peer); any consumer that limits by address must
+    /// refuse on `None` (fail closed). Local dispatch context only: never
+    /// serialized and never caller input.
     #[serde(skip)]
-    pub source_address: ryeos_node_runtime::node_policy::sections::client_address::SourceAddress,
+    pub source_address:
+        Option<ryeos_node_runtime::node_policy::sections::client_address::SourceAddress>,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -243,7 +246,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
-            source_address: Default::default(),
+            source_address: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -267,7 +270,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
-            source_address: Default::default(),
+            source_address: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -292,7 +295,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
-            source_address: Default::default(),
+            source_address: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -318,7 +321,7 @@ impl HandlerContext {
             authenticated_grant_authority: Some(authenticated_grant_authority),
             signed_request_digest: None,
             delegated_via: None,
-            source_address: Default::default(),
+            source_address: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -387,10 +390,10 @@ impl HandlerContext {
         self
     }
 
-    /// Record where the request came from.
+    /// Record where the request came from; `None` leaves it unresolved.
     pub fn with_source_address(
         mut self,
-        address: ryeos_node_runtime::node_policy::sections::client_address::SourceAddress,
+        address: Option<ryeos_node_runtime::node_policy::sections::client_address::SourceAddress>,
     ) -> Self {
         self.source_address = address;
         self

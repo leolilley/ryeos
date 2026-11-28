@@ -196,6 +196,14 @@ impl NodePolicySnapshot {
             section_digests: BTreeMap::new(),
         }
     }
+
+    /// A copy of this test snapshot with one section's record replaced (or
+    /// added), so a test can vary a single policy over a full snapshot.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_test_record(mut self, record: Arc<dyn ErasedNodePolicy>) -> Self {
+        self.records.insert(record.section_name(), record);
+        self
+    }
 }
 
 /// The shipped `launch_trust` policy record, admitting nothing beyond each

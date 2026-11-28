@@ -143,6 +143,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
         authenticated_origin_site_id: None,
         authenticated_grant_authority: None,
         minted_session_grant: None,
+        source_address: None,
         metadata: Default::default(),
     };
     let result = invoker
@@ -391,6 +392,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
                 authenticated_origin_site_id: None,
                 authenticated_grant_authority: None,
                 minted_session_grant: None,
+                source_address: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,
@@ -438,6 +440,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                 authenticated_origin_site_id: None,
                 authenticated_grant_authority: None,
                 minted_session_grant: None,
+                source_address: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,

@@ -98,6 +98,7 @@ pub fn session_route_principal(
             session_id: session_id.to_owned(),
             granted_caps: granted_caps.to_vec(),
         }),
+        source_address: None,
         metadata: {
             let mut m = BTreeMap::new();
             if let Some(principal_id) = user_principal_id {
