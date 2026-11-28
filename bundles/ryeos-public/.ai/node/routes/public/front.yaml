@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-27T17:49:53Z:317a60314b13135f7ec7d35be8c14737f0d0d9ef5029786506cb6e057716ef3c:c3tmSCb+Y1zyhy7pNf1Ji0e4/9v3qNxoAMFCzhPfVfoKEEXIe+4FnqVevxVufGzH9fkVkSzaacII0WUkvgscCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: public/front
+path: /
+methods:
+  - GET
+  - HEAD
+auth: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: static
+  status: 200
+  content_type: "text/html; charset=utf-8"
+  body_b64: PCFkb2N0eXBlIGh0bWw+CjxodG1sIGxhbmc9ImVuIj4KPGhlYWQ+CjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij4KPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xIj4KPHRpdGxlPlJ5ZU9TPC90aXRsZT4KPC9oZWFkPgo8Ym9keT4KPG1haW4+CjxoMT5SeWVPUzwvaDE+CjxwPlRoaXMgcGFnZSBpcyBhIHBsYWNlaG9sZGVyLjwvcD4KPC9tYWluPgo8L2JvZHk+CjwvaHRtbD4K
+public: true
