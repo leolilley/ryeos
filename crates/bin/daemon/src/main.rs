@@ -6094,6 +6094,28 @@ async fn dispatch_resume_intents(
 ) -> Result<()> {
     for intent in intents {
         let thread_id = intent.thread_id.clone();
+        // A live-root run resumes only while its project root is still
+        // admitted to the key that launched it. The refusal is recorded on the
+        // thread for every resume kind, so the owner sees why it ended.
+        if let Err(refusal) = ryeos_executor::execution::runner::readmit_resumed_live_project(
+            state,
+            &intent.resume_context,
+        ) {
+            tracing::error!(thread_id, error = %refusal, "resumed live project is no longer admitted");
+            let outcome = ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
+                state,
+                &thread_id,
+                ryeos_executor::execution::runner::RESUME_PROJECT_NOT_ADMITTED,
+                "resume_project_admission",
+                "the project root of this run is no longer admitted to the key that launched it",
+            )?;
+            tracing::warn!(
+                thread_id,
+                ?outcome,
+                "resume project admission refusal classified"
+            );
+            continue;
+        }
         if matches!(
             intent.kind,
             reconcile::ResumeKind::OperatorContinuation | reconcile::ResumeKind::Continuation

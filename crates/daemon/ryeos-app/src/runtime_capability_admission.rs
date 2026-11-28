@@ -42,14 +42,7 @@ impl ProjectMint {
         trust_store: &ryeos_engine::trust::TrustStore,
         requested_by: &ryeos_engine::contracts::EffectivePrincipal,
     ) -> Self {
-        let key = match requested_by {
-            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
-                principal.fingerprint.as_str()
-            }
-            ryeos_engine::contracts::EffectivePrincipal::Delegated(delegated) => {
-                delegated.caller_fingerprint.as_str()
-            }
-        };
+        let key = crate::operator_authority::requesting_key(requested_by);
         Self::for_requesting_key(app_root, trust_store, key)
     }
 
@@ -60,21 +53,11 @@ impl ProjectMint {
         key: &str,
         now_secs: u64,
     ) -> Self {
-        let Ok(operator) =
-            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)
-        else {
-            return Self::NoProjectMint;
-        };
-        let operator_key = operator.principal_id();
-        if key == operator_key {
-            return Self::OperatorKey;
-        }
-        let Ok(operator_owner) = trust_store.owner_for_at(&operator_key, now_secs) else {
-            return Self::NoProjectMint;
-        };
-        match trust_store.owner_for_at(key, now_secs) {
-            Ok(owner) if owner.principal == operator_owner.principal => Self::OperatorKey,
-            _ => Self::NoProjectMint,
+        if crate::operator_authority::is_admitted_operator_key(app_root, trust_store, key, now_secs)
+        {
+            Self::OperatorKey
+        } else {
+            Self::NoProjectMint
         }
     }
 }

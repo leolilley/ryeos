@@ -121,6 +121,52 @@ fn require_speaks_for_operator_owner(state: &AppState, key: &str) -> anyhow::Res
     ))
 }
 
+/// The key a plan was requested by: a local principal's own key, or a
+/// delegated request's calling key.
+pub fn requesting_key(requested_by: &ryeos_engine::contracts::EffectivePrincipal) -> &str {
+    match requested_by {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+            principal.fingerprint.as_str()
+        }
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(delegated) => {
+            delegated.caller_fingerprint.as_str()
+        }
+    }
+}
+
+/// Whether `key` (`fp:<hex>`) is the node's operator, judged by the key alone
+/// at `now_secs`: the configured operator key itself, or a key that speaks for
+/// the owner the operator key acts for. A key link that has expired by
+/// `now_secs` ends the relation. A failure to load the operator identity or to
+/// resolve either owner is never the operator.
+///
+/// This is the one key-only operator judgement. It is for places with no
+/// request context to read a grant class from (a launch plan, a resumed run);
+/// a handler judges its caller with [`require_admitted_operator`].
+pub fn is_admitted_operator_key(
+    app_root: &std::path::Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    key: &str,
+    now_secs: u64,
+) -> bool {
+    let Ok(operator) =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)
+    else {
+        return false;
+    };
+    let operator_key = operator.principal_id();
+    if key == operator_key {
+        return true;
+    }
+    let Ok(operator_owner) = trust_store.owner_for_at(&operator_key, now_secs) else {
+        return false;
+    };
+    matches!(
+        trust_store.owner_for_at(key, now_secs),
+        Ok(owner) if owner.principal == operator_owner.principal
+    )
+}
+
 /// Require the app root's exact local configured operator.
 pub fn require_local_configured_operator(
     state: &AppState,

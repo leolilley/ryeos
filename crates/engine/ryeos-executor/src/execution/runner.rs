@@ -8458,12 +8458,62 @@ fn reattach_resumed_workspace_input(
     }
 }
 
+/// Outcome code of a resumed live-root run whose project root is no longer
+/// admitted to the key that launched it.
+pub const RESUME_PROJECT_NOT_ADMITTED: &str = "resume_project_not_admitted";
+
+/// A resumed run's live project root was refused by the same admission a
+/// launch of that path goes through. Carries the code the thread ends with.
+#[derive(Debug, thiserror::Error)]
+#[error("resume_project_not_admitted: {0}")]
+pub struct ResumeProjectNotAdmitted(pub String);
+
+/// Admit the live project root of a resumed run again, at the node's time now,
+/// for the key that requested the run. A run that is not a live-root run is
+/// not judged here. See [`readmit_live_project`].
+pub fn readmit_resumed_live_project(
+    state: &AppState,
+    resume: &ResumeContext,
+) -> Result<(), ResumeProjectNotAdmitted> {
+    match decide_resume_provenance(resume) {
+        ResumeProvenanceDecision::LiveProject(project_root) => {
+            readmit_live_project(state, &resume.requested_by, project_root)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Admit `project_root` as a live project for the key `requested_by` acts
+/// with, through the same admission a launch of that path goes through. The
+/// key is judged by key alone at the node's time now: the node's operator
+/// names any directory the node allows; any other key needs a checkout
+/// registered to an owner it speaks for. A key that has been revoked or
+/// retired, an operator link that has expired and a checkout that has been
+/// unregistered all refuse.
+pub fn readmit_live_project(
+    state: &AppState,
+    requested_by: &ryeos_engine::contracts::EffectivePrincipal,
+    project_root: &Path,
+) -> Result<(), ResumeProjectNotAdmitted> {
+    let key = ryeos_app::operator_authority::requesting_key(requested_by);
+    let operator = ryeos_app::operator_authority::is_admitted_operator_key(
+        &state.config.app_root,
+        &state.engine.trust_store,
+        key,
+        lillux::time::unix_secs_now(),
+    );
+    ryeos_app::live_project_path::admit_live_project_path(state, key, operator, project_root)
+        .map(|_| ())
+        .map_err(|refusal| ResumeProjectNotAdmitted(refusal.to_string()))
+}
+
 fn execution_provenance_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,
 ) -> Result<(ExecutionProvenance, ProjectContext)> {
     match decide_resume_provenance(resume) {
         ResumeProvenanceDecision::LiveProject(project_root) => {
+            readmit_resumed_live_project(state, resume)?;
             let canonical = std::fs::canonicalize(project_root).map_err(|error| {
                 anyhow::anyhow!(
                     "resume: live project authority {} is unavailable for {}: {error}",
