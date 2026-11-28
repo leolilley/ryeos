@@ -31,7 +31,7 @@ pub(crate) fn evaluate_next_with_result(
         Some(result),
         execution,
         run,
-        dispatch.map(|dispatch| (Some(dispatch), None)),
+        dispatch.map(|dispatch| (Some(dispatch), None, None)),
     )
 }
 

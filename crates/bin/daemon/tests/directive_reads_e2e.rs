@@ -203,7 +203,7 @@ async fn a_followed_directives_reads_are_projected_from_the_daemons_own_records(
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
-    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon with mock provider + workflow bundles");
     let project = tempfile::tempdir().expect("project tempdir");
