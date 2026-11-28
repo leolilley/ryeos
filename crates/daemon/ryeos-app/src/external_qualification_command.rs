@@ -600,7 +600,7 @@ pub fn execute_signed_qualification_worker_request(
 }
 
 /// The structured bridge owns session binding. Require its exact bounded
-/// common binding observation; never extract Codex-specific response pointers
+/// common binding observation; never extract worker-specific response pointers
 /// or interpolate an upstream ID in the daemon's turn payload.
 fn validate_setup_final(body: &Value, wire_max_bytes: u32) -> Result<()> {
     ensure!(

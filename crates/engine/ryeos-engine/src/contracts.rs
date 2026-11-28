@@ -3310,7 +3310,7 @@ pub struct ItemMetadata {
     pub description: Option<String>,
     /// Item category
     pub category: Option<String>,
-    /// Vault secret IDs this item requires (e.g. `["openai-api-key"]`).
+    /// Vault secret IDs this item requires (e.g. `["provider-api-key"]`).
     /// The daemon resolves these per-principal and injects as `RYEOS_VAULT_*` env vars.
     #[serde(default)]
     pub required_secrets: Vec<String>,

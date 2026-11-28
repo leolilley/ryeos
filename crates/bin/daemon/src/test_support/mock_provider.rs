@@ -1,7 +1,7 @@
 //! Mock LLM provider for V5.4 P3b directive-runtime e2e tests.
 //!
 //! Spins a tiny axum HTTP server on an ephemeral port that mimics the
-//! OpenAI Chat Completions surface that
+//! chat-completions surface that
 //! `crates/runtimes/directive/src/adapter.rs::call_provider` POSTs to
 //! (`<base_url>/chat/completions`).
 //!
@@ -10,7 +10,7 @@
 //! list is exhausted, additional requests get HTTP 500 — useful for
 //! pinning that a test-under-test didn't loop more times than expected.
 //!
-//! The OpenAI shape we emit (only fields the adapter actually reads —
+//! The chat-completions shape we emit (only fields the adapter actually reads —
 //! see `parse_response` in `adapter.rs`):
 //!
 //! ```json
@@ -336,7 +336,7 @@ async fn handle_chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if streaming {
-        // OpenAI-compatible SSE chunked response. The directive
+        // Chat-completions-compatible SSE chunked response. The directive
         // runtime defaults to `delta_merge` mode (see
         // streaming.rs::stream_mode), which expects
         // `choices[0].delta.{content,tool_calls}` per chunk and
@@ -359,7 +359,7 @@ async fn handle_chat_completions(
     }
 }
 
-/// Build an OpenAI-style streaming SSE response from a single
+/// Build a chat-completions-style streaming SSE response from a single
 /// canned mock response. Two `data:` events: the assistant content
 /// (or tool call) chunk, then the final chunk carrying `usage` +
 /// `finish_reason`. Closes with `data: [DONE]`.

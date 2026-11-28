@@ -231,7 +231,7 @@ struct RenderNetworkPolicy {
 
 impl RenderNetworkPolicy {
     /// Whether this echo is exactly `expected`. Workload: every Render
-    /// Sandbox this adapter binds or observes, above all a remote Codex lease
+    /// Sandbox this adapter binds or observes, above all a remote worker lease
     /// whose guest may reach only its controller. The echoed `type` must
     /// equal the requested one, `default` when present must equal `type`, and
     /// the echoed rules must equal the requested rules byte for byte as
@@ -651,7 +651,7 @@ fn operate() -> Result<()> {
     let (provider_spec, _provider_spec_sha256) =
         parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)
             .classed(FailClass::SpecDigest)?;
-    // A remote Codex lease's admitted request names its guest egress. It
+    // A remote worker lease's admitted request names its guest egress. It
     // selects the exact policy the create requests and every read of the
     // Sandbox must echo. A policy the signed spec cannot create fails closed
     // here, before any credential or network input is read.

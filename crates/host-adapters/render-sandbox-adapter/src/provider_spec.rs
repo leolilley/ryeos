@@ -503,7 +503,7 @@ impl ProviderSpec {
 
     /// The exact policy a lease create requests for `lease_egress`, the
     /// admitted lease's guest egress hosts, derived from the signed
-    /// `network_policy` declaration. Workload: a remote Codex lease whose
+    /// `network_policy` declaration. Workload: a remote worker lease whose
     /// guest must reach only its controller.
     pub(crate) fn egress_policy(&self, lease_egress: &BTreeSet<String>) -> Result<EgressPolicy> {
         self.network_policy
@@ -717,7 +717,7 @@ impl ProviderSpec {
         }
     }
 
-    /// Provider-attested lease guarantees for remote Codex exec-server leases,
+    /// Provider-attested lease guarantees for remote worker exec-server leases,
     /// derived only from implemented operation kinds and proof profiles. The
     /// signed data names mechanisms; it can never name a guarantee directly.
     pub(crate) fn lease_guarantees(&self) -> BTreeSet<&'static str> {

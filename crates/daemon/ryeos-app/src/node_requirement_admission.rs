@@ -6,7 +6,7 @@
 //! the executing node must prove in its signed capability report. Each entry
 //! is matched with Lillux `satisfies` against that report before any launch
 //! side effect, and an unmet entry refuses the launch with the report's
-//! reason for it. A Codex credential login, for one, needs a durable private
+//! reason for it. A hosted worker credential login, for one, needs a durable private
 //! credential home here.
 //!
 //! A profile's `requires.lease` and `requires.guest` are not judged here:

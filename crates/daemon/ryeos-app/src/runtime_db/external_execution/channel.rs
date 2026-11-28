@@ -1933,7 +1933,7 @@ impl RuntimeDb {
                 ExecutionChannelPayload::RuntimeApplied { .. }
             ) {
                 // This applies only a retained signed observation to the node's
-                // journal. It neither delivers bytes to Codex nor qualifies the
+                // journal. It neither delivers bytes to the worker nor qualifies the
                 // consumer runtime. A lost response can finish the same claimed
                 // no-effect frame without replaying a native operation.
                 match journal::claim_application(

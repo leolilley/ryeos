@@ -1116,7 +1116,7 @@ impl DaemonHarness {
 
     /// Like [`start_fast_with`], but under the authored Development
     /// composition, which adds central-auth, environment-qualification, the
-    /// Render sandbox adapter and the claude-code worker bundle.
+    /// Render sandbox adapter and the hosted coding worker bundles.
     pub async fn start_fast_development_with<S, F>(
         plant: S,
         tweak: F,

@@ -2410,7 +2410,7 @@ pub(crate) fn fold_messages_anchored(
             "tool_call_result" => {
                 // The retained text is exactly what the live runner put in the
                 // provider message. Never parse JSON-looking content: doing so
-                // changes both OpenAI-style wire content and custom schema
+                // changes both chat-completions-style wire content and custom schema
                 // template rendering after a crash.
                 messages.push(unpinned(replayed_tool_result(event)?.message()));
             }

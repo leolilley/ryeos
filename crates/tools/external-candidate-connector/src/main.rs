@@ -1,6 +1,6 @@
 //! Trusted controller-side stdio connector for one admitted external candidate.
 //!
-//! Codex starts this exact binary as a command-backed environment. It does not
+//! The worker starts this exact binary as a command-backed environment. It does not
 //! execute commands itself: stdin/stdout are relayed to the daemon's durable
 //! occurrence channel through one owner-private authenticated Unix stream.
 
@@ -279,7 +279,7 @@ fn run() -> Result<()> {
     )?;
 
     // SAFETY: exclusive executable startup, before Rust stdin/stdout use or
-    // host tasks. Codex supplies distinct piped endpoints and retains only
+    // host tasks. The worker supplies distinct piped endpoints and retains only
     // their opposite ends. Neither inherited endpoint has another owner here.
     let pipes = unsafe {
         lillux::inherited_pipes::InheritedPipePair::take_inherited_pipes(
@@ -360,7 +360,7 @@ fn run() -> Result<()> {
             }
         }
     })();
-    // Sticky pipe interruption wakes an idle stdin owner even when Codex still
+    // Sticky pipe interruption wakes an idle stdin owner even when the worker still
     // holds its writer open. Socket shutdown interrupts an in-flight send;
     // notifying retained relay state releases an acknowledgement wait. Join is
     // required on every outcome; neither EOF nor detach establishes settlement.

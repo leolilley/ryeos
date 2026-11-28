@@ -75,7 +75,7 @@ Therefore the Render activation gate remains closed.
   body as required by the pinned generated client. It also takes plan,
   region, immutable `snapshotId`, the reserved maximum lifetime, and a network
   policy from the admitted settings/request inputs. The network policy is
-  `{"type": "deny-all"}`, or, for a remote Codex lease handed its admitted
+  `{"type": "deny-all"}`, or, for a remote worker lease handed its admitted
   lease request on `RYEOS_LIFECYCLE_LEASE_ADMISSION_FD` with a non-empty
   egress list, `{"type": "allow-list", "rules": [{"domain": <host>,
   "protocol": "https"}, ...]}` with the rules in ascending host order. The
@@ -519,7 +519,7 @@ and required claims. The node Config signer is not assumed to be the product
 owner. A non-null object is only an exact coordinate:
 fresh placement refuses it until the published witness, current
 policy, and independent execution evidence can all be joined.
-This is distinct from the Codex candidate-runtime product selection retained
+This is distinct from the worker candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
 
@@ -542,13 +542,13 @@ credential access on fresh placement paths. That authenticates the product
 proof; the backend registry
 still refuses a non-null qualification for new contact. The exact proof and
 product owner are now CAS-owned by the schema-18 persistent-session capsule,
-separately from the Codex executable selection. No synthetic verified request
+separately from the worker executable selection. No synthetic verified request
 context is constructed.
 
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot
-remains the distinct Codex executable product, not this guest-owner snapshot.
+remains the distinct worker executable product, not this guest-owner snapshot.
 
 The required implementation order is: publish and pin the exact owner input;
 sign the bounded producer Tool and capture its runtime product; run and retain the installed independent
@@ -574,10 +574,10 @@ capability is limited to W1's
 The adapter does not declare `idempotent_termination` because it follows the
 one-Terminate policy.
 
-## Remote Codex exec-server leases
+## Remote worker exec-server leases
 
-The workload is a durable controller that keeps the Codex App Server and its
-credential profile, with each Sandbox leased only to run `codex exec-server`.
+The workload is a durable controller that keeps the worker app server and its
+credential profile, with each Sandbox leased only to run the worker's exec-server command.
 The provider-neutral `ryeos-remote-lease-core` crate
 (`crates/host-adapters/remote-lease-core`) implements its admission,
 authenticated Ready and the two lease operations; `src/lease.rs` answers the
@@ -618,7 +618,7 @@ frames to it on an inherited descriptor.
   admitted verdict, which names the spec's digest, and charges its node lease
   budget the lease's lifetime times that weight.
 - Guest egress is data on the lease request: `guest_network_allow` lists the
-  hosts the guest may reach over HTTPS. A remote Codex lease names exactly its
+  hosts the guest may reach over HTTPS. A remote worker lease names exactly its
   controller's hostname, so the guest can dial one authenticated WebSocket
   back to it and model-directed commands reach nothing else over TCP. Each
   host is an exact lowercase DNS name with no scheme, port, path or trailing

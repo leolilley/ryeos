@@ -138,7 +138,7 @@ const STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY: &[&str] = &[
 ];
 
 /// The authored Development profile: every application bundle, the Render
-/// sandbox adapter and the claude-code worker bundle.
+/// sandbox adapter and the hosted coding worker bundles.
 const DEVELOPMENT_BUNDLE_INVENTORY: &[&str] = &[
     "browser",
     "central-auth",

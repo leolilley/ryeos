@@ -1137,8 +1137,8 @@ pub enum StreamEvent {
     /// Incremental assistant text.
     Delta(String),
     /// Incremental reasoning/thinking text. Emitted when the provider
-    /// streams thinking separately (Anthropic extended thinking, Gemini
-    /// thoughts, OpenAI o-series). Not all providers produce these.
+    /// streams thinking separately (extended thinking, Gemini
+    /// thoughts, reasoning-model series). Not all providers produce these.
     ReasoningDelta(String),
     /// One completed opaque reasoning block captured by a signed capture
     /// rule. Meaningless to this crate beyond being stored and replayed.
@@ -1166,7 +1166,7 @@ pub enum StreamEvent {
     },
     /// Partial tool call argument JSON streamed mid-flight.
     ///
-    /// Anthropic delivers tool arguments as `input_json_delta` chunks
+    /// Some providers deliver tool arguments as `input_json_delta` chunks
     /// before the final `content_block_stop`. Surfacing the running
     /// accumulation here lets the runner emit progressive
     /// `cognition_out` events so the daemon (and ultimately the
@@ -1246,8 +1246,8 @@ pub fn is_empty_reply(message: &ProviderMessage) -> bool {
 }
 
 /// Normalize a provider-specific finish reason string to a canonical enum.
-/// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
-/// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
+/// Case-insensitive: Gemini sends uppercase `"STOP"`, another provider sends
+/// lowercase `"end_turn"`, a third sends lowercase `"stop"`.
 pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
     let lower = raw.map(|s| s.to_ascii_lowercase());
     match lower.as_deref() {

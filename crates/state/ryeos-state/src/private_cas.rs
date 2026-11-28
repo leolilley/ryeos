@@ -1,6 +1,6 @@
 //! A private scratch content-addressed store with no SQL.
 //!
-//! The codex runtime verifier captures a guest's candidate tree into a
+//! The worker runtime verifier captures a guest's candidate tree into a
 //! verifier-private scratch CAS: it needs content-addressed objects and blobs
 //! under a pinned owner-private directory, and nothing that a node State
 //! database provides. This module establishes the State root layout in such a
