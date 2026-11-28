@@ -262,6 +262,23 @@ async fn a_round_bound_outside_one_to_eight_ends_failed_before_any_directive_run
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_fractional_round_bound_ends_failed_before_any_directive_runs() {
+    let run = run_goal_with(
+        "graph:variant",
+        |project, signer| plant_variant(project, signer, "max_rounds: 3", "max_rounds: 2.5"),
+        vec![work("never asked")],
+    )
+    .await;
+    assert!(!run.completed(), "events={:#?}", run.events);
+    assert!(
+        run.failure_text().contains("goal_config_invalid"),
+        "failure={}",
+        run.failure_text()
+    );
+    assert!(run.bodies.is_empty(), "no directive ran");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_graphs_own_step_limit_ends_it_with_its_own_code_never_success() {
     let mut script = Vec::new();
     for round in 0..3 {
