@@ -528,6 +528,7 @@ pub(super) fn validate_prospective_follow_resume_payload(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn admit_follow_terminal_envelope(
     waiter: &runtime_db::FollowWaiter,
     child_chain_root_id: &str,

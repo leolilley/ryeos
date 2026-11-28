@@ -307,7 +307,7 @@ mod tests {
     fn dispatch_reads_is_the_daemons_projection_or_a_typed_absence_never_the_result() {
         use ryeos_runtime::envelope::{FOLLOW_READS_COVERED, FollowReads, ReadEntry};
         let compiled = CompiledJsonTemplate::compile(
-            &json!({"reads": "${dispatch.reads}", "first": "${dispatch.reads.refs[0].ref}"}),
+            &json!({"reads": "${dispatch.reads}"}),
             "test.post_action_reads",
             &CompilationLimits::default(),
         )
@@ -341,19 +341,16 @@ mod tests {
             .with_post_action_dispatch(Some(&dispatch), Some("T-child"), Some(&reads))
             .render_json(&compiled)
             .unwrap();
-        assert_eq!(with["first"], "knowledge:a/b");
         assert_eq!(with["reads"]["covered"], "declared-read-tools-only");
         assert_eq!(with["reads"]["refs"][0]["space"], "bundle");
 
         let absent = scope()
             .with_post_action_dispatch(Some(&dispatch), Some("T-child"), None)
-            .render_json(&compiled);
-        // No followed directive: `dispatch.reads` is null, so the typed absence
-        // is visible to a condition and indexing into it is not a read.
-        match absent {
-            Ok(value) => assert_eq!(value["reads"], Value::Null),
-            Err(_) => {}
-        }
+            .render_json(&compiled)
+            .unwrap();
+        // No followed directive: `dispatch.reads` is null, never an empty list
+        // and never anything the result claimed.
+        assert_eq!(absent["reads"], Value::Null);
     }
 
     #[test]
