@@ -453,7 +453,7 @@ impl StateStore {
             Arc::clone(&head_trust),
             deadline,
         )?;
-        ryeos_state::settle_pending_quarantine_leftovers_at_node_start(&runtime_state_dir)
+        ryeos_state::settle_quarantine_leftovers_at_node_start(&app_root, &runtime_state_dir)
             .context("settle quarantine leftovers before recovery")?;
         Self::open(
             app_root,

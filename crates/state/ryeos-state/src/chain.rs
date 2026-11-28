@@ -563,7 +563,7 @@ fn ensure_lock_protects(lock: &ChainLock, chain_root_id: &str) -> anyhow::Result
 
 fn validate_chain_root_id(chain_root_id: &str) -> anyhow::Result<()> {
     if chain_root_id.is_empty()
-        || chain_root_id.len() > 255
+        || chain_root_id.len() > crate::recovery::MAX_CHAIN_ROOT_ID_BYTES
         || matches!(chain_root_id, "." | "..")
         || chain_root_id.contains(['/', '\\'])
         || chain_root_id.bytes().any(|byte| byte.is_ascii_control())

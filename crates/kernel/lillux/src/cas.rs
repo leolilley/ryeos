@@ -999,7 +999,13 @@ impl CasStore {
         };
 
         let mut report = BlobCapturePruneReport::default();
+        let mut skipped_quarantine = false;
         for name in staging.entry_names()? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if crate::is_quarantine_leftover_name(&name) {
+                skipped_quarantine = true;
+                continue;
+            }
             let text = name.to_str().ok_or_else(|| {
                 anyhow::anyhow!(
                     "non-UTF8 CAS blob capture staging entry under {}",
@@ -1026,6 +1032,7 @@ impl CasStore {
             report.bytes = report.bytes.saturating_add(size);
         }
         if !dry_run
+            && !skipped_quarantine
             && !blobs
                 .remove_empty_child_if_same(staging_name, &staging)
                 .map(|receipt| receipt.is_some())?

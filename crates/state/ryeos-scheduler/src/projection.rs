@@ -295,6 +295,12 @@ pub fn canonical_schedule_source_paths(schedules_dir: &Path) -> Result<Vec<std::
     let paths = lillux::collect_regular_files_no_follow(schedules_dir, false)?.unwrap_or_default();
     paths
         .into_iter()
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(lillux::is_quarantine_leftover_name)
+        })
         .map(|path| {
             if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
                 bail!(
@@ -1057,5 +1063,16 @@ mod tests {
         rebuild_fires_from_dir(&fires_root(dir.path()), &db).unwrap();
 
         assert!(db.fire_projection_is_current().unwrap());
+    }
+
+    #[test]
+    fn canonical_source_paths_skip_exact_quarantine_name_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = schedule_dir(root.path());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".ryeos-quarantine.4242.1.YS5qc29u"), "q").unwrap();
+        assert!(canonical_schedule_source_paths(&dir).unwrap().is_empty());
+        fs::write(dir.join(".ryeos-quarantine.4242.01.YS5qc29u"), "q").unwrap();
+        assert!(canonical_schedule_source_paths(&dir).is_err());
     }
 }

@@ -1058,6 +1058,10 @@ fn read_verified_closed_head_directory(
 ) -> anyhow::Result<Option<SignedRef>> {
     let mut head = None;
     for name in directory.entry_names()? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&name) {
+            continue;
+        }
         let name_text = name
             .to_str()
             .ok_or_else(|| anyhow!("{label} entry is not valid UTF-8"))?;
@@ -2245,6 +2249,10 @@ fn collect_verified_generic_heads_in_directory(
     found: &mut Vec<GenericHeadRef>,
 ) -> anyhow::Result<()> {
     for entry_name in directory.entry_names()? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&entry_name) {
+            continue;
+        }
         let entry = entry_name.to_str().ok_or_else(|| {
             anyhow::anyhow!(
                 "generic ref entry name is not valid UTF-8: {}",
@@ -2348,6 +2356,10 @@ fn collect_generic_head_envelopes_structural(
     found: &mut Vec<GenericHeadRef>,
 ) -> anyhow::Result<()> {
     for entry_name in read_ref_directory_names(directory)? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&entry_name) {
+            continue;
+        }
         let path = dir.join(&entry_name);
         let entry_name_c = std::ffi::CString::new(entry_name.as_bytes())?;
         if let Some(child_directory) =
@@ -2732,6 +2744,23 @@ mod tests {
         let mut trust = TrustStore::new();
         trust.insert(signer.fingerprint().to_string(), signer.verifying_key());
         trust
+    }
+
+    #[test]
+    fn generic_head_listing_skips_exact_quarantine_name_but_refuses_near_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let leaf = tmp.path().join("generic").join("ns").join("name");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let refs = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let trust = TrustStore::new();
+        std::fs::write(leaf.join(".ryeos-quarantine.4242.1.YS5qc29u"), "q").unwrap();
+        assert!(
+            list_verified_generic_head_refs_in_directory(&refs, "", &trust)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(leaf.join(".ryeos-quarantine.4242.01.YS5qc29u"), "q").unwrap();
+        assert!(list_verified_generic_head_refs_in_directory(&refs, "", &trust).is_err());
     }
 
     #[test]

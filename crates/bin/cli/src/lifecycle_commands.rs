@@ -3404,6 +3404,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         checks.push(check("sockets", status, serde_json::Value::Object(detail)));
     }
 
+    checks.push(quarantine_leftovers_check(
+        &config.app_root,
+        &config.runtime_state_dir(),
+    ));
+
     // Held external capacity and credential-profile locks, as the running
     // daemon sees them.
     if daemon_running {
@@ -3709,6 +3714,62 @@ fn remote_content_testimonies_check(
             }),
         ),
     }
+}
+
+/// Doctor row for files a process left under Lillux's quarantine name in the
+/// pending-transition directory and under `.ai/node`. A leftover that records
+/// its original name is settled at the next start and only warns; one an older
+/// build left records nothing, refuses the start, and fails the row.
+fn quarantine_leftovers_check(
+    app_root: &std::path::Path,
+    runtime_state_dir: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let mut roots = vec![app_root.join(".ai").join("node")];
+    roots.push(
+        runtime_state_dir
+            .join("recovery")
+            .join("thread-projection")
+            .join("pending"),
+    );
+    let mut settle = Vec::new();
+    let mut old_form = Vec::new();
+    let mut errors = Vec::new();
+    for root in roots {
+        match lillux::PinnedDirectory::open(&root) {
+            Ok(None) => {}
+            Ok(Some(directory)) => match directory.quarantine_leftovers_tree() {
+                Ok(found) => {
+                    for (path, leftover) in found {
+                        if leftover.original().is_some() {
+                            settle.push(path.display().to_string());
+                        } else {
+                            old_form.push(path.display().to_string());
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("{}: {error:#}", root.display())),
+            },
+            Err(error) => errors.push(format!("{}: {error:#}", root.display())),
+        }
+    }
+    let status = if !old_form.is_empty() || !errors.is_empty() {
+        FAIL
+    } else if !settle.is_empty() {
+        WARN
+    } else {
+        OK
+    };
+    check(
+        "quarantine_leftovers",
+        status,
+        serde_json::json!({
+            "settled_at_next_start": settle,
+            "old_form_refuse_start": old_form,
+            "errors": errors,
+            "fix": "a settled leftover needs nothing; for an old-form one, inspect it, rename it back to its original name or delete it, then start again",
+        }),
+    )
 }
 
 /// Doctor row for the node-signed authorized-key grants: which have lapsed,

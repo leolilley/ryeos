@@ -6808,11 +6808,14 @@ impl PinnedDirectory {
         source_name: &std::ffi::CStr,
     ) -> crate::atomic_fs::AtomicMutationResult<(OsString, std::ffi::CString)> {
         for _ in 0..16 {
-            let name = OsString::from(format!(
-                ".ryeos-quarantine.{}.{}",
+            let name = QuarantineLeftover::new_name(
+                source_name.to_bytes(),
                 std::process::id(),
-                crate::atomic_fs::next_temp_sequence()
-            ));
+                crate::atomic_fs::next_temp_sequence(),
+            )
+            .map_err(|error| {
+                crate::atomic_fs::AtomicMutationError::before(anyhow::Error::new(error))
+            })?;
             let name_c = std::ffi::CString::new(name.as_bytes())
                 .map_err(crate::atomic_fs::AtomicMutationError::before)?;
             match rename_noreplace_between(&self.directory, source_name, &self.directory, &name_c) {
@@ -6828,19 +6831,85 @@ impl PinnedDirectory {
         ))
     }
 
-    /// Regular entries whose name is exactly the form
-    /// `move_regular_to_unique_quarantine` produces: `.ryeos-quarantine.<pid>.<seq>`
-    /// with canonical decimal numbers. A near-miss name is not listed, so the
+    /// Regular entries whose name is exactly a quarantine leftover (see
+    /// [`QuarantineLeftover`]). A near-miss name is not listed, so the
     /// caller's strict scan still refuses it.
     pub fn quarantine_leftovers(&self) -> Result<Vec<QuarantineLeftover>> {
         let mut found = Vec::new();
-        for entry in self.regular_files()? {
-            if let Some(leftover) = QuarantineLeftover::parse(entry.name()) {
+        for entry in self.entries_no_follow()? {
+            if entry.entry_type == PinnedEntryType::Regular
+                && let Some(leftover) = QuarantineLeftover::parse(&entry.name)
+            {
                 found.push(leftover);
             }
         }
         found.sort_by_key(|leftover| (leftover.pid, leftover.sequence));
         Ok(found)
+    }
+
+    /// Read-only: every quarantine leftover in this directory and below, with
+    /// its path (links are not followed; depth is bounded). Nothing is moved.
+    pub fn quarantine_leftovers_tree(&self) -> Result<Vec<(PathBuf, QuarantineLeftover)>> {
+        const MAX_DEPTH: usize = 12;
+        fn walk(
+            directory: &PinnedDirectory,
+            depth: usize,
+            found: &mut Vec<(PathBuf, QuarantineLeftover)>,
+        ) -> Result<()> {
+            for leftover in directory.quarantine_leftovers()? {
+                found.push((directory.path().join(leftover.name()), leftover));
+            }
+            for entry in directory.entries_no_follow()? {
+                if entry.entry_type != PinnedEntryType::Directory {
+                    continue;
+                }
+                anyhow::ensure!(
+                    depth < MAX_DEPTH,
+                    "{} is nested deeper than {MAX_DEPTH} directories",
+                    directory.path().join(&entry.name).display()
+                );
+                if let Some(child) = directory.open_child_directory(&entry.name)? {
+                    walk(&child, depth + 1, found)?;
+                }
+            }
+            Ok(())
+        }
+        let mut found = Vec::new();
+        walk(self, 0, &mut found)?;
+        Ok(found)
+    }
+
+    /// [`Self::settle_quarantine_leftovers`] over this directory and every
+    /// directory below it (links are not followed; depth is bounded).
+    pub fn settle_quarantine_leftovers_tree(&self, max_bytes: u64) -> Result<QuarantineSettlement> {
+        const MAX_DEPTH: usize = 12;
+        fn walk(
+            directory: &PinnedDirectory,
+            max_bytes: u64,
+            depth: usize,
+            report: &mut QuarantineSettlement,
+        ) -> Result<()> {
+            let here = directory.settle_quarantine_leftovers(max_bytes)?;
+            report.restored.extend(here.restored);
+            report.removed.extend(here.removed);
+            for entry in directory.entries_no_follow()? {
+                if entry.entry_type != PinnedEntryType::Directory {
+                    continue;
+                }
+                anyhow::ensure!(
+                    depth < MAX_DEPTH,
+                    "{} is nested deeper than {MAX_DEPTH} directories",
+                    directory.path().join(&entry.name).display()
+                );
+                if let Some(child) = directory.open_child_directory(&entry.name)? {
+                    walk(&child, max_bytes, depth + 1, report)?;
+                }
+            }
+            Ok(())
+        }
+        let mut report = QuarantineSettlement::default();
+        walk(self, max_bytes, 0, &mut report)?;
+        Ok(report)
     }
 
     /// Rename a leftover back to `target` without replacing anything.
@@ -6869,6 +6938,61 @@ impl PinnedDirectory {
                 Err(error) => Err(anyhow::Error::new(error).context("restore quarantine leftover")),
             }
         }
+    }
+
+    /// Settle every leftover whose name records its original. Restoring is
+    /// what the live failure path does, so it is always safe: the leftover is
+    /// renamed back (never replacing anything). When the original name is now
+    /// occupied, the leftover is removed only if the occupant is byte
+    /// identical; otherwise this refuses naming both paths and keeps the
+    /// leftover. A short-form (old build) leftover refuses with [`OldQuarantineLeftover`]. Files over
+    /// `max_bytes` are refused without being read whole. The caller proves no
+    /// other process is using the directory.
+    pub fn settle_quarantine_leftovers(&self, max_bytes: u64) -> Result<QuarantineSettlement> {
+        let mut report = QuarantineSettlement::default();
+        for leftover in self.quarantine_leftovers()? {
+            let path = self.path.join(leftover.name());
+            let Some(original) = leftover.original() else {
+                return Err(anyhow::Error::new(OldQuarantineLeftover { path }));
+            };
+            if self.restore_quarantine_leftover(&leftover, original)? {
+                report.restored.push(path);
+                continue;
+            }
+            let canonical = self.path.join(original);
+            let mine = self.read_bounded_by_name(leftover.name(), max_bytes)?;
+            let theirs = self.read_bounded_by_name(original, max_bytes)?;
+            if mine == theirs {
+                self.remove_quarantine_leftover(&leftover)?;
+                report.removed.push(path);
+            } else {
+                anyhow::bail!(
+                    "quarantine leftover {} differs from {}; resolve by hand",
+                    path.display(),
+                    canonical.display()
+                );
+            }
+        }
+        Ok(report)
+    }
+
+    fn read_bounded_by_name(&self, name: &OsStr, max_bytes: u64) -> Result<Vec<u8>> {
+        use std::io::Read as _;
+        let path = self.path.join(name);
+        let file = self
+            .open_regular(name, false)?
+            .ok_or_else(|| anyhow::anyhow!("{} vanished while settling", path.display()))?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take(max_bytes + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read {}", path.display()))?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= max_bytes,
+            "{} is larger than {max_bytes} bytes; refusing to settle it",
+            path.display()
+        );
+        Ok(bytes)
     }
 
     /// Unlink a leftover (no-follow, by name in the pinned directory).
@@ -9506,32 +9630,161 @@ fn rename_noreplace_between(
 
 /// A file left under Lillux's quarantine name by a process that stopped
 /// between the quarantine move and the unlink.
+///
+/// The name is `.ryeos-quarantine.<pid>.<seq>.<base64url, unpadded, of the
+/// original name>` and records where the file came from, so restoring it is
+/// always possible. An original name longer than
+/// [`QUARANTINE_ORIGINAL_NAME_MAX`] bytes is refused before anything moves.
+/// The short form `.ryeos-quarantine.<pid>.<seq>` is what older builds left;
+/// it records no original and is recognised only so it can be reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuarantineLeftover {
     name: OsString,
     pub pid: u32,
     pub sequence: u64,
+    original: Option<OsString>,
+}
+
+/// The longest original file name a quarantine name can carry: the prefix, a
+/// 10-digit pid, a 20-digit sequence and two dots leave 205 of the 255 name
+/// bytes, which hold 153 bytes of unpadded base64url.
+pub const QUARANTINE_ORIGINAL_NAME_MAX: usize = 153;
+
+/// The original name is too long to record in a quarantine name. Raised
+/// before the file is moved, so the removal or replacement fails loudly and
+/// nothing is left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineNameTooLong {
+    pub original_len: usize,
+}
+
+impl std::fmt::Display for QuarantineNameTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "file name of {} bytes is longer than the {QUARANTINE_ORIGINAL_NAME_MAX} bytes a quarantine name can record; nothing was moved",
+            self.original_len
+        )
+    }
+}
+
+impl std::error::Error for QuarantineNameTooLong {}
+
+/// A quarantine leftover written by an older build, whose name does not
+/// record the original. Settlement refuses it so an operator decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OldQuarantineLeftover {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for OldQuarantineLeftover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} was left by an older build and does not record the name it came from; \
+             inspect it, then rename it back to its original name or delete it, and start again",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for OldQuarantineLeftover {}
+
+/// True when `name` is exactly a quarantine leftover (either form). Scanners
+/// that run while the node is up skip such an entry, because a live removal
+/// may own it.
+pub fn is_quarantine_leftover_name(name: &OsStr) -> bool {
+    QuarantineLeftover::parse(name).is_some()
+}
+
+/// The exact quarantine name for `original`, as the quarantine move writes it.
+pub fn quarantine_name(
+    original: &OsStr,
+    pid: u32,
+    sequence: u64,
+) -> std::result::Result<OsString, QuarantineNameTooLong> {
+    QuarantineLeftover::new_name(original.as_bytes(), pid, sequence)
 }
 
 impl QuarantineLeftover {
     const PREFIX: &'static str = ".ryeos-quarantine.";
 
-    /// Exactly `.ryeos-quarantine.<pid>.<seq>`, canonical decimal, nothing else.
+    fn new_name(
+        original: &[u8],
+        pid: u32,
+        sequence: u64,
+    ) -> std::result::Result<OsString, QuarantineNameTooLong> {
+        use base64::Engine as _;
+        if original.len() > QUARANTINE_ORIGINAL_NAME_MAX {
+            return Err(QuarantineNameTooLong {
+                original_len: original.len(),
+            });
+        }
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(original);
+        Ok(OsString::from(format!(
+            "{}{pid}.{sequence}.{encoded}",
+            Self::PREFIX
+        )))
+    }
+
+    /// Exactly one of the two forms, canonical decimal numbers and canonical
+    /// base64url that decodes to one normal path component; anything else is
+    /// not a leftover and is left for the caller's strict scan.
     pub fn parse(name: &OsStr) -> Option<Self> {
+        use base64::Engine as _;
         let rest = name.to_str()?.strip_prefix(Self::PREFIX)?;
-        let (pid, sequence) = rest.split_once('.')?;
+        let mut parts = rest.splitn(3, '.');
+        let pid = parts.next()?;
+        let sequence = parts.next()?;
+        let encoded = parts.next();
         let pid_n: u32 = pid.parse().ok()?;
         let sequence_n: u64 = sequence.parse().ok()?;
-        (format!("{pid_n}.{sequence_n}") == rest).then(|| Self {
+        if format!("{pid_n}.{sequence_n}") != format!("{pid}.{sequence}") {
+            return None;
+        }
+        let original = match encoded {
+            None => None,
+            Some(encoded) => {
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(encoded)
+                    .ok()?;
+                if bytes.is_empty()
+                    || bytes.len() > QUARANTINE_ORIGINAL_NAME_MAX
+                    || base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) != encoded
+                {
+                    return None;
+                }
+                use std::os::unix::ffi::OsStringExt as _;
+                let original = OsString::from_vec(bytes);
+                validate_child_name(&original).ok()?;
+                Some(original)
+            }
+        };
+        Some(Self {
             name: name.to_os_string(),
             pid: pid_n,
             sequence: sequence_n,
+            original,
         })
     }
 
     pub fn name(&self) -> &OsStr {
         &self.name
     }
+
+    /// The name the file had before the move; absent for an old-form leftover.
+    pub fn original(&self) -> Option<&OsStr> {
+        self.original.as_deref()
+    }
+}
+
+/// What `PinnedDirectory::settle_quarantine_leftovers` did.
+#[derive(Debug, Default)]
+pub struct QuarantineSettlement {
+    /// Leftovers renamed back to their recorded original name.
+    pub restored: Vec<PathBuf>,
+    /// Leftovers removed because a byte-identical file holds the original name.
+    pub removed: Vec<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]

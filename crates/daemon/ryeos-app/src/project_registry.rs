@@ -152,6 +152,10 @@ pub fn load_registrations_reporting(
     };
     let mut loaded = Vec::new();
     for owner_entry in directory.entries_no_follow_bounded(MAX_OWNERS)? {
+        // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+        if lillux::is_quarantine_leftover_name(&owner_entry.name) {
+            continue;
+        }
         let owner_name = owner_entry
             .name
             .to_str()
@@ -172,6 +176,10 @@ pub fn load_registrations_reporting(
             .open_child_directory(&owner_entry.name)?
             .with_context(|| format!("owner directory {owner_name} vanished"))?;
         for entry in owner_directory.entries_no_follow_bounded(MAX_NAMES_PER_OWNER)? {
+            // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+            if lillux::is_quarantine_leftover_name(&entry.name) {
+                continue;
+            }
             let file_name = entry.name.to_str().with_context(|| {
                 format!(
                     "stray entry under {}: name is not UTF-8",
@@ -426,5 +434,22 @@ pub fn live_logical_project(
                 ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod quarantine_skip_tests {
+    use super::*;
+
+    #[test]
+    fn load_skips_exact_quarantine_name_but_refuses_near_miss() {
+        let app = tempfile::tempdir().unwrap();
+        let root = projects_dir(app.path());
+        std::fs::create_dir_all(&root).unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[7; 32]).verifying_key();
+        std::fs::write(root.join(".ryeos-quarantine.4242.1.YS5qc29u"), "q").unwrap();
+        assert!(load_registrations(app.path(), &key).unwrap().is_empty());
+        std::fs::write(root.join(".ryeos-quarantine.4242.01.YS5qc29u"), "q").unwrap();
+        assert!(load_registrations(app.path(), &key).is_err());
     }
 }

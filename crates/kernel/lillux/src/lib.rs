@@ -140,7 +140,6 @@ pub use exec::{
 };
 #[cfg(unix)]
 pub use secure_fs::PATH_MAX_BYTES;
-pub use secure_fs::QuarantineLeftover;
 pub use secure_fs::{
     AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
     ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
@@ -173,6 +172,10 @@ pub use secure_fs::{
     MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
     PrefixWalkBudget, PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkEntry,
     PrefixWalkExhaustion,
+};
+pub use secure_fs::{
+    OldQuarantineLeftover, QUARANTINE_ORIGINAL_NAME_MAX, QuarantineLeftover, QuarantineNameTooLong,
+    QuarantineSettlement, is_quarantine_leftover_name, quarantine_name,
 };
 pub use secure_fs::{
     SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
