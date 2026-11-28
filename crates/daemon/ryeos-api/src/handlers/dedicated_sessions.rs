@@ -7756,6 +7756,62 @@ async fn start_candidate_integration(
     .await
 }
 
+/// The evaluator parameter the daemon alone sets beside `base_config`: the
+/// paths the candidate changed against its base, as the daemon computed them
+/// from the two verified snapshot trees. A caller cannot supply it.
+const CHANGED_PATHS_PARAMETER: &str = "changed_paths";
+/// A sealed list holds at most this many paths and this many bytes of path
+/// text; past either, the list is sealed as null with its count and digest.
+const CHANGED_PATHS_MAX_ENTRIES: usize = 10_000;
+const CHANGED_PATHS_MAX_BYTES: usize = 1024 * 1024;
+
+/// The paths whose entry differs between two project trees (added, changed or
+/// deleted), sorted. The one place the changed set is computed: the hosted
+/// candidate's closure evidence and the evaluator's sealed parameter both
+/// call it.
+fn changed_paths_between(
+    base: &BTreeMap<String, String>,
+    candidate: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    paths.extend(candidate.keys().cloned());
+    paths.extend(base.keys().cloned());
+    paths
+        .into_iter()
+        .filter(|path| candidate.get(path) != base.get(path))
+        .collect()
+}
+
+fn changed_paths_digest(paths: &[String]) -> Result<String, HandlerError> {
+    ryeos_state::objects::canonical_value_digest(&serde_json::to_value(paths).map_err(internal)?)
+        .map_err(internal)
+}
+
+/// The sealed `changed_paths` value: the digest and exact count always, the
+/// list itself only within the bounds, else null with the reason naming which
+/// bound was passed.
+fn changed_paths_testimony(paths: &[String]) -> Result<Value, HandlerError> {
+    let digest = changed_paths_digest(paths)?;
+    let bytes: usize = paths.iter().map(String::len).sum();
+    let reason = if paths.len() > CHANGED_PATHS_MAX_ENTRIES {
+        Some(format!(
+            "more than {CHANGED_PATHS_MAX_ENTRIES} changed paths"
+        ))
+    } else if bytes > CHANGED_PATHS_MAX_BYTES {
+        Some(format!(
+            "more than {CHANGED_PATHS_MAX_BYTES} bytes of changed path text"
+        ))
+    } else {
+        None
+    };
+    Ok(json!({
+        "digest": digest,
+        "count": paths.len(),
+        "paths": if reason.is_some() { Value::Null } else { json!(paths) },
+        "reason": reason,
+    }))
+}
+
 /// The evaluator parameter the daemon alone sets: the base snapshot's config,
 /// as the daemon read and judged it. A caller cannot supply it.
 const BASE_CONFIG_PARAMETER: &str = "base_config";
@@ -7809,15 +7865,18 @@ fn base_config_testimony(config_ref: &str, read: Result<BaseConfigFacts, String>
     }
 }
 
-/// A caller never names `base_config`; the daemon sets it, or it is absent.
+/// A caller never names `base_config` or `changed_paths`; the daemon sets
+/// them, or they are absent.
 fn refuse_reserved_base_config(parameters: &Value) -> Result<(), HandlerError> {
-    if parameters
-        .as_object()
-        .is_some_and(|object| object.contains_key(BASE_CONFIG_PARAMETER))
-    {
-        return Err(HandlerError::BadRequest(format!(
-            "evaluator parameters may not name `{BASE_CONFIG_PARAMETER}`: the daemon alone seals it from the base snapshot"
-        )));
+    for reserved in [BASE_CONFIG_PARAMETER, CHANGED_PATHS_PARAMETER] {
+        if parameters
+            .as_object()
+            .is_some_and(|object| object.contains_key(reserved))
+        {
+            return Err(HandlerError::BadRequest(format!(
+                "evaluator parameters may not name `{reserved}`: the daemon alone seals it from the base snapshot"
+            )));
+        }
     }
     if !(parameters.is_null() || parameters.is_object()) {
         return Err(HandlerError::BadRequest(
@@ -7833,6 +7892,15 @@ fn seal_base_config(parameters: Value, testimony: Value) -> Value {
         _ => serde_json::Map::new(),
     };
     object.insert(BASE_CONFIG_PARAMETER.to_owned(), testimony);
+    Value::Object(object)
+}
+
+fn seal_changed_paths(parameters: Value, testimony: Value) -> Value {
+    let mut object = match parameters {
+        Value::Object(object) => object,
+        _ => serde_json::Map::new(),
+    };
+    object.insert(CHANGED_PATHS_PARAMETER.to_owned(), testimony);
     Value::Object(object)
 }
 
@@ -8196,9 +8264,32 @@ async fn start_candidate_operation(
                         composed_value: item.composed_value,
                     }
                 });
-            seal_base_config(
-                req.parameters.clone(),
-                base_config_testimony(config_ref, read),
+            let changed_paths = {
+                let cas_read = state.acquire_cas_read().map_err(internal)?;
+                let cas = cas_read.cas();
+                let candidate_closure =
+                    ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+                        cas,
+                        &req.candidate_snapshot_hash,
+                    )
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+                let base_closure =
+                    ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+                        cas,
+                        &base_snapshot_hash,
+                    )
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+                changed_paths_between(
+                    &base_closure.tree().tree().files,
+                    &candidate_closure.tree().tree().files,
+                )
+            };
+            seal_changed_paths(
+                seal_base_config(
+                    req.parameters.clone(),
+                    base_config_testimony(config_ref, read),
+                ),
+                changed_paths_testimony(&changed_paths)?,
             )
         }
     };
@@ -8452,19 +8543,9 @@ fn frozen_candidate_closure_evidence(
         &base_snapshot_hash,
     )
     .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
-    let mut paths = BTreeSet::new();
-    paths.extend(candidate.tree().tree().files.keys().cloned());
-    paths.extend(base.tree().tree().files.keys().cloned());
-    let changed_paths = paths
-        .into_iter()
-        .filter(|path| {
-            candidate.tree().tree().files.get(path) != base.tree().tree().files.get(path)
-        })
-        .collect::<Vec<_>>();
-    let changed_paths_digest = ryeos_state::objects::canonical_value_digest(
-        &serde_json::to_value(&changed_paths).map_err(internal)?,
-    )
-    .map_err(internal)?;
+    let changed_paths =
+        changed_paths_between(&base.tree().tree().files, &candidate.tree().tree().files);
+    let changed_paths_digest = changed_paths_digest(&changed_paths)?;
     let evidence = json!({
         "schema":"ryeos.hosted_candidate_closure_and_base_validation.v2",
         "checks":{
@@ -11731,7 +11812,9 @@ mod evaluator_contract_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseConfigFacts, base_config_testimony, refuse_reserved_base_config, seal_base_config,
+        BaseConfigFacts, CHANGED_PATHS_MAX_BYTES, CHANGED_PATHS_MAX_ENTRIES, base_config_testimony,
+        changed_paths_between, changed_paths_digest, changed_paths_testimony,
+        refuse_reserved_base_config, seal_base_config, seal_changed_paths,
     };
 
     fn facts(kind: &str, trusted: bool, hash: &str) -> BaseConfigFacts {
@@ -11825,6 +11908,106 @@ mod tests {
         assert!(refuse_reserved_base_config(&json!(["not", "an", "object"])).is_err());
         refuse_reserved_base_config(&json!({"candidate_snapshot_hash": "a"})).unwrap();
         refuse_reserved_base_config(&serde_json::Value::Null).unwrap();
+    }
+
+    #[test]
+    fn a_caller_cannot_supply_the_changed_paths_parameter() {
+        assert!(refuse_reserved_base_config(&json!({"changed_paths": {"paths": []}})).is_err());
+        assert!(
+            refuse_reserved_base_config(&json!({"base_config": {}, "changed_paths": []})).is_err()
+        );
+    }
+
+    fn tree(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(path, hash)| ((*path).to_owned(), (*hash).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn the_changed_set_holds_added_changed_and_deleted_paths_sorted() {
+        let base = tree(&[
+            ("a.txt", "1"),
+            ("b.txt", "2"),
+            ("c.txt", "3"),
+            ("same", "9"),
+        ]);
+        let candidate = tree(&[
+            ("a.txt", "1"),
+            ("b.txt", "22"),
+            ("d.txt", "4"),
+            ("same", "9"),
+        ]);
+        assert_eq!(
+            changed_paths_between(&base, &candidate),
+            vec!["b.txt".to_owned(), "c.txt".to_owned(), "d.txt".to_owned()]
+        );
+        // A rename is a delete and an add.
+        let renamed = tree(&[
+            ("new.txt", "1"),
+            ("b.txt", "2"),
+            ("c.txt", "3"),
+            ("same", "9"),
+        ]);
+        assert_eq!(
+            changed_paths_between(&base, &renamed),
+            vec!["a.txt".to_owned(), "new.txt".to_owned()]
+        );
+        assert!(changed_paths_between(&base, &base).is_empty());
+    }
+
+    #[test]
+    fn both_callers_of_the_shared_function_give_one_digest_for_one_pair() {
+        let base = tree(&[("a.txt", "1"), ("b.txt", "2")]);
+        let candidate = tree(&[("a.txt", "1"), ("b.txt", "3"), ("c.txt", "4")]);
+        // The closure evidence digests the list it computed; the evaluator's
+        // sealed parameter carries the digest of the list it computed. Both
+        // come from changed_paths_between over the same pair.
+        let evidence_digest =
+            changed_paths_digest(&changed_paths_between(&base, &candidate)).unwrap();
+        let sealed = changed_paths_testimony(&changed_paths_between(&base, &candidate)).unwrap();
+        assert_eq!(sealed["digest"], json!(evidence_digest));
+        assert_eq!(sealed["count"], json!(2));
+        assert_eq!(sealed["paths"], json!(["b.txt", "c.txt"]));
+        assert_eq!(sealed["reason"], Value::Null);
+        let other = changed_paths_between(&base, &tree(&[("a.txt", "1")]));
+        assert_ne!(changed_paths_digest(&other).unwrap(), evidence_digest);
+    }
+
+    #[test]
+    fn a_changed_set_past_the_entry_or_byte_bound_seals_null_with_its_exact_count() {
+        let many: Vec<String> = (0..=CHANGED_PATHS_MAX_ENTRIES)
+            .map(|n| format!("f{n}"))
+            .collect();
+        let sealed = changed_paths_testimony(&many).unwrap();
+        assert_eq!(sealed["paths"], Value::Null);
+        assert_eq!(sealed["count"], json!(many.len()));
+        assert_eq!(
+            sealed["digest"],
+            json!(changed_paths_digest(&many).unwrap())
+        );
+        assert!(sealed["reason"].as_str().unwrap().contains("changed paths"));
+        let long = vec!["x".repeat(CHANGED_PATHS_MAX_BYTES + 1)];
+        let sealed = changed_paths_testimony(&long).unwrap();
+        assert_eq!(sealed["paths"], Value::Null);
+        assert_eq!(sealed["count"], json!(1));
+        assert!(sealed["reason"].as_str().unwrap().contains("bytes"));
+        let at_the_bound: Vec<String> = (0..CHANGED_PATHS_MAX_ENTRIES)
+            .map(|n| format!("f{n}"))
+            .collect();
+        assert!(changed_paths_testimony(&at_the_bound).unwrap()["paths"].is_array());
+    }
+
+    #[test]
+    fn sealing_changed_paths_replaces_a_stale_value_and_keeps_the_other_parameters() {
+        let sealed = seal_changed_paths(
+            json!({"candidate_snapshot_hash": "a", "base_config": {"ref": "x"}}),
+            json!({"count": 0}),
+        );
+        assert_eq!(sealed["candidate_snapshot_hash"], json!("a"));
+        assert_eq!(sealed["base_config"]["ref"], json!("x"));
+        assert_eq!(sealed["changed_paths"]["count"], json!(0));
     }
 
     #[test]

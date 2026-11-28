@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T21:29:40Z:aeabdf4a9bc4a41d33432a6e8c2adfcecb6b16591732f364f782dc5dfe001f22:z9idVTGE1tVHg8xujn6NpOC+Iu0K9jzP1GhekbYDqKc6ueUmMLCC3G7FMkxWnzJKuLnHgNYThyLVBCO1/ZGBBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T19:50:32Z:a6390d6a3505a3ad6024518159f3a90ce2e1ff2a61c462ad4dd5af82d03cb70d:eEYu9YLzLmjWdEFAT2Ugzd/pANkLKavjxp+xoUmdBaBQ6SmX9Snw17lYulA0zGeQbzyUppB8AwD+p8hjPeg9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/core/evaluate
 #   version: "1.0.0"
@@ -15,6 +15,7 @@
 #       candidate_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
 #       base_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
 #       base_config: {type: [object, "null"]}
+#       changed_paths: {type: [object, "null"]}
 #     required: [candidate_snapshot_hash, base_snapshot_hash]
 #     additionalProperties: false
 """Evaluate one frozen candidate against the checks its project declared.
@@ -40,6 +41,16 @@ Check kinds, each `{id, kind, ...}`:
   parses_as {path, format, max_bytes}
                                 the file parses as json or yaml within max_bytes;
                                 yaml with aliases, or with too many events, fails
+  changed_paths_within {allow, deny}
+                                every path the candidate changed against its base
+                                matches an allow glob and no deny glob
+  changed_paths_count {max}     the candidate changed at most max paths
+
+The changed paths arrive as `changed_paths`, computed by the daemon from the two
+verified snapshot trees: {digest, count, paths, reason}. The tool never computes
+them (it sees only the candidate). Past the daemon's bounds `paths` is null and
+`count` stays exact: changed_paths_count still runs, changed_paths_within fails.
+A missing or inconsistent value fails both checks; nothing here accepts without it.
 """
 
 import hashlib
@@ -289,6 +300,53 @@ def check_parses_as(root, spec, ctx):
     return f"parses as {kind}"
 
 
+def sealed_changed_paths(value):
+    """The daemon's changed-paths testimony if it is well formed, else None."""
+    if not isinstance(value, dict):
+        return None
+    digest, count, paths = value.get("digest"), value.get("count"), value.get("paths")
+    if not isinstance(digest, str) or not HASH.fullmatch(digest):
+        return None
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return None
+    if paths is not None:
+        if not isinstance(paths, list) or len(paths) != count:
+            return None
+        if not all(isinstance(path, str) for path in paths):
+            return None
+    return {"digest": digest, "count": count, "paths": paths}
+
+
+def check_changed_paths_within(root, spec, ctx):
+    allow = globs(spec.get("allow"))
+    deny = globs(spec.get("deny", []))
+    if not allow:
+        raise Refused("allow list is empty")
+    sealed = ctx["changed"]
+    if sealed is None:
+        raise Refused("the daemon sealed no usable changed paths")
+    if sealed["paths"] is None:
+        raise Refused("the changed paths were too many to list")
+    for relative in sealed["paths"]:
+        if not any(rx.fullmatch(relative) for rx in allow):
+            raise Refused(f"changed path outside the allow list: {relative}")
+        if any(rx.fullmatch(relative) for rx in deny):
+            raise Refused(f"changed path in the deny list: {relative}")
+    return "every changed path is allowed"
+
+
+def check_changed_paths_count(root, spec, ctx):
+    limit = spec.get("max")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise Refused("max is not a non-negative integer")
+    sealed = ctx["changed"]
+    if sealed is None:
+        raise Refused("the daemon sealed no usable changed paths")
+    if sealed["count"] > limit:
+        raise Refused("too many changed paths")
+    return "within the changed path limit"
+
+
 KINDS = {
     "path_exists": ({"path"}, check_path_exists, False),
     "path_absent": ({"path"}, check_path_absent, False),
@@ -296,6 +354,8 @@ KINDS = {
     "paths_within": ({"allow", "deny"}, check_paths_within, True),
     "limits": ({"max_files", "max_total_bytes", "max_file_bytes"}, check_limits, True),
     "parses_as": ({"path", "format", "max_bytes"}, check_parses_as, False),
+    "changed_paths_within": ({"allow", "deny"}, check_changed_paths_within, False),
+    "changed_paths_count": ({"max"}, check_changed_paths_count, False),
 }
 
 
@@ -368,7 +428,8 @@ def evaluate(request: dict, project: Path) -> dict:
             "checks": [],
         }
         return result
-    ctx = {"max_file_bytes": PARSE_BYTES_CEILING, "entries": None}
+    changed = sealed_changed_paths(request.get("changed_paths"))
+    ctx = {"max_file_bytes": PARSE_BYTES_CEILING, "entries": None, "changed": changed}
     outcomes = []
     for spec in checks:
         _fields, function, needs_walk = KINDS[spec["kind"]]
@@ -390,6 +451,8 @@ def evaluate(request: dict, project: Path) -> dict:
         "checks_digest": hashlib.sha256(
             json.dumps(checks, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
+        "changed_paths_digest": changed["digest"] if changed else None,
+        "changed_paths_count": changed["count"] if changed else None,
         "checks_declared": len(outcomes),
         "checks": outcomes,
     }

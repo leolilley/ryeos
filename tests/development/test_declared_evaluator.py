@@ -21,15 +21,24 @@ DIGEST = "c" * 64
 REF = "config:ryeos/core/evaluate/checks"
 
 
-def run(project, checks, digest=DIGEST):
-    return declared.evaluate(
-        {
-            "candidate_snapshot_hash": CANDIDATE,
-            "base_snapshot_hash": BASE,
-            "base_config": base_config(checks, digest),
-        },
-        project,
-    )
+def run(project, checks, digest=DIGEST, changed=None):
+    request = {
+        "candidate_snapshot_hash": CANDIDATE,
+        "base_snapshot_hash": BASE,
+        "base_config": base_config(checks, digest),
+    }
+    if changed is not None:
+        request["changed_paths"] = changed
+    return declared.evaluate(request, project)
+
+
+def sealed(paths, count=None, digest="d" * 64):
+    return {
+        "digest": digest,
+        "count": len(paths) if count is None and paths is not None else count,
+        "paths": paths,
+        "reason": None if paths is not None else "more than 10000 changed paths",
+    }
 
 
 def base_config(checks, digest=DIGEST, trusted=True, reason=None):
@@ -51,6 +60,69 @@ class DeclaredEvaluator(unittest.TestCase):
         (self.root / "src/a.txt").write_bytes(b"alpha")
         (self.root / "data.json").write_text('{"k": [1, 2]}')
         (self.root / "conf.yaml").write_text("a: 1\nb: [x, y]\n")
+
+    def test_changed_paths_within_and_count_judge_the_sealed_list(self):
+        within = {"id": "w", "kind": "changed_paths_within", "allow": ["src/**", "docs/*.md"], "deny": ["src/gen/**"]}
+        count = {"id": "n", "kind": "changed_paths_count", "max": 3}
+        result = run(self.root, [within, count], changed=sealed(["src/a.rs", "docs/x.md"]))
+        self.assertIs(result["accepted"], True)
+        self.assertEqual(result["evidence"]["changed_paths_digest"], "d" * 64)
+        self.assertEqual(result["evidence"]["changed_paths_count"], 2)
+        outside = run(self.root, [within], changed=sealed(["src/a.rs", "Cargo.toml"]))
+        self.assertIs(outside["accepted"], False)
+        self.assertIn("outside the allow list", outcome(outside, "w")["detail"])
+        denied = run(self.root, [within], changed=sealed(["src/gen/x.rs"]))
+        self.assertIn("deny list", outcome(denied, "w")["detail"])
+        many = run(self.root, [count], changed=sealed(["a", "b", "c", "d"]))
+        self.assertIs(many["accepted"], False)
+        self.assertIn("too many changed paths", outcome(many, "n")["detail"])
+
+    def test_an_absent_or_malformed_changed_set_fails_both_kinds_closed(self):
+        within = {"id": "w", "kind": "changed_paths_within", "allow": ["**"]}
+        count = {"id": "n", "kind": "changed_paths_count", "max": 100}
+        bad = [
+            None,
+            {},
+            {"digest": "short", "count": 0, "paths": []},
+            {"digest": "d" * 64, "count": -1, "paths": []},
+            {"digest": "d" * 64, "count": True, "paths": []},
+            {"digest": "d" * 64, "count": 2, "paths": ["a"]},
+            {"digest": "d" * 64, "count": 1, "paths": [7]},
+            "a/b",
+        ]
+        for value in bad:
+            result = run(self.root, [within, count], changed=value)
+            self.assertIs(result["accepted"], False, value)
+            self.assertEqual(outcome(result, "w")["result"], "fail", value)
+            self.assertEqual(outcome(result, "n")["result"], "fail", value)
+            self.assertIsNone(result["evidence"]["changed_paths_digest"], value)
+        # No sealed value at all (an old daemon): the checks fail, nothing accepts.
+        result = run(self.root, [within, count])
+        self.assertIs(result["accepted"], False)
+
+    def test_past_the_bounds_the_count_still_runs_and_within_fails_closed(self):
+        over = sealed(None, count=20000)
+        count_ok = {"id": "n", "kind": "changed_paths_count", "max": 30000}
+        count_low = {"id": "m", "kind": "changed_paths_count", "max": 100}
+        within = {"id": "w", "kind": "changed_paths_within", "allow": ["**"]}
+        result = run(self.root, [count_ok, count_low, within], changed=over)
+        self.assertEqual(outcome(result, "n")["result"], "pass")
+        self.assertEqual(outcome(result, "m")["result"], "fail")
+        self.assertEqual(outcome(result, "w")["result"], "fail")
+        self.assertIn("too many", outcome(result, "w")["detail"])
+        self.assertEqual(result["evidence"]["changed_paths_count"], 20000)
+
+    def test_a_changed_paths_check_needs_valid_fields(self):
+        for check in (
+            {"id": "n", "kind": "changed_paths_count", "max": -1},
+            {"id": "n", "kind": "changed_paths_count", "max": "3"},
+            {"id": "w", "kind": "changed_paths_within", "allow": []},
+        ):
+            result = run(self.root, [check], changed=sealed(["a"]))
+            self.assertIs(result["accepted"], False, check)
+        unknown = run(self.root, [{"id": "n", "kind": "changed_paths_count", "max": 1, "extra": 1}], changed=sealed([]))
+        self.assertEqual(unknown["evidence"]["scope"], "no checks declared")
+
 
     def test_no_checks_declared_never_accepts(self):
         for checks in (None, []):
