@@ -282,6 +282,10 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 covers = ["ryeos-graph-definition", "ryeos-graph-runtime", "ryeos-node-runtime", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/item_revised.rs", "crates/daemon/ryeos-app/src/runtime_item_author_service.rs"]
 
+[tests.keyless_static_routes_e2e]
+covers = ["ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/routes/response_modes/static_mode.rs"]
+
 [tests.large_object_quarantine_e2e]
 covers = ["ryeos-core-tools", "ryeos-state"]
 paths = ["crates/daemon/ryeos-app/src/state_store/**", "crates/state/ryeos-state/src/large_object_store.rs"]
