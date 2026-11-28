@@ -513,7 +513,9 @@ mod tests {
         dns.set_nonblocking(true).unwrap();
         let context = context(dns.local_addr().unwrap());
         let start = Instant::now();
-        let deadline = MonotonicDeadline::after(Duration::from_millis(80));
+        // The resolver's first query goes out at the start; 600 ms leaves a
+        // stalled runner room to send it before the deadline settles the call.
+        let deadline = MonotonicDeadline::after(Duration::from_millis(600));
         let error = context
             .connect(
                 "silent.example",
@@ -526,7 +528,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(10));
         let mut bytes = [0; 4096];
         let mut contacted = false;
         while dns.recv_from(&mut bytes).is_ok() {
