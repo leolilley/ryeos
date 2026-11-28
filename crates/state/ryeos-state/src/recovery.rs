@@ -5408,7 +5408,7 @@ mod tests {
         for name in [
             format!(".ryeos-quarantine.{}.07", dead_pid()),
             format!(".ryeos-quarantine.{}", dead_pid()),
-            format!(".ryeos-quarantine.x.7"),
+            ".ryeos-quarantine.x.7".to_string(),
             format!("ryeos-quarantine.{}.7", dead_pid()),
         ] {
             let path = dir.join(&name);
