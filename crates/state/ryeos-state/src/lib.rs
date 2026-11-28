@@ -136,12 +136,11 @@ pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
     DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, EvidenceValidator,
     HeadOperation, PendingChainHeadTransition, PendingTransitionCursor,
-    ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
-    RecoveryStore, RetiredChainClosure, RetiredChainClosureDraft, RetiredChainFence,
-    RetiredThreadHistoryDiscardMarker, RetirementEvidenceDiscard, StagedCasRootHashes,
-    StagedCasRootLease, ThreadHistoryDiscardAcknowledgementRefused,
-    ThreadHistoryDiscardOperationRef, TransitionPhase, read_retired_chain_closure,
-    settle_quarantine_leftovers_at_node_start,
+    ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredChainClosure,
+    RetiredChainClosureDraft, RetiredChainFence, RetiredThreadHistoryDiscardMarker,
+    RetirementEvidenceDiscard, StagedCasRootHashes, StagedCasRootLease,
+    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
+    read_retired_chain_closure, settle_quarantine_leftovers_at_node_start,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

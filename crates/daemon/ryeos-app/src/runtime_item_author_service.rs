@@ -1571,7 +1571,10 @@ mod tests {
         assert_eq!(typed.cap, cap);
         assert_eq!(typed.path, over);
         let msg = format!("{err:#}");
-        assert!(msg.contains("graph:a/b") && msg.contains(&cap.to_string()), "{msg}");
+        assert!(
+            msg.contains("graph:a/b") && msg.contains(&cap.to_string()),
+            "{msg}"
+        );
     }
 
     #[test]
