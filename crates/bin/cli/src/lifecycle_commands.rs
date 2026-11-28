@@ -3406,7 +3406,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
 
     checks.push(quarantine_leftovers_check(
         &config.app_root,
-        &config.runtime_state_dir(),
+        &config.app_root.join(".ai").join("state"),
     ));
 
     // Held external capacity and credential-profile locks, as the running

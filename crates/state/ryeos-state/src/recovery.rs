@@ -5412,9 +5412,11 @@ mod tests {
     }
 
     #[test]
-    fn an_plain_form_leftover_refuses_start_with_a_typed_error_naming_the_path() {
+    fn a_plain_leftover_in_a_node_controlled_directory_refuses_start_with_a_typed_error_naming_the_path()
+     {
         let temp = tempfile::tempdir().unwrap();
         let _store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        std::fs::create_dir_all(pending_dir(temp.path())).unwrap();
         let old = pending_dir(temp.path()).join(format!(".ryeos-quarantine.{}.3", dead_pid()));
         std::fs::write(&old, b"{}").unwrap();
         let app = tempfile::tempdir().unwrap();
