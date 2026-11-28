@@ -199,7 +199,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            15,
+            16,
             "update provider-environment profile expectations"
         );
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
@@ -227,7 +227,7 @@ mod tests {
                 | "bundle-source" => &[],
                 "contained-workflow" | "core" | "core-knowledge" | "core-scheduling"
                 | "core-workflow" | "development" | "hosted-node" | "local-inference"
-                | "standard" => &[],
+                | "member" | "standard" => &[],
                 _ => panic!("add an explicit provider-environment expectation for {profile_name}"),
             };
             assert_eq!(provider.declared_names(), expected, "{profile_name}");

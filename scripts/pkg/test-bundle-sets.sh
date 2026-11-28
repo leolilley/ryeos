@@ -259,8 +259,9 @@ assert_rejected ryeos_bundle_set_node_init_profile release-artifacts
 assert_rejected ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority" ]]
+[[ "${node_init_profiles[*]}" == "central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority member" ]]
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
+[[ "$(ryeos_node_init_profile_bundle_set member)" == "standard" ]]
 [[ "$(ryeos_node_init_profile_bundle_set hosted-node)" == "core" ]]
 assert_rejected ryeos_bundle_set_names hosted-node
 [[ "$(ryeos_node_init_profile_bundle_set development)" == "development" ]]
@@ -300,7 +301,7 @@ for profile_name in "${node_init_profiles[@]}"; do
   grep -Eq '^    producer_resource_ceiling:($| null$)' <<<"$execution_section"
   # The isolation policy declares its host classes as data: the
   # composition profiles a strict local class and a hosted class, the hosted
-  # workflow profiles only a hosted class, every other profile only its
+  # workflow and member profiles only a hosted class, every other profile only its
   # local class. Initialization selects one, named by the deployment.
   grep -Fxq '      version: 11' "$node_init_profile"
   grep -Fxq '      host_classes:' "$node_init_profile"
@@ -315,7 +316,7 @@ for profile_name in "${node_init_profiles[@]}"; do
       [[ "$declared_host_classes" == "hosted local local_unconfined " ]] ;;
     hosted-controller)
       [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
-    hosted-node|hosted-workflow)
+    hosted-node|hosted-workflow|member)
       [[ "$declared_host_classes" == "hosted " ]] ;;
     development)
       [[ "$declared_host_classes" == "hosted local local_direct " ]] ;;
@@ -336,7 +337,7 @@ for profile_name in "${node_init_profiles[@]}"; do
         | sed -nE 's/^          trusted_process_group_sessions: (true|false)$/\1/p'
     )"
     case "$profile_name:$host_class" in
-      hosted-workflow:*|hosted-controller:*|standard:hosted|development:hosted)
+      hosted-workflow:*|hosted-controller:*|standard:hosted|development:hosted|member:hosted)
         [[ "$declared_trust" == true ]] ;;
       *)
         [[ "$declared_trust" == false ]] ;;

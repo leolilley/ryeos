@@ -3533,6 +3533,38 @@ mod tests {
         assert!(!state.join(".ai/node/vault/public_key.pem").exists());
     }
 
+    #[test]
+    fn the_member_profile_refuses_an_ephemeral_root_before_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, tmp.path());
+        opts.node_profile = Some("member".to_owned());
+        opts.host_class = Some("hosted".to_owned());
+        opts.substrate_identity = Some(
+            SubstrateIdentity::new(
+                format!("sha256:{}", "1".repeat(64)),
+                1,
+                Some("member".to_owned()),
+                Some("hosted".to_owned()),
+            )
+            .unwrap(),
+        );
+        let error = run_init_on_storage(&opts, None, ephemeral_root, |_| Ok(()))
+            .expect_err("an ephemeral root must refuse the member profile");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("profile member requires storage:durable_root"),
+            "{text}"
+        );
+        assert!(text.contains("No identity or key was created"), "{text}");
+        assert!(!state.join(".ai/node/identity/private_key.pem").exists());
+        assert!(
+            !state
+                .join(".ai/node/operator/signing/private_key.pem")
+                .exists()
+        );
+    }
+
     fn authored_profile(
         name: &str,
     ) -> ryeos_node_runtime::node_policy::generation::NodeInitProfile {
@@ -3721,7 +3753,12 @@ mod tests {
             "ryeos.execute.service.projects/open",
             "ryeos.read.project.live",
         ];
-        for name in ["hosted-node", "hosted-workflow", "hosted-controller"] {
+        for name in [
+            "hosted-node",
+            "hosted-workflow",
+            "hosted-controller",
+            "member",
+        ] {
             let profile = authored_profile(name);
             let scopes = profile.policies["ui_browser_sessions"]["session_scopes"]
                 .as_array()

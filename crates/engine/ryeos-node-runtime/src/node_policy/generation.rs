@@ -182,6 +182,7 @@ impl NodeInitProfile {
             bail!("node policy set exact_bundles is empty");
         }
         validate_sorted_unique_bundle_names(&self.exact_bundles)?;
+        super::sections::membership::check_generation(&self.policies)?;
         for host_class in self.host_classes()? {
             let selected = self.for_host_class(&host_class)?;
             validate_policy_bodies(policy_table, &selected.policies, source_file)
@@ -526,6 +527,7 @@ fn validate_policy_generation(
         }
     }
     super::sections::host_access::check_generation(&policies)?;
+    super::sections::membership::check_generation(&policies)?;
     for section in operator_sections.iter().flatten() {
         if !policies.contains_key(section) {
             bail!(

@@ -407,7 +407,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
     let development = ["hosted", "local", "local_direct"];
-    let expected: [(&str, &[&str]); 15] = [
+    let expected: [(&str, &[&str]); 16] = [
         ("core", &both),
         ("core-scheduling", &both),
         ("core-workflow", &both),
@@ -423,6 +423,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("development", &development),
         ("hosted-workflow", &hosted_only),
         ("hosted-node", &hosted_only),
+        ("member", &hosted_only),
     ];
     let shipped: BTreeSet<String> = profile_names().into_iter().collect();
     let covered: BTreeSet<String> = expected
@@ -555,6 +556,80 @@ fn development_hosted_class_matches_the_standard_hosted_lane() {
         "development's hosted class is the standard hosted class"
     );
     assert!(trusts_process_group_sessions("development", "hosted"));
+}
+
+#[test]
+fn member_hosted_class_matches_the_standard_hosted_class_and_follows_its_matrix() {
+    assert_eq!(
+        host_classes(&load_profile("member"))["hosted"],
+        host_classes(&load_profile("standard"))["hosted"],
+        "the member profile's hosted class is the standard hosted class"
+    );
+    let cases: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
+    ];
+    for (class, host, expect) in &cases {
+        check("member", class, host, expect);
+    }
+}
+
+/// Sign-up and membership classes per shipped profile. A profile gaining a
+/// class, or flipping `hosted.admission_enabled`, is a reviewed edit of this
+/// table.
+#[test]
+fn the_profile_matrix_pins_sign_up_and_forbids_a_member_class_everywhere_today() {
+    let expected: [(&str, bool); 16] = [
+        ("bundle-source", false),
+        ("central-host", false),
+        ("contained-workflow", true),
+        ("core", false),
+        ("core-knowledge", false),
+        ("core-scheduling", false),
+        ("core-workflow", false),
+        ("development", true),
+        ("hosted-controller", false),
+        ("hosted-node", true),
+        ("hosted-workflow", true),
+        ("local-inference", false),
+        ("member", true),
+        ("release-authority", true),
+        ("standard", true),
+        ("standard-central-auth", false),
+    ];
+    let shipped: BTreeSet<String> = profile_names().into_iter().collect();
+    let covered: BTreeSet<String> = expected
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    assert_eq!(shipped, covered, "every shipped profile has a sign-up row");
+    for (name, admission_enabled) in expected {
+        let profile = load_profile(name);
+        assert_eq!(
+            profile["policies"]["hosted"]["admission_enabled"].as_bool(),
+            Some(admission_enabled),
+            "{name}: hosted.admission_enabled"
+        );
+        let classes = profile["policies"]["membership"]["classes"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{name}: membership.classes is a mapping"));
+        assert!(
+            classes.is_empty(),
+            "{name}: no shipped profile carries a membership class yet; adding one is a \
+             reviewed edit of this table"
+        );
+        let hosts_ui = profile["exact_bundles"]
+            .as_sequence()
+            .expect("exact_bundles")
+            .iter()
+            .any(|bundle| bundle.as_str() == Some("ryeos-ui"));
+        assert!(
+            hosts_ui || classes.is_empty(),
+            "{name}: a profile without ryeos-ui in exact_bundles cannot carry a class"
+        );
+    }
 }
 
 #[test]

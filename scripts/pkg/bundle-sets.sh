@@ -96,7 +96,7 @@ ryeos_bundle_set_cargo_features() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority
+  printf '%s\n' central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority member
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -108,6 +108,8 @@ ryeos_node_init_profile_bundle_set() {
     # The hosted-node profile is the core set under hosted admission policy.
     hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
+    # The member profile is the standard distribution on a durable hosted node.
+    member) printf '%s\n' standard ;;
     development) printf '%s\n' development ;;
     release-authority) printf '%s\n' release-authority ;;
     *) return 1 ;;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T05:02:59Z:056329ce29923e89b41402963017cbec5eda3aa9ab01954bdbe8b8e2e1ba6601:UbgLMZS9ieOX4kGlh3bbgWgQ5IAzAh0lgBhivmFESP3I/Q2924zM7xh+athabF9GnS39+R2ye10Gf8CoCdoSCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T03:37:20Z:63b237173da5c655c771e187d406fa2c627e5486ff2a00088f28a3fbd938252c:8I0BjSePZ92+JD+pUOVptXGQ67kya3R1axnMD1g9eEkQtjO0A3SehKhG8i9iX536ClbnZIUz1mtqNCeQqVLxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -228,6 +228,14 @@ and invokes the same explicit replacement boundary, passing through any
 `--keep-section`/`--reset-section` choices. It preserves node, operator, and
 vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
 flag on a fresh node or a node whose generation is already current.
+
+The `member` profile is the `standard` bundle set on a durable hosted node that
+hosts members: its only host class is `hosted`, whose floor requires
+`storage:durable_root`, so an ephemeral root is refused before any key is
+created (`ryeos init --node-profile member --host-class hosted`). Sign-up is
+enabled, and no member class ships yet. A profile whose `membership` section
+declares a class is refused at policy compile unless every host class it
+declares requires durable storage (`membership_requires_durable_storage`).
 
 The `hosted-node`, `hosted-workflow` and `hosted-controller` profiles are
 single-operator nodes, and their `ui_browser_sessions.session_scopes` give a

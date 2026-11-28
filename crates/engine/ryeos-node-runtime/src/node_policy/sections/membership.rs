@@ -212,6 +212,46 @@ impl NodePolicySection for MembershipPolicySection {
     }
 }
 
+/// The cross-section check of one complete node generation or profile: a
+/// membership section that declares any class is refused unless every host
+/// class the isolation policy declares lists `storage:durable_root` as a plain
+/// required entry of its floor. A key admitted into a class must outlive a
+/// restart, so a node whose floor can be met on disposable storage cannot
+/// hold members. A floor that offers durable storage only inside an `any_of`
+/// set does not count.
+pub fn check_generation(
+    policies: &std::collections::BTreeMap<String, Value>,
+) -> anyhow::Result<()> {
+    let Some(membership) = policies.get(SECTION_NAME) else {
+        return Ok(());
+    };
+    let membership: MembershipPolicy = serde_json::from_value(membership.clone())
+        .context("failed to parse membership policy record")?;
+    if membership.classes.is_empty() {
+        return Ok(());
+    }
+    let isolation = policies
+        .get(super::isolation::SECTION_NAME)
+        .context("membership_requires_durable_storage: the profile has no isolation policy")?;
+    let lacking = super::isolation::host_classes_lacking_required_capability(
+        isolation,
+        lillux::process_control::STORAGE_DURABLE_ROOT,
+    )?;
+    if !lacking.is_empty() {
+        bail!(
+            "membership_requires_durable_storage: the membership section declares a class, but \
+             host class {} does not require {} in its capability floor",
+            lacking
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            lillux::process_control::STORAGE_DURABLE_ROOT
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +463,58 @@ mod tests {
         let mut body = body(class());
         body["schema"] = Value::from(2);
         assert!(MembershipPolicySection.parse(&ctx(), &body).is_err());
+    }
+
+    /// The member profile's policies with its membership section replaced by
+    /// one class, so the cross-section check sees a real isolation body.
+    fn member_profile_policies() -> std::collections::BTreeMap<String, Value> {
+        let raw = std::fs::read_to_string(
+            ryeos_engine::test_support::workspace_root()
+                .join("bundles/.ai/node/init/profiles/member.yaml"),
+        )
+        .unwrap();
+        let profile: crate::node_policy::generation::NodeInitProfile =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap();
+        let mut policies = profile.policies().clone();
+        policies.insert(SECTION_NAME.into(), body(class()));
+        policies
+    }
+
+    fn hosted_floor(policies: &mut std::collections::BTreeMap<String, Value>) -> &mut Vec<Value> {
+        policies
+            .get_mut("isolation")
+            .unwrap()
+            .pointer_mut("/policy/host_classes/hosted/requires_capabilities")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_class_is_accepted_when_every_host_class_floor_requires_durable_storage() {
+        let policies = member_profile_policies();
+        check_generation(&policies).unwrap();
+    }
+
+    #[test]
+    fn a_class_is_refused_when_a_host_class_floor_lacks_durable_storage() {
+        let mut policies = member_profile_policies();
+        hosted_floor(&mut policies).retain(|entry| entry != "storage:durable_root");
+        let message = format!("{:#}", check_generation(&policies).unwrap_err());
+        assert!(
+            message.contains("membership_requires_durable_storage") && message.contains("`hosted`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_membership_section_needs_no_durable_floor() {
+        let mut policies = member_profile_policies();
+        hosted_floor(&mut policies).retain(|entry| entry != "storage:durable_root");
+        policies.insert(
+            SECTION_NAME.into(),
+            serde_json::json!({"schema": 1, "classes": {}}),
+        );
+        check_generation(&policies).unwrap();
     }
 }

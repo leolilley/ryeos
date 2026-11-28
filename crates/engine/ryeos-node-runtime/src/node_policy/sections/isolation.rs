@@ -47,6 +47,29 @@ pub fn declared_host_classes(body: &Value) -> anyhow::Result<Vec<String>> {
         .host_class_names())
 }
 
+/// The declared host classes whose capability floor does not list
+/// `capability` as a plain required entry of its own. An entry that offers it
+/// only as one alternative of an `any_of` set does not count, because a host
+/// may then satisfy the floor without it.
+pub fn host_classes_lacking_required_capability(
+    body: &Value,
+    capability: &str,
+) -> anyhow::Result<Vec<String>> {
+    let envelope = IsolationPolicyEnvelope::parse(body)?;
+    Ok(envelope
+        .policy
+        .host_classes
+        .iter()
+        .filter(|(_, class)| {
+            !class
+                .requires_capabilities
+                .iter()
+                .any(|entry| !entry.is_set() && entry.names().iter().any(|name| name == capability))
+        })
+        .map(|(name, _)| name.clone())
+        .collect())
+}
+
 /// The isolation section body narrowed to the one named host class. A
 /// class the body does not declare is refused.
 pub fn select_host_class(body: &Value, host_class: &str) -> anyhow::Result<Value> {

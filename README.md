@@ -265,9 +265,10 @@ The rest are branch candidates deployed by digest, not tagged releases;
 `ryeos-hosted-controller` can also be built from a published release's signed
 bundle archive (`build-controller-from-release` workflow) and is deployed by
 digest. `standard-central-auth` (installable, no image decided) and
-`development` (for local builds) have no image. Two more init profiles reuse a set: `hosted-node` (the `core`
-set under hosted admission policy) and `contained-workflow` (the
-`hosted-workflow` set). `standard` is the default local node set: core,
+`development` (for local builds) have no image. Three more init profiles reuse a set: `hosted-node` (the `core`
+set under hosted admission policy), `contained-workflow` (the
+`hosted-workflow` set) and `member` (the `standard` set on a durable hosted
+node that hosts members; no member class ships yet). `standard` is the default local node set: core,
 scheduling, knowledge, directive, graph, ryeos-docs, ryeos-ui, codex, opencode,
 web and browser. See [deploy/composition-images.md](deploy/composition-images.md).
 

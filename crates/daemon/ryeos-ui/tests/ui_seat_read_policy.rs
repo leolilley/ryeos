@@ -606,7 +606,7 @@ fn every_shipped_source_has_an_entry_in_every_profile() {
 
     let mut profiles = Vec::new();
     yaml_files(&root.join("bundles/.ai/node/init/profiles"), &mut profiles);
-    assert_eq!(profiles.len(), 15);
+    assert_eq!(profiles.len(), 16);
     for path in profiles {
         let profile: serde_json::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -804,7 +804,7 @@ mod revisions {
     #[test]
     fn every_profile_admits_both_reads_and_pins_the_project() {
         let paths = profile_paths();
-        assert_eq!(paths.len(), 15);
+        assert_eq!(paths.len(), 16);
         for path in paths {
             let policy = policy_of(&path);
             for target in [LIST, GET] {

@@ -26,7 +26,9 @@ const FORBIDDEN_FOR_NON_OPERATOR_CLASSES: &[&str] = &[
 
 /// The profiles of nodes with a single operator: they never admit another
 /// key, so their sessions are the operator's own. A profile not named here
-/// is held to the rule above.
+/// is held to the rule above. `member` is listed because it declares no
+/// class yet: its seat scopes are the operator's own, and the day it gains a
+/// class the class ceiling, not this list, bounds what a member may reach.
 const SINGLE_OPERATOR_PROFILES: &[&str] = &[
     "bundle-source",
     "central-host",
@@ -40,6 +42,7 @@ const SINGLE_OPERATOR_PROFILES: &[&str] = &[
     "hosted-node",
     "hosted-workflow",
     "local-inference",
+    "member",
     "release-authority",
     "standard-central-auth",
     "standard",
