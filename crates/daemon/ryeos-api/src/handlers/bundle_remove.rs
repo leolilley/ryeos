@@ -188,19 +188,29 @@ fn admit_prospective_remove(
         app_root,
         trust_store: node_trust_store,
     };
+    // A laned bundle that fails its boot audit is not loaded, so it is not in
+    // the set this node will load after the removal either; removing another
+    // bundle is not blocked by it.
+    let skipped_laned: std::collections::BTreeSet<String>;
     let mut current_records: std::collections::BTreeMap<
         String,
         ryeos_node_runtime::node_config_source::BundleRecord,
-    > = loader
-        .load_bundle_section()
-        .context("load current node bundle registrations for prospective removal")?
-        .into_iter()
-        .map(|record| (record.name.clone(), record))
-        .collect();
+    > = {
+        let (loaded, skipped) = loader
+            .load_bundle_section_reporting_skipped()
+            .context("load current node bundle registrations for prospective removal")?;
+        skipped_laned = skipped.into_iter().map(|bundle| bundle.name).collect();
+        loaded
+            .into_iter()
+            .map(|record| (record.name.clone(), record))
+            .collect()
+    };
     let prospective_records = plan
         .bundles
         .iter()
-        .filter(|(_, bundle)| bundle.action != BundleAction::Remove)
+        .filter(|(name, bundle)| {
+            retained_after_removal(name, bundle.action != BundleAction::Remove, &skipped_laned)
+        })
         .map(|(name, bundle)| {
             let record = current_records.remove(name).with_context(|| {
                 format!("prospective bundle '{name}' has no verified current registration")
@@ -240,9 +250,11 @@ fn admit_prospective_remove(
         .context("prospective removal would fail composed node-config admission")?;
     let prospective_roots: Vec<PathBuf> = plan
         .bundles
-        .values()
-        .filter(|bundle| bundle.action != BundleAction::Remove)
-        .map(|bundle| bundle.source.root_path().clone())
+        .iter()
+        .filter(|(name, bundle)| {
+            retained_after_removal(name, bundle.action != BundleAction::Remove, &skipped_laned)
+        })
+        .map(|(_, bundle)| bundle.source.root_path().clone())
         .collect();
     ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         app_root,
@@ -253,6 +265,17 @@ fn admit_prospective_remove(
     )
     .context("prospective removal failed node definition admission")?;
     Ok(())
+}
+
+/// Whether a bundle of the removal plan is part of the set the node loads
+/// after the removal: it stays (not removed) and the node loads it (it is not
+/// a laned bundle that fails its boot audit).
+fn retained_after_removal(
+    name: &str,
+    stays: bool,
+    skipped_laned: &std::collections::BTreeSet<String>,
+) -> bool {
+    stays && !skipped_laned.contains(name)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -268,3 +291,23 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skipped_laned_bundle_is_not_in_the_set_the_node_loads_after_a_removal() {
+        let skipped: std::collections::BTreeSet<String> =
+            ["laned-a".to_owned(), "laned-b".to_owned()].into();
+        // Removing `laned-a`: it goes, `laned-b` stays registered but is not
+        // loaded, the native bundle stays loaded.
+        assert!(!retained_after_removal("laned-a", false, &skipped));
+        assert!(!retained_after_removal("laned-b", true, &skipped));
+        assert!(retained_after_removal("native", true, &skipped));
+        // Nothing skipped: every bundle that stays is retained.
+        let none = std::collections::BTreeSet::new();
+        assert!(retained_after_removal("laned-b", true, &none));
+        assert!(!retained_after_removal("laned-a", false, &none));
+    }
+}

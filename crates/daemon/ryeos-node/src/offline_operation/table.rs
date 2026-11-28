@@ -15,6 +15,7 @@ use ryeos_node_runtime::state_lock::StateLock;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::bundle_apply;
 use super::contract::{RequestBody, SignedRequest};
 use super::facts::{
     FACT_AUTHORIZED_KEYS, FACT_BUNDLE_REGISTRATIONS, FACT_CAPACITY_ACCOUNT,
@@ -677,6 +678,34 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.bundle.apply-staged",
+        authority_bearing: true,
+        // Only the node's own operator key may sign it. Without a grant that
+        // names the exact stage, any key holding the scope could activate any
+        // staged digest, so the delegated form is not offered.
+        local_signer_only: true,
+        alone: false,
+        // The bytes come from the node's own staging area, never from the
+        // request: an input slot would be a second byte source to verify.
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_BUNDLE_REGISTRATIONS],
+        // The expected bundle set is a signed argument the handler compares
+        // before copying anything, so a refused result never claims a state.
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: bundle_apply::BundleApplyStagedArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(bundle_apply::bundle_apply_staged),
+        recovery: Recovery {
+            record: "the node-signed refusal marker in the stage directory for a refused apply, or the installed bundle whose tree digest equals the request's staged digest for a completed install",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a rerun that finds a marker naming this request returns its refusal, one that finds an interrupted install finishes or undoes it through the bundle journal and reseals only a tree equal to the stage, one that finds the installed tree equal to the stage reseals and removes the stage, and one that finds none of these installs again",
+        },
+    },
+    OperationSpec {
         id: "node.bundle-state.export",
         authority_bearing: true,
         local_signer_only: true,
@@ -1125,6 +1154,7 @@ mod tests {
             "node.authorize-client",
             "node.remote.pin",
             "node.bundle.replace",
+            "node.bundle.apply-staged",
             "node.bundle-state.export",
             "node.bundle-state.import",
             "node.bundle-state.remove",
@@ -1144,7 +1174,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 36);
+        assert_eq!(operations().len(), 37);
     }
 
     #[test]
@@ -1187,6 +1217,7 @@ mod tests {
                 "node.authorize-client",
                 "node.remote.pin",
                 "node.bundle.replace",
+                "node.bundle.apply-staged",
                 "node.bundle-state.export",
                 "node.bundle-state.import",
                 "node.bundle-state.remove",
@@ -1255,7 +1286,58 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 19);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 20);
+    }
+
+    #[test]
+    fn apply_staged_is_authority_bearing_local_only_with_no_inputs() {
+        let spec = lookup("node.bundle.apply-staged").unwrap();
+        assert!(spec.authority_bearing && spec.local_signer_only && !spec.alone);
+        assert!(spec.inputs.is_empty());
+        assert_eq!(spec.preconditions, &[FACT_BUNDLE_REGISTRATIONS]);
+        assert!(spec.expected_result.is_empty() && spec.required_expected_result.is_empty());
+        assert_eq!(spec.scope(), "ryeos.offline.node.bundle.apply-staged");
+        assert_eq!(spec.recovery.rerun, Rerun::ConvergesOverEffect);
+    }
+
+    #[test]
+    fn apply_staged_request_validation_checks_name_and_digests() {
+        let spec = lookup("node.bundle.apply-staged").unwrap();
+        let body = |arguments: serde_json::Value| RequestBody {
+            schema: String::new(),
+            node_fingerprint: String::new(),
+            signer_fingerprint: String::new(),
+            signer_grant_digest: None,
+            signer_origin_site_id: None,
+            operation: spec.id.to_owned(),
+            arguments,
+            inputs: BTreeMap::new(),
+            expected_result: BTreeMap::new(),
+            precondition: BTreeMap::new(),
+            issued_at: String::new(),
+            not_after: String::new(),
+        };
+        let good = serde_json::json!({
+            "name": "site",
+            "staged_digest": "a".repeat(64),
+            "expected_bundle_set": "b".repeat(64),
+        });
+        (spec.validate_request)(&body(good.clone())).unwrap();
+        let mut bad_name = good.clone();
+        bad_name["name"] = serde_json::json!("Site/../x");
+        assert!((spec.validate_request)(&body(bad_name)).is_err());
+        let mut bad_digest = good.clone();
+        bad_digest["staged_digest"] = serde_json::json!("sha256:abc");
+        assert!((spec.validate_request)(&body(bad_digest)).is_err());
+        let mut no_expectation = good.clone();
+        no_expectation
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_bundle_set");
+        assert!((spec.validate_request)(&body(no_expectation)).is_err());
+        let mut extra = good;
+        extra["install_from"] = serde_json::json!("/tmp/x");
+        assert!((spec.validate_request)(&body(extra)).is_err());
     }
 
     #[test]

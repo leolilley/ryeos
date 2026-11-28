@@ -48,7 +48,10 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     lillux::atomic_write_private(path, bytes).with_context(|| format!("write {}", path.display()))
 }
 
-fn operator_key_path(app_root: Option<PathBuf>, signing_key: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn operator_key_path(
+    app_root: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+) -> Result<PathBuf> {
     match signing_key {
         Some(path) => Ok(path),
         None => Ok(crate::transport::signing::client_signing_key_path(
@@ -698,11 +701,7 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     for item in list("receipts") {
         banner.rows.push(crate::tty::Row::key_value(
             format!("receipt {}", cell(&item, "sequence")),
-            format!(
-                "{} {}",
-                cell(&item, "operation"),
-                cell(&item, "request_digest")
-            ),
+            receipt_line(&item),
         ));
     }
     for item in list("refusals") {
@@ -720,9 +719,48 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     Ok(())
 }
 
+/// One receipt as the status prints it. A receipt whose result records a
+/// refusal says so, with its closed code, ahead of the request digest: the
+/// request was consumed and the operation did nothing.
+fn receipt_line(item: &Value) -> String {
+    let text = |field: &str| item.get(field).and_then(Value::as_str).unwrap_or_default();
+    let outcome = match (text("outcome"), text("code")) {
+        ("", _) => String::new(),
+        (outcome, "") => format!("{outcome} "),
+        (outcome, code) => format!("{outcome} ({code}) "),
+    };
+    format!("{} {outcome}{}", text("operation"), text("request_digest"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_receipt_prints_its_outcome_and_code() {
+        let refused = json!({
+            "operation": "node.bundle.apply-staged",
+            "request_digest": "abc",
+            "outcome": "refused",
+            "code": "tree_digest_mismatch",
+        });
+        assert_eq!(
+            receipt_line(&refused),
+            "node.bundle.apply-staged refused (tree_digest_mismatch) abc"
+        );
+        let applied = json!({
+            "operation": "node.bundle.apply-staged",
+            "request_digest": "abc",
+            "outcome": "applied",
+            "code": null,
+        });
+        assert_eq!(
+            receipt_line(&applied),
+            "node.bundle.apply-staged applied abc"
+        );
+        let plain = json!({ "operation": "node.allow-restart", "request_digest": "abc" });
+        assert_eq!(receipt_line(&plain), "node.allow-restart abc");
+    }
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
