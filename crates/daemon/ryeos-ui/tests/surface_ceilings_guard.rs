@@ -10,7 +10,6 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const STILL_WILDCARD: &[&str] = &[
-    "assistant-observe",
     "lens",
     "lens-observe",
     "project",

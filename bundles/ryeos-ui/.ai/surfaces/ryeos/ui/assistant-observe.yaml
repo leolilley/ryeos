@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:49e74b8a31be9b49fad5721123852f787c77ff5d2eeb6edde82e6a75ab3fffd1:zNaUTtSjMNT+x4NCa9f2z32tjJX4NxzQzrSNnkWqSMh705n8D34S1ojZBSXQu46qkwpOEfnXOHKHRobt7EUxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T05:29:31Z:933cf17269341d28cfbfe24aefaa991ceb4ddf4a4b9103c68a87110991a1cbec:cbVjLjkCfeJgPm8plWC5P9yqeM0CFjDSS5Jbsvsh6lQVo2mHBOD4pDpZ0txNBdA+AERyEdVVO6KMFkOGo4UJDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant-observe
 title: Assistant · observe
 version: "1.0.0"
@@ -6,5 +6,32 @@ description: Explicitly selected observation-only assistant composition
 extends: surface:ryeos/ui/assistant
 
 capabilities:
-  sources: ["ryeos.execute.service.*"]
+  sources:
+    - ryeos.execute.service.bundle/list
+    - ryeos.execute.service.commands/list
+    - ryeos.execute.service.node/status
+    - ryeos.execute.service.projects/list
+    - ryeos.execute.service.scheduler/list
+    - ryeos.execute.service.worker-executions/approvals
+    - ryeos.execute.service.ui/ryeos-ui/config/get
+    - ryeos.execute.service.ui/ryeos-ui/coverage/wording
+    - ryeos.execute.service.ui/ryeos-ui/dimension/get
+    - ryeos.execute.service.ui/ryeos-ui/execution/occurrence
+    - ryeos.execute.service.ui/ryeos-ui/field/execution
+    - ryeos.execute.service.ui/ryeos-ui/files/read
+    - ryeos.execute.service.ui/ryeos-ui/files/tree
+    - ryeos.execute.service.ui/ryeos-ui/gc/status
+    - ryeos.execute.service.ui/ryeos-ui/items/list
+    - ryeos.execute.service.ui/ryeos-ui/node/activity
+    - ryeos.execute.service.ui/ryeos-ui/node/usage
+    - ryeos.execute.service.ui/ryeos-ui/remotes/list
+    - ryeos.execute.service.ui/ryeos-ui/thread/inspect
+    - ryeos.execute.service.ui/ryeos-ui/thread/tree
+    - ryeos.execute.service.ui/ryeos-ui/threads/list
+    - ryeos.execute.service.ui/ryeos-ui/timeline/raw
+    - ryeos.execute.service.ui/ryeos-ui/timeline/thread
+    - ryeos.execute.service.ui/ryeos-ui/work/approval-history
+    - ryeos.execute.service.ui/ryeos-ui/work/attention
+    - ryeos.execute.service.ui/ryeos-ui/work/candidate
+    - ryeos.execute.service.ui/ryeos-ui/work/list
   affordances: []
