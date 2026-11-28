@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-26T09:35:52Z:f772f62a012134f88cb36677a6705f5400d173b8c6f11b745ed04a2c6f8900ff:i99LkibM6qle5GIRs1+XDratNX0Ha5v7xL1vCv43Z2LIV+kT5mFGc/E1+wMOAc4gmRuYJ1LxIF+cFGi0XCT1Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T04:05:48Z:0951eea5215ce52106b7432710dbd2b18659ec96a99c3c0a6527d14334dc77ed:MA7ZMDCYV0G/Bm9Tu/4K/rkTQoyvo1xNMyX933UgCVMybQWydxKM0aDJFnSRRniChPqr4yRPuFJEbP9YvtQiCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -46,8 +46,8 @@ policies:
       maximum_duration_ms: 120000
     # Each epoch is a fresh allowance under the same issuance; nothing is refunded.
     renewal:
-      at_orderly_rollover: false
-      operator_reissue: false
+      at_orderly_rollover: true
+      operator_reissue: true
       maximum_epochs: null
 
   accounting:
