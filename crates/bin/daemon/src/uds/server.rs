@@ -1508,6 +1508,19 @@ fn spawn_machine_continuation_launch(
     });
 }
 
+/// A typed launch refusal keeps its type as the error root, so the caller
+/// sees its code; every other preparation failure is carried as is.
+fn continuation_preparation_error(
+    error: ryeos_executor::execution::launch::BuildAndLaunchError,
+) -> anyhow::Error {
+    match error {
+        ryeos_executor::execution::launch::BuildAndLaunchError::LaunchPreparation(refusal) => {
+            anyhow::Error::new(*refusal)
+        }
+        other => anyhow::Error::new(other),
+    }
+}
+
 async fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
@@ -1535,13 +1548,7 @@ async fn handle_request_continuation(
         &params.thread_id,
     )
     .await
-    .map_err(|error| match error {
-        // A typed refusal keeps its type so the caller sees its code.
-        ryeos_executor::execution::launch::BuildAndLaunchError::LaunchPreparation(refusal) => {
-            anyhow::Error::new(*refusal)
-        }
-        other => anyhow::Error::new(other),
-    })?;
+    .map_err(continuation_preparation_error)?;
     let initial_events = prepared.initial_audit_events()?;
     let result = state.threads.request_continuation_with_events(
         &params,
@@ -2166,6 +2173,29 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continuation_preparation_refusal_keeps_its_typed_code_as_error_root() {
+        use ryeos_executor::dispatch_error::DispatchError;
+        use ryeos_executor::execution::launch::BuildAndLaunchError;
+        let error = super::continuation_preparation_error(BuildAndLaunchError::LaunchPreparation(
+            Box::new(DispatchError::LaunchPolicyForbidden {
+                code: ryeos_executor::execution::runner::RESUME_PROJECT_NOT_ADMITTED.to_owned(),
+                message: "checkout is not registered".to_owned(),
+                binding: None,
+            }),
+        ));
+        assert!(matches!(
+            error.downcast_ref::<DispatchError>(),
+            Some(DispatchError::LaunchPolicyForbidden { code, .. })
+                if code == "resume_project_not_admitted"
+        ));
+        let other = super::continuation_preparation_error(BuildAndLaunchError::Internal(
+            anyhow::anyhow!("unrelated"),
+        ));
+        assert!(other.downcast_ref::<DispatchError>().is_none());
+        assert!(other.downcast_ref::<BuildAndLaunchError>().is_some());
+    }
+
     use super::*;
     use crate::config::Config;
     use crate::uds::protocol::RpcError;
