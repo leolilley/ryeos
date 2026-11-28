@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T02:13:55Z:754a3de19f5e4b4baad1c02ffbede6cbc935d357bf086e48942a2975bd22a9de:eNeTloM3aVq7it2mngqGQIJCMxAYoni2j/RNDnAVjr/s4QSk3ApnzBVF+cM1JgvDB4CpI0Wl74u3d6Ofq7ICAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T03:15:45Z:afc688873ac2526c7b778dc5fedcbf52c628efd663aad734f5bae2d2bbc9a4ed:vUkpKhO69c/s0IFy7MGfXOBj9rDW9xCm+ZVXH/mfKmtPV1HhF0U7rgJwSWCL9JCiBe8BtI3ReVndExkHQ76QCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -299,7 +299,7 @@ header field the tool does not exist.
 Nothing is written per update: the newest accepted `plan` call in the
 conversation is the state. When a compaction or a successor start drops that
 call, the runtime pins one input, origin `plan`, kind `plan_state_rev_<n>`,
-saying "your plan as you last recorded it" with each step quoted as data; a plan
+saying "your plan as recorded when the context was last cut" with each step quoted as data, and that a later plan call replaces it; a plan
 call still inside the kept turns carries itself and nothing is added. The pinned
 plan is the model's own words, never the harness speaking, and it counts toward
 the pinned-size bound. It proves nothing about the work: a model can mark every
