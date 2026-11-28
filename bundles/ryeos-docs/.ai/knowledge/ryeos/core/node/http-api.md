@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T00:57:27Z:24e0cdd095d8f7d3051867be3a1335cb615c8d841d40b0b70269162c19ece680:CVS9X6J5im0/4PBiEP1w/w+EzHMoT2YhJJUFTXbLjzdTi+E1N/GmSpmW7fdaDdSkd3mgFxpjPdPcwEhF2Es7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T11:40:54Z:45be89350aae3c139cbc97700c1afb280f4f582a812fe3ecdbc2cca9e22de42d:ID+Busbggs3vE3vEt8ge3Jd/BdjI2FaOsvTkPBIlPpK3ubKFZRymTGoiKThVtXyEgB5B2xxaFLjzxnHLASIiDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -212,6 +212,10 @@ being admitted.
   `membership_class_unknown` (403), and the key's scopes are cut by the class
   scope ceiling. A `remote_node` grant (a peer node) is never a member and keeps
   its explicit scopes; only the local operator may mint one.
+  A browser session minted for a member keeps the scopes it was cut to at
+  mint: a later change to the class or its ceiling reaches that session when
+  it expires, not before. The member's class is judged on signed requests;
+  a session does not carry it yet.
 - **Used by:** `ryeos remote admit`
 
 ## Thread Routes
