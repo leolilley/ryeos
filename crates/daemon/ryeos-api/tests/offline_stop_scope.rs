@@ -32,12 +32,14 @@ const SITE: &str = "site:origin-a";
 const QUEUE_SCOPE: &str = "ryeos.execute.service.offline-operations/submit";
 const RESTART_SCOPE: &str = "ryeos.offline.node.allow-restart";
 
+// Fields drop in declaration order: the state goes before the store it
+// holds, and the store before the directory it lives in.
 struct Rig {
-    _dir: tempfile::TempDir,
-    _store_owner: ryeos_app::test_support::TestStateStore,
     state: Arc<AppState>,
     operator: SigningKey,
     stopped: Arc<AtomicBool>,
+    _store_owner: ryeos_app::test_support::TestStateStore,
+    _dir: tempfile::TempDir,
 }
 
 fn rig() -> Rig {
