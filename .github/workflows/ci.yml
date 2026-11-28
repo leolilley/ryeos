@@ -852,10 +852,22 @@ jobs:
           # builds; 8 MiB is the standard Rust thread-stack escape hatch and
           # leaves the production state machine unchanged.
           RUST_MIN_STACK: 8388608
+          # Each daemon a test starts writes its stderr here, so a failed shard can
+          # upload the files the test's own failure message only quotes a tail of.
+          RYEOSD_TEST_STDERR_DIR: ${{ runner.temp }}/daemon-stderr
         run: >-
           ./scripts/gate.sh
           --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
           --partition "hash:${{ matrix.shard }}/8"
+
+      - name: Upload the daemon stderr files of a failed shard
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: workspace-shard-${{ matrix.shard }}-daemon-stderr-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/daemon-stderr
+          if-no-files-found: ignore
+          retention-days: 7
 
   ui-ignored-tests:
     name: Ignored UI seat tests
@@ -1467,11 +1479,23 @@ jobs:
           # Same stack as the workspace shards (deep admission futures in debug builds).
           RUST_MIN_STACK: 8388608
           SHARDS: ${{ strategy.job-total }}
+          # Each daemon a test starts writes its stderr here, so a failed shard can
+          # upload the files the test's own failure message only quotes a tail of.
+          RYEOSD_TEST_STDERR_DIR: ${{ runner.temp }}/daemon-stderr
         run: >-
           ./scripts/gate.sh
           --nextest-run-archive "$RUNNER_TEMP/e2e-archive/e2e.tar.zst"
           --partition "hash:${{ matrix.shard }}/$SHARDS"
           --no-tests=pass
+
+      - name: Upload the daemon stderr files of a failed shard
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-shard-${{ matrix.shard }}-daemon-stderr-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/daemon-stderr
+          if-no-files-found: ignore
+          retention-days: 7
 
   # G-11: the 21 capacity rollovers are `#[ignore]` and return early unless
   # RYEOS_LONG_E2E=1, so no other job ever ran them. This runs them on request

@@ -308,6 +308,37 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
 }
 
+/// The last `lines` lines of a daemon's stderr with the backtrace frames
+/// removed. A panic or error run with `RUST_BACKTRACE` set ends in dozens of
+/// frame lines (`  16: symbol` and `             at /path:line`) after a
+/// `stack backtrace:` line; a plain tail shows only those and loses the line
+/// that names the error. Only the lines of that section are dropped, so an
+/// error's own `Caused by:` list (`    0: message`) stays.
+pub fn stderr_digest(log: &str, lines: usize) -> String {
+    fn is_frame(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let numbered = trimmed
+            .split_once(": ")
+            .map(|(number, _)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or(false);
+        numbered || trimmed.starts_with("at ")
+    }
+    let mut in_backtrace = false;
+    let mut kept: Vec<&str> = Vec::new();
+    for line in log.lines() {
+        if line.trim() == "stack backtrace:" {
+            in_backtrace = true;
+            continue;
+        }
+        if in_backtrace && is_frame(line) {
+            continue;
+        }
+        in_backtrace = false;
+        kept.push(line);
+    }
+    kept[kept.len().saturating_sub(lines)..].join("\n")
+}
+
 fn daemon_stderr_log_path(fallback_dir: &Path, harness_id: u64) -> PathBuf {
     let directory = std::env::var_os("RYEOSD_TEST_STDERR_DIR")
         .map(PathBuf::from)
@@ -1904,13 +1935,10 @@ impl DaemonHarness {
         };
         anyhow::ensure!(
             status.success(),
-            "daemon orderly stop exited with {status}; stderr log {}\n--- stderr tail ---\n{}",
+            "daemon orderly stop exited with {status}; stderr log {}\n--- stderr tail (backtrace frames dropped) ---\n{}",
             self.stderr_log_path.display(),
             std::fs::read_to_string(&self.stderr_log_path)
-                .map(|log| {
-                    let lines: Vec<&str> = log.lines().collect();
-                    lines[lines.len().saturating_sub(40)..].join("\n")
-                })
+                .map(|log| stderr_digest(&log, 40))
                 .unwrap_or_default()
         );
         Ok(())
@@ -2525,4 +2553,37 @@ pub fn open_stopped_node_store(
     let mut trust = ryeos_state::refs::TrustStore::new();
     trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
     ryeos_app::test_support::TestStateStore::open(state_path, signer, std::sync::Arc::new(trust))
+}
+
+#[cfg(test)]
+mod stderr_digest_tests {
+    use super::stderr_digest;
+
+    #[test]
+    fn the_error_line_survives_a_backtrace_longer_than_the_tail() {
+        let mut log = String::from(
+            "INFO started\nError: state lock held by another process\n\nCaused by:\n    0: refused\n",
+        );
+        log.push_str("stack backtrace:\n");
+        for frame in 0..60 {
+            log.push_str(&format!(
+                "{frame:>4}: ryeosd::frame_{frame}\n             at /src/lib.rs:{frame}\n"
+            ));
+        }
+        let digest = stderr_digest(&log, 10);
+        assert!(
+            digest.contains("Error: state lock held by another process"),
+            "{digest}"
+        );
+        assert!(digest.contains("Caused by:"), "{digest}");
+        assert!(digest.contains("0: refused"), "{digest}");
+        assert!(!digest.contains("frame_"), "{digest}");
+        assert!(!digest.contains("/src/lib.rs"), "{digest}");
+    }
+
+    #[test]
+    fn a_log_without_frames_keeps_its_last_lines() {
+        let log = "a\nb\nc\nd\n";
+        assert_eq!(stderr_digest(log, 2), "c\nd");
+    }
 }
