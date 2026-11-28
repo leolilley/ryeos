@@ -26,6 +26,18 @@ pub async fn handle(
 ) -> Result<Value> {
     ryeos_app::operator_authority::require_local_configured_operator(&state, &context)
         .context("admission-token minting requires the configured local operator")?;
+    // A `remote_node` token admits a peer node outside membership, so only the
+    // local configured operator acting for itself may mint one: never a
+    // member, never a delegated request.
+    if request.class == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
+        && (context.member_class.is_some() || context.delegated_via.is_some())
+    {
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "remote_node_token_operator_only",
+            403,
+            "a remote_node admission token is minted only by the local configured operator, never by a member or on a delegated request",
+        )));
+    }
     let params = request.into_params(state.config.app_root.clone())?;
     let membership = state
         .node_policy
@@ -65,12 +77,14 @@ pub async fn handle(
         .source_file::<HostedNodePolicy>()
         .context("load retained hosted-node policy source")?
         .to_path_buf();
+    let identity = state.identity.clone();
     tokio::task::spawn_blocking(move || {
         let result = ryeos_core_tools::actions::authorize::mint_admission_token_with_policy(
             params,
             &policy,
             &policy_source,
             &membership,
+            &identity,
         )?;
         serde_json::to_value(result).map_err(Into::into)
     })

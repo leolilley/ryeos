@@ -359,8 +359,9 @@ pub struct MintAdmissionTokenResult {
 }
 
 /// Stored admission token format. Version 3 carries the class of the grant it
-/// admits and the membership class of the key it admits; the claim side
-/// refuses any other version as stale.
+/// admits and the membership class of the key it admits, under a node
+/// signature line; the claim side refuses any other version as stale and any
+/// record the node did not sign.
 #[derive(serde::Serialize)]
 struct AdmissionTokenFile<'a> {
     version: u32,
@@ -516,7 +517,16 @@ pub fn run_mint_admission_token(
     }
     let policy = load_hosted_policy(&params.app_root)?;
     let membership = crate::actions::hosted_policy::load_membership_policy(&params.app_root)?;
-    mint_admission_token_with_policy(params, &policy.policy, &policy.source_file, &membership)
+    let node_identity = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(params.app_root.clone()).node_signing_key_path(),
+    )?;
+    mint_admission_token_with_policy(
+        params,
+        &policy.policy,
+        &policy.source_file,
+        &membership,
+        &node_identity,
+    )
 }
 
 /// Mint through the daemon-owned service using its already-loaded, exact
@@ -527,6 +537,7 @@ pub fn mint_admission_token_with_policy(
     policy: &ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy,
     policy_source: &std::path::Path,
     membership: &ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> Result<MintAdmissionTokenResult> {
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
@@ -631,7 +642,7 @@ pub fn mint_admission_token_with_policy(
     })?;
     let path = token_dir.join(format!("{token_hash}.toml"));
 
-    let doc = toml::to_string(&AdmissionTokenFile {
+    let body = toml::to_string(&AdmissionTokenFile {
         version: ADMISSION_TOKEN_FORMAT_VERSION,
         token_hash: &token_hash,
         label: label.as_deref(),
@@ -644,6 +655,9 @@ pub fn mint_admission_token_with_policy(
         origin_site_id: params.origin_site_id.as_deref(),
         grant_lifetime_secs: params.grant_lifetime_secs,
     })?;
+    // The node signs the record, membership class included, so that claim
+    // and request authentication can trust the class it keeps.
+    let doc = ryeos_node_runtime::identity::sign_node_toml(&body, node_identity);
     let token_dir = lillux::PinnedDirectory::open(&token_dir)?
         .ok_or_else(|| anyhow::anyhow!("admission token directory is unavailable"))?;
     token_dir
@@ -1167,6 +1181,7 @@ admission_enabled: {admission_enabled}
         )
         .unwrap();
         let stored = std::fs::read_to_string(&minted.path).unwrap();
+        assert!(stored.starts_with("# ryeos:signed:"), "{stored}");
         assert!(stored.contains("version = 3"), "{stored}");
         assert!(stored.contains("class = \"remote_principal\""), "{stored}");
         assert!(stored.contains("membership_class = \"guest\""), "{stored}");

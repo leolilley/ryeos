@@ -155,7 +155,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let maximum_token_ttl_secs = hosted_admission_token_ttl_secs(&state)?;
     let token_hash = token_hash(&req.token);
     let token_path = admission_token_path(&state.config.app_root, &token_hash);
-    let token = read_token_file(&token_path)?;
+    let token = read_token_file(&token_path, &state.identity)?;
 
     if token.token_hash != token_hash {
         return Err(HandlerError::BadRequest(
@@ -329,13 +329,14 @@ struct RetainedTokenRecord {
 
 /// The membership class retained on the claimed admission token that a
 /// grant's `granted_by` (`admission:<first 12 hex of the token hash>`) names.
-/// Exactly one claimed token file must carry that hash prefix, in the current
-/// token format, with its stored hash matching its file name and a class.
+/// Exactly one claimed token file must carry that hash prefix, signed by this
+/// node, in the current token format, with its stored hash matching its file name and a class.
 /// Anything else is refused with the reason, so a missing, altered, ambiguous
 /// or classless record never yields a class.
 pub(crate) fn retained_membership_class(
     app_root: &Path,
     granted_by: &str,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> Result<String, String> {
     let prefix = granted_by
         .strip_prefix("admission:")
@@ -368,7 +369,12 @@ pub(crate) fn retained_membership_class(
     };
     let raw = std::fs::read_to_string(path)
         .map_err(|error| format!("read the claimed admission token `{prefix}`: {error}"))?;
-    let record: RetainedTokenRecord = toml::from_str(&raw).map_err(|error| {
+    let body = ryeos_node_runtime::identity::verify_node_signed_toml(&raw, node_identity).map_err(
+        |error| {
+            format!("the claimed admission token `{prefix}` is not signed by this node: {error}")
+        },
+    )?;
+    let record: RetainedTokenRecord = toml::from_str(&body).map_err(|error| {
         format!("the claimed admission token `{prefix}` is unreadable: {error}")
     })?;
     if record.version != ADMISSION_TOKEN_FORMAT_VERSION {
@@ -390,7 +396,10 @@ pub(crate) fn retained_membership_class(
     }
 }
 
-fn read_token_file(path: &Path) -> HandlerResult<AdmissionTokenFile> {
+fn read_token_file(
+    path: &Path,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> HandlerResult<AdmissionTokenFile> {
     let raw = std::fs::read_to_string(path).map_err(|_| {
         HandlerError::Forbidden("invalid or already-used admission token".to_string())
     })?;
@@ -407,7 +416,19 @@ fn read_token_file(path: &Path) -> HandlerResult<AdmissionTokenFile> {
             ),
         ));
     }
-    toml::from_str(&raw).map_err(|e| HandlerError::BadRequest(format!("invalid token file: {e}")))
+    // Only a record the node signed at mint is read: its membership class is
+    // part of what was signed.
+    let body = ryeos_node_runtime::identity::verify_node_signed_toml(&raw, node_identity)
+        .map_err(|error| {
+            refusal(
+                "admission_token_invalid",
+                400,
+                format!(
+                    "the admission token record is not signed by this node ({error}); mint a new one with `ryeos admission-token`"
+                ),
+            )
+        })?;
+    toml::from_str(&body).map_err(|e| HandlerError::BadRequest(format!("invalid token file: {e}")))
 }
 
 /// Check that the claim is the one the token admits and return the origin

@@ -340,6 +340,36 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
 }
 
 #[tokio::test]
+async fn launch_mint_refuses_a_remote_node_key_whatever_its_scopes() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let principal = format!("fp:{}", "cd".repeat(32));
+    let req = ryeos_ui::handlers::ui_launch_mint::Request {
+        ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
+        root_ref: "surface:ryeos/ui/base".into(),
+        project_path: None,
+        user_principal_id: Some(principal.clone()),
+        scopes: None,
+    };
+    let context = HandlerContext::new_with_authority(
+        principal,
+        vec!["*".into()],
+        true,
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode),
+        Some("site:peer".into()),
+    );
+
+    let err = ryeos_ui::handlers::ui_launch_mint::handle(req, context, Arc::new(state))
+        .await
+        .expect_err("a peer node's key must not open a browser session");
+
+    let handler_error = extract_handler_error(&err).expect("should preserve typed handler error");
+    assert!(
+        matches!(&handler_error, HandlerError::Forbidden(message) if message.contains("remote_node")),
+        "{handler_error:?}"
+    );
+}
+
+#[tokio::test]
 async fn launch_mint_rejects_mismatched_user_principal() {
     let (_tmp, _state_owner, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {

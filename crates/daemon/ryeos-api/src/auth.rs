@@ -443,6 +443,11 @@ fn judge_membership(
     if !grant.granted_by.starts_with("admission:") {
         return Ok((None, scopes));
     }
+    // A peer node admitted by token keeps its explicit scopes: membership
+    // judges only the keys of people.
+    if grant.principal_class == AuthorizedKeyPrincipalClass::RemoteNode {
+        return Ok((None, scopes));
+    }
     if ryeos_app::operator_authority::key_acts_for_operator(state, fingerprint)
         .map_err(|error| format!("judge operator by key: {error:#}"))?
     {
@@ -457,6 +462,7 @@ fn judge_membership(
     let class_id = crate::handlers::admission_claim::retained_membership_class(
         &state.config.app_root,
         &grant.granted_by,
+        &state.identity,
     )
     .map_err(unknown)?;
     let class = policy.classes.get(&class_id).ok_or_else(|| {
@@ -2484,12 +2490,13 @@ mod tests {
         let hash = lillux::cas::sha256_hex(token.as_bytes());
         let dir = state.config.app_root.join(".ai/node/admission/tokens");
         std::fs::create_dir_all(&dir).unwrap();
+        let body = format!(
+            "version = {version}\ntoken_hash = \"{}\"\nscopes = [\"ryeos.fetch.item.read\"]\nexpires_at_unix = 4102444800\nclass = \"local_client\"\n{extra}",
+            stored_hash.unwrap_or(&hash)
+        );
         std::fs::write(
             dir.join(format!("{hash}.claimed")),
-            format!(
-                "version = {version}\ntoken_hash = \"{}\"\nscopes = [\"ryeos.fetch.item.read\"]\nexpires_at_unix = 4102444800\nclass = \"local_client\"\n{extra}",
-                stored_hash.unwrap_or(&hash)
-            ),
+            ryeos_node_runtime::identity::sign_node_toml(&body, &state.identity),
         )
         .unwrap();
         format!("admission:{}", &hash[..12])
@@ -2721,6 +2728,140 @@ mod tests {
         crate::test_support::set_membership_classes(&mut state, &[]);
         let error = verify_as(&state, &key, &fp, "nonce-member-after-withdrawal")
             .expect_err("a withdrawn class refuses its members");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+    }
+
+    #[test]
+    fn a_record_the_node_did_not_sign_or_that_was_altered_is_refused() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(
+            &mut state,
+            &[
+                ("guest", &["ryeos.fetch.item.*"]),
+                ("admin", &["ryeos.fetch.item.*"]),
+            ],
+        );
+        let version = token_format_version();
+        let record_path = |token: &str| {
+            state.config.app_root.join(format!(
+                ".ai/node/admission/tokens/{}.claimed",
+                lillux::cas::sha256_hex(token.as_bytes())
+            ))
+        };
+        let body_of = |token: &str| {
+            let raw = std::fs::read_to_string(record_path(token)).unwrap();
+            lillux::signature::strip_signature_lines(&raw)
+        };
+
+        // The same record, signed by a key that is not the node's.
+        let other = SigningKey::from_bytes(&[130u8; 32]);
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-wrong-signer",
+            version,
+            None,
+            "membership_class = \"guest\"\n",
+        );
+        let body = body_of("token-wrong-signer");
+        std::fs::write(
+            record_path("token-wrong-signer"),
+            lillux::signature::sign_content(&body, &other, "#", None),
+        )
+        .unwrap();
+        let key = SigningKey::from_bytes(&[131u8; 32]);
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &key, &fp, "nonce-member-wrong-signer")
+            .expect_err("a record signed by another key is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+
+        // No signature at all.
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-unsigned",
+            version,
+            None,
+            "membership_class = \"guest\"\n",
+        );
+        std::fs::write(record_path("token-unsigned"), body_of("token-unsigned")).unwrap();
+        let key = SigningKey::from_bytes(&[132u8; 32]);
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &key, &fp, "nonce-member-unsigned")
+            .expect_err("an unsigned record is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+
+        // The class edited after signing, to another class the policy holds:
+        // the signature no longer matches.
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-edited-class",
+            version,
+            None,
+            "membership_class = \"guest\"\n",
+        );
+        let edited = std::fs::read_to_string(record_path("token-edited-class"))
+            .unwrap()
+            .replace(
+                "membership_class = \"guest\"",
+                "membership_class = \"admin\"",
+            );
+        std::fs::write(record_path("token-edited-class"), edited).unwrap();
+        let key = SigningKey::from_bytes(&[133u8; 32]);
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &key, &fp, "nonce-member-edited")
+            .expect_err("an edited record is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+    }
+
+    #[test]
+    fn a_remote_node_token_grant_is_never_a_member() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        // The record keeps no class at all; the grant still keeps its scopes
+        // and gets no member class.
+        let granted_by = retain_claimed_token(&state, "token-peer", 2, None, "");
+        let key = SigningKey::from_bytes(&[134u8; 32]);
+        let vk = key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &base64::engine::general_purpose::STANDARD.encode(vk.as_bytes()),
+            &[ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()],
+            "token-admitted-peer",
+            &granted_by,
+            "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+            "site:peer",
+            state.identity.signing_key(),
+        )
+        .unwrap();
+        let principal = verify_as(&state, &key, &fp, "nonce-member-token-peer")
+            .expect("a token-admitted remote node is not judged by membership");
+        assert_eq!(principal.member_class, None);
+        assert_eq!(
+            principal.scopes,
+            [ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE]
+        );
+    }
+
+    #[test]
+    fn a_classless_remote_principal_token_grant_is_refused() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        let key = SigningKey::from_bytes(&[135u8; 32]);
+        let fp = register_remote_principal_key(&state, &key, "site:peer");
+        let mut grant =
+            load_authorized_key_unjudged(&fp, &state.config.authorized_keys_dir, &state.identity)
+                .unwrap()
+                .grant;
+        assert_eq!(
+            grant.principal_class,
+            AuthorizedKeyPrincipalClass::RemotePrincipal
+        );
+        grant.granted_by = retain_claimed_token(&state, "token-principal", 2, None, "");
+        let scopes = grant.scopes.clone();
+        let error = judge_membership(&state, &grant, &fp, scopes)
+            .expect_err("a classless remote_principal token grant is refused");
         assert_eq!(membership_code(&error), Some("membership_class_unknown"));
     }
 

@@ -95,6 +95,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         )
         .into());
     }
+    // A peer node's key never opens a browser session, whatever scopes its
+    // grant holds.
+    if ctx.authorized_key_class
+        == Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+    {
+        return Err(HandlerError::Forbidden(
+            "a remote_node key cannot open a browser session".into(),
+        )
+        .into());
+    }
     if !ctx
         .scopes
         .iter()

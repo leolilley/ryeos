@@ -186,6 +186,107 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
     assert!(matches!(reused, Err(HandlerError::Forbidden(_))));
 }
 
+/// A token the node did not sign, signed by another key, or edited after
+/// signing is refused before anything is granted, and stays unclaimed.
+#[tokio::test]
+async fn a_token_record_the_node_did_not_sign_is_refused_at_claim() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let other = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let cases: [(&str, Box<dyn Fn(&str) -> String>); 3] = [
+        (
+            "unsigned-token",
+            Box::new(|body| lillux::signature::strip_signature_lines(body)),
+        ),
+        (
+            "wrong-signer-token",
+            Box::new(move |body| {
+                lillux::signature::sign_content(
+                    &lillux::signature::strip_signature_lines(body),
+                    &other,
+                    "#",
+                    None,
+                )
+            }),
+        ),
+        (
+            "edited-token",
+            Box::new(|body| {
+                body.replace(
+                    "membership_class = \"guest\"",
+                    "membership_class = \"admin\"",
+                )
+            }),
+        ),
+    ];
+    for (token, rewrite) in cases {
+        write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+        let path = token_file_paths(&state, token).0;
+        let body = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, rewrite(&body)).unwrap();
+        let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+        let result = admission_claim::handle(
+            signed_claim_request(&state, token, &claimant, PUSH_SCOPES, None),
+            Arc::new(state.clone()),
+        )
+        .await;
+        assert_eq!(refusal_code(&result), "admission_token_invalid", "{token}");
+        assert!(path.is_file(), "{token} must stay unclaimed");
+    }
+}
+
+#[tokio::test]
+async fn only_the_local_operator_in_person_mints_a_remote_node_token() {
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_hosted_policy(600);
+    test_state::set_membership_classes(&mut state, &[("guest", &["ryeos.fetch.item.*"])]);
+    let state = Arc::new(state);
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    let request = || ryeos_core_tools::actions::authorize::MintAdmissionTokenRequest {
+        scopes: "ryeos.fetch.item.read".to_owned(),
+        label: None,
+        ttl_secs: 60,
+        class: AuthorizedKeyPrincipalClass::RemoteNode,
+        membership_class: "guest".to_owned(),
+        origin_site_id: None,
+        grant_lifetime_secs: None,
+    };
+    let local = |fingerprint: String| {
+        ryeos_app::handler_context::HandlerContext::new_with_authority(
+            fingerprint,
+            vec![],
+            true,
+            Some(AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        )
+    };
+    let stranger = local(format!("fp:{}", "ab".repeat(32)));
+    let member = local(operator.principal_id()).with_member_class(Some("guest".to_owned()));
+    let delegated = local(operator.principal_id()).with_delegated_via(Some("site:peer".to_owned()));
+    let forwarded = ryeos_app::handler_context::HandlerContext::new_with_authority(
+        operator.principal_id(),
+        vec![],
+        true,
+        Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
+        Some("site:peer".to_owned()),
+    );
+    for (label, context) in [
+        ("a non-operator key", stranger),
+        ("a member", member),
+        ("a delegated request", delegated),
+        ("a forwarded request", forwarded),
+    ] {
+        let error = ryeos_api::handlers::admission_token::handle(request(), context, state.clone())
+            .await
+            .expect_err(label);
+        assert!(
+            ryeos_api::handler_error::extract_handler_error(&error).is_some()
+                || format!("{error:#}").contains("configured local operator"),
+            "{label}: {error:#}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn minting_refuses_a_membership_class_the_node_policy_does_not_name() {
     let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_hosted_policy(600);
@@ -427,7 +528,7 @@ fn write_admission_token_file_with_issued_at(
     }
     std::fs::write(
         admission_token_path(&state.config.app_root, &token_hash),
-        doc,
+        ryeos_node_runtime::identity::sign_node_toml(&doc, &state.identity),
     )
     .unwrap();
 }
@@ -625,6 +726,11 @@ fn write_class_token(state: &ryeos_app::state::AppState, fixture: &ClassFixture,
     if let Some(lifetime) = fixture.grant_lifetime_secs {
         doc.push_str(&format!("grant_lifetime_secs = {lifetime}\n"));
     }
+    let doc = if version == 3 {
+        ryeos_node_runtime::identity::sign_node_toml(&doc, &state.identity)
+    } else {
+        doc
+    };
     std::fs::write(
         admission_token_path(&state.config.app_root, &token_hash),
         doc,

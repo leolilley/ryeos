@@ -1228,6 +1228,33 @@ fn render_authorized_key_toml_for_subject(
     ))
 }
 
+/// Sign a TOML record body with the node key: the body under one leading
+/// `#` signature line, the envelope node-signed grant files use.
+pub fn sign_node_toml(body: &str, node_identity: &NodeIdentity) -> String {
+    lillux::signature::sign_content(body, node_identity.signing_key(), "#", None)
+}
+
+/// Verify a TOML record signed by [`sign_node_toml`] and return its body. An
+/// unsigned record, one signed by any other key, and one whose body was
+/// altered are all refused.
+pub fn verify_node_signed_toml(raw: &str, node_identity: &NodeIdentity) -> Result<String> {
+    let (body, header) =
+        lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
+    let header = header.ok_or_else(|| anyhow::anyhow!("unsigned record"))?;
+    if header.signer_fingerprint != node_identity.fingerprint() {
+        bail!("wrong signer");
+    }
+    if lillux::sha256_hex(body.as_bytes()) != header.content_hash {
+        bail!("tampered record");
+    }
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&header.signature_b64)
+        .context("record signature is not valid base64")?;
+    let signature = Signature::from_slice(&sig_bytes)?;
+    node_identity.verify_hash(&header.content_hash, &signature)?;
+    Ok(body.to_string())
+}
+
 fn publish_authorized_key_bytes(
     directory: &lillux::PinnedDirectory,
     fingerprint: &str,
