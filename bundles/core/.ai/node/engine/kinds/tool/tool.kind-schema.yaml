@@ -1,5 +1,7 @@
-# ryeos:signed:2026-11-17T12:51:39Z:13e754d067c91c1a7749b8ae696af3a72dfd2d2d114da0e4308e8ca9b3f25ad2:fIj9Af0RWGO9eEVFcnzQFOVLPVXCt2nhB1mogavkUlePmgW+Lz+aHipiPa3hctk635RwVF+gg5zGx1XQuGtlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:14:00Z:c1daed34d191a0894fad6eb9e3259561eb9cff3eb4d26d4c6d4b962ae383da76:/Y2CWp8aFrciJFl2B7N5j+qG55Sc+jiIEPh7PvowEMjY3Mi2+eIY/+yCwsgKLJXQQmbfABY/TIXgO7piCsCdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
+# Items of this kind act only when a caller invokes them, under that caller's own grants.
+activation: invoked
 version: "1.6.0"
 location:
   directory: tools
