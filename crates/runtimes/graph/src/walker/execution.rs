@@ -368,7 +368,6 @@ impl Walker {
                         child_thread_id: None,
                         integrity: true,
                         dispatch: None,
-                        reads: None,
                         outcome: None,
                     }))
                 } else {
