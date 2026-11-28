@@ -1256,6 +1256,74 @@ mod tests {
     }
 
     #[test]
+    fn a_generation_takes_the_shipped_bundle_staging_member_and_refuses_a_bad_or_absent_one() {
+        use crate::node_policy::compile_generation;
+        use crate::node_policy::sections::bundle_staging::BundleStagingPolicy;
+
+        let table = NodePolicyTable::new();
+        let app_root = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new("standard.yaml");
+        let compile = |edit: &dyn Fn(&mut NodeInitProfile)| {
+            let mut profile = authored_profile("standard")
+                .for_host_class("local_unconfined")
+                .unwrap();
+            edit(&mut profile);
+            profile
+                .validated_generation(&table, path)
+                .and_then(|generation| {
+                    compile_generation(app_root.path(), &table, &generation, &"a".repeat(64))
+                })
+        };
+
+        // The shipped member compiles to the shipped bounds.
+        let snapshot = compile(&|_| {}).unwrap();
+        let bounds = snapshot.require::<BundleStagingPolicy>().unwrap();
+        assert_eq!(
+            (
+                bounds.max_node_bytes,
+                bounds.max_node_stages,
+                bounds.max_key_bytes,
+                bounds.max_key_stages
+            ),
+            (2 * 1024 * 1024 * 1024, 64, 512 * 1024 * 1024, 16)
+        );
+
+        // No code default: an absent member is an incomplete generation.
+        assert!(
+            compile(&|profile| {
+                profile.policies.remove("bundle_staging").unwrap();
+            })
+            .is_err()
+        );
+        // A zero cap, an unknown field and a missing field are refused, not
+        // replaced by a default.
+        assert!(
+            compile(&|profile| {
+                profile.policies.get_mut("bundle_staging").unwrap()["max_key_stages"] = 0.into();
+            })
+            .is_err()
+        );
+        assert!(
+            compile(&|profile| {
+                profile.policies.get_mut("bundle_staging").unwrap()["fallback"] = 1.into();
+            })
+            .is_err()
+        );
+        assert!(
+            compile(&|profile| {
+                profile
+                    .policies
+                    .get_mut("bundle_staging")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_node_bytes");
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn declared_import_roots_are_admitted_into_the_generation() {
         let table = NodePolicyTable::new();
         let app_root = tempfile::tempdir().unwrap();

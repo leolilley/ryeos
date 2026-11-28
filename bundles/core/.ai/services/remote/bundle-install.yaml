@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-24T20:26:06Z:576c128292483c294e440e3ad64c82b56807cb9e0442b35c76c07a914113f757:xE3DCofB5DWkm8nxri9HZ/iBmEh+Yd8B9/8KhCyS3qaZqptaFbd0kfTL5In5JshTi7redWvq3T+eM0TtBZk5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T17:01:26Z:53ad9c5e0a009016555a9f9a9b8d76bf7418e52ee29312cf369176cd15c825e1:EKcBygwUGNC9uSW040LDLCeFJtT6BLZ2aDq3C81xuoHOXZuQyYdL24IH8UN9Tl5ovbIlOn91jIVw1I7IHEPnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: remote.bundle-install
@@ -6,6 +6,6 @@ required_caps: ["ryeos.execute.service.bundle/install"]
 schema:
   remote: string?
   bundle_name: string
-description: "Install a bundle from a remote node via CAS pipeline"
+description: "Fetch a bundle from a remote node via the CAS pipeline, verify it and stage it. The bundle is staged, not installed; it takes effect at the next start by a signed operation."
 # Bundle installation is an operator tool: it writes the node's bundle tree and answers with the install path.
 disclosure: {}

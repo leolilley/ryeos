@@ -16,6 +16,10 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub(crate) const EXPORTED_BUNDLE_ENTRY_KIND_FILE: &str = "file";
+/// Format version of the bundle export answer. Version 2 records each file's
+/// mode as exactly 0o644 or 0o755 (the executable bit is the only content);
+/// version 1 recorded the host's raw modes and is refused, never read.
+pub(crate) const BUNDLE_EXPORT_FORMAT: &str = "ryeos.bundle-export/v2";
 pub(crate) const MAX_EXPORTED_BUNDLE_FILES: usize = 10_000;
 pub(crate) const MAX_EXPORTED_BUNDLE_TREE_ENTRIES: usize = 20_000;
 pub(crate) const MAX_EXPORTED_BUNDLE_DEPTH: usize = 64;
@@ -96,6 +100,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     remember_exported_blobs(&state, &req.bundle_name, &entries);
 
     Ok(serde_json::json!({
+        "format": BUNDLE_EXPORT_FORMAT,
         "bundle_name": req.bundle_name,
         "file_count": entries.len(),
         "total_bytes": total_bytes,
@@ -253,7 +258,7 @@ pub(crate) fn walk_and_ingest(
                     MAX_EXPORTED_BUNDLE_FILE_BYTES
                 );
             }
-            let mode = validated_unix_file_mode(&metadata, &path)?;
+            let mode = normalised_export_mode(&path)?;
             let capacity = usize::try_from(metadata.len())
                 .context("bundle file size does not fit in memory address space")?;
             let mut bytes = Vec::with_capacity(capacity);
@@ -301,25 +306,18 @@ pub(crate) fn walk_and_ingest(
     Ok(())
 }
 
-fn validated_unix_file_mode(metadata: &std::fs::Metadata, path: &std::path::Path) -> Result<u32> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let mode = metadata.permissions().mode() & 0o7777;
-        if mode & !0o777 != 0 {
-            bail!(
-                "bundle export refuses special permission bits on {} ({mode:#o})",
-                path.display()
-            );
-        }
-        Ok(mode)
+/// The mode a file is exported with: 0o755 when the source has any execute
+/// bit, else 0o644. The host's umask and group or other bits never reach the
+/// export, so two hosts holding the same files export the same bytes.
+fn normalised_export_mode(path: &std::path::Path) -> Result<u32> {
+    let observed = lillux::observe_tree_entry_no_follow(path)?;
+    if observed.kind != lillux::TreeEntryKind::RegularFile {
+        bail!(
+            "bundle export refuses non-regular entry at {}",
+            path.display()
+        );
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (metadata, path);
-        bail!("bundle export requires Unix file-mode support")
-    }
+    Ok(ryeos_engine::trust::normalised_file_mode(observed.mode))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -334,3 +332,61 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::tree_entry::test_support::{make_fifo, make_symlink, set_mode};
+
+    fn tree(file_mode: u32, exec_mode: u32, dir_mode: u32) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ai/sub")).unwrap();
+        std::fs::write(root.join(".ai/a.txt"), b"alpha").unwrap();
+        std::fs::write(root.join(".ai/sub/run.sh"), b"#!/bin/sh\n").unwrap();
+        set_mode(&root.join(".ai/a.txt"), file_mode).unwrap();
+        set_mode(&root.join(".ai/sub/run.sh"), exec_mode).unwrap();
+        set_mode(&root.join(".ai/sub"), dir_mode).unwrap();
+        set_mode(&root.join(".ai"), dir_mode).unwrap();
+        dir
+    }
+
+    fn walk(root: &std::path::Path) -> Result<Vec<Value>> {
+        let (mut entries, mut total, mut count) = (Vec::new(), 0, 0);
+        walk_and_ingest(root, root, None, &mut entries, &mut total, &mut count, 0)?;
+        entries.sort_by_key(|entry| entry["path"].as_str().unwrap().to_owned());
+        Ok(entries)
+    }
+
+    #[test]
+    fn two_hosts_with_different_umasks_export_the_same_entries() {
+        let strict = tree(0o644, 0o755, 0o755);
+        let loose = tree(0o664, 0o775, 0o775);
+        let odd = tree(0o600, 0o700, 0o700);
+        let a = walk(strict.path()).unwrap();
+        assert_eq!(a, walk(loose.path()).unwrap());
+        assert_eq!(a, walk(odd.path()).unwrap());
+        let mode_of = |path: &str| {
+            a.iter().find(|entry| entry["path"] == path).unwrap()["mode"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(mode_of(".ai/a.txt"), 0o644);
+        assert_eq!(mode_of(".ai/sub/run.sh"), 0o755);
+    }
+
+    #[test]
+    fn an_export_refuses_a_symlink_or_a_special_file() {
+        let linked = tree(0o644, 0o755, 0o755);
+        make_symlink(
+            std::path::Path::new("a.txt"),
+            &linked.path().join(".ai/link"),
+        )
+        .unwrap();
+        assert!(walk(linked.path()).is_err());
+
+        let piped = tree(0o644, 0o755, 0o755);
+        make_fifo(&piped.path().join(".ai/pipe")).unwrap();
+        assert!(walk(piped.path()).is_err());
+    }
+}

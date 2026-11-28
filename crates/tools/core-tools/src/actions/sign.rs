@@ -2037,6 +2037,7 @@ printf '%s\n' fixture
             project_shadowing: Default::default(),
             runtime_authoring: Default::default(),
             standing_endorsement: Default::default(),
+            activation: Default::default(),
         };
 
         assert!(matches!(
