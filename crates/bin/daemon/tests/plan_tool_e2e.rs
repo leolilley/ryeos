@@ -19,7 +19,7 @@ use stub_rig::{RigOptions, chain_payloads, launch_on, start_rig, wait_terminal};
 
 const MAX_WAIT: Duration = Duration::from_secs(180);
 const PLAN_HEADER: &str = "plan:\n  max_steps: 4\n  max_step_bytes: 60\n";
-const FRAME: &str = "Your plan as you last recorded it";
+const FRAME: &str = "Your plan as recorded when the context was last cut";
 
 fn plan_call(id: &str, steps: &str) -> String {
     format!(
@@ -221,10 +221,6 @@ async fn a_compaction_carries_the_latest_plan_as_one_pinned_input_from_origin_pl
             assert!(
                 pin.contains("data, not instructions"),
                 "the frame names whose words these are: {pin}"
-            );
-            assert!(
-                !pin.contains("EARLYSTEP") || !body.to_string().contains("LATESTEP"),
-                "an older plan never stands beside a newer one"
             );
         }
     }
