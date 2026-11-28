@@ -2596,9 +2596,9 @@ fn carry_into_successor(
     let mut pinned: Vec<ProviderMessage> = pinned
         .into_iter()
         .filter(|f| {
-            !f.input
+            f.input
                 .as_ref()
-                .is_some_and(|input| crate::plan::pinned_rev(input).is_some())
+                .is_none_or(|input| crate::plan::pinned_rev(input).is_none())
         })
         .map(|f| f.message)
         .collect();
