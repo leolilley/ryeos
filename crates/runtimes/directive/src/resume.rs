@@ -5746,6 +5746,42 @@ mod tests {
         assert_eq!(texts, ["u2", "a2"]);
     }
 
+    /// The successor start is the path that builds the pinned inputs, so this
+    /// drives `carry_into_successor` itself: a plan call in the turns the
+    /// carry drops comes back as exactly one pinned plan message, and the
+    /// turns it keeps carry no second copy.
+    #[test]
+    fn a_successor_start_carries_a_dropped_plan_call_as_one_pinned_message() {
+        let call = |id: &str, step: &str| crate::directive::ToolCall {
+            id: Some(id.to_string()),
+            name: crate::directive::PLAN_TOOL.to_string(),
+            arguments: json!({"steps": [{"step": step, "status": "pending"}]}),
+        };
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(ProviderMessage::user("u1"), false),
+            folded(
+                ProviderMessage::assistant(None, vec![call("p1", "DROPPEDSTEP")], None),
+                false,
+            ),
+            folded(ProviderMessage::tool_result("p1", "{}"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+            folded(ProviderMessage::user("u3"), false),
+            folded(ProviderMessage::assistant_text("a3"), false),
+        ];
+        let carried = carry_into_successor(conversation, &CarryPolicy::turns(1), None).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        let pins: Vec<&String> = texts
+            .iter()
+            .filter(|text| text.contains("Your plan as recorded when the context was last cut"))
+            .collect();
+        assert_eq!(pins.len(), 1, "exactly one pinned plan: {texts:?}");
+        assert!(pins[0].contains("DROPPEDSTEP"), "{}", pins[0]);
+        assert_eq!(texts.first().map(String::as_str), Some("launch"));
+        assert_eq!(&texts[texts.len() - 2..], ["u3", "a3"]);
+    }
+
     #[test]
     fn a_start_with_a_broken_tool_pairing_fails_with_a_typed_error() {
         let call = crate::directive::ToolCall {

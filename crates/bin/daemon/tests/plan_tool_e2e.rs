@@ -12,10 +12,10 @@
 #[path = "common/stub_rig.rs"]
 mod stub_rig;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::Value;
-use stub_rig::{RigOptions, chain_payloads, launch_on, start_rig, wait_terminal};
+use serde_json::{Value, json};
+use stub_rig::{RigOptions, chain_payloads, launch_on, launch_on_with, start_rig, wait_terminal};
 
 const MAX_WAIT: Duration = Duration::from_secs(180);
 const PLAN_HEADER: &str = "plan:\n  max_steps: 4\n  max_step_bytes: 60\n";
@@ -236,4 +236,87 @@ async fn a_compaction_carries_the_latest_plan_as_one_pinned_input_from_origin_pl
             "{pin}"
         );
     }
+}
+
+/// The plan header with a repeatable provider contact and a spend limit, so a
+/// call cut by a restart is retried rather than failed typed.
+const PLAN_RESTART_HEADER: &str = "plan:\n  max_steps: 4\n  max_step_bytes: 60\nprovider_contact: repeatable\nlimits:\n  spend_usd: \"3\"\n";
+
+/// The plan call and its answer, as a request carries them: the assistant
+/// message holding the call and the tool message answering it.
+fn plan_exchange(body: &Value) -> Vec<String> {
+    messages_of(body)
+        .iter()
+        .filter(|message| {
+            let text = message.to_string();
+            text.contains("RESTARTSTEP")
+                || message.get("role").and_then(Value::as_str) == Some("tool")
+        })
+        .map(Value::to_string)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_mid_run_rebuilds_the_same_plan_conversation() {
+    let hold = "  - delay_ms: 600000\n    text: \"never delivered\"\n";
+    let script = format!(
+        "steps:\n{}{hold}  - text: done\n",
+        plan_call("p1", "[{ step: RESTARTSTEP, status: in_progress }]"),
+    );
+    let exec = "category: \"ryeos-runtime\"\nretries: 3\nbackoff_base_ms: 100\nbackoff_max_ms: 1000\n\
+                unknown_outcome_retry:\n  max_retries: 2\n  on: [timeout, send, mid_stream]\n";
+    let mut rig = start_rig(
+        &script,
+        RigOptions {
+            header_extra: PLAN_RESTART_HEADER,
+            exec_yaml: Some(exec.to_string()),
+            paid_provider: true,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({})).await.expect("launch");
+
+    // Request 1 is answered with the plan call; request 2 is held. The stub
+    // receives it only after the attempt is recorded as issued.
+    let until = Instant::now() + Duration::from_secs(120);
+    while rig.stub.requests().await.len() < 2 {
+        assert!(Instant::now() < until, "the held request never arrived");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = rig.stub.requests().await[1].body.clone();
+    let exchange_before = plan_exchange(&before);
+    assert!(
+        exchange_before.iter().any(|m| m.contains("RESTARTSTEP")),
+        "the held request carries the plan call: {exchange_before:?}"
+    );
+
+    rig.h.kill_daemon().await.expect("kill the node mid-call");
+    let db = rig
+        .h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    ryeos_app::test_support::read_existing_runtime(&db, |connection| {
+        connection.execute("UPDATE thread_runtime SET resume_attempts = 0", [])?;
+        Ok(())
+    });
+    rig.h.respawn_with(|_| {}).await.expect("restart the node");
+
+    let (status, _) = wait_terminal(&rig.h, &id, MAX_WAIT).await;
+    assert_eq!(status, "completed");
+    let requests = rig.stub.requests().await;
+    assert_eq!(requests.len(), 3, "the cut call was retried once");
+    let after = &requests[2].body;
+    assert!(
+        offers(after, "plan"),
+        "the resumed run still offers the plan tool"
+    );
+    assert_eq!(
+        plan_exchange(after),
+        exchange_before,
+        "the resumed run rebuilt the same plan call and answer from the record"
+    );
+    rig.h.kill_daemon().await.expect("stop the node");
 }
