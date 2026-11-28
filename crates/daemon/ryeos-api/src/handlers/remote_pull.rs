@@ -262,6 +262,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.remote/pull"],
     handler: |params, ctx, state| {
         Box::pin(async move {
+            // The output directory is a host path this service creates and
+            // writes into, so the service is the operator's alone; judged
+            // before the request is read.
+            ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
             let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, ctx, state).await
         })

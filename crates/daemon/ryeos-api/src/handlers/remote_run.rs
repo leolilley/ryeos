@@ -67,6 +67,15 @@ pub async fn handle(
 ) -> HandlerResult<Value> {
     let contact_deadline = remote_contact_deadline(&req, &ctx);
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
+    // A project path names a live directory on the host, so it is admitted
+    // like any other live project path before anything else uses it.
+    let admitted_project = match req.project.as_deref() {
+        Some(requested) => Some(
+            ryeos_app::live_project_path::admit_handler_live_path(&state, &ctx, requested)?
+                .canonical,
+        ),
+        None => None,
+    };
     req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
     let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
@@ -76,8 +85,7 @@ pub async fn handle(
     })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
-    let binding = req
-        .project
+    let binding = admitted_project
         .as_ref()
         .map(|project| config::resolve_loaded_project_binding(&loaded_remote, project))
         .transpose()
@@ -159,7 +167,7 @@ pub async fn handle(
     let principal = if retained_current_head {
         OutboundPrincipal::Delegated
     } else {
-        OutboundPrincipal::resolve(req.outbound_principal, &state, &ctx)
+        OutboundPrincipal::resolve_admitted(req.outbound_principal, &state, &ctx)?
     };
     let client = principal.client(&state, &remote_cfg, &ctx)?;
     let accepted =

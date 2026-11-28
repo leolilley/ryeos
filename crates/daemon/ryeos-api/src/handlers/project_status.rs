@@ -21,9 +21,14 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
 
-    let canonical = crate::handlers::project_apply_snapshot::canonical_existing_project_path(
-        &req.project_path,
-    )?;
+    // The path names a live directory on the host, so it is admitted like any
+    // other live project path.
+    let canonical = ryeos_app::live_project_path::admit_handler_live_path(
+        &state,
+        &ctx,
+        std::path::Path::new(&req.project_path),
+    )?
+    .canonical;
     let canonical_project_path = canonical
         .to_str()
         .ok_or_else(|| {

@@ -225,6 +225,9 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 &roots,
                 &engine.trust_store,
                 None,
+                // A projectless installed-bundle subject: project mint is
+                // never read for it.
+                ryeos_app::runtime_capability_admission::ProjectMint::NoProjectMint,
             )?;
         if kind == "graph" {
             let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(
