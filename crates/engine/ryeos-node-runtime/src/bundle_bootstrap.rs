@@ -23,7 +23,7 @@ pub struct BundleRegistrationRefusal {
 }
 
 impl BundleRegistrationRefusal {
-    fn new(code: &'static str, message: impl Into<String>) -> anyhow::Error {
+    fn error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
         anyhow::Error::new(Self {
             code,
             message: message.into(),
@@ -121,7 +121,7 @@ impl<'a> BundleBootstrapLoader<'a> {
         let records = self.load_registrations()?;
         let (records, skipped) = self.audit_laned_bundles(records);
         if records.is_empty() {
-            return Err(BundleRegistrationRefusal::new(
+            return Err(BundleRegistrationRefusal::error(
                 BUNDLE_REGISTRATIONS_EMPTY,
                 "no bundle registration remains after the publication-lane audit",
             ));
@@ -150,7 +150,7 @@ impl<'a> BundleBootstrapLoader<'a> {
             std::fs::symlink_metadata(&node_dir),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         ) {
-            return Err(BundleRegistrationRefusal::new(
+            return Err(BundleRegistrationRefusal::error(
                 BUNDLE_REGISTRATIONS_MISSING,
                 format!(
                     "the node's bundle registration directory {} does not exist",
@@ -161,10 +161,13 @@ impl<'a> BundleBootstrapLoader<'a> {
         // Bundles use one exact flat YAML namespace. Any directory, symlink,
         // special file, or non-YAML entry is refused.
         let files = scan_yaml_files(&node_dir, false).map_err(|error| {
-            BundleRegistrationRefusal::new(BUNDLE_REGISTRATION_ENTRY_REFUSED, format!("{error:#}"))
+            BundleRegistrationRefusal::error(
+                BUNDLE_REGISTRATION_ENTRY_REFUSED,
+                format!("{error:#}"),
+            )
         })?;
         if files.is_empty() {
-            return Err(BundleRegistrationRefusal::new(
+            return Err(BundleRegistrationRefusal::error(
                 BUNDLE_REGISTRATIONS_EMPTY,
                 format!(
                     "the node's bundle registration directory {} holds no registration",
@@ -190,7 +193,7 @@ impl<'a> BundleBootstrapLoader<'a> {
                 "bundle registrations are written only by the node's own `ryeos bundle install`: remove the file and reinstall the bundle",
             )
             .map_err(|error| {
-                BundleRegistrationRefusal::new(
+                BundleRegistrationRefusal::error(
                     BUNDLE_REGISTRATION_NOT_NODE_SIGNED,
                     format!("{error:#}"),
                 )
@@ -229,7 +232,7 @@ impl<'a> BundleBootstrapLoader<'a> {
 
         // Collision detection: by canonical path AND by name (fail-closed)
         check_bundle_collisions(&records).map_err(|error| {
-            BundleRegistrationRefusal::new(BUNDLE_REGISTRATION_COLLISION, format!("{error:#}"))
+            BundleRegistrationRefusal::error(BUNDLE_REGISTRATION_COLLISION, format!("{error:#}"))
         })?;
         Ok(records)
     }
