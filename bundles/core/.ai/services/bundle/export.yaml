@@ -1,12 +1,13 @@
-# ryeos:signed:2026-11-24T13:50:08Z:a49ef6f6bf522fb70cb0168503e0b0034d107df7521528636499bbcc745b5a9b:MLKr72yYermbpm7WHUcf4AK4CfutadfXo9m2cEgmcv7zXpFVZHoJcNBKkkN9VsCxCaFsMS+1EhCrRmmj8gomCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T21:44:41Z:7167cde2df9b151e6175c5635be849f018e8057c37738e82dcdc170e3302fa8a:1yTUDBQboSo4Qzm2hp/3F6yTP+3oeo3DhuAqLIPucQ1u8zHABnZ2e9zliXU1VtUQRe87yb8I61P9nGEFwx4fAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.export
 required_caps: ["ryeos.execute.service.bundle/export"]
 schema:
   bundle_name: string
-description: "Export an installed bundle as CAS objects. Walks the bundle directory tree, ingests every file into the node's CAS, and returns a manifest of file hashes."
+description: "Export an installed bundle as CAS objects. Walks the bundle directory tree, ingests every file into the node's CAS, and returns a manifest of file hashes. Each file records exactly mode 0o644 or 0o755 (the executable bit is the only content); the answer names its format, ryeos.bundle-export/v2."
 disclosure:
   principal:
+    - "/format"
     - "/bundle_name"
     - "/file_count"
     - "/total_bytes"

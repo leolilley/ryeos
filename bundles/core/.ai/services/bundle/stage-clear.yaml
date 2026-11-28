@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-27T00:09:22Z:35006c52142fd5580332bd3f6a3f6a6fe5228abe02d7809ea46aabb91408dc73:hwK2EBi5vO1jTru2h3LjPmcENo0eezBBELFuh7d6SbqF/pvvw/7RRHiyiXfROTIBp1/v72u28BPyjk4TLEKZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle.stage-clear
+required_caps: ["ryeos.execute.service.bundle/stage-clear"]
+schema:
+  digests: string[]?
+  apply_refused: boolean?
+  all: boolean?
+description: "Remove staged bundles while the node runs: the stages named by `digests`, every stage whose signed apply was refused (`apply_refused`), or every stage plus the crash remnants and stale temporary directories of the staging area (`all`; a younger temporary directory may be a transfer in flight and is never touched). Exactly one selector. There is no age selector. Only the node's admitted operator may clear, whatever capability another key holds. The answer lists what was removed and what stays; nothing is written to the offline ledger."
+# Clearing is an operator act; a principal or unauthenticated caller is shaped to an empty answer.
+disclosure: {}

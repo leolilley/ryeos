@@ -814,8 +814,29 @@ fi
 
 release_workflow="$root/.github/workflows/publish-ryeosd.yml"
 release_bake="$root/docker-bake.release.hcl"
-[[ "$(grep -Fc 'uses: docker/bake-action@' "$release_workflow")" -eq 1 ]] || {
-    echo "release workflow must use exactly one unified Bake action" >&2
+# One unified Bake action per job, and exactly two jobs bake: `publish`, the real
+# release (job-level `if: ${{ !inputs.dry_run }}`, the only job that names the
+# official publisher key), and `rehearse`, the dry run (`if: ${{ inputs.dry_run }}`,
+# no secrets). A third bake, a bake elsewhere or a changed `if` fails here.
+[[ "$(grep -Fc 'uses: docker/bake-action@' "$release_workflow")" -eq 2 ]] || {
+    echo "release workflow must have exactly two Bake actions: one in publish and one in rehearse" >&2
+    exit 1
+}
+python3 -I - "$release_workflow" <<'PY' || {
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+jobs = re.split(r"(?m)^  (?=[\w-]+:\s*$)", text.split("\njobs:\n", 1)[1])
+bakes = {}
+for job in jobs:
+    name = job.split(":", 1)[0]
+    count = job.count("uses: docker/bake-action@")
+    if count:
+        bakes[name] = (count, re.search(r"(?m)^    if: (.*)$", job).group(1))
+want = {"publish": (1, "${{ !inputs.dry_run }}"), "rehearse": (1, "${{ inputs.dry_run }}")}
+if bakes != want:
+    sys.exit(f"bake placement {bakes} is not {want}")
+PY
+    echo "release workflow's Bake actions are not exactly one in publish (!inputs.dry_run) and one in rehearse (inputs.dry_run)" >&2
     exit 1
 }
 if grep -Fq 'uses: docker/build-push-action@' "$release_workflow" \

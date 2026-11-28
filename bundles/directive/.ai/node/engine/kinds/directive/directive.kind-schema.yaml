@@ -1,5 +1,7 @@
-# ryeos:signed:2026-11-25T05:41:27Z:d84d5d5c2b57b7d008fa7b01fc5195a5d34edeb7ac7f9f396c9208a299ed4be4:Aq9o2ZxxP6S4+If+x9xAG2g1fhvG8LlyzFpJqoZD6+HryAhAiYx2eojkqCfiHZWCm8h1FLLLAHCH1aZh9H5TBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:14:00Z:1a25f2840e6a866dd312a9638a7ab8d524cab46b43e902914fe1a96f9ff57bff:+MmObNOfy1mXdE5ETTepylU3pDuHCNP05NH6UNWaC1s+G1DjwZqyCgOhzI5mhoQahzuuzgR0ztNltq6QNKB5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
+# Items of this kind act only when a caller invokes them, under that caller's own grants.
+activation: invoked
 inventory_policy:
   admission:
     capability_template: "ryeos.execute.{kind}.{bare_id}"

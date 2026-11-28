@@ -750,6 +750,37 @@ pub fn register_fixture_bundle(
     register_presigned_fixture_bundle(state_path, bundle_name, &abs, fixture)
 }
 
+/// Give a fixture bundle explicit modes where the runner's umask left group or
+/// other write: such a directory becomes 0o755, such a file 0o755 when it
+/// carries an execute bit and 0o644 otherwise. A bundle that is exported and
+/// staged is refused when a file is group- or other-writable, so fixtures must
+/// not inherit whatever umask the runner has. Links are not followed.
+pub fn set_fixture_bundle_modes(root: &Path) -> Result<()> {
+    let observed = lillux::observe_tree_entry_no_follow(root)?;
+    match observed.kind {
+        lillux::TreeEntryKind::Directory => {
+            if observed.group_or_other_writable() {
+                lillux::tree_entry::test_support::set_mode(root, 0o755)?;
+            }
+            for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+                set_fixture_bundle_modes(&entry?.path())?;
+            }
+        }
+        lillux::TreeEntryKind::RegularFile => {
+            let mode = if observed.mode & 0o111 != 0 {
+                0o755
+            } else {
+                0o644
+            };
+            if observed.group_or_other_writable() {
+                lillux::tree_entry::test_support::set_mode(root, mode)?;
+            }
+        }
+        lillux::TreeEntryKind::Other => {}
+    }
+    Ok(())
+}
+
 /// Register an already signed test bundle without replacing its manifest.
 /// External lifecycle fixtures declare capabilities in that manifest, so the
 /// generic fixture writer above must not erase them during daemon setup.
@@ -774,6 +805,7 @@ pub fn register_presigned_fixture_bundle(
         abs.join(AI_DIR).join("manifest.yaml").is_file(),
         "presigned fixture bundle has no manifest"
     );
+    set_fixture_bundle_modes(&abs)?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
@@ -845,6 +877,7 @@ pub fn register_config_fixture_bundle(
         FAST_FIXTURE_TIME,
     );
     fs::write(bundle_root.join(AI_DIR).join("manifest.yaml"), manifest)?;
+    set_fixture_bundle_modes(&bundle_root)?;
 
     let absolute_root = bundle_root
         .canonicalize()
