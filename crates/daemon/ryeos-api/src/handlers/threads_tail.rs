@@ -232,6 +232,7 @@ mod tests {
             request: Default::default(),
             source_file: Default::default(),
             authority: None,
+            public: false,
         }
     }
 
@@ -256,6 +257,7 @@ mod tests {
             request: Default::default(),
             source_file: Default::default(),
             authority: None,
+            public: false,
         }
     }
 

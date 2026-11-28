@@ -151,12 +151,18 @@ impl DaemonOfflineHost<'_> {
                 "the daemon's configuration names another app root than the one being applied to"
             );
         }
-        let (engine, _, _, isolation, _) =
+        let (engine, _, policy, isolation, _) =
             ryeosd::bootstrap::load_node_config_two_phase_standalone(&config, provider_environment)
                 .context("compose the node's configuration to verify the bundle")?;
+        let public_routes = Arc::new(
+            policy
+                .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                .clone(),
+        );
         let validator = crate::prospective_node_config_validator(
             Arc::new(ryeos_ui::UiState::new()),
             Arc::clone(&engine),
+            public_routes,
         );
         Ok(ComposedForInstall {
             engine,

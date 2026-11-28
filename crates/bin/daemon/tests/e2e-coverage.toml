@@ -384,6 +384,18 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
 
+[tests.public_page_e2e]
+covers = ["ryeos-ui"]
+paths = ["bundles/ryeos-public/**", "crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.public_route_gating_e2e]
+covers = ["ryeos-cli", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/handlers/system_routes.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/route_diagnostics.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
+
+[tests.public_route_install_e2e]
+covers = ["ryeos-bundle"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_install.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
+
 [tests.publication_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-node", "ryeos-node-runtime"]
 paths = ["crates/bin/daemon/src/startup.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/handlers/publication.rs", "crates/engine/ryeos-engine/src/authority/trust/publication.rs"]
