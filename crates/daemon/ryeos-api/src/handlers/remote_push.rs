@@ -153,30 +153,11 @@ pub async fn handle(
 ) -> Result<Value> {
     // Judged before any path is touched, so a refused request learns nothing.
     let principal = OutboundPrincipal::resolve_admitted(req.outbound_principal, &state, &context)?;
-    let path = &req.project;
-    if !path.is_absolute() {
-        return Err(refuse(
-            "project_path_not_absolute",
-            400,
-            format!(
-                "project '{}' is not absolute: the CLI must canonicalize \
-                 before sending. The daemon's cwd is irrelevant to the caller.",
-                path.display()
-            ),
-        ));
-    }
-    let canonical_abs = path.canonicalize().map_err(|e| {
-        refuse(
-            "project_path_unavailable",
-            400,
-            format!(
-                "cannot canonicalize project '{}': {}. Ensure the path \
-                 exists and is accessible.",
-                path.display(),
-                e
-            ),
-        )
-    })?;
+    // The path names a live directory on the host, so it is admitted like any
+    // other live project path.
+    let canonical_abs =
+        ryeos_app::live_project_path::admit_handler_live_path(&state, &context, &req.project)?
+            .canonical;
     let mut project_path_for_ref = config::local_project_identity(&canonical_abs)?.to_owned();
     let abs_project_path = canonical_abs;
 

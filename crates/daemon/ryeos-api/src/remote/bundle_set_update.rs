@@ -381,6 +381,7 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                 app_root: Some(app_root.to_owned()),
                 ..Default::default()
             })?;
+        let lane_trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
         let mut actions = Vec::new();
         let mut future = live.clone();
         for entry in &plan.entries {
@@ -419,6 +420,11 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                 kind,
                 BundleSetActionKind::Add | BundleSetActionKind::Replace
             ) {
+                ryeos_app::bundle_transaction::refuse_laned_replacement(
+                    app_root,
+                    &lane_trust,
+                    &entry.bundle_name,
+                )?;
                 let generation = verified
                     .generations()
                     .get(&entry.bundle_name)
@@ -439,6 +445,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                     .join("bundles")
                     .join(&entry.bundle_name);
                 let bytes = ryeos_app::bundle_transaction::prepare_signed_bundle_registration(
+                    app_root,
+                    &lane_trust,
                     &live_target,
                     &config.node_signing_key_path,
                 )?;

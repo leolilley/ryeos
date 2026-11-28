@@ -219,6 +219,10 @@ fn authority_measure_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         context
             .require_verified()
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -2714,6 +2718,10 @@ fn substrate_build_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         context
             .require_verified()
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -2907,6 +2915,10 @@ fn substrate_qualify_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         context
             .require_verified()
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -3013,6 +3025,10 @@ fn core_seed_build_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: ryeos_app::bundle_publication::core_seed::CoreSeedBuildRequest =
             crate::handler_error::parse_request(params)?;
         anyhow::ensure!(
@@ -3143,6 +3159,10 @@ fn core_seed_capture_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: CoreSeedCaptureRequest = crate::handler_error::parse_request(params)?;
         anyhow::ensure!(
             request.build.child_product_selections.is_empty(),
@@ -3275,6 +3295,10 @@ fn core_seed_qualify_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: CoreSeedQualifyRequest = crate::handler_error::parse_request(params)?;
         let project = request.build.release_input["project_path"]
             .as_str()
@@ -3346,6 +3370,10 @@ fn input_inspect_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: InputInspectRequest = crate::handler_error::parse_request(params)?;
         let root = std::path::PathBuf::from(&request.project_path);
         let (source_generation, _source_context) = resolve_release_source_generation(
@@ -3389,6 +3417,10 @@ fn core_seed_inspect_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: CoreSeedInspectRequest = crate::handler_error::parse_request(params)?;
         anyhow::ensure!(
             request.bundle_name == "core",
@@ -3435,6 +3467,10 @@ fn generation_build_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: GenerationBuildRequest = crate::handler_error::parse_request(params)?;
         BundleReleaseOperation::GenerationBuild(request.clone()).validate()?;
         let project = request
@@ -3612,6 +3648,10 @@ fn generation_capture_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: GenerationCaptureRequest = crate::handler_error::parse_request(params)?;
         BundleReleaseOperation::GenerationCapture(request.clone()).validate()?;
         let project = request.release_input["project_path"]
@@ -3790,6 +3830,10 @@ fn generation_qualify_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        // This service reads host paths the request names (a project
+        // checkout or an executable), so it is the operator's alone; judged
+        // before the request is read.
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request: GenerationQualifyRequest = crate::handler_error::parse_request(params)?;
         BundleReleaseOperation::GenerationQualify(request.clone()).validate()?;
         let project = request
@@ -4154,6 +4198,7 @@ fn submit_handler(
     state: Arc<AppState>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
+        ryeos_app::operator_authority::require_admitted_operator(&state, &context)?;
         let request = crate::handler_error::parse_request(params)?;
         dispatch_release_graph(request, context, state).await
     })

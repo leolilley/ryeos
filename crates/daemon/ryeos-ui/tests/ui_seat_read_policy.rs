@@ -43,6 +43,7 @@ fn add_bundles(state: &mut AppState, names: &[&str]) {
     for name in names {
         snapshot.bundles.push(BundleRecord {
             name: (*name).to_owned(),
+            lane: None,
             path: format!("/srv/private/{name}").into(),
             source_file: format!("/srv/private/{name}.yaml").into(),
         });
@@ -209,6 +210,12 @@ async fn the_shipped_policy_withholds_bundle_paths_from_a_seat() {
     assert_eq!(
         listed["result"]["result"],
         json!({"bundles": [{"name": "alpha"}, {"name": "beta"}]})
+    );
+    // The staged list is the operator's node administration: the shipped
+    // policy keeps only the installed bundles, so a seat never sees the key.
+    assert!(
+        listed["result"]["result"].get("staged").is_none(),
+        "a seat was shown the staged list: {listed}"
     );
     let text = serde_json::to_string(&listed).unwrap();
     assert!(!text.contains("/srv/private"), "{text}");

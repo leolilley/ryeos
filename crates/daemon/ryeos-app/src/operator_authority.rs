@@ -214,6 +214,28 @@ pub fn require_admitted_operator(
     }
 }
 
+/// Admit the operator, or this node acting as itself. A node-owned schedule
+/// fire presents the node's own principal as a verified caller with no
+/// authenticated class and no forwarding origin. Any other key, including a
+/// remote node's, is held to the operator rule and refused like a member.
+pub fn require_admitted_operator_or_this_node(
+    state: &AppState,
+    context: &HandlerContext,
+) -> anyhow::Result<()> {
+    let is_this_node = context.require_verified().is_ok()
+        && context.authenticated_origin_site_id.is_none()
+        && matches!(
+            context.authorized_key_class,
+            None | Some(AuthorizedKeyPrincipalClass::LocalClient)
+        )
+        && (context.fingerprint == state.identity.principal_id()
+            || context.fingerprint == state.identity.fingerprint());
+    if is_this_node {
+        return Ok(());
+    }
+    require_admitted_operator(state, context).map(drop)
+}
+
 fn remote_principal_fingerprint(context: &HandlerContext) -> anyhow::Result<String> {
     let fingerprint = context
         .fingerprint

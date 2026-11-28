@@ -1,11 +1,11 @@
-# ryeos:signed:2026-11-24T13:50:08Z:2dd1158aaba3d11ad9f4b8ecac8eeb0c5c5b054396c793bdbf2f8cef04e5aba7:wRhsrLeA41lBuIOA/Vjd+XRbdFfIl+4MMnF0rbOlkzFN/t8fhKXh4OKHS+BE+KNKxPlgWOIi/ivNxcVJ9AJ2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T16:30:28Z:d275dc8b85f2583288bcdf9b1065ee513986f76a93ad173da9fcc75757772322:RbwppAMJVU/LaNT3bg5lodfdlr/5QepScMVcamnhg//W9x6UyeTm6tsOWyiwbKkChob/Wfhp839uM/+heES4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: system.push-head
 required_caps: ["ryeos.execute.service.system/push-head"]
 schema:
   staging_id: string
-  project_path: string
+  project: json
   snapshot_hash: string
   # Required: explicit null for first publication, otherwise the observed hash.
   expected_previous_hash: json

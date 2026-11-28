@@ -44,6 +44,10 @@ const VAULT_LIST: &str = "ryeos.execute.service.vault/list";
 const VAULT_SET: &str = "ryeos.execute.service.vault/set";
 const VAULT_DELETE: &str = "ryeos.execute.service.vault/delete";
 const REVOKE_CAP: &str = "ryeos.execute.service.identity/revoke-delegation";
+const BUNDLE_EXPORT: &str = "ryeos.execute.service.bundle/export";
+const OBJECTS_GET: &str = "ryeos.execute.service.objects/get";
+/// A bundle HOSTED holds and ORIGIN does not, for the staging scenario.
+const STAGED_BUNDLE: &str = "staged-demo";
 
 fn hosted_node_key() -> SigningKey {
     SigningKey::from_bytes(&[171_u8; 32])
@@ -183,6 +187,8 @@ async fn start_pair() -> Result<Pair> {
                     // The remote bundle-install service also requires the
                     // local bundle-install capability before it goes out.
                     "ryeos.execute.service.bundle/install",
+                    // Reading the staged list is a plain principal's view.
+                    "ryeos.execute.service.bundle/list",
                     THREADS_CAP,
                     "ryeos.execute.service.remote/delegation-revoke",
                 ],
@@ -201,7 +207,19 @@ async fn start_pair() -> Result<Pair> {
                 fixture,
                 &u1,
                 &origin_site,
-                &[VAULT_LIST, VAULT_SET, REVOKE_CAP],
+                &[
+                    VAULT_LIST,
+                    VAULT_SET,
+                    REVOKE_CAP,
+                    BUNDLE_EXPORT,
+                    OBJECTS_GET,
+                ],
+            )?;
+            common::fast_fixture::register_config_fixture_bundle(
+                state_path,
+                STAGED_BUNDLE,
+                fixture,
+                |_| Ok(()),
             )?;
             authorize_remote_principal(state_path, fixture, &u2, &origin_site, &[VAULT_LIST])?;
             Ok(())
@@ -602,7 +620,8 @@ async fn a_principal_without_a_delegation_is_refused_on_origin_and_capped_on_hos
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -> Result<()> {
+async fn authorize_and_bundle_install_go_out_as_the_caller_and_pull_is_the_operators() -> Result<()>
+{
     let pair = start_pair().await?;
     let u2 = u2_key();
     let calls = [
@@ -613,15 +632,6 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
                 "public_key": format!("ed25519:{}", public_b64(&hosted_operator_key())),
                 "label": "x",
                 "scopes": ["ryeos.execute.service.threads/list"],
-            }),
-        ),
-        (
-            "service:remote/pull",
-            json!({
-                "remote": HOSTED_REMOTE,
-                "root": {"kind": "thread_result", "thread_id": "T-x"},
-                "object_hashes": ["object:00"],
-                "output_dir": "/nonexistent/out",
             }),
         ),
         (
@@ -637,20 +647,47 @@ async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -
             "{service}: {body}"
         );
     }
+    // A pull writes into a host directory it names, so it is the operator's
+    // alone: a non-operator caller is refused before its delegation is read.
+    let (status, body) = pair
+        .origin_service(
+            &u2,
+            "service:remote/pull",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "root": {"kind": "thread_result", "thread_id": "T-x"},
+                "object_hashes": ["object:00"],
+                "output_dir": "/nonexistent/out",
+            }),
+        )
+        .await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "remote/pull: {body}"
+    );
+    assert!(
+        body.to_string().contains("local_operator_required"),
+        "remote/pull: {body}"
+    );
     Ok(())
 }
 
-/// A caller the origin authorizes (a stored delegation for the remote) is
-/// refused by the live-install rule, not by authority: it learns that live
-/// installs are staged, nothing is written on the origin, and the node boots
-/// again.
+/// A caller the origin authorizes (a stored delegation for the remote) has the
+/// bundle fetched, verified and staged on ORIGIN: nothing is registered or put
+/// in a bundle root, ORIGIN boots again, bundle/list shows it as staged and
+/// not installed, an operator sees the stage's detail and another principal
+/// sees the status only.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_nothing() -> Result<()>
-{
+async fn an_authorized_remote_bundle_install_stages_and_registers_nothing() -> Result<()> {
     let mut pair = start_pair().await?;
     let u1 = common::fast_fixture::user_signing_key();
-    pair.delegate(&u1, &[VAULT_LIST]).await?;
-    let bundle = "staged-refusal-demo";
+    let u2 = u2_key();
+    pair.delegate(&u1, &[VAULT_LIST, BUNDLE_EXPORT, OBJECTS_GET])
+        .await?;
+    let bundle = STAGED_BUNDLE;
+    let journal = pair.origin.state_path.join(".ai/state/node-journal");
+    let journal_before = listing(&journal);
 
     let (status, body) = pair
         .origin_service(
@@ -659,13 +696,19 @@ async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_no
             json!({"remote": HOSTED_REMOTE, "bundle_name": bundle}),
         )
         .await?;
-    assert_eq!(status.as_u16(), 501, "{body}");
-    assert_eq!(body["code"], "live_install_staged_unavailable", "{body}");
-    let text = body["error"].as_str().unwrap_or_default();
-    assert!(
-        text.contains("live installs are staged; staging is not available yet"),
+    assert_eq!(status.as_u16(), 200, "{body}");
+    let result = &body["result"];
+    assert_eq!(result["status"], "staged", "{body}");
+    assert_eq!(result["installed"], false, "{body}");
+    assert_eq!(
+        result["receipt"],
+        "fetched and verified; staged; takes effect at the next start by a signed operation",
         "{body}"
     );
+    let digest = result["tree_digest"]
+        .as_str()
+        .context("tree digest")?
+        .to_owned();
     assert!(
         !pair
             .origin
@@ -673,7 +716,7 @@ async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_no
             .join(".ai/bundles")
             .join(bundle)
             .exists(),
-        "a refused install left a bundle behind"
+        "a staged install put a bundle in the bundle root"
     );
     assert!(
         !pair
@@ -682,15 +725,73 @@ async fn an_authorized_remote_bundle_install_is_refused_as_staged_and_changes_no
             .join(".ai/node/bundles")
             .join(format!("{bundle}.yaml"))
             .exists(),
-        "a refused install left a registration behind"
+        "a staged install registered a bundle"
+    );
+    assert_eq!(
+        listing(&journal),
+        journal_before,
+        "staging wrote to the ledger"
+    );
+    assert!(
+        pair.origin
+            .state_path
+            .join(".ai/state/bundle-staging")
+            .join(&digest)
+            .join("stage.record")
+            .is_file()
     );
 
     pair.origin.restart().await?;
-    let (status, listed) = pair
-        .origin_service(&u1, "service:bundle/list", json!({}))
-        .await?;
-    assert_eq!(status.as_u16(), 200, "{listed}");
+    for (key, operator) in [(&u1, true), (&u2, false)] {
+        let (status, listed) = pair
+            .origin_service(key, "service:bundle/list", json!({}))
+            .await?;
+        assert_eq!(status.as_u16(), 200, "{listed}");
+        assert!(
+            !listed["result"]["bundles"]
+                .as_array()
+                .context("bundles")?
+                .iter()
+                .any(|entry| entry["name"] == bundle),
+            "a staged bundle is listed as installed: {listed}"
+        );
+        let entry = listed["result"]["staged"]
+            .as_array()
+            .context("staged")?
+            .iter()
+            .find(|entry| entry["name"] == bundle)
+            .with_context(|| format!("the stage is not listed: {listed}"))?;
+        assert_eq!(entry["status"], "staged", "{listed}");
+        if operator {
+            assert_eq!(entry["tree_digest"], digest, "{listed}");
+            assert!(entry["declared"].is_object(), "{listed}");
+        } else {
+            let keys: Vec<&String> = entry.as_object().context("entry")?.keys().collect();
+            assert_eq!(
+                keys.len(),
+                2,
+                "a principal sees the name and status only: {listed}"
+            );
+        }
+    }
     Ok(())
+}
+
+fn listing(dir: &Path) -> Vec<(String, u64)> {
+    let mut entries: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .map(|read| {
+            read.map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.metadata().unwrap().len(),
+                )
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    entries
 }
 
 #[tokio::test(flavor = "multi_thread")]

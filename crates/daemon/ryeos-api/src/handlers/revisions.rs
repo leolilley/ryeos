@@ -68,19 +68,30 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| HandlerError::Internal(format!("revisions read task failed: {error}")))?
 }
 
-/// The chain of `item_ref` in `project_path`, read and verified.
+/// The live project root a request names, admitted like any other live
+/// project path: the operator keeps its own answers, any other key only at a
+/// root registered to an owner it speaks for.
+fn admit_project_root(
+    state: &AppState,
+    ctx: &HandlerContext,
+    project_path: &str,
+) -> HandlerResult<PathBuf> {
+    Ok(ryeos_app::live_project_path::admit_handler_live_path(
+        state,
+        ctx,
+        std::path::Path::new(project_path),
+    )?
+    .canonical)
+}
+
+/// The chain of `item_ref` in the admitted `project_root`, read and verified.
 fn read_item_chain(
     state: &AppState,
-    project_path: &str,
+    project_root: PathBuf,
     item_ref: &str,
 ) -> HandlerResult<ChainView> {
     let item = ChainItem::parse(item_ref)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
-    let project_root = std::fs::canonicalize(project_path).map_err(|error| {
-        HandlerError::BadRequest(format!(
-            "project_path `{project_path}` is not readable: {error}"
-        ))
-    })?;
     let schema =
         state.engine.kinds.get(&item.kind).ok_or_else(|| {
             HandlerError::BadRequest(format!("unknown item kind `{}`", item.kind))
@@ -174,8 +185,9 @@ pub async fn list(
             )
         })?,
     };
+    let project_root = admit_project_root(&state, &ctx, &req.project_path)?;
     blocking(move || {
-        let view = read_item_chain(&state, &req.project_path, &req.item_ref)?;
+        let view = read_item_chain(&state, project_root, &req.item_ref)?;
         let page: Vec<Value> = view
             .records
             .iter()
@@ -209,8 +221,9 @@ pub async fn get(
             super::records::INCLUDE_UNVERIFIED_CAP
         )));
     }
+    let project_root = admit_project_root(&state, &ctx, &req.project_path)?;
     blocking(move || {
-        let view = read_item_chain(&state, &req.project_path, &req.item_ref)?;
+        let view = read_item_chain(&state, project_root, &req.item_ref)?;
         let record = view
             .records
             .iter()

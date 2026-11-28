@@ -94,21 +94,13 @@ pub async fn handle(
     let (abs_project_path, mut project_path_for_ref) = match &project_spec {
         ProjectPathSpec::NoProject => (None, NO_PROJECT_SENTINEL.to_string()),
         ProjectPathSpec::Explicit { path } => {
-            if !path.is_absolute() {
-                return Err(HandlerError::BadRequest(format!(
-                    "project '{}' is not absolute: the CLI must \
-                     canonicalize before sending. The daemon's cwd is \
-                     irrelevant to the caller.",
-                    path.display()
-                )));
-            }
-            let canonical = path.canonicalize().map_err(|e| {
-                HandlerError::BadRequest(format!(
-                    "cannot canonicalize project path '{}': {e}. \
-                     Ensure the path exists and is accessible.",
-                    path.display()
-                ))
-            })?;
+            // The path names a live directory on the host, so it is
+            // admitted like any other live project path (absolute,
+            // canonical, registered to the caller unless the caller is the
+            // operator).
+            let canonical =
+                ryeos_app::live_project_path::admit_handler_live_path(&state, &ctx, path)?
+                    .canonical;
             let ref_str = config::local_project_identity(&canonical)
                 .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
                 .to_owned();

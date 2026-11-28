@@ -7,6 +7,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
 use ryeos_node_runtime::disclosure::ServiceDisclosure;
 use serde_json::Value;
 
@@ -119,6 +122,7 @@ const OPERATOR_ONLY: &[&str] = &[
     "bundle/remove",
     "bundle/sign",
     "bundle/smoke",
+    "bundle/stage-clear",
     "bundle/verify",
     "credential-profiles/abandon-login",
     "credential-profiles/delete",
@@ -973,45 +977,12 @@ fn the_handoff_targets_tiers_carry_exactly_the_stage_timings_the_source_reads_ba
 /// braced item (`mod tests { .. }`) ends where its braces balance.
 fn ungated_measurement_writes(source: &str) -> Vec<usize> {
     let lines: Vec<&str> = source.lines().collect();
-    let mut skipped = vec![false; lines.len()];
-    let mut index = 0;
-    while index < lines.len() {
-        if lines[index].trim() != "#[cfg(test)]" {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        let mut depth = 0_i64;
-        let mut opened = false;
-        let mut end = index;
-        'item: for (offset, line) in lines[index + 1..].iter().enumerate() {
-            end = index + 1 + offset;
-            if !opened && line.trim_start().starts_with("#[") {
-                continue;
-            }
-            for character in line.chars() {
-                match character {
-                    '{' => {
-                        opened = true;
-                        depth += 1;
-                    }
-                    '}' => depth -= 1,
-                    ';' if !opened => break 'item,
-                    _ => {}
-                }
-                if opened && depth == 0 {
-                    break 'item;
-                }
-            }
-        }
-        for flag in &mut skipped[start..=end] {
-            *flag = true;
-        }
-        index = end + 1;
-    }
+    let production = rust_source_text::production_text("handler source", source);
+    let production_lines: Vec<&str> = production.lines().collect();
     let mut ungated = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if skipped[index] || !line.contains("[\"qualification_measurements\"] =") {
+        let needle = "[\"qualification_measurements\"] =";
+        if !line.contains(needle) || !production_lines[index].contains(needle) {
             continue;
         }
         let gated = lines[..index]
@@ -1065,7 +1036,7 @@ fn the_gate_scan_skips_test_modules_and_flags_ungated_production_writes() {
     assert_eq!(ungated_measurement_writes(file_module), vec![5]);
 }
 
-/// The publication services are operator acts and operator bookkeeping. An
+/// The publication services and the stage clear are operator acts and operator bookkeeping. An
 /// empty `disclosure: {}` is not a grant: a principal or an unauthenticated
 /// caller is shaped to an empty answer and never sees the result. Their
 /// capability requirement is separate and unchanged.
@@ -1075,6 +1046,7 @@ fn the_publication_services_disclose_nothing_to_a_non_operator() {
     let all = services();
     for name in [
         "bundle/pull",
+        "bundle/stage-clear",
         "publication/freeze",
         "publication/list",
         "publication/publish",
