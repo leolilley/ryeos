@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:14:24Z:32b3f7bd0488d44bb3114b20d7db33dc3dc7ac69becdf774831a132327adbe6e:jn0chPlxqlV6Xi/Ni/pml2K0gDK2NhcKp3hrkJzuLbBJ4TpMDismR7RLU8Kh7nRUepY0c2Kp+EzETUtiQBl+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T15:22:04Z:75a029ed0450ebc8d5f9dded235ba7b74da4f18509ec08a0c23ed7bac795c54a:RBdjFmcreJGAloHyuBDvRcTTmSzUFik8KSfGFfclmmS8wIoDfP62NzBhVfU6l0SHSSfJmpvu3fijH9ROMdteDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -91,7 +91,7 @@ For stale signatures, stale bundle binaries, stale CAS, or wrong-key signing:
 target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
 target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core
 target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core
-target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge
+target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge --registry-root bundles/graph
 ```
 
 Then reinitialize the system space you are actually using:

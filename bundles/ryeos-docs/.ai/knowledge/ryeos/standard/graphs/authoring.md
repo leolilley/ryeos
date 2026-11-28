@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T14:23:58Z:1fe07d0d63a6fd04938eb1513a456297b2dd2c51942c1545b9f2975b9e78b78d:+WPjAjqYit2TeNuPwbxIL7VLFQxsK3jmqq/s0HvpsCdXDbZeJFP+llNFILw1oQ9WGZaHsBFIP9TsNFvIzar+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T15:22:04Z:e3e6239cade05763f14cf5ed58ce3833a38d8e2a483d4fc872b9f98c6db7a628:CAr4ishtwckcWmAJO/LBEh5ljFSfLdeKP/1XRnvBWSjBspi1yYIbxOfqAde2jHDKx7FYndhJRYw1+BlwXxPECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
@@ -29,7 +29,7 @@ The graph kind delegates to `runtime:graph-runtime` through the runtime registry
 
 ## Example: a goal, a working directive and a judge
 
-`graph:ryeos/standard/examples/goal-judge` (in the graph bundle, with `directive:ryeos/standard/examples/goal-work`, `directive:ryeos/standard/examples/goal-judge` and `tool:ryeos/standard/examples/goal-fail`) is a signed example, not a default: no shipped graph, directive or allowlist refers to it. Copy it and change the signed state at the top of the graph.
+`graph:ryeos/standard/examples/goal-judge` (in the directive bundle, with `directive:ryeos/standard/examples/goal-work`, `directive:ryeos/standard/examples/goal-judge` and `tool:ryeos/standard/examples/goal-fail`) is a signed example, not a default: no shipped graph, directive or allowlist refers to it. Copy it and change the signed state at the top of the graph.
 
 What it does, each stage a followed child with a fresh context:
 

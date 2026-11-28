@@ -807,7 +807,7 @@ publish_bundle() {
 
 publish_bundle knowledge "$KNOWLEDGE" "signed manifests"
 publish_bundle graph "$GRAPH" "signed manifests"
-publish_bundle directive "$DIRECTIVE" "signed manifests" "$KNOWLEDGE"
+publish_bundle directive "$DIRECTIVE" "signed manifests" "$KNOWLEDGE" "$GRAPH"
 publish_bundle ryeos-docs "$RYEOS_DOCS" "signed manifests" "$KNOWLEDGE"
 publish_bundle environment-qualification "$ENV_QUALIFICATION" "signed qualification policies"
 publish_bundle web "$WEB" "signed manifests"

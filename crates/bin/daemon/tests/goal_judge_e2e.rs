@@ -115,7 +115,7 @@ fn verdict(pass: bool, failed: &[&str]) -> MockResponse {
 /// state replaced, planted as `graph:variant` and signed by the test publisher.
 fn plant_variant(project: &Path, signer: &SigningKey, from: &str, to: &str) {
     let source =
-        repo_root().join("bundles/graph/.ai/graphs/ryeos/standard/examples/goal-judge.yaml");
+        repo_root().join("bundles/directive/.ai/graphs/ryeos/standard/examples/goal-judge.yaml");
     let raw = std::fs::read_to_string(source).expect("shipped example graph");
     let body = lillux::signature::strip_signature_lines(&raw);
     assert!(body.contains(from), "the example holds `{from}`");
@@ -452,7 +452,7 @@ fn repo_root() -> PathBuf {
 #[test]
 fn the_shipped_judge_directive_declares_no_tool_and_no_capability() {
     let path =
-        repo_root().join("bundles/graph/.ai/directives/ryeos/standard/examples/goal-judge.md");
+        repo_root().join("bundles/directive/.ai/directives/ryeos/standard/examples/goal-judge.md");
     let raw = std::fs::read_to_string(path).expect("judge directive");
     let header = raw
         .split("---")
@@ -499,7 +499,7 @@ fn no_default_graph_directive_or_allowlist_refers_to_the_example() {
             walk(&bundle.path().join(".ai").join(sub), &mut found);
         }
     }
-    let allowed = "bundles/graph/.ai";
+    let allowed = "bundles/directive/.ai";
     let offenders: Vec<_> = found
         .iter()
         .filter(|path| {

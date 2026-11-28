@@ -7,6 +7,8 @@ requires_kinds:
   - parser
   - runtime
   - service
+  - tool
   - worker
 uses_kinds:
+  - graph
   - knowledge

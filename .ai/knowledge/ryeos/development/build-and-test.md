@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T01:06:17Z:364fb80c8bb82e492d1b5a2d26847a2885c79d78501fd07ff8a59015792becc8:jz2SgXYjiRo3MTYfey8+PIPOanT+7b8MhIRNE0JVLmOd0kGiIhVX2W9dH3ZPXX99GomiLunx/Vic3rrsXARVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T15:22:04Z:2efb224624db7e52487a7aa3fb928128f58d0d62e236991f345c7c3c2d70218a:OTVYBQiNWCkJNJ5ze6/tmyZRiDiTVCKkRr+AybKmuqqIkCR3mHb9KUYH9xU60kZRtC0M+JLRHhmD0AuOPmLTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -24,7 +24,7 @@ test, refresh bundles, or install this checkout locally.
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
-| Verify core and workflow source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge` |
+| Verify core and workflow source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge --registry-root bundles/graph` |
 | Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/knowledge --registry-root bundles/directive --registry-root bundles/graph` |
 | Stronger-host build and configured-remote qualification | See `development/remote-development-and-qualification.md` |
 
