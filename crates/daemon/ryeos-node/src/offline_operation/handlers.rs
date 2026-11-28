@@ -385,9 +385,10 @@ impl AuthorizeClientArguments {
             !self.scopes.iter().any(|scope| scope.contains('*')),
             "a delegated grant names exact scopes; wildcards are refused"
         );
-        // Offline-operation scopes are granted only by the node's local
-        // operator: a delegated grant cannot widen who may sign them.
-        ryeos_node_runtime::identity::reject_offline_scopes(&self.scopes)?;
+        // Offline-operation scopes, and the scope that stops the node, are
+        // granted only by the node's local operator: a delegated grant cannot
+        // widen who may sign or stop.
+        ryeos_node_runtime::identity::reject_offline_grant_scopes(&self.scopes)?;
         ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)
             .context("origin site id is not canonical")?;
         Ok(())

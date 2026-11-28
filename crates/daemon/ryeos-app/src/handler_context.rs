@@ -190,6 +190,12 @@ pub struct HandlerContext {
     /// caller input.
     #[serde(skip)]
     pub delegated_via: Option<String>,
+    /// Scopes the forwarding node's own grant holds, for a request that node
+    /// forwarded under a delegation. `None` for a request that was not
+    /// forwarded. Local dispatch context only: never serialized and never
+    /// caller input.
+    #[serde(skip)]
+    pub forwarding_scopes: Option<Vec<String>>,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -237,6 +243,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            forwarding_scopes: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -260,6 +267,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            forwarding_scopes: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -284,6 +292,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            forwarding_scopes: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -309,6 +318,7 @@ impl HandlerContext {
             authenticated_grant_authority: Some(authenticated_grant_authority),
             signed_request_digest: None,
             delegated_via: None,
+            forwarding_scopes: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -374,6 +384,12 @@ impl HandlerContext {
     /// delegation.
     pub fn with_delegated_via(mut self, site_id: Option<String>) -> Self {
         self.delegated_via = site_id;
+        self
+    }
+
+    /// Record the scopes the forwarding node's own grant holds.
+    pub fn with_forwarding_scopes(mut self, scopes: Option<Vec<String>>) -> Self {
+        self.forwarding_scopes = scopes;
         self
     }
 

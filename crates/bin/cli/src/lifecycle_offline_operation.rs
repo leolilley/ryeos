@@ -477,7 +477,7 @@ pub async fn run_remote_facts(
 #[command(
     name = "ryeos node offline-operation submit",
     about = "Send a signed offline-operation request to a running node's route",
-    long_about = "The node verifies the request exactly as it will at its next startup and queues it. It applies nothing while running. The node keeps running unless --stop is given; with --stop it makes a plain operator stop, and its supervisor (or the hosting platform) starts it again, which applies the request. The key that authenticates the delivery must be the key that signed the request. With --remote <name> the request and its input files go to this operator's own node, which forwards them to that remote under the operator's stored delegation (`ryeos remote delegate --remote <name> --scopes ryeos.execute.service.offline-operations/submit,...`); the remote records the operator as the principal and this node's site as the forwarding node.",
+    long_about = "The node verifies the request exactly as it will at its next startup and queues it. It applies nothing while running. The node keeps running unless --stop is given; with --stop it makes a plain operator stop, and its supervisor (or the hosting platform) starts it again, which applies the request. The key that authenticates the delivery must be the key that signed the request. With --remote <name> the request and its input files go to this operator's own node, which forwards them to that remote under the operator's stored delegation (`ryeos remote delegate --remote <name> --scopes ryeos.execute.service.offline-operations/submit,...`; with --stop the delegation must also lend `ryeos.execute.service.offline-operations/stop`, and the remote's grant to you and to this node must hold it: a stop is a separate scope from queueing); the remote records the operator as the principal and this node's site as the forwarding node.",
     no_binary_name = true
 )]
 struct SubmitArgs {
@@ -491,7 +491,8 @@ struct SubmitArgs {
 
     /// Deliver through this operator's own node to the remote of this name,
     /// under the delegation stored for it. The delegation must lend
-    /// `ryeos.execute.service.offline-operations/submit`.
+    /// `ryeos.execute.service.offline-operations/submit`, and with `--stop`
+    /// also `ryeos.execute.service.offline-operations/stop`.
     #[arg(long, conflicts_with = "url")]
     remote: Option<String>,
 

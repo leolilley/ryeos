@@ -319,6 +319,26 @@ pub fn reject_offline_scopes(scopes: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Exact scope that lets a caller make the node stop when it delivers an
+/// offline operation. Queueing a request and stopping the node are separate
+/// scopes: holding the queue scope, or a wildcard that would match this one,
+/// never grants it.
+pub const OFFLINE_STOP_SCOPE: &str = "ryeos.execute.service.offline-operations/stop";
+
+/// [`reject_offline_scopes`], and also the exact stop scope. Writers of a
+/// grant that act for anyone but the node's local operator use this: only the
+/// local operator may put the stop scope into a grant. A delegation does not
+/// use it: a delegation only lends part of what its signer's own grant holds.
+pub fn reject_offline_grant_scopes(scopes: &[String]) -> Result<()> {
+    reject_offline_scopes(scopes)?;
+    if scopes.iter().any(|scope| scope == OFFLINE_STOP_SCOPE) {
+        bail!(
+            "scope `{OFFLINE_STOP_SCOPE}` stops the node; only the node's local operator may grant it"
+        );
+    }
+    Ok(())
+}
+
 /// Refuse any scope that is a wildcard under the offline-operation prefix.
 pub fn reject_offline_scope_wildcards(scopes: &[String]) -> Result<()> {
     if let Some(scope) = scopes.iter().find(|scope| is_offline_scope_wildcard(scope)) {

@@ -105,7 +105,7 @@ impl AuthorizeClientRequest {
         }
         ryeos_node_runtime::identity::reject_offline_scope_wildcards(&scopes)?;
         if !local_operator {
-            ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
+            ryeos_node_runtime::identity::reject_offline_grant_scopes(&scopes)?;
         }
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
@@ -309,8 +309,9 @@ impl MintAdmissionTokenRequest {
             .map(str::to_owned)
             .collect::<Vec<String>>();
         // An admission token is redeemed by the party being admitted, never by
-        // the local operator, so it cannot carry an offline-operation scope.
-        ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
+        // the local operator, so it cannot carry an offline-operation scope or
+        // the scope that stops the node.
+        ryeos_node_runtime::identity::reject_offline_grant_scopes(&scopes)?;
         Ok(MintAdmissionTokenParams {
             app_root,
             scopes,

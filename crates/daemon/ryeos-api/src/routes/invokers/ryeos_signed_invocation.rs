@@ -80,6 +80,12 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
                 site,
             );
         }
+        if let Some(scopes) = &principal.forwarding_scopes {
+            metadata.insert(
+                crate::routes::invocation::FORWARDING_SCOPES_METADATA_KEY.to_owned(),
+                serde_json::to_string(scopes).map_err(|_| RouteDispatchError::Unauthorized)?,
+            );
+        }
         Ok(RouteInvocationResult::Principal(RoutePrincipal {
             id: format!("fp:{}", principal.fingerprint),
             scopes: principal.scopes,

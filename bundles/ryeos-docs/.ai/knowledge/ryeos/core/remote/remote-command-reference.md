@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T16:25:38Z:4a4908c189f79ec55ffe57bf92a6195ab37fe2e9b177316499d6d20dbcca076b:btENwBlvChRF5TXr4HJB9Ptlyi9hgpzdI0a8WIGc4I9XrxnBtI6mF0EIEHiEV5RiZCQL0o2crJdrmTobFzA7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T23:59:04Z:004a7bf446eb5b7bf8734f16f709baa2cb23b8036c5518dc45ee007db703a9e6:AvGqKerr2og6QVeprS9smRunACozDUNoOYXr6a1v+2HtX6FOf1Huj2c818oB4IT1pI5vNztZnz1t22zNUzXjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -64,7 +64,7 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote delegation list` | `ryeos.execute.service.remote/delegation-list` | none | none |
 | `ryeos remote delegation revoke` | `ryeos.execute.service.remote/delegation-revoke` | `ryeos.execute.service.identity/revoke-delegation` (lent by the delegation; the remote operator may instead run `ryeos delegation tombstone`) | `POST /revoke-delegation` |
 | `ryeos node offline-operation facts --remote` | `ryeos.execute.service.remote/offline-operations-facts` | `ryeos.execute.service.offline-operations/facts` (lent by the delegation) | `GET /offline-operations/facts` |
-| `ryeos node offline-operation submit --remote` | `ryeos.execute.service.remote/offline-operations-submit` | `ryeos.execute.service.offline-operations/submit` (lent by the delegation) plus the exact `ryeos.offline.<operation>` scope in the grant | `POST /offline-operations` |
+| `ryeos node offline-operation submit --remote` | `ryeos.execute.service.remote/offline-operations-submit` | `ryeos.execute.service.offline-operations/submit` (lent by the delegation) plus the exact `ryeos.offline.<operation>` scope in the grant; `--stop` also needs the exact `ryeos.execute.service.offline-operations/stop` scope, in the grant and lent by the delegation | `POST /offline-operations` |
 | `ryeos node offline-operation list --remote` | `ryeos.execute.service.remote/offline-operations-status` | `ryeos.execute.service.offline-operations/status` (lent by the delegation) | `GET /offline-operations` |
 | `ryeos remote bundle-install` | `ryeos.execute.service.bundle/install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` | `POST /bundle/export`, `POST /objects/get` |
 | `ryeos remote vault-set` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/set` | `POST /vault/set` |

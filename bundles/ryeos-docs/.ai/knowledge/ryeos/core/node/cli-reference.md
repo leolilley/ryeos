@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:44:16Z:e74a2031156942d2886c18c89c048b60ccb34f4178fe3ef80acb62ce18789b15:zIZs0wpaqAU+YeSZJi7aWKfmt6KUPjlZ2FxkdkYQANZyN1eUAOZc4MhDVd41oTmj4Xv3xedJXbr6w4HPRnvDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T23:59:04Z:9c9cae32947fc50fda2ffd2be921a118a7ae1d0832bbbc05f5db63e24481cd89:sYaPa4OXUtj6yXg003+oZAvneYnJNiLEv4HmSsW3GPx5k6Vyl/OyNTjSIdSIRTDw2lAu9bbhxpN/uFe7p6lPCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1037,7 +1037,9 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 verbs are signed offline operations (`node.trust.pin`, `node.trust.scope`,
 `node.trust.retire`, `node.trust.revoke`, `node.trust.succeed`; local signer
 only). On a running node they refuse with `node_running_trust_change`; cure
-by stopping the node, or by `ryeos node offline-operation submit --stop`.
+by stopping the node, or by `ryeos node offline-operation submit --stop`
+(a stop is its own scope, `ryeos.execute.service.offline-operations/stop`,
+separate from queueing; the node's local operator needs no grant for it).
 Each change appends a node-signed, hash-chained key event under
 `<app_root>/.ai/node/trust/events/`.
 

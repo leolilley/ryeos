@@ -25,6 +25,41 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+/// The scope that lets a delivery make the node stop. Queueing a request and
+/// stopping the node are separate scopes: this one is satisfied only by the
+/// exact string in the caller's grant, never by a wildcard.
+pub const OFFLINE_STOP_SCOPE: &str = ryeos_node_runtime::identity::OFFLINE_STOP_SCOPE;
+
+/// Refusal code for a stop asked without the stop scope.
+pub const OFFLINE_STOP_SCOPE_REQUIRED: &str = "offline_stop_scope_required";
+
+/// Refuse a stop the caller holds no authority for. The node's local
+/// configured operator carries it with its own authority; any other caller
+/// needs the exact stop scope in its grant. A delivery another node forwarded
+/// also needs the exact stop scope in that node's own grant.
+fn require_stop_authority(ctx: &HandlerContext, state: &AppState) -> Result<(), HandlerError> {
+    let holds = |scopes: &[String]| scopes.iter().any(|scope| scope == OFFLINE_STOP_SCOPE);
+    if ryeos_app::operator_authority::require_local_configured_operator(state, ctx).is_ok() {
+        return Ok(());
+    }
+    let forwarder_holds =
+        ctx.delegated_via.is_none() || ctx.forwarding_scopes.as_deref().is_some_and(holds);
+    if holds(&ctx.scopes) && forwarder_holds {
+        return Ok(());
+    }
+    let message = "queueing an offline operation and stopping the node are separate scopes; \
+                   a stop needs the exact offline-operations/stop scope";
+    Err(HandlerError::Structured {
+        code: OFFLINE_STOP_SCOPE_REQUIRED.to_owned(),
+        status: 403,
+        body: json!({
+            "code": OFFLINE_STOP_SCOPE_REQUIRED,
+            "message": message,
+            "required_scope": OFFLINE_STOP_SCOPE,
+        }),
+    })
+}
+
 /// How long the stop waits, so the response that reports the queued request
 /// reaches the caller before the listener closes.
 const STOP_DELAY: Duration = Duration::from_millis(500);
@@ -116,6 +151,9 @@ pub async fn submit(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    if req.stop == Some(StopWhen::Now) {
+        require_stop_authority(&ctx, &state)?;
+    }
     // A stop that cannot be performed is refused before anything is queued:
     // the caller asked for both or neither.
     let stop = match req.stop {

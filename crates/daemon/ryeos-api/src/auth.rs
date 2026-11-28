@@ -35,6 +35,9 @@ pub struct Principal {
     /// Site of the node that forwarded this request under the principal's
     /// delegation, when it did. The principal is then the delegator.
     pub delegated_via: Option<String>,
+    /// Scopes the forwarding node's own grant holds, when it forwarded this
+    /// request. `None` for a request that was not forwarded.
+    pub forwarding_scopes: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +597,7 @@ pub(crate) fn verify_request(
             forwarding: forwarding_authority,
         },
         delegated_via: None,
+        forwarding_scopes: None,
     })
 }
 
@@ -760,6 +764,7 @@ fn verify_delegated(
             ),
         },
         delegated_via: Some(forwarding_site_id.to_owned()),
+        forwarding_scopes: Some(node_key.scopes.clone()),
     })
 }
 

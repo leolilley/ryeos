@@ -38,6 +38,9 @@ use ryeos_node_runtime::remote_delegation::DelegationError;
 pub const REMOTE_SUBMIT_CAP: &str = "ryeos.execute.service.offline-operations/submit";
 pub const REMOTE_FACTS_CAP: &str = "ryeos.execute.service.offline-operations/facts";
 pub const REMOTE_STATUS_CAP: &str = "ryeos.execute.service.offline-operations/status";
+/// What a delivery that asks the remote to stop also needs: stopping is a
+/// separate scope from queueing.
+pub const REMOTE_STOP_CAP: &str = ryeos_node_runtime::identity::OFFLINE_STOP_SCOPE;
 
 /// The operator's stored delegation does not lend the remote route's
 /// capability.
@@ -88,7 +91,8 @@ fn scope_missing(remote: &str, required: &str) -> HandlerError {
             "error": format!(
                 "your delegation for remote `{remote}` does not lend `{required}`, and the remote \
                  acts for you only within what the delegation lends; sign one that does: \
-                 `ryeos remote delegate --remote {remote} --scopes {REMOTE_SUBMIT_CAP},{REMOTE_FACTS_CAP},{REMOTE_STATUS_CAP}`"
+                 `ryeos remote delegate --remote {remote} --scopes {REMOTE_SUBMIT_CAP},{REMOTE_FACTS_CAP},{REMOTE_STATUS_CAP}` \
+                 (add `{REMOTE_STOP_CAP}` to deliver with --stop)"
             ),
             "remote": remote,
             "required_scope": required,
@@ -104,7 +108,7 @@ fn delegated_client(
     state: &AppState,
     ctx: &HandlerContext,
     remote_name: &str,
-    required: &str,
+    required: &[&str],
 ) -> HandlerResult<(RemoteClient, String)> {
     ctx.require_verified()?;
     let remote = load_remote(state, remote_name)?;
@@ -127,8 +131,11 @@ fn delegated_client(
             remote: remote.name.clone(),
         })
     })?;
-    if !delegation.body.covers(required) {
-        return Err(scope_missing(&remote.name, required));
+    if let Some(missing) = required
+        .iter()
+        .find(|required| !delegation.body.covers(required))
+    {
+        return Err(scope_missing(&remote.name, missing));
     }
     Ok((client, delegator))
 }
@@ -229,7 +236,12 @@ pub async fn submit(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
-    let (client, delegator) = delegated_client(&state, &ctx, &req.remote, REMOTE_SUBMIT_CAP)?;
+    let required: &[&str] = if req.stop == Some(StopWhen::Now) {
+        &[REMOTE_SUBMIT_CAP, REMOTE_STOP_CAP]
+    } else {
+        &[REMOTE_SUBMIT_CAP]
+    };
+    let (client, delegator) = delegated_client(&state, &ctx, &req.remote, required)?;
     // The remote queues a request only from the key that signed it, and the
     // remote sees the caller as that key. Say so here, with the fix.
     if req.request.body.signer_fingerprint != delegator {
@@ -262,7 +274,7 @@ pub async fn facts(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
-    let (client, _) = delegated_client(&state, &ctx, &req.remote, REMOTE_FACTS_CAP)?;
+    let (client, _) = delegated_client(&state, &ctx, &req.remote, &[REMOTE_FACTS_CAP])?;
     let mut report = client
         .offline_operations_facts()
         .await
@@ -278,7 +290,7 @@ pub async fn status(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
-    let (client, _) = delegated_client(&state, &ctx, &req.remote, REMOTE_STATUS_CAP)?;
+    let (client, _) = delegated_client(&state, &ctx, &req.remote, &[REMOTE_STATUS_CAP])?;
     let mut report = client
         .offline_operations_status()
         .await

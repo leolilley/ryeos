@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T16:25:38Z:a66cc937ed0c20a26f2c7689cc503ea2ffda5ef5648317615c294e06d2fc2d61:eNJi78g+P4OBEcOcWU87aDEzHLOenm8DsXqipYwkNbvryHQqPGhVq43a9viN2BFpV9UY5y8oMyaiHjmuLF5kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:00:26Z:850762621091cf0c7354ceb9bdc0a5e6384ab7a4072cecdab7b4db25e5cd4fa6:Lh5wtXLJ3Lo/v8bnsL+hi4aqmNuygCby+laZWvJ5lrqLsC2zVPD/Uy2UX/gP3Cho2NHE71/WZ/STjO93vnLkAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -487,7 +487,14 @@ can make (through the platform channel below, once): the origin node as a
 attestation scope, and the origin operator as a `remote_principal` bound to the
 same site whose scopes name the offline-operations routes
 (`ryeos.execute.service.offline-operations/submit`, `/facts`, `/status`) and
-the exact `ryeos.offline.node.*` scopes it may sign. The origin pins the
+the exact `ryeos.offline.node.*` scopes it may sign. Queueing a request and stopping
+the node are separate scopes: a delivery that asks for `--stop` is refused
+with `offline_stop_scope_required` (403, before anything is queued) unless the
+caller holds the exact `ryeos.execute.service.offline-operations/stop` scope.
+No wildcard (`ryeos.execute.service.*`, `*`) satisfies it, and only the
+controller's local operator can put it into a grant; the node's local
+operator stops without it. A forwarded delivery needs it in the operator's
+grant, lent by the delegation, and in the forwarding node's own grant. The origin pins the
 controller with its URL (the controller is the side the origin can dial).
 
 On the origin, the operator then lends the routes' scopes to its node for the
@@ -496,7 +503,7 @@ controller and works from there:
 ```bash
 # once, and again before it expires (default 8 hours, at most 30 days)
 ryeos remote delegate --remote controller \
-  --scopes ryeos.execute.service.offline-operations/submit,ryeos.execute.service.offline-operations/facts,ryeos.execute.service.offline-operations/status
+  --scopes ryeos.execute.service.offline-operations/submit,ryeos.execute.service.offline-operations/facts,ryeos.execute.service.offline-operations/status,ryeos.execute.service.offline-operations/stop
 
 ryeos node offline-operation facts --remote controller --json > controller-facts.json
 ryeos node offline-operation sign --operation node.remote.pin \

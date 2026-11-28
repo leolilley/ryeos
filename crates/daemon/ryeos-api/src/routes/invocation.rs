@@ -62,6 +62,10 @@ pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_dige
 /// node that forwarded a delegated request.
 pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
 
+/// Metadata key under which the `ryeos_signed` verifier records, as a JSON
+/// array, the scopes the forwarding node's own grant holds.
+pub(crate) const FORWARDING_SCOPES_METADATA_KEY: &str = "forwarding_scopes";
+
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
     pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
@@ -111,6 +115,11 @@ impl RoutePrincipal {
             .with_minted_session_grant(self.minted_session_grant.clone())
             .with_signed_request_digest(signed_request_digest)
             .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
+            .with_forwarding_scopes(
+                self.metadata
+                    .get(FORWARDING_SCOPES_METADATA_KEY)
+                    .and_then(|encoded| serde_json::from_str(encoded).ok()),
+            )
     }
 }
 
