@@ -1292,6 +1292,75 @@ async fn shared_recovery_dispatch_settles_only_the_unreconstructable_target() {
 }
 
 #[tokio::test]
+async fn resume_dispatch_settles_a_no_longer_admitted_live_root_and_continues() {
+    let (tmpdir, _state_owner, state) = build_test_state();
+    // A live checkout no key has registered: the node's operator could still
+    // name it, but the key that launched this run is not the operator.
+    let project = tmpdir.path().join("unregistered-checkout");
+    std::fs::create_dir_all(&project).unwrap();
+    let refused = "T-live-not-admitted";
+    let live = live_resume(&project);
+    state
+        .state_store
+        .create_thread_for_test(&thread_record(
+            refused,
+            Some(project.clone()),
+            live.project_authority.clone(),
+        ))
+        .unwrap();
+    let mut refused_intent = resume_intent(refused);
+    refused_intent.resume_context = live;
+
+    // The next intent is not a live-root run; it must still be dispatched.
+    // It carries no launch metadata, so dispatch reaches the rebuild step and
+    // settles it there, which proves the loop went past the refused intent.
+    let following = "T-after-refusal";
+    state
+        .state_store
+        .create_thread_for_test(&thread_record(
+            following,
+            None,
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        ))
+        .unwrap();
+
+    super::dispatch_resume_intents(&state, vec![refused_intent, resume_intent(following)])
+        .await
+        .unwrap();
+
+    let outcome_of = |thread_id: &str| {
+        assert_eq!(
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+        state
+            .state_store
+            .get_thread_result(thread_id)
+            .unwrap()
+            .unwrap()
+            .outcome_code
+    };
+    assert_eq!(
+        outcome_of(refused).as_deref(),
+        Some(ryeos_executor::execution::runner::RESUME_PROJECT_NOT_ADMITTED)
+    );
+    assert_eq!(
+        outcome_of(following).as_deref(),
+        Some("resume_rebuild_failed")
+    );
+    super::ensure_recovery_targets_classified(
+        &state,
+        &BTreeSet::from([refused.to_string(), following.to_string()]),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 async fn shared_recovery_dispatch_never_overwrites_a_competing_claim() {
     let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-claimed-recovery";

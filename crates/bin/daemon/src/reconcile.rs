@@ -3888,13 +3888,36 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
                     );
                 }
                 let execution =
-                    ryeos_executor::execution::runner::execution_params_from_sealed_root_request(
+                    match ryeos_executor::execution::runner::execution_params_from_sealed_root_request(
                         state,
                         &intent.child_thread_id,
                         resume,
                         sealed,
                         None,
-                    )?;
+                    ) {
+                        Ok(execution) => execution,
+                        Err(error)
+                            if error
+                                .downcast_ref::<ryeos_executor::execution::runner::ResumeProjectNotAdmitted>()
+                                .is_some() =>
+                        {
+                            // The child has no row yet, so there is no thread
+                            // to settle. The project root is no longer
+                            // admitted to the key that sealed the intent:
+                            // keep the reservation for an authenticated
+                            // replay, which meets the same typed refusal,
+                            // and let the rest of reconciliation proceed.
+                            tracing::error!(
+                                operation_id = %intent.operation_id,
+                                child_thread_id = %intent.child_thread_id,
+                                code = ryeos_executor::execution::runner::RESUME_PROJECT_NOT_ADMITTED,
+                                error = %error,
+                                "detached child not born: its project root is no longer admitted"
+                            );
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                 state
                     .threads
                     .create_root_thread_with_events_and_launch_metadata(
