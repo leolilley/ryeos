@@ -10974,11 +10974,11 @@ mod quarantine_settlement_order_tests {
     #[test]
     fn node_config_leftovers_settle_before_the_first_node_config_load() {
         let source = include_str!("main.rs");
-        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        let production = &source[..source.rfind("#[cfg(test)]").unwrap()];
         let settle = ["settle_node_config", "_quarantine_leftovers("].concat();
         let lock_markers = [
-            "StateLock::acquire_with_timeout(",
-            "StateLock::acquire(&state_lock::default_lock_path(&config",
+            "let state_lock = state_lock::StateLock::acquire_with_timeout(",
+            "let standalone_state_lock = Arc::new(",
         ];
         let load_markers = [
             "bootstrap::load_node_config_two_phase_with_host_runtime(",
