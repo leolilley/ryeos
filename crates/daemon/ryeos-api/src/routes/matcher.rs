@@ -196,7 +196,9 @@ mod tests {
             id: id.to_string(),
             path: path.to_string(),
             methods: methods.iter().map(|s| s.to_string()).collect(),
-            auth: "none".to_string(),
+            // Path matching is under test; the placeholder static response is
+            // compiled as a keyed route so any method may be matched.
+            auth: "browser_session".to_string(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
@@ -213,6 +215,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::new(),
             authority: None,
+            public: false,
         };
         Arc::new(CompiledRoute {
             id: id.to_string(),

@@ -189,10 +189,25 @@ NO_COLOR=1 TERM=xterm RYEOS_TTY=always bash -c '
 assert_terminal_frames_fit "$tmp/resized" 51 resized
 
 if command -v script >/dev/null 2>&1; then
-    TERM=xterm RYEOS_TTY=auto script -qec \
+    # A pty that never closes must fail this case in seconds with a message,
+    # not hold the job until its own timeout cancels it. The pty reads no
+    # input from the job: stdin is /dev/null.
+    pty_timeout=30
+    pty_status=0
+    TERM=xterm RYEOS_TTY=auto timeout "$pty_timeout" script -qec \
         "bash -c \"source '$helper'; ryeos_term_init; ryeos_term_begin RUN pty; ryeos_term_cleanup\"" \
-        "$tmp/pty" >/dev/null
-    grep -q $'\033\[2K' "$tmp/pty"
+        "$tmp/pty" >/dev/null </dev/null || pty_status=$?
+    if [[ "$pty_status" == 124 ]]; then
+        printf 'FAIL: the pty case did not finish within %s seconds (script hung)\n' "$pty_timeout" >&2
+        exit 1
+    elif [[ "$pty_status" != 0 ]]; then
+        printf 'FAIL: the pty case exited %s\n' "$pty_status" >&2
+        exit 1
+    fi
+    grep -q $'\033\[2K' "$tmp/pty" || {
+        printf 'FAIL: the pty output has no erase-line sequence\n' >&2
+        exit 1
+    }
 fi
 
 printf 'ryeos terminal helper cases passed\n'

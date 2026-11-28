@@ -24,6 +24,9 @@ pub struct ApiState {
     /// Built once at boot from the node's configuration and never replaced:
     /// a running node's routes do not change.
     pub route_table: Arc<RouteTable>,
+    /// Limits on the keyless public-page routes, keyed by route id, built
+    /// once at start from the node's `public_routes` policy.
+    pub public_routes: Arc<crate::routes::public_limits::PublicRouteLimiter>,
     pub webhook_dedupe: Arc<WebhookDedupeStore>,
 }
 

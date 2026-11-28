@@ -1,4 +1,5 @@
 pub mod installed;
+pub mod lane;
 pub mod manifest;
 pub mod pictures;
 pub mod plan;

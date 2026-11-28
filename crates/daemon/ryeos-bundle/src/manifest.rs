@@ -727,8 +727,19 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
 
     let raw = fs::read_to_string(&manifest_path)
         .with_context(|| format!("read manifest {}", manifest_path.display()))?;
-    let body = lillux::signature::strip_signature_lines(&raw);
-    let manifest = parse_current_manifest_body(&body, &manifest_path)?;
+    parse_manifest_text(&raw, &manifest_path, expected_name)
+}
+
+/// Parse and validate the text of a generated bundle manifest, as
+/// [`parse_manifest`] does for the installed file. `manifest_path` names the file in
+/// errors.
+pub fn parse_manifest_text(
+    raw: &str,
+    manifest_path: &Path,
+    expected_name: &str,
+) -> Result<BundleManifest> {
+    let body = lillux::signature::strip_signature_lines(raw);
+    let manifest = parse_current_manifest_body(&body, manifest_path)?;
     manifest.runtime_authority.validate().map_err(|e| {
         anyhow::anyhow!(
             "invalid `runtime_authority` declaration in {}: {e}",
