@@ -534,12 +534,59 @@ pub(super) fn admit_follow_terminal_envelope(
     child_terminal_thread_id: &str,
     candidate: &Value,
 ) -> Result<(Value, bool)> {
+    admit_follow_terminal_envelope_with_reads(
+        waiter,
+        child_chain_root_id,
+        child_terminal_thread_id,
+        candidate,
+        None,
+    )
+}
+
+/// Add the reads of a followed directive child to a compact envelope, cut to
+/// fit the parent's resume bounds: the list is halved and marked `truncated`
+/// until it fits, and left off only when not even an empty list fits.
+fn attach_reads_fitting(
+    waiter: &runtime_db::FollowWaiter,
+    child_chain_root_id: &str,
+    compact: Value,
+    reads: &ryeos_runtime::envelope::FollowReads,
+) -> Result<Value> {
+    let mut shrunk = reads.clone();
+    loop {
+        let candidate = ryeos_runtime::envelope::with_follow_reads(compact.clone(), &shrunk)
+            .map_err(anyhow::Error::msg)?;
+        if validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &candidate)
+            .is_ok()
+        {
+            return Ok(candidate);
+        }
+        if shrunk.refs.is_empty() {
+            return Ok(compact);
+        }
+        let keep = shrunk.refs.len() / 2;
+        shrunk.refs.truncate(keep);
+        shrunk.truncated = true;
+    }
+}
+
+pub(super) fn admit_follow_terminal_envelope_with_reads(
+    waiter: &runtime_db::FollowWaiter,
+    child_chain_root_id: &str,
+    child_terminal_thread_id: &str,
+    candidate: &Value,
+    reads: Option<&ryeos_runtime::envelope::FollowReads>,
+) -> Result<(Value, bool)> {
     let compact = compact_follow_terminal_envelope(
         waiter,
         child_chain_root_id,
         child_terminal_thread_id,
         candidate,
     )?;
+    let compact = match reads {
+        Some(reads) => attach_reads_fitting(waiter, child_chain_root_id, compact, reads)?,
+        None => compact,
+    };
     match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &compact) {
         Ok(()) => Ok((compact, false)),
         Err(candidate_error) => {

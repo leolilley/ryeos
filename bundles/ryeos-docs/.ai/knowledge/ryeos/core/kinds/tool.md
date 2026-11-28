@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T06:36:01Z:f4f6b6f03b17b49f392608d131ff95b7a29bce3ca35106dc792b1f3cb43af8b2:IclGRcKHCns88DzPSSaqSNyK2EU8/3kzDMAWycWlI6dYCjAZAK7dErHPZqyx8ZBMA6azGeDvmxaYE1mGytHoCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T02:56:27Z:ed79a454d065788e6924200d19fdc13b41923c322c0f85b4c93156a60129ab8e:IbQFknv9hKi9bY2xO1yJwoilaQNmrUFF3mmLSoeoitSfM+fkBCgl9Jf2xm3vgoowumOiRVbwrgP7kOITRHekDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -131,3 +131,13 @@ Handler routes pass request data as the tool's parameters envelope; they
 do not replace `required_secrets`. A public OAuth or webhook handler will
 typically use both: route `source_config.request` for incoming HTTP data,
 and tool `required_secrets` for provider credentials or signing keys.
+
+## Declaring what a tool reads
+
+A tool item may declare `reads: {argument: <name>}`, naming the call argument that
+holds the ref a call reads. It is signed data on the item (`fetch` declares
+`item_ref`, `compose` declares `ref`). At launch the daemon records, once per
+attempt, the run's tools that declare it, each with the space it resolved in, as
+a `launch_tool_reads` event a runtime cannot append. A graph that follows a
+directive sees what those calls read as `dispatch.reads` (see the graphs guide).
+A tool without the declaration is not covered.

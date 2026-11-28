@@ -6784,6 +6784,25 @@ impl ThreadLifecycleService {
         Ok(())
     }
 
+    /// Persist and publish the read-declaring tools of this launch attempt's
+    /// inventory (`launch_tool_reads`). Same fence as
+    /// [`Self::append_launch_attempt_audit`].
+    pub fn record_launch_tool_reads(
+        &self,
+        thread_id: &str,
+        payload: &ryeos_engine::execution_contract::LaunchToolReadsPayload,
+    ) -> Result<()> {
+        let thread = self
+            .state_store
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("launch tool reads thread not found: {thread_id}"))?;
+        let persisted =
+            self.state_store
+                .append_launch_tool_reads(&thread.chain_root_id, thread_id, payload)?;
+        self.publish_records(&persisted);
+        Ok(())
+    }
+
     /// Record one portable cross-chain parent→child edge exactly once and
     /// publish it only after the signed authoritative append succeeds.
     pub fn append_child_thread_spawned_once(

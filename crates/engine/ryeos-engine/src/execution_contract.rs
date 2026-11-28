@@ -176,6 +176,69 @@ pub struct ProcessInputRootSelectedPayload {
     pub root: ProcessInputRootKind,
 }
 
+/// Payload of the `launch_tool_reads` event: the tools of a run's inventory
+/// that declare `reads`. Built by the daemon from descriptors it made; a
+/// runtime cannot append it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchToolReadsPayload {
+    pub tools: Vec<ToolReadsEntry>,
+}
+
+/// One inventory tool that declares what its calls read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolReadsEntry {
+    /// Canonical ref of the tool item (`tool:ryeos/core/fetch`).
+    pub item_ref: String,
+    /// The call argument that names what the call reads.
+    pub argument: String,
+    /// The space the tool item resolved in. A project-space tool can declare
+    /// `reads` without reading anything, so a condition that matters filters
+    /// on `bundle` or `node`.
+    pub space: crate::contracts::ItemSpace,
+}
+
+/// The most tools one launch records as read-declaring.
+pub const MAX_LAUNCH_TOOL_READS: usize = 256;
+
+/// The read-declaring tools of an inventory, or `None` when it has none. A
+/// descriptor whose declaration is malformed (no `argument` string of
+/// `[A-Za-z0-9_]`, at most 64 bytes, or no space) is left out, never guessed.
+pub fn launch_tool_reads(
+    inventory: &std::collections::HashMap<String, Vec<crate::registry::inventory::ItemDescriptor>>,
+) -> Option<LaunchToolReadsPayload> {
+    let mut tools: Vec<ToolReadsEntry> = inventory
+        .get("tool")?
+        .iter()
+        .filter_map(|descriptor| {
+            let argument = descriptor
+                .extra
+                .get("reads")?
+                .get("argument")?
+                .as_str()?
+                .to_owned();
+            let valid = !argument.is_empty()
+                && argument.len() <= 64
+                && argument
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+            if !valid {
+                return None;
+            }
+            let space = serde_json::from_value(descriptor.extra.get("space")?.clone()).ok()?;
+            Some(ToolReadsEntry {
+                item_ref: descriptor.item_id.clone(),
+                argument,
+                space,
+            })
+        })
+        .collect();
+    tools.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    tools.truncate(MAX_LAUNCH_TOOL_READS);
+    (!tools.is_empty()).then_some(LaunchToolReadsPayload { tools })
+}
+
 /// Whether an execution's derived facts retain filesystem bindings (a source
 /// closure or external-content realizations). Such a tool never runs from the
 /// live project: it gets a private admitted-input root.
@@ -750,6 +813,50 @@ mod tests {
             ..ExecutionPolicy::projectless(ExecutionResponse::Accepted)
         };
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn launch_tool_reads_keeps_only_well_formed_declarations_with_their_space() {
+        use crate::registry::inventory::ItemDescriptor;
+        let descriptor = |item_id: &str, extra: serde_json::Value| ItemDescriptor {
+            name: item_id.to_owned(),
+            item_id: item_id.to_owned(),
+            extra: serde_json::from_value(extra).unwrap(),
+            ..ItemDescriptor::default()
+        };
+        let inventory = std::collections::HashMap::from([(
+            "tool".to_owned(),
+            vec![
+                descriptor(
+                    "tool:b/fetch",
+                    serde_json::json!({"reads": {"argument": "item_ref"}, "space": "bundle"}),
+                ),
+                descriptor(
+                    "tool:a/mine",
+                    serde_json::json!({"reads": {"argument": "path"}, "space": "project"}),
+                ),
+                descriptor(
+                    "tool:c/odd",
+                    serde_json::json!({"reads": {"argument": "a b"}, "space": "bundle"}),
+                ),
+                descriptor("tool:d/none", serde_json::json!({"space": "bundle"})),
+                descriptor(
+                    "tool:e/nospace",
+                    serde_json::json!({"reads": {"argument": "x"}}),
+                ),
+            ],
+        )]);
+        let payload = launch_tool_reads(&inventory).expect("two entries");
+        assert_eq!(
+            payload
+                .tools
+                .iter()
+                .map(|entry| (entry.item_ref.as_str(), entry.argument.as_str()))
+                .collect::<Vec<_>>(),
+            [("tool:a/mine", "path"), ("tool:b/fetch", "item_ref")]
+        );
+        assert_eq!(payload.tools[0].space, crate::contracts::ItemSpace::Project);
+        assert!(launch_tool_reads(&std::collections::HashMap::new()).is_none());
     }
 
     #[test]

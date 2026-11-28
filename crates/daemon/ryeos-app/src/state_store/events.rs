@@ -269,6 +269,27 @@ impl StateStore {
         )
     }
 
+    /// Record the read-declaring tools of this launch attempt's inventory:
+    /// one daemon-authored `launch_tool_reads` event, under the same
+    /// claimed-attempt fence as the launch audit.
+    pub(crate) fn append_launch_tool_reads(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        payload: &ryeos_engine::execution_contract::LaunchToolReadsPayload,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let event_type = ryeos_runtime::RuntimeEventType::LaunchToolReads;
+        self.append_launch_attempt_events(
+            chain_root_id,
+            thread_id,
+            &[NewEventRecord {
+                event_type: event_type.as_str().to_owned(),
+                storage_class: event_type.storage_class().as_str().to_owned(),
+                payload: serde_json::to_value(payload)?,
+            }],
+        )
+    }
+
     fn append_launch_attempt_events(
         &self,
         chain_root_id: &str,
@@ -327,6 +348,42 @@ impl StateStore {
             thread_id,
             events,
         )
+    }
+
+    /// The reads a directive child's chain shows, projected from its recorded
+    /// events (see `reads_projection`). The scan pages through the chain and
+    /// stops at a fixed number of pages; a cut scan marks the result truncated.
+    pub fn project_chain_reads(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<ryeos_runtime::envelope::FollowReads> {
+        const PAGE_EVENTS: usize = 500;
+        const PAGE_BYTES: usize = 6 * 1024 * 1024;
+        const MAX_PAGES: usize = 64;
+        let types = crate::reads_projection::projection_event_types();
+        let mut events: Vec<PersistedEventRecord> = Vec::new();
+        let mut after_seq: Option<i64> = None;
+        let mut cut = false;
+        for page_number in 0..MAX_PAGES {
+            let page = self.replay_events_of_types(
+                chain_root_id,
+                None,
+                after_seq,
+                PAGE_EVENTS,
+                PAGE_BYTES,
+                Some(&types),
+            )?;
+            let Some(last) = page.events.last() else {
+                break;
+            };
+            after_seq = Some(last.chain_seq);
+            events.extend(page.events.iter().cloned());
+            if !page.has_more {
+                break;
+            }
+            cut = page_number + 1 == MAX_PAGES;
+        }
+        Ok(crate::reads_projection::project_reads(&events, cut))
     }
 
     /// The thread a live tail of `chain_root_id` should currently follow: the

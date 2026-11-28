@@ -540,6 +540,7 @@ impl Walker {
                     child_thread_id,
                     replayed_from,
                     dispatch,
+                    reads,
                 } = success;
                 if let Err(error) = validate_runtime_shape(&val, "graph action result") {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
@@ -582,7 +583,11 @@ impl Walker {
                         ),
                     )
                     .with_result(&val)
-                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
+                    .with_post_action_dispatch(
+                        dispatch.as_ref(),
+                        child_thread_id.as_deref(),
+                        reads.as_ref(),
+                    )
                     .render_json(assign)
                     {
                         Ok(value) => Some(value),
@@ -616,7 +621,11 @@ impl Walker {
                         ),
                     )
                     .with_result(&val)
-                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
+                    .with_post_action_dispatch(
+                        dispatch.as_ref(),
+                        child_thread_id.as_deref(),
+                        reads.as_ref(),
+                    )
                     .render_json(template)
                     {
                         Ok(Value::Array(observations)) => observations,
@@ -681,6 +690,7 @@ impl Walker {
                     ),
                     dispatch.as_ref(),
                     child_thread_id.as_deref(),
+                    reads.as_ref(),
                 ) {
                     Ok(next) => next,
                     Err(error) => {

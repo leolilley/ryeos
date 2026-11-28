@@ -67,6 +67,11 @@ event_types! {
     /// Daemon-authored, once per launch attempt: the kind of root the process's
     /// inputs were laid out in (`live`, `sparse_private`, `pinned`, ...). Names no path.
     PROCESS_INPUT_ROOT_SELECTED = "process_input_root_selected";
+    /// Daemon-authored, once per launch attempt of a directive: the tools of
+    /// the run's inventory that declare `reads`, each with the argument that
+    /// names what it reads and the space (bundle, node or project) it resolved
+    /// in. Built from descriptors the daemon made; a runtime cannot append it.
+    LAUNCH_TOOL_READS = "launch_tool_reads";
     /// Daemon-authored, once in the birth batch of an operator rebind
     /// successor: the source thread, each replaced ref binding (`from`, `to`)
     /// and the launch's runtime facts before and after.

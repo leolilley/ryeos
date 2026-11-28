@@ -265,8 +265,17 @@ fn build_descriptor_for_ref(
     profile.finish_parse(parse_started);
 
     let projection_started = profile.start_phase();
-    let descriptor =
+    let mut descriptor =
         descriptor_from_parsed_item(ref_, target_schema, &parsed, &resolution.winner_path);
+    // The space this item resolved in, stamped by the daemon next to a `reads`
+    // declaration so a later record of what a run read can say how far to
+    // trust the declaration. Only items that declare `reads` carry it.
+    if descriptor.extra.contains_key("reads") {
+        descriptor.extra.insert(
+            "space".to_owned(),
+            Value::String(resolution.winner_space.as_str().to_owned()),
+        );
+    }
     profile.finish_projection(projection_started);
     Ok(descriptor)
 }

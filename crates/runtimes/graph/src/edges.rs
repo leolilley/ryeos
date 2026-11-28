@@ -44,6 +44,7 @@ pub(crate) fn evaluate_next_with_action_result(
     run: GraphRunExpressionContext<'_>,
     dispatch: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     child_thread_id: Option<&str>,
+    reads: Option<&ryeos_runtime::envelope::FollowReads>,
 ) -> Result<Option<String>, ExpressionError> {
     evaluate_next_with_optional_result(
         node,
@@ -52,7 +53,7 @@ pub(crate) fn evaluate_next_with_action_result(
         Some(result),
         execution,
         run,
-        Some((dispatch, child_thread_id)),
+        Some((dispatch, child_thread_id, reads)),
     )
 }
 
@@ -66,6 +67,7 @@ fn evaluate_next_with_optional_result(
     post_action_dispatch: Option<(
         Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
         Option<&str>,
+        Option<&ryeos_runtime::envelope::FollowReads>,
     )>,
 ) -> Result<Option<String>, ExpressionError> {
     let Some(edge) = &node.next else {
@@ -86,8 +88,8 @@ fn evaluate_next_with_optional_result(
             }
             context.insert("run", &run);
             let dispatch_value;
-            if let Some((dispatch, child_thread_id)) = post_action_dispatch {
-                dispatch_value = post_action_dispatch_value(dispatch, child_thread_id);
+            if let Some((dispatch, child_thread_id, reads)) = post_action_dispatch {
+                dispatch_value = post_action_dispatch_value(dispatch, child_thread_id, reads);
                 context.insert("dispatch", &dispatch_value);
             }
             let limits = EvaluationLimits::default();

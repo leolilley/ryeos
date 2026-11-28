@@ -98,6 +98,9 @@ pub struct ActionFailure {
     /// `outcome_kind` and any partial `result`. `None` for every failure whose
     /// child reported no outcome classification.
     pub outcome: Option<Value>,
+    /// What the followed directive child's recorded tool calls show it read
+    /// (`dispatch.reads`), when the daemon projected it. `None` otherwise.
+    pub reads: Option<ryeos_runtime::envelope::FollowReads>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +162,9 @@ pub struct ActionSuccess {
     /// through the unary callback boundary and therefore carry `None` here;
     /// unary, retry, and foreach actions always carry it.
     pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    /// What the followed directive child's recorded tool calls show it read
+    /// (`dispatch.reads`), when the daemon projected it. `None` otherwise.
+    pub reads: Option<ryeos_runtime::envelope::FollowReads>,
 }
 
 impl ActionSuccess {
@@ -173,6 +179,7 @@ impl ActionSuccess {
             child_thread_id: None,
             replayed_from: None,
             dispatch: None,
+            reads: None,
         }
     }
 }
@@ -323,6 +330,7 @@ pub async fn dispatch_action(
             child_thread_id: None,
             replayed_from: retained.replayed_from,
             dispatch: None,
+            reads: None,
         }),
         None => classify_callback_result(response.result, item_id, &response.thread),
     };
@@ -370,6 +378,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: Some(daemon_dispatch),
+                    reads: None,
                     outcome: None,
                 }));
             }
@@ -382,6 +391,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: success.dispatch,
+                    reads: None,
                     outcome: None,
                 }));
             }
@@ -412,6 +422,7 @@ pub async fn dispatch_action(
                     child_thread_id: success.child_thread_id,
                     integrity: false,
                     dispatch: success.dispatch,
+                    reads: None,
                     outcome: None,
                 }));
             }
@@ -646,6 +657,8 @@ struct FollowResultEnvelope {
     status: RuntimeResultStatus,
     result: Value,
     cost: Value,
+    #[serde(default)]
+    reads: Option<ryeos_runtime::envelope::FollowReads>,
 }
 
 /// A followed worker child's settled value is its own outcome record: an
@@ -747,7 +760,13 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
         status,
         result,
         cost,
+        reads,
     } = envelope;
+    if let Some(reads) = &reads {
+        reads
+            .validate()
+            .map_err(|error| format!("malformed follow result envelope reads: {error}"))?;
+    }
 
     if projection != ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION {
         return Err(format!(
@@ -789,6 +808,7 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             child_thread_id: Some(envelope_child_thread_id),
             replayed_from: None,
             dispatch: None,
+            reads,
         })
     } else {
         let structured_failure = parse_runtime_failure(&result);
@@ -844,6 +864,7 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             child_thread_id,
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            reads,
             outcome: failure_outcome,
         })
     };
@@ -968,6 +989,7 @@ fn classify_native_runtime_envelope(
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                reads: None,
                 outcome: None,
             });
         }
@@ -989,6 +1011,7 @@ fn classify_native_runtime_envelope(
                 child_thread_id: None,
                 replayed_from,
                 dispatch: None,
+                reads: None,
             }),
             Err(diagnostic) => malformed_native_runtime_failure(diagnostic, cost),
         }
@@ -1013,6 +1036,7 @@ fn classify_native_runtime_envelope(
             child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            reads: None,
             outcome: None,
         })
     }
@@ -1029,6 +1053,7 @@ fn malformed_native_runtime_failure(
         child_thread_id: None,
         integrity: true,
         dispatch: None,
+        reads: None,
         outcome: None,
     })
 }
@@ -1044,6 +1069,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                reads: None,
                 outcome: None,
             });
         }
@@ -1062,6 +1088,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             child_thread_id: None,
             replayed_from,
             dispatch: None,
+            reads: None,
         })
     } else {
         ActionOutcome::Failure(ActionFailure {
@@ -1071,6 +1098,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             child_thread_id: None,
             integrity: false,
             dispatch: None,
+            reads: None,
             outcome: None,
         })
     }

@@ -609,6 +609,7 @@ pub async fn run_foreach_sequential(
                     // refuses durable classes at the definition layer.
                     replayed_from: _,
                     dispatch,
+                    reads: _,
                 } = success;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
@@ -714,7 +715,7 @@ pub async fn run_foreach_sequential(
                     )
                     .with_foreach(var, item)
                     .with_result(&val)
-                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
+                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref(), None)
                     .render_json(assign)
                     {
                         Ok(value) => {
@@ -1112,6 +1113,7 @@ pub async fn run_foreach_parallel(
                             child_thread_id,
                             replayed_from: _,
                             dispatch,
+                            reads: _,
                         } = success;
                         if let Err(error) = validate_runtime_value(
                             &result,

@@ -125,6 +125,86 @@ struct ManagedFollowEnvelope {
     status: RuntimeResultStatus,
     result: serde_json::Value,
     cost: serde_json::Value,
+    /// Present only for a followed directive child.
+    #[serde(default)]
+    reads: Option<FollowReads>,
+}
+
+/// What a followed directive child's recorded tool calls show it read, as the
+/// daemon projected it. Reaches a graph as `dispatch.reads`. The refs are what
+/// the model asked for (`requested`), not proof the content reached or was
+/// understood; only tools that declare `reads` are covered.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowReads {
+    pub refs: Vec<ReadEntry>,
+    /// More reads than the bound held; the list is cut, never silently.
+    pub truncated: bool,
+    /// What the list does not cover, in words a graph author reads.
+    pub covered: String,
+}
+
+/// One read a followed child's tool call made: the tool item, the space that
+/// item resolved in, the ref the model named, and the basis of that ref.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadEntry {
+    pub tool: String,
+    /// `bundle`, `node` or `project`. Never a trust claim: a project-space tool
+    /// can declare `reads` without reading anything.
+    pub space: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Always `requested` today: the model's own argument. `resolved` is for a
+    /// tool whose result names a canonical item ref; none does yet.
+    pub basis: String,
+}
+
+pub const FOLLOW_READS_COVERED: &str = "declared-read-tools-only";
+pub const FOLLOW_READS_BASIS_REQUESTED: &str = "requested";
+pub const MAX_FOLLOW_READ_REFS: usize = 256;
+pub const MAX_FOLLOW_READ_REF_BYTES: usize = 512;
+
+impl FollowReads {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.refs.len() > MAX_FOLLOW_READ_REFS {
+            return Err(format!(
+                "follow reads hold {} refs, at most {MAX_FOLLOW_READ_REFS}",
+                self.refs.len()
+            ));
+        }
+        if self.covered != FOLLOW_READS_COVERED {
+            return Err("follow reads must state what they cover".to_string());
+        }
+        for entry in &self.refs {
+            if entry.reference.is_empty() || entry.reference.len() > MAX_FOLLOW_READ_REF_BYTES {
+                return Err("a follow read ref is empty or over the bound".to_string());
+            }
+            if !matches!(entry.space.as_str(), "bundle" | "node" | "project") {
+                return Err(format!("follow read space `{}` is unknown", entry.space));
+            }
+            if entry.basis != FOLLOW_READS_BASIS_REQUESTED {
+                return Err(format!("follow read basis `{}` is unknown", entry.basis));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Add the reads a followed directive child made to a compact follow envelope.
+pub fn with_follow_reads(
+    mut envelope: serde_json::Value,
+    reads: &FollowReads,
+) -> Result<serde_json::Value, String> {
+    reads.validate()?;
+    let object = envelope
+        .as_object_mut()
+        .ok_or_else(|| "follow terminal envelope is not an object".to_string())?;
+    object.insert(
+        "reads".to_string(),
+        serde_json::to_value(reads).map_err(|error| error.to_string())?,
+    );
+    Ok(envelope)
 }
 
 pub const FOLLOW_ACTION_RESULT_PROJECTION: &str = "action_result";
@@ -546,7 +626,13 @@ pub fn decode_follow_terminal_envelope(
         status,
         result,
         cost,
+        reads,
     } = envelope;
+    if let Some(reads) = &reads {
+        reads
+            .validate()
+            .map_err(|error| format!("malformed follow terminal envelope reads: {error}"))?;
+    }
     if projection != FOLLOW_ACTION_RESULT_PROJECTION {
         return Err(format!(
             "malformed follow terminal envelope: projection `{projection}` is not `{FOLLOW_ACTION_RESULT_PROJECTION}`"

@@ -85,6 +85,7 @@ pub(crate) struct ExpressionScope<'a> {
 struct PostActionDispatchExpressionContext<'a> {
     evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     child_thread_id: Option<&'a str>,
+    reads: Option<&'a ryeos_runtime::envelope::FollowReads>,
 }
 
 /// Build the transient post-action dispatch root. The child coordinate comes
@@ -93,6 +94,7 @@ struct PostActionDispatchExpressionContext<'a> {
 pub(crate) fn post_action_dispatch_value(
     evidence: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     child_thread_id: Option<&str>,
+    reads: Option<&ryeos_runtime::envelope::FollowReads>,
 ) -> Value {
     let mut value = evidence.map_or_else(
         || json!({}),
@@ -111,6 +113,23 @@ pub(crate) fn post_action_dispatch_value(
     assert!(
         prior.is_none(),
         "persisted dispatch evidence must not own child_thread_id"
+    );
+    // `reads` is present only after a followed directive child, projected by
+    // the daemon from that child's own chain. Anywhere else it is a typed
+    // absence (`null`), never an empty list, so a condition can tell the two
+    // apart.
+    let prior = value
+        .as_object_mut()
+        .expect("typed dispatch evidence serializes as an object")
+        .insert(
+            "reads".to_string(),
+            reads.map_or(Value::Null, |reads| {
+                serde_json::to_value(reads).expect("validated follow reads serialize")
+            }),
+        );
+    assert!(
+        prior.is_none(),
+        "persisted dispatch evidence must not own reads"
     );
     value
 }
@@ -143,10 +162,12 @@ impl<'a> ExpressionScope<'a> {
         mut self,
         evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
         child_thread_id: Option<&'a str>,
+        reads: Option<&'a ryeos_runtime::envelope::FollowReads>,
     ) -> Self {
         self.post_action_dispatch = Some(PostActionDispatchExpressionContext {
             evidence,
             child_thread_id,
+            reads,
         });
         self
     }
@@ -193,8 +214,11 @@ impl<'a> ExpressionScope<'a> {
         context.insert("run", &self.run);
         let dispatch_value;
         if let Some(dispatch) = self.post_action_dispatch {
-            dispatch_value =
-                post_action_dispatch_value(dispatch.evidence, dispatch.child_thread_id);
+            dispatch_value = post_action_dispatch_value(
+                dispatch.evidence,
+                dispatch.child_thread_id,
+                dispatch.reads,
+            );
             context.insert("dispatch", &dispatch_value);
         }
         if let Some((name, item)) = self.foreach {
@@ -260,7 +284,7 @@ mod tests {
             },
         )
         .with_result(&result)
-        .with_post_action_dispatch(Some(&dispatch), None)
+        .with_post_action_dispatch(Some(&dispatch), None, None)
         .render_json(&compiled)
         .unwrap();
 
@@ -274,8 +298,62 @@ mod tests {
         );
         let mut expected_dispatch = serde_json::to_value(dispatch).unwrap();
         expected_dispatch["child_thread_id"] = Value::Null;
+        expected_dispatch["reads"] = Value::Null;
         assert_eq!(rendered["dispatch"], expected_dispatch);
         assert_eq!(rendered["answer"], 7);
+    }
+
+    #[test]
+    fn dispatch_reads_is_the_daemons_projection_or_a_typed_absence_never_the_result() {
+        use ryeos_runtime::envelope::{FOLLOW_READS_COVERED, FollowReads, ReadEntry};
+        let compiled = CompiledJsonTemplate::compile(
+            &json!({"reads": "${dispatch.reads}", "first": "${dispatch.reads.refs[0].ref}"}),
+            "test.post_action_reads",
+            &CompilationLimits::default(),
+        )
+        .unwrap();
+        let state = json!({});
+        let inputs = json!({});
+        // A result that claims reads of its own is not read as them.
+        let spoofed_result = json!({"reads": {"refs": [{"ref": "knowledge:forged"}]}});
+        let dispatch = live_dispatch();
+        let digest = "d".repeat(64);
+        let reads = FollowReads {
+            refs: vec![ReadEntry {
+                tool: "tool:ryeos/core/fetch".to_string(),
+                space: "bundle".to_string(),
+                reference: "knowledge:a/b".to_string(),
+                basis: "requested".to_string(),
+            }],
+            truncated: false,
+            covered: FOLLOW_READS_COVERED.to_string(),
+        };
+        let scope = || {
+            ExpressionScope::new(
+                &state,
+                &inputs,
+                None,
+                GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
+            )
+            .with_result(&spoofed_result)
+        };
+        let with = scope()
+            .with_post_action_dispatch(Some(&dispatch), Some("T-child"), Some(&reads))
+            .render_json(&compiled)
+            .unwrap();
+        assert_eq!(with["first"], "knowledge:a/b");
+        assert_eq!(with["reads"]["covered"], "declared-read-tools-only");
+        assert_eq!(with["reads"]["refs"][0]["space"], "bundle");
+
+        let absent = scope()
+            .with_post_action_dispatch(Some(&dispatch), Some("T-child"), None)
+            .render_json(&compiled);
+        // No followed directive: `dispatch.reads` is null, so the typed absence
+        // is visible to a condition and indexing into it is not a read.
+        match absent {
+            Ok(value) => assert_eq!(value["reads"], Value::Null),
+            Err(_) => {}
+        }
     }
 
     #[test]
@@ -299,7 +377,7 @@ mod tests {
             GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
         )
         .with_result(&spoofed_result)
-        .with_post_action_dispatch(Some(&dispatch), Some("T-daemon-child"))
+        .with_post_action_dispatch(Some(&dispatch), Some("T-daemon-child"), None)
         .render_json(&compiled)
         .unwrap();
         assert_eq!(exact["child"], "T-daemon-child");
@@ -311,7 +389,7 @@ mod tests {
             GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
         )
         .with_result(&spoofed_result)
-        .with_post_action_dispatch(Some(&dispatch), None)
+        .with_post_action_dispatch(Some(&dispatch), None, None)
         .render_json(&compiled)
         .unwrap();
         assert_eq!(no_child["child"], Value::Null);
@@ -323,7 +401,7 @@ mod tests {
             GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
         )
         .with_result(&spoofed_result)
-        .with_post_action_dispatch(None, None)
+        .with_post_action_dispatch(None, None, None)
         .render_json(&compiled)
         .unwrap();
         assert_eq!(no_evidence["child"], Value::Null);

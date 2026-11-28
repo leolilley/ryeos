@@ -436,6 +436,7 @@ mod daemon_authored_event_scan {
         "RuntimeLaunchFacts",
         "LaunchAugmentationCacheHit",
         "ProcessInputRootSelected",
+        "LaunchToolReads",
         "ContinuationRequested",
         "ContinuationAccepted",
         "CommandSubmitted",

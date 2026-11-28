@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T04:38:33Z:644ba65775169e1dff73ea8e7bcef3752f6ef9d10ac5a5031934acbcce6dda60:36rPMEoCQfheOLPzqvbt8f6BsBtMuXuulY21LKKLbVBE/Lkkl/VlhiNbtzN2s2I38tUwV0xYTuhQ4CtiUR1hDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T02:56:23Z:002c423450e541e7d3885679018a092f7658a83b3edd38a787fc0932c9164800:hcyWCGWX9EendQTVxAcTfDw6PW/tBg2PvbO7+ku+IYlns0fVaSZ2E9j32/9Ug++q3AJuOorbZ7o6D9m+CyrsBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.1.1"
@@ -126,6 +126,50 @@ pre-assignment `state`, `inputs`, successful `result`, `dispatch`, and `run`
 context as `assign`, and it does not launch a second child. Use a hook when an
 independent observer must execute or derive new evidence; do not use one merely
 to repackage values already accepted at the node fence.
+
+### What a followed directive read: `dispatch.reads`
+
+After an action node that follows a directive (`follow: true`), `dispatch.reads`
+holds what that directive's own recorded tool calls show it read, projected by
+the daemon from the child's chain (all threads of its continuation chain):
+
+```yaml
+dispatch.reads:
+  refs:                       # at most 256, each ref at most 512 bytes
+    - tool: "tool:ryeos/core/fetch"
+      space: bundle           # bundle | node | project
+      ref: "knowledge:a/b"    # what the model asked for
+      basis: requested
+  truncated: false            # true when the list was cut to a bound
+  covered: declared-read-tools-only
+```
+
+After any other action, and after a follow whose child is not a directive,
+`dispatch.reads` is `null`, never an empty list; test for it rather than for
+`refs`. It is never read from the result.
+
+Read these limits before branching on it:
+
+- **Only declared read tools are covered.** A tool counts when its signed item
+  declares `reads: {argument: <name>}` (`fetch` and `compose` do). A shell or
+  script that opens a file, and every project-file read, is not covered, and
+  the fact does not say so per read: `covered` does.
+- **A call counts only when it succeeded and the daemon executed that tool for
+  it.** The tool is the item the daemon dispatched, taken from the daemon's own
+  child record, never from what the runtime wrote about itself. `space` is
+  where the tool resolved, recorded by the daemon at launch. A project-space
+  tool can declare `reads` without reading anything, so a condition that
+  matters filters on `space` being `bundle` or `node`. The projection never
+  upgrades a project-space entry.
+- **`basis: requested` is the model's own argument.** It shows the call
+  succeeded, not that the content reached the model's reasoning or was
+  understood. `resolved` is reserved for a tool whose result names a canonical
+  item ref; none does yet. A host path a tool reports is never copied here.
+- **One residual:** the daemon does not record which model call an operation
+  was. That link, and the argument the ref comes from, come from the run's own
+  recorded turns, so a runtime that lied about its own turns could attach a
+  different call's argument to a read-declaring tool it really dispatched. It
+  cannot name a tool it did not dispatch or change a space.
 
 Graph-authored requests remain behind successful assignment and branch
 evaluation. Action-returned requests retain the existing dispatch-observation

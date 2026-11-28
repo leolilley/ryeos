@@ -618,6 +618,9 @@ pub enum RuntimeEventType {
     /// Daemon-authored record of the root kind a launch attempt's process
     /// inputs were laid out in (no paths).
     ProcessInputRootSelected,
+    /// Daemon-authored record, once per directive launch attempt, of the
+    /// inventory tools that declare `reads` (tool ref, argument, space).
+    LaunchToolReads,
     /// Daemon-authored record, in a rebound successor's birth batch, of the
     /// ref bindings an operator replaced and the launch facts before and after.
     LaunchBindingRebound,
@@ -712,6 +715,7 @@ impl RuntimeEventType {
             Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
+            Self::LaunchToolReads => wire::LAUNCH_TOOL_READS,
             Self::LaunchBindingRebound => wire::LAUNCH_BINDING_REBOUND,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::CognitionIn => wire::COGNITION_IN,
@@ -773,6 +777,7 @@ impl RuntimeEventType {
             wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
             wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
+            wire::LAUNCH_TOOL_READS => Ok(Self::LaunchToolReads),
             wire::LAUNCH_BINDING_REBOUND => Ok(Self::LaunchBindingRebound),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
@@ -882,6 +887,7 @@ impl RuntimeEventType {
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
+            | Self::LaunchToolReads
             | Self::LaunchBindingRebound
             | Self::ThreadFacetSet
             | Self::CognitionIn
@@ -958,6 +964,7 @@ impl RuntimeEventType {
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
+            | Self::LaunchToolReads
             | Self::LaunchBindingRebound
             | Self::ThreadFacetSet
             | Self::CognitionIn
@@ -1174,6 +1181,7 @@ mod tests {
             RuntimeEventType::RuntimeLaunchFacts,
             RuntimeEventType::LaunchAugmentationCacheHit,
             RuntimeEventType::ProcessInputRootSelected,
+            RuntimeEventType::LaunchToolReads,
             RuntimeEventType::LaunchBindingRebound,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::CognitionIn,

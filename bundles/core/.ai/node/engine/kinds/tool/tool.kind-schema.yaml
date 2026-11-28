@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-17T12:51:39Z:13e754d067c91c1a7749b8ae696af3a72dfd2d2d114da0e4308e8ca9b3f25ad2:fIj9Af0RWGO9eEVFcnzQFOVLPVXCt2nhB1mogavkUlePmgW+Lz+aHipiPa3hctk635RwVF+gg5zGx1XQuGtlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T02:49:24Z:3dc7435cba2e4ea6406e433e17bd0124f45874de89929f575c5e521e981fe725:V8r1mW9cAieeFaEX92cmWLw4QuFNdhwZkQ8g9XBgjTlBxyC5v8j4X05zkS0yI57NBOCtr9PEffA7xg7L1Dh1DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.6.0"
+version: "1.7.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -246,6 +246,12 @@ composed_value_contract:
     presentation:
       type: single
       prim: mapping
+    # Declares that a call of this tool reads an item: `reads: {argument: <name>}`
+    # names the call argument that holds the ref it reads. Signed data on the
+    # tool item; a tool without it is not covered by the run's read record.
+    reads:
+      type: single
+      prim: mapping
 runtime:
   # Tool invocation selectors remain ordinary schema-validated input. The
   # shared runtime template may project one scalar `params` value into one
@@ -342,6 +348,9 @@ runtime:
     # Display hint read from the pinned composed value by the timeline
     # service; it is not a runtime-handler block.
     - presentation
+    # Read-record declaration; carried to metadata.extra by the rule below, not
+    # a runtime-handler block.
+    - reads
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
   # Python files use a comment-YAML `# ryeos-tool:` header that parses
@@ -382,3 +391,8 @@ metadata:
     method_dispatch:
       from: path_value
       key: method_dispatch
+    # Carry the `reads:` declaration verbatim so the launch inventory can hand
+    # it to the runtime that records which tool calls read which refs.
+    reads:
+      from: path_value
+      key: reads

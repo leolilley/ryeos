@@ -8224,6 +8224,21 @@ async fn run_claimed_thread_row_inner(
         }
     }
 
+    // The tools of this run that declare what their calls read, with the space
+    // each resolved in, recorded by the daemon from the descriptors it just
+    // built. A later projection of what the run read joins against this, never
+    // against anything the runtime says about itself.
+    if let Some(table) = ryeos_engine::execution_contract::launch_tool_reads(&inventory) {
+        state
+            .threads
+            .record_launch_tool_reads(&thread_id, &table)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "durable launch tool reads append failed: {error}"
+                ))
+            })?;
+    }
+
     // 8. Build envelope
     //    Using LaunchEnvelopeBuilder to centralize construction and
     //    prevent future field drift. New fields on LaunchEnvelope

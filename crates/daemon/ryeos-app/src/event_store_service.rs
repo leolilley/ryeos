@@ -673,6 +673,7 @@ pub const DAEMON_AUTHORED_EVENT_TYPES: &[&str] = &[
     ryeos_state::event_types::RUNTIME_LAUNCH_FACTS,
     ryeos_state::event_types::LAUNCH_AUGMENTATION_CACHE_HIT,
     ryeos_state::event_types::PROCESS_INPUT_ROOT_SELECTED,
+    ryeos_state::event_types::LAUNCH_TOOL_READS,
     // Vocabulary with no writer: reserved, not open to a runtime.
     ryeos_state::event_types::CONTINUATION_REQUESTED,
     ryeos_state::event_types::CONTINUATION_ACCEPTED,
@@ -1194,6 +1195,7 @@ mod tests {
             "runtime_launch_facts",
             "launch_augmentation_cache_hit",
             "process_input_root_selected",
+            "launch_tool_reads",
             "continuation_requested",
             "continuation_accepted",
             "command_submitted",

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-23T02:35:38Z:dabd3483b3bdde128ea438d9683422d626bfc8824638e2d7eb03b7f6239d816f:4jw1G2gPd62oMgheymZOO674hJmNF+RBMtRLnL3ZAvuwQS/M3/2nTuXxd8qjqKcwlVD/5B6WP8iOHPjl9VtsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T02:56:07Z:de5b4bfaf616759ae3c1d972bf19bc20ba8af040d865f293a8b497502981e778:MQuPszHRTJT28HDPMRrJOSSxEU3CY5/KOwYGE6ra5Qv4FTJHLQycqFPuBTBw+emcKwrwGxkQxglCH6T47XzQDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -38,6 +38,7 @@ events:
   as_launched_resolution: [{drop: true}]
   as_launched_ref_bindings: [{drop: true}]
   process_input_root_selected: [{drop: true}]
+  launch_tool_reads: [{drop: true}]  # which inventory tools declare reads, for the reads projection
   provider_attempt_budget_transition_v1: [{drop: true}]
   stream_opened: [{drop: true}]
   thread_usage: [{drop: true}]

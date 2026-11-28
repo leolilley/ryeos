@@ -939,6 +939,7 @@ mod tests {
         "RuntimeLaunchFacts",
         "LaunchAugmentationCacheHit",
         "ProcessInputRootSelected",
+        "LaunchToolReads",
         "ContinuationRequested",
         "ContinuationAccepted",
         "CommandSubmitted",

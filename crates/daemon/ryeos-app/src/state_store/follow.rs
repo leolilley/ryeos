@@ -87,6 +87,26 @@ impl StateStore {
         child_terminal_status: &str,
         terminal_envelope: &serde_json::Value,
     ) -> Result<bool> {
+        // A followed directive child gets the reads its own chain shows, read
+        // before the store lock is taken (the replay takes it itself).
+        let reads = match self.get_follow_waiter_by_child_chain(child_chain_root_id)? {
+            Some(waiter) => {
+                let is_directive = waiter
+                    .children
+                    .iter()
+                    .find(|child| child.child_chain_root_id == child_chain_root_id)
+                    .is_some_and(|child| {
+                        ryeos_engine::canonical_ref::CanonicalRef::parse(&child.item_ref)
+                            .is_ok_and(|canonical| canonical.kind == "directive")
+                    });
+                if is_directive {
+                    Some(self.project_chain_reads(child_chain_root_id)?)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
         let g = self.lock()?;
         let Some(waiter) = g
             .runtime_db
@@ -94,11 +114,12 @@ impl StateStore {
         else {
             return Ok(false);
         };
-        let (terminal_envelope, degraded) = admit_follow_terminal_envelope(
+        let (terminal_envelope, degraded) = admit_follow_terminal_envelope_with_reads(
             &waiter,
             child_chain_root_id,
             child_terminal_thread_id,
             terminal_envelope,
+            reads.as_ref(),
         )?;
         if degraded {
             tracing::warn!(

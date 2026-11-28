@@ -98,6 +98,7 @@ pub mod qualification_cold_settlement;
 pub mod qualification_consumer_input;
 mod qualification_consumer_observation;
 pub mod qualification_workspace_custody;
+pub mod reads_projection;
 pub mod recovery_execution_gate;
 pub mod recovery_nudge;
 pub mod remote_consumer_launch;
