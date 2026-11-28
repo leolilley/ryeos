@@ -2486,7 +2486,6 @@ fn current_guard_file_for_pinned_runtime(
 pub struct QuarantineSettlement {
     pub restored: Vec<String>,
     pub removed: Vec<String>,
-    pub deferred_live_pid: Vec<String>,
 }
 
 /// Settle quarantine leftovers in the pending-transition directory. Runs once
@@ -2496,8 +2495,9 @@ pub struct QuarantineSettlement {
 /// not have run, so it is never deleted unless an identical canonical file
 /// exists: it is renamed back (never replacing anything) and replayed by the
 /// normal scan. An undecodable file, a differing canonical file, or any
-/// near-miss name is refused with paths named. A leftover whose pid is still
-/// live is left alone (deferred, never removed).
+/// near-miss name is refused with paths named. The pid in the name is never
+/// consulted: the exclusive lock proves the process that left the file is
+/// gone, and a live process with that number is an unrelated one.
 pub fn settle_pending_quarantine_leftovers_at_node_start(
     runtime_state_dir: &Path,
 ) -> Result<QuarantineSettlement> {
@@ -2518,10 +2518,6 @@ pub fn settle_pending_quarantine_leftovers_at_node_start(
     };
     for leftover in pending.quarantine_leftovers()? {
         let path = pending.path().join(leftover.name());
-        if lillux::is_alive(leftover.pid) {
-            report.deferred_live_pid.push(path.display().to_string());
-            continue;
-        }
         let file = pending
             .open_regular(leftover.name(), false)?
             .ok_or_else(|| anyhow::anyhow!("quarantine leftover {} vanished", path.display()))?;
@@ -5474,7 +5470,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leftover_whose_pid_is_live_is_deferred_never_removed() {
+    fn a_leftover_named_with_a_live_unrelated_pid_is_still_settled_at_start() {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
         let lock = chain_lock(temp.path(), "T-live");
@@ -5485,8 +5481,13 @@ mod tests {
         let live = dir.join(format!(".ryeos-quarantine.{}.1", std::process::id()));
         std::fs::rename(dir.join("T-live.json"), &live).unwrap();
         let report = settle_pending_quarantine_leftovers_at_node_start(temp.path()).unwrap();
-        assert_eq!(report.deferred_live_pid, vec![live.display().to_string()]);
-        assert!(live.exists());
+        assert_eq!(report.restored, vec![live.display().to_string()]);
+        assert!(!live.exists());
+        assert_eq!(
+            store.list_pending().unwrap().len(),
+            1,
+            "the node boots past it"
+        );
     }
 
     #[test]
