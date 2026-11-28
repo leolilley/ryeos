@@ -5035,6 +5035,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         &mut publication,
         None,
     )?;
+    let project_mint = crate::runtime_capability_admission::ProjectMint::for_requesting_key(
+        &state.config.app_root,
+        &request_engine.trust_store,
+        &context.fingerprint,
+    );
     let preselection_snapshots =
         crate::effective_program_preparation::prepare_preselection_effective_program(
             &request_engine,
@@ -5043,6 +5048,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
             &roots,
             &request_engine.trust_store,
             None,
+            project_mint,
         )?;
     if let Some(admitted) = admitted_resolution
         && resolution

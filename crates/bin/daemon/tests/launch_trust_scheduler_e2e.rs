@@ -53,6 +53,16 @@ fn scheduled_project(h: &DaemonHarness, name: &str, signer: Option<&SigningKey>)
 /// narrowed to this tool, so the scheduler's pre-authorization admits the
 /// fire and only the trust gate is left to refuse it.
 async fn schedule_gap_echo(h: &DaemonHarness, schedule_id: &str, project_root: &str) {
+    schedule_tool(h, schedule_id, "gap/echo", project_root).await;
+}
+
+/// [`schedule_gap_echo`] for any project tool, named by its bare id.
+async fn schedule_tool(
+    h: &DaemonHarness,
+    schedule_id: &str,
+    tool_bare_id: &str,
+    project_root: &str,
+) {
     let fire_at = ryeos_effect_contract::rfc3339::format_unix_millis(
         lillux::time::timestamp_millis() + 6_000,
     )
@@ -63,7 +73,7 @@ async fn schedule_gap_echo(h: &DaemonHarness, schedule_id: &str, project_root: &
             ".",
             json!({
                 "schedule_id": schedule_id,
-                "item_ref": "tool:gap/echo",
+                "item_ref": format!("tool:{tool_bare_id}"),
                 "ref_bindings": {},
                 "schedule_type": "at",
                 "expression": fire_at,
@@ -75,7 +85,7 @@ async fn schedule_gap_echo(h: &DaemonHarness, schedule_id: &str, project_root: &
                 "enabled": true,
                 "project_root": project_root,
                 "capabilities": [
-                    "ryeos.execute.tool.gap/echo",
+                    format!("ryeos.execute.tool.{tool_bare_id}"),
                     "ryeos.read.project.live"
                 ],
                 "execution_policy": {
@@ -217,4 +227,114 @@ async fn a_schedule_naming_an_unpinned_signed_project_tool_is_refused_when_it_fi
     schedule_gap_echo(&h, "trust-floor-unpinned", &project_root).await;
 
     assert_fire_refused(&mut h, "trust-floor-unpinned", "effective_trust_refused").await;
+}
+
+/// Bundle id of the project tool below: its first ref segment, which the
+/// project manifest's `name` must equal.
+const MINT_BUNDLE: &str = "mintcheck";
+
+/// A project tool that requests runtime authority the project manifest
+/// declares. It never uses the authority; the launch mints it or refuses.
+const MINT_TOOL: &str = "category: mintcheck
+version: \"1.0.0\"
+tool_type: \"subprocess\"
+executor_id: \"@subprocess\"
+execution_protocol: \"protocol:ryeos/core/opaque\"
+config:
+  command: /bin/echo
+  args: [\"mint-check\"]
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        item_authoring:
+          - kind: knowledge
+            namespace: \"mint/*\"
+";
+
+const MINT_MANIFEST: &str = "name: mintcheck
+version: 1.0.0
+description: project mint fixture
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+runtime_authority:
+  item_authoring:
+    - kind: knowledge
+      namespace: \"mint/*\"
+";
+
+/// Plant [`MINT_TOOL`] and its signed manifest, both signed by `signer`.
+fn plant_mint_tool(project: &Path, signer: &SigningKey) {
+    let ai = project.join(".ai");
+    let dir = ai.join("tools").join(MINT_BUNDLE);
+    std::fs::create_dir_all(&dir).expect("create project mint tool dir");
+    std::fs::write(
+        ai.join("manifest.yaml"),
+        lillux::signature::sign_content(MINT_MANIFEST, signer, "#", None),
+    )
+    .expect("write project manifest");
+    std::fs::write(
+        dir.join("echo.yaml"),
+        lillux::signature::sign_content(MINT_TOOL, signer, "#", None),
+    )
+    .expect("write project mint tool");
+}
+
+/// Poll `show_fires` until the schedule's first fire is terminal.
+async fn terminal_fire(h: &DaemonHarness, schedule_id: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let fire = settled_fire(h, schedule_id).await;
+        if matches!(fire["status"].as_str(), Some("completed" | "failed")) {
+            return fire;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "schedule {schedule_id} never reached a terminal fire: {fire:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A trusted project's tool that requests runtime caps its signed manifest
+/// declares, registered by the operator, still mints them when it fires: the
+/// fire acts for the schedule's registrant, who is the operator.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_registered_schedule_of_a_trusted_project_tool_with_runtime_caps_mints_at_fire()
+{
+    let (mut h, fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start Core+Scheduling daemon");
+    let project = h.user_space.path().join("mint-schedule-project");
+    // The fixture publisher is pinned in the node signer registry for every
+    // kind, so its project items resolve as trusted_project.
+    plant_mint_tool(&project, &fixture.publisher);
+    let project_root = project
+        .canonicalize()
+        .expect("resolve scheduled project root")
+        .display()
+        .to_string();
+
+    schedule_tool(&h, "mint-at-fire", "mintcheck/echo", &project_root).await;
+
+    let fire = terminal_fire(&h, "mint-at-fire").await;
+    let stderr = h.drain_stderr_nonblocking().await;
+    assert!(
+        !stderr.contains("project_runtime_caps_operator_only"),
+        "the operator's schedule must not be refused the project's runtime caps: {stderr}"
+    );
+    assert_eq!(
+        fire["status"], "completed",
+        "the operator-registered fire must run to completion: {fire:#}; stderr: {stderr}"
+    );
+    assert_eq!(fire["outcome"], "success", "{fire:#}; stderr: {stderr}");
+    assert!(
+        !fire["admitted_capsule_hash"].is_null(),
+        "an admitted fire records its launch: {fire:#}"
+    );
+    assert!(
+        !stderr.contains("schedule dispatch failed"),
+        "no dispatch failure may be logged: {stderr}"
+    );
 }

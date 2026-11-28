@@ -3253,7 +3253,13 @@ mod tests {
 
         require_staging_capacity(&staging, &activation, &policy).unwrap();
 
-        policy.minimum_free_bytes = staging.filesystem_capacity().unwrap().available_bytes;
+        // A floor a whole gibibyte above what is free now: the runner may free some
+        // space between this read and the next check, which must still fail.
+        policy.minimum_free_bytes = staging
+            .filesystem_capacity()
+            .unwrap()
+            .available_bytes
+            .saturating_add(1 << 30);
         let error = require_staging_capacity(&staging, &activation, &policy).unwrap_err();
         assert!(error.to_string().contains("staging requires"));
     }

@@ -165,6 +165,29 @@ pub struct RawContent {
 /// Max raw content size (256 KiB).
 const MAX_RAW_BYTES: usize = 256 * 1024;
 
+/// The project a seat reads items from. A seat bound to a project reads that
+/// project and nothing in the request changes it. The node's operator, whose
+/// seat has no project of its own, may name one. Any other seat with no
+/// project is refused a named path, so a request cannot make it read an
+/// arbitrary directory.
+fn seat_project_path(
+    caller: &crate::seat_auth::SeatCaller,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+    params: &Value,
+) -> Result<Option<PathBuf>, HandlerError> {
+    if let Some(access) = project_access {
+        return Ok(Some(access.path().to_path_buf()));
+    }
+    let named = params.get("project_path").and_then(|v| v.as_str());
+    match (caller, named) {
+        (crate::seat_auth::SeatCaller::Operator { .. }, named) => Ok(named.map(PathBuf::from)),
+        (crate::seat_auth::SeatCaller::Attachment(_), None) => Ok(None),
+        (crate::seat_auth::SeatCaller::Attachment(_), Some(_)) => Err(HandlerError::Forbidden(
+            "no_project_bound: no project is bound to this invocation".to_owned(),
+        )),
+    }
+}
+
 // ── items.list handler ─────────────────────────────────────────────
 
 pub async fn handle_items_list(
@@ -176,15 +199,7 @@ pub async fn handle_items_list(
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let project_access = caller.project_access()?;
-    let project_path: Option<PathBuf> = project_access
-        .as_ref()
-        .map(|access| access.path().to_path_buf())
-        .or_else(|| {
-            params
-                .get("project_path")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-        });
+    let project_path = seat_project_path(&caller, project_access.as_ref(), &params)?;
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
@@ -425,15 +440,7 @@ pub async fn handle_item_inspect(
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let project_access = caller.project_access()?;
-    let project_path: Option<PathBuf> = project_access
-        .as_ref()
-        .map(|access| access.path().to_path_buf())
-        .or_else(|| {
-            params
-                .get("project_path")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-        });
+    let project_path = seat_project_path(&caller, project_access.as_ref(), &params)?;
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
