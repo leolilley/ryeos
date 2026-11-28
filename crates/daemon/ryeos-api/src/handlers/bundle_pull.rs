@@ -11,12 +11,14 @@
 //! fetched before the last of them passes:
 //!
 //! 1. the node's `/public-key` answers with the pinned fingerprint, a key that
-//!    hashes to it, and a build of the same major.minor as this daemon;
+//!    hashes to it;
 //! 2. the served record hashes to `--expect` (and that hash is the recomputed
 //!    canonical body hash), names the pinned node, carries a countersignature
 //!    that verifies under the node key, and has not passed `not_after`;
 //! 3. the served manifest hashes to the record's `manifest_hash` and names the
-//!    record's bundle;
+//!    record's bundle; the record and the manifest each carry a schema this
+//!    build knows (an unknown one is `publication_schema_unknown`), and the
+//!    countersignature's format is fixed by the domain it is signed under;
 //! 4. the manifest's publisher is a signer this node trusts.
 //!
 //! Then every blob is fetched with one GET, hashed against its manifest entry
@@ -39,8 +41,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use ryeos_engine::trust::{
-    MAX_PUBLICATION_MANIFEST_BYTES, PublicationManifest, ServedPublication, TrustStore,
-    compute_fingerprint,
+    MAX_PUBLICATION_MANIFEST_BYTES, NODE_DOMAIN, PublicationManifest, PublicationRefusal,
+    ServedPublication, TrustStore, compute_fingerprint,
 };
 use ryeos_executor::executor::ServiceAvailability;
 use serde_json::{Value, json};
@@ -72,6 +74,8 @@ const DESCRIBE_MAX_BYTES: u64 = MAX_PUBLICATION_MANIFEST_BYTES + 256 * 1024;
 pub enum PullRefusal {
     #[error("publication_malformed: {0}")]
     Malformed(String),
+    #[error("publication_schema_unknown: {0}")]
+    SchemaUnknown(String),
     #[error("publication_insecure_url: {0}")]
     InsecureUrl(String),
     #[error("publication_fetch_failed: {0}")]
@@ -92,17 +96,12 @@ pub enum PullRefusal {
     ProxyUnchecked { host: String, proxy: String },
     #[error("publication_node_mismatch: {0}")]
     NodeMismatch(String),
-    #[error(
-        "publication_version_mismatch: the node runs {remote}, this daemon runs {local}; pulls \
-         need the same major.minor on both, so a node upgrade can invalidate a shared link until \
-         the other node is upgraded too"
-    )]
-    VersionMismatch { local: String, remote: String },
     #[error("publication_hash_mismatch: {0}")]
     HashMismatch(String),
     #[error(
         "publication_signature_invalid: the node countersignature does not verify under the \
-         pinned node key"
+         pinned node key and the domain {}",
+        NODE_DOMAIN
     )]
     SignatureInvalid,
     #[error("publication_expired: the publication's not_after has passed")]
@@ -125,12 +124,12 @@ impl PullRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "publication_malformed",
+            Self::SchemaUnknown(_) => "publication_schema_unknown",
             Self::InsecureUrl(_) => "publication_insecure_url",
             Self::FetchFailed(_) => "publication_fetch_failed",
             Self::HostInternal { .. } => "publication_host_internal",
             Self::ProxyUnchecked { .. } => "publication_proxy_unchecked",
             Self::NodeMismatch(_) => "publication_node_mismatch",
-            Self::VersionMismatch { .. } => "publication_version_mismatch",
             Self::HashMismatch(_) => "publication_hash_mismatch",
             Self::SignatureInvalid => "publication_signature_invalid",
             Self::Expired => "publication_expired",
@@ -142,7 +141,7 @@ impl PullRefusal {
 
     fn status(&self) -> u16 {
         match self {
-            Self::Malformed(_) | Self::InsecureUrl(_) => 400,
+            Self::Malformed(_) | Self::SchemaUnknown(_) | Self::InsecureUrl(_) => 400,
             Self::FetchFailed(_) => 502,
             _ => 422,
         }
@@ -331,23 +330,12 @@ pub(crate) fn parse_target(raw: &str, allow_internal: bool) -> Result<PullTarget
 pub(crate) struct PublicKeyDoc {
     pub fingerprint: String,
     pub signing_key: String,
-    pub version: String,
 }
 
-/// The release series a build belongs to: its major and minor numbers.
-fn release_series(version: &str) -> Option<(u64, u64)> {
-    let mut parts = version.trim().trim_start_matches('v').split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
-}
-
-/// Step 1: the node at the URL is the pinned node and a build this daemon
-/// can pull from. Returns the key its countersignature must verify under.
+/// Step 1: the node at the URL is the pinned node. Returns the key its countersignature must verify under.
 pub(crate) fn check_public_key(
     doc: &PublicKeyDoc,
     pinned_node: &str,
-    local_version: &str,
 ) -> Result<lillux::crypto::VerifyingKey, PullRefusal> {
     let reported = doc
         .fingerprint
@@ -365,13 +353,7 @@ pub(crate) fn check_public_key(
             "the node's signing_key does not hash to its fingerprint".into(),
         ));
     }
-    match (release_series(&doc.version), release_series(local_version)) {
-        (Some(remote), Some(local)) if remote == local => Ok(key),
-        _ => Err(PullRefusal::VersionMismatch {
-            local: local_version.to_owned(),
-            remote: doc.version.clone(),
-        }),
-    }
+    Ok(key)
 }
 
 /// A publication whose record, countersignature and manifest all verified.
@@ -379,6 +361,15 @@ pub(crate) fn check_public_key(
 pub(crate) struct VerifiedPublication {
     pub served: ServedPublication,
     pub manifest: PublicationManifest,
+}
+
+/// A record shape refusal as the pull reports it: an unknown schema keeps its
+/// typed code, anything else is a malformed document.
+fn shape_refusal(what: &str, error: PublicationRefusal) -> PullRefusal {
+    match error {
+        PublicationRefusal::SchemaUnknown(text) => PullRefusal::SchemaUnknown(text),
+        other => PullRefusal::Malformed(format!("{what}: {other}")),
+    }
 }
 
 /// Steps 2 and 3: the describe answer against the pins and the node key.
@@ -405,7 +396,7 @@ pub(crate) fn verify_publication(
     let record = &served.record;
     record
         .validate_shape()
-        .map_err(|error| malformed("the record", &error))?;
+        .map_err(|error| shape_refusal("the record", error))?;
 
     let recomputed = record
         .body_hash()
@@ -443,9 +434,10 @@ pub(crate) fn verify_publication(
             "the manifest does not hash to the record's manifest_hash".into(),
         ));
     }
-    manifest
-        .validate_shape()
-        .map_err(|error| PullRefusal::ManifestMismatch(error.to_string()))?;
+    manifest.validate_shape().map_err(|error| match error {
+        PublicationRefusal::SchemaUnknown(text) => PullRefusal::SchemaUnknown(text),
+        other => PullRefusal::ManifestMismatch(other.to_string()),
+    })?;
     if manifest.bundle_name != record.bundle_name {
         return Err(PullRefusal::ManifestMismatch(
             "the manifest is for another bundle than the record names".into(),
@@ -843,7 +835,7 @@ pub async fn handle(
     let target = parse_target(&req.url, req.allow_internal).map_err(refuse)?;
     let http = PublicHttp::new(req.allow_internal).map_err(refuse)?;
 
-    // 1. The node at the URL is the pinned node, on a compatible build.
+    // 1. The node at the URL is the pinned node.
     let key_doc: PublicKeyDoc = serde_json::from_value(
         http.get_json(
             &format!("{}/public-key", target.origin),
@@ -854,8 +846,7 @@ pub async fn handle(
     )
     .map_err(|error| PullRefusal::Malformed(format!("the node's /public-key answer: {error}")))
     .map_err(refuse)?;
-    let node_key =
-        check_public_key(&key_doc, &pins.node, state.daemon_build.version).map_err(refuse)?;
+    let node_key = check_public_key(&key_doc, &pins.node).map_err(refuse)?;
 
     // 2 and 3. The record, its countersignature and its manifest.
     let described = http

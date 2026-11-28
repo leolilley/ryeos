@@ -220,24 +220,23 @@ fn a_manifest_for_another_bundle_version_than_the_record_is_refused() {
     assert!(refusal.to_string().contains("version"), "{refusal}");
 }
 
-fn key_doc(fingerprint: &str, version: &str) -> PublicKeyDoc {
+fn key_doc(fingerprint: &str) -> PublicKeyDoc {
     PublicKeyDoc {
         fingerprint: fingerprint.to_owned(),
         signing_key: format!(
             "ed25519:{}",
             base64::engine::general_purpose::STANDARD.encode(node_key().verifying_key().as_bytes())
         ),
-        version: version.to_owned(),
     }
 }
 
 #[test]
-fn the_public_key_must_be_the_pinned_node_on_the_same_series() {
+fn the_public_key_must_be_the_pinned_node() {
     let fp = node_fp();
-    assert!(check_public_key(&key_doc(&fp, "0.6.3"), &fp, "0.6.9").is_ok());
-    assert!(check_public_key(&key_doc(&format!("fp:{fp}"), "0.6.3"), &fp, "0.6.9").is_ok());
+    assert!(check_public_key(&key_doc(&fp), &fp).is_ok());
+    assert!(check_public_key(&key_doc(&format!("fp:{fp}")), &fp).is_ok());
     assert_eq!(
-        check_public_key(&key_doc(&fp, "0.6.3"), &"d".repeat(64), "0.6.3")
+        check_public_key(&key_doc(&fp), &"d".repeat(64))
             .unwrap_err()
             .code(),
         "publication_node_mismatch"
@@ -245,20 +244,47 @@ fn the_public_key_must_be_the_pinned_node_on_the_same_series() {
     // A key that does not hash to the fingerprint it is offered under.
     let other = "d".repeat(64);
     assert_eq!(
-        check_public_key(&key_doc(&other, "0.6.3"), &other, "0.6.3")
+        check_public_key(&key_doc(&other), &other)
             .unwrap_err()
             .code(),
         "publication_node_mismatch"
     );
-    for remote in ["0.7.0", "1.6.3", "garbage", ""] {
-        assert_eq!(
-            check_public_key(&key_doc(&fp, remote), &fp, "0.6.3")
-                .unwrap_err()
-                .code(),
-            "publication_version_mismatch",
-            "{remote}"
-        );
-    }
+}
+
+#[test]
+fn a_record_with_an_unknown_schema_is_refused_naming_both_schemas() {
+    let mut published = published();
+    published.body["record"]["schema"] = json!("ryeos.publication/v9");
+    let refusal = verify(&published, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publication_schema_unknown");
+    let text = refusal.to_string();
+    assert!(text.contains("record"), "{text}");
+    assert!(text.contains("ryeos.publication/v9"), "{text}");
+    assert!(text.contains("ryeos.publication/v1"), "{text}");
+}
+
+#[test]
+fn a_manifest_with_an_unknown_kind_or_schema_is_refused_naming_both() {
+    // The record must name the tampered manifest's hash for the check to be
+    // reached, so build the publication around the tampered manifest.
+    let mut manifest = manifest_for("demo", BODY);
+    manifest.schema = "ryeos.publication.bundle-export-manifest/v9".to_owned();
+    let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+    let refusal = verify(&published, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publication_schema_unknown");
+    let text = refusal.to_string();
+    assert!(text.contains("manifest"), "{text}");
+    assert!(text.contains("bundle-export-manifest/v9"), "{text}");
+    assert!(text.contains("bundle-export-manifest/v1"), "{text}");
+}
+
+#[test]
+fn a_failed_countersignature_names_the_domain_it_was_checked_under() {
+    let impostor = SigningKey::from_bytes(&[9; 32]);
+    let published = published_with("demo", &manifest_for("demo", BODY), NOW + 3600, &impostor);
+    let refusal = verify(&published, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publication_signature_invalid");
+    assert!(refusal.to_string().contains(NODE_DOMAIN), "{refusal}");
 }
 
 #[test]

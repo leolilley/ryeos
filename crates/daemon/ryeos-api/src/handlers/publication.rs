@@ -35,6 +35,7 @@ static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn refusal_error(refusal: &PublicationRefusal) -> HandlerError {
     let status = match refusal {
         PublicationRefusal::Malformed(_)
+        | PublicationRefusal::SchemaUnknown(_)
         | PublicationRefusal::Expired
         | PublicationRefusal::NotAfterTooFar { .. } => 400,
         PublicationRefusal::BadSignature | PublicationRefusal::SignerNotOperator => 403,

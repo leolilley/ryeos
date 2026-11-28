@@ -61,7 +61,10 @@ pub const PUBLICATION_RETIREMENT_NOTE: &str = "version 1 does not record which o
 pub const PUBLICATION_KEY_ROTATION_NOTE: &str = "a node key rotation invalidates every printed node pin: existing publication links stop verifying; re-share them";
 
 const OPERATOR_DOMAIN: &str = "ryeos-publication-v1";
-const NODE_DOMAIN: &str = "ryeos-publication-node-v1";
+/// Domain the node countersignature is signed under. It is the countersignature's
+/// format identifier: a different domain is a different format, and such a
+/// countersignature does not verify.
+pub const NODE_DOMAIN: &str = "ryeos-publication-node-v1";
 const STORE_SCHEMA_VERSION: u32 = 1;
 /// Name of the directory below the state directory.
 pub const PUBLICATIONS_DIR: &str = "publications";
@@ -87,6 +90,10 @@ pub const MAX_PUBLICATION_MANIFEST_ENTRIES: usize = 10_000;
 pub enum PublicationRefusal {
     #[error("publication_malformed: {0}")]
     Malformed(String),
+    /// A signed document names a schema this build does not know. The text
+    /// names the document and both schema identifiers.
+    #[error("publication_schema_unknown: {0}")]
+    SchemaUnknown(String),
     #[error(
         "publication_bad_signature: the record does not verify under the operator key. Sign it \
          again with the operator key"
@@ -118,6 +125,7 @@ impl PublicationRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "publication_malformed",
+            Self::SchemaUnknown(_) => "publication_schema_unknown",
             Self::BadSignature => "publication_bad_signature",
             Self::SignerNotOperator => "publication_signer_not_operator",
             Self::Expired => "publication_expired",
@@ -256,7 +264,10 @@ impl PublicationRecord {
     pub fn validate_shape(&self) -> Result<(), PublicationRefusal> {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
         if self.schema != PUBLICATION_SCHEMA {
-            return malformed("unknown schema");
+            return Err(PublicationRefusal::SchemaUnknown(format!(
+                "the publication record has schema `{}`, expected `{PUBLICATION_SCHEMA}`",
+                self.schema
+            )));
         }
         if !is_publication_id(&self.id) {
             return malformed("id is not 32 lowercase hex digits");
@@ -508,7 +519,11 @@ impl PublicationManifest {
     pub fn validate_shape(&self) -> Result<(), PublicationRefusal> {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
         if self.kind != PUBLICATION_MANIFEST_KIND || self.schema != PUBLICATION_MANIFEST_SCHEMA {
-            return malformed("manifest has an unknown kind or schema");
+            return Err(PublicationRefusal::SchemaUnknown(format!(
+                "the publication manifest has kind `{}` and schema `{}`, expected kind \
+                 `{PUBLICATION_MANIFEST_KIND}` and schema `{PUBLICATION_MANIFEST_SCHEMA}`",
+                self.kind, self.schema
+            )));
         }
         if !is_bundle_version(&self.bundle_version) {
             return malformed("bundle_version must be 1 to 64 bytes of [0-9A-Za-z.+_-]");
