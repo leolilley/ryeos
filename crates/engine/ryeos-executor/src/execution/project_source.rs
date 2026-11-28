@@ -711,6 +711,11 @@ fn prepare_external_consumer_context(
         .as_ref()
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
+    let project_mint = ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+        &state.config.app_root,
+        &engine.trust_store,
+        &principal_fingerprint,
+    );
     let plan_context = ryeos_engine::contracts::PlanContext {
         logical_project,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -826,6 +831,7 @@ fn prepare_external_consumer_context(
             &roots,
             &engine.trust_store,
             project_authority,
+            project_mint,
         )?;
     Ok(PreparedExternalProductConsumer {
         resolution,

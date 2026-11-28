@@ -46,6 +46,11 @@ on:
         required: false
         default: ""
         type: string
+      long_e2e:
+        description: "Run the daemon e2e that the other jobs never run (the 21 capacity rollovers, about 14 minutes), on its own"
+        required: true
+        default: false
+        type: boolean
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -111,6 +116,10 @@ jobs:
       # crates/bin/daemon/tests/e2e-coverage.toml; ERROR fails the e2e archive job.
       e2e_tests: ${{ steps.classify.outputs.e2e_tests || 'ERROR' }}
       e2e_shards: ${{ steps.classify.outputs.e2e_shards || '[1]' }}
+      # JSON list of {suite, test} real-isolation smoke tests the Process-scope e2e job runs in a
+      # merge gate: non-empty only when the branch touches operator authority or the trust store
+      # (the [authority] table of the coverage map). ERROR fails that job.
+      process_scope_suites: ${{ steps.classify.outputs.process_scope_suites || 'ERROR' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -137,7 +146,7 @@ jobs:
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards|process_scope_suites)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
           # A changed package no coverage-map entry names runs no daemon e2e test; say so.
           sed -n 's/^e2e_uncovered=//p' "$RUNNER_TEMP/classification" | jq -r '.[]?' | while IFS= read -r package; do
             echo "::warning title=No daemon e2e coverage::$package changed, but no entry in crates/bin/daemon/tests/e2e-coverage.toml covers it, so no daemon e2e test runs for it."
@@ -163,6 +172,13 @@ jobs:
 
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
+      # The helper's failure path (exit 1 after four attempts) and removal path
+      # (a packages.microsoft.com source is deleted) cannot be forced on a
+      # runner, so they run here against a stub apt-get and a temporary
+      # sources directory.
+      - name: Check the apt-update helper's failure and removal paths
+        run: ./.ai/tools/ryeos/development/runner-host/lib/test-apt-update.sh
 
       - name: Check signed files match their signed content hash
         # Mirrors lillux::signature::content_hash_after_signature
@@ -1457,6 +1473,73 @@ jobs:
           --partition "hash:${{ matrix.shard }}/$SHARDS"
           --no-tests=pass
 
+  # G-11: the 21 capacity rollovers are `#[ignore]` and return early unless
+  # RYEOS_LONG_E2E=1, so no other job ever ran them. This runs them on request
+  # (a dispatch with long_e2e=true), sets the variable, passes `--ignored`, and
+  # fails unless exactly that one test passed and nothing skipped.
+  long-e2e:
+    name: Long daemon e2e (21 capacity rollovers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.long_e2e }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Restore or refresh the bundle state
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: "false"
+          github-token: ${{ github.token }}
+
+      - name: Run the 21 rollovers
+        env:
+          RYEOS_LONG_E2E: "1"
+          RUST_MIN_STACK: 8388608
+        run: |
+          log="$RUNNER_TEMP/long-e2e.log"
+          cargo test -p ryeosd --locked --features scheduling,model-provider-setup \
+            --test capacity_rollover_e2e -- --ignored --exact \
+            twenty_one_rollovers_renew_the_epoch_without_exhausting --test-threads 1 --nocapture 2>&1 | tee "$log"
+          [[ "${PIPESTATUS[0]}" == 0 ]] || { echo "FAIL: the rollover test failed" >&2; exit 1; }
+          if grep -qi 'skipped' "$log"; then
+            echo "FAIL: the rollover test printed a skip, so the proof did not run" >&2; exit 1
+          fi
+          grep -q '^test result: ok\. 1 passed; 0 failed' "$log" || { echo "FAIL: expected exactly one passed test" >&2; exit 1; }
+          # The loop prints "rollover N completed" after each rollover's checks:
+          # exactly 21, in order, or the loop did not run (a pass in 0.00 s with no
+          # marker is a skip; the run on a hosted runner took about 14 minutes).
+          # The marker can share a line with libtest's own "test ... " prefix (stderr
+          # and stdout interleave), so it is matched anywhere on a line, not anchored.
+          markers="$(grep -o 'rollover [0-9][0-9]* completed' "$log" | sed 's/^rollover \([0-9][0-9]*\) completed$/\1/' | tr '\n' ' ')"
+          expected="$(seq -s ' ' 1 21) "
+          [[ "$markers" == "$expected" ]] || { echo "FAIL: expected the rollover markers 1 to 21, saw: ${markers:-none}" >&2; exit 1; }
+
   test:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
@@ -1868,18 +1951,83 @@ jobs:
   # binding in a delegated cgroup subtree (see test_support/process_scopes.rs),
   # an unqualified host fails the test, and every suite must pass an exact
   # nonzero number of tests with none skipped.
+
+      # G-11: three native probes pass as "skipped" on a host that cannot run
+      # them and are never enabled by anything else. Here the host qualifies
+      # (unprivileged namespaces above, root for the overlay probe), their
+      # variable is set, and a skip line or a non-zero exit fails the step.
+      - name: Write the probe runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/run-probe" <<'RUN'
+          #!/bin/bash
+          # run-probe LABEL CMD...: run a native probe; fail on a non-zero exit
+          # or on any output line that says it skipped, so a probe that did not
+          # run is never a pass.
+          set -uo pipefail
+          label="$1"; shift
+          log="$(mktemp)"
+          "$@" 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          [[ "$status" == 0 ]] || { echo "FAIL: $label exited $status" >&2; exit 1; }
+          if grep -qi 'skipped' "$log"; then
+            echo "FAIL: $label printed a skip, so the proof did not run" >&2; exit 1
+          fi
+          echo "PROBE-RAN: $label"
+          RUN
+          chmod 755 "$RUNNER_TEMP/run-probe"
+
+      - name: Native probe - guest occurrence owner (unprivileged namespaces)
+        env:
+          RYEOS_GUEST_OCCURRENCE_NATIVE: "1"
+        run: |
+          "$RUNNER_TEMP/run-probe" guest_occurrence_owner_native \
+            cargo test -p ryeos-external-execution --locked --test guest_occurrence_owner_native
+
+      - name: Native probe - private source owner (unprivileged namespaces)
+        env:
+          LILLUX_PRIVATE_SOURCE_NATIVE: "1"
+        run: |
+          "$RUNNER_TEMP/run-probe" private_source_owner \
+            cargo test -p lillux --locked --test private_source_owner
+
+      - name: Native probe - root overlay (root)
+        env:
+          LILLUX_ROOT_OVERLAY_NATIVE: "1"
+        run: |
+          build_json="$RUNNER_TEMP/build-root-overlay.jsonl"
+          if ! cargo test -p lillux --locked --test root_overlay_native --no-run --message-format=json > "$build_json"; then
+            echo "::error::building the root overlay probe failed; the compiler's messages follow" >&2
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.rendered' "$build_json" >&2 || true
+            exit 1
+          fi
+          bin="$(jq -r 'select(.profile.test == true and .executable != null) | .executable' "$build_json")"
+          [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one root overlay probe executable, got: $bin" >&2; exit 1; }
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_ROOT_OVERLAY_NATIVE=1 \
+            "$RUNNER_TEMP/run-probe" root_overlay_native "$bin"
+
+
   process-scope-e2e:
     name: Process-scope e2e (real isolation)
-    needs: [bundles]
+    needs: [bundles, classify]
     runs-on: ubuntu-24.04
     # The handoff acceptance matrix alone runs 55 to 90 minutes depending on
     # the runner, and the claude follow suite runs after it.
     timeout-minutes: 180
-    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    # A merge gate runs this job only for a branch that touches operator authority or the trust
+    # store (classify's process_scope_suites), and then only the named smoke test; the full
+    # matrix stays on next.
+    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || (inputs.merge_gates && needs.classify.outputs.process_scope_suites != '[]')) }}
     env:
       RUST_MIN_STACK: 8388608
       E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
     steps:
+      - name: Refuse an unreadable authority classification
+        if: ${{ inputs.merge_gates && needs.classify.outputs.process_scope_suites == 'ERROR' }}
+        run: |
+          echo "::error::The classifier could not decide the authority smoke tests; refusing to treat that as none."
+          exit 1
+
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -1942,19 +2090,26 @@ jobs:
           echo "delegated child cgroup.controllers: $(cat /sys/fs/cgroup/ryeos-controller-evidence/cgroup.controllers)"
           sudo -n rmdir /sys/fs/cgroup/ryeos-controller-evidence
 
+      - name: Restore or refresh the bundle state (merge gate)
+        if: ${{ inputs.merge_gates }}
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: ${{ needs.classify.outputs.bundles_changed }}
+          github-token: ${{ github.token }}
+
       - name: Download the refreshed bundle state
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.bundles.result == 'success' && !inputs.merge_gates }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: bundle-state-${{ github.sha }}
           path: ${{ runner.temp }}/bundle-state
 
       - name: Restore the refreshed bundles
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.bundles.result == 'success' && !inputs.merge_gates }}
         run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
 
       - name: Restore next's bundle state (no bundles job in this run)
-        if: ${{ needs.bundles.result != 'success' }}
+        if: ${{ needs.bundles.result != 'success' && !inputs.merge_gates }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Restores the bundle state of the newest next CI run whose bundles job succeeded and
@@ -2031,9 +2186,12 @@ jobs:
         run: ./scripts/ci/check-test-support-feature-leak.sh
 
       - name: Build the e2e test binaries
+        env:
+          # A merge gate builds only the suites its smoke tests name.
+          SUITES: ${{ inputs.merge_gates && join(fromJSON(needs.classify.outputs.process_scope_suites).*.suite, ' ') || 'session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e' }}
         run: |
           set -euo pipefail
-          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
+          for suite in $SUITES; do
             build_json="$RUNNER_TEMP/build-$suite.jsonl"
             if ! cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json > "$build_json"; then
               # The JSON stream holds the compiler's own error text, which
@@ -2055,12 +2213,13 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/run-suite" <<'RUN'
           #!/bin/bash
-          # run-suite SUITE PASSED IGNORED: run one e2e test binary as an
-          # administrator under the real process-scope mode and fail unless
-          # exactly PASSED tests passed, none failed and exactly IGNORED are
-          # ignored. The mode turns every unqualified-host skip into a failure.
+          # run-suite SUITE PASSED IGNORED [TEST]: run one e2e test binary (or,
+          # with TEST, that one test by exact name) as an administrator under the
+          # real process-scope mode and fail unless exactly PASSED tests passed,
+          # none failed and exactly IGNORED are ignored. The mode turns every
+          # unqualified-host skip into a failure.
           set -euo pipefail
-          suite="$1"; passed_expected="$2"; ignored_expected="$3"
+          suite="$1"; passed_expected="$2"; ignored_expected="$3"; only="${4:-}"
           exe="$(sed -n "s/^$suite=//p" "$RUNNER_TEMP/e2e-executables")"
           log="$RUNNER_TEMP/$suite.log"
           set +e
@@ -2071,7 +2230,7 @@ jobs:
             "RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1" \
             "RYEOS_TEST_SCOPE_ACCOUNT=$(id -u):$(id -g)" \
             ${RYEOS_TEST_HANDLER_BIN_DIR:+"RYEOS_TEST_HANDLER_BIN_DIR=$RYEOS_TEST_HANDLER_BIN_DIR"} \
-            "$exe" --test-threads=1 2>&1 | tee "$log"
+            "$exe" ${only:+"$only" --exact} --test-threads=1 2>&1 | tee "$log"
           status="${PIPESTATUS[0]}"
           set -e
           result="$(grep -E '^test result: ' "$log" | tail -n 1)"
@@ -2089,18 +2248,30 @@ jobs:
           staged="$GITHUB_WORKSPACE/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
           if [[ -d "$staged" ]]; then echo "RYEOS_TEST_HANDLER_BIN_DIR=$staged" >> "$GITHUB_ENV"; fi
 
+      # A merge gate runs each named smoke test once and requires exactly one test run and
+      # passed; run-suite fails a skip, so a smoke test that skips fails the job.
+      - name: Authority smoke tests (merge gate)
+        if: ${{ inputs.merge_gates }}
+        env:
+          SMOKE: ${{ needs.classify.outputs.process_scope_suites }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SMOKE" | jq -r '.[] | "\(.suite) \(.test)"' | while read -r suite test; do
+            "$RUNNER_TEMP/run-suite" "$suite" 1 0 "$test"
+          done
+
       - name: Session secret delivery (real isolation)
-        if: ${{ !inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e' }}
+        if: ${{ !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e') }}
         run: |
           "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 7 0
 
       - name: Handoff crash recovery (real isolation)
-        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
+        if: ${{ !cancelled() && !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
         run: |
           "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
 
       - name: Claude Code worker follow (real isolation)
-        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
+        if: ${{ !cancelled() && !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
         # The suite's development-hosted nodes start as the only child of tini,
         # pid 1 of their own user, pid, mount and cgroup namespace (the
         # enclosure placement, the shipped image's shape).
