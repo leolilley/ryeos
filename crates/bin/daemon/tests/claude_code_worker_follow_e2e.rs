@@ -72,7 +72,14 @@ const CONTINUE_ITEM: &str = "worker_execution:claude-code/bounded-turn-continue"
 const SHORT_TURN_BUNDLE: &str = "claude-code-short-turn-fixture";
 const SHORT_TURN_ITEM: &str = "worker_execution:claude-code-short-turn-fixture/bounded-turn";
 const SHORT_TURN_SECONDS: u64 = 8;
-const ENVIRONMENT_REF: &str = "config:claude-code/environments/trusted-lane";
+/// A synthetic test bundle holding one item: the bundle's trusted-lane
+/// environment without its pinned Claude Code tree. The shipped environment
+/// needs that tree activated on the node, which the stub-driven turns never
+/// run, so these tests name this copy instead; the shipped environments are
+/// checked by the bundle contract test and the launch preparer's validator.
+const ENVIRONMENT_BUNDLE: &str = "claude-code-stub-environment-fixture";
+const ENVIRONMENT_REF: &str =
+    "config:claude-code-stub-environment-fixture/environments/trusted-lane";
 const CREDENTIAL_PROFILE_ID: &str = "credential:claude-code-follow-e2e";
 
 /// The two host-provided names the bundle's environment delivers.
@@ -175,7 +182,7 @@ const GRAPH_REQUIRES: &str = r#"requires:
     declared:
       - ryeos.execute.worker_execution.claude-code/bounded-turn
       - ryeos.execute.worker_execution.claude-code-short-turn-fixture/bounded-turn
-      - ryeos.execute.config.claude-code/environments/trusted-lane
+      - ryeos.execute.config.claude-code-stub-environment-fixture/environments/trusted-lane
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
       - ryeos.runtime.dedicated_session.terminate
@@ -618,10 +625,49 @@ fn plant_short_turn(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     )
 }
 
+/// Install [`ENVIRONMENT_REF`]: the bundle's trusted-lane environment with no
+/// external content and a literal executable path, in a synthetic bundle
+/// signed by the fixture publisher. The stub driver never runs the path.
+fn plant_stub_environment(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    let source = common::workspace_root()
+        .join("bundles")
+        .join(BUNDLE_NAME)
+        .join(".ai/config/claude-code/environments/trusted-lane.yaml");
+    let body = lillux::signature::strip_signature_lines(&std::fs::read_to_string(&source)?);
+    let mut item: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    item["category"] = serde_yaml::Value::from(format!("{ENVIRONMENT_BUNDLE}/environments"));
+    item["external_content"] = serde_yaml::Value::Sequence(Vec::new());
+    let executable: serde_yaml::Value =
+        serde_yaml::from_str("{kind: literal, value: /stub/claude-code/bin/claude}")?;
+    item["configuration"]["process_environment"]["CLAUDE_CODE_EXECUTABLE"] = executable;
+    let bundle_root = state_path.join(".ai/bundles").join(ENVIRONMENT_BUNDLE);
+    let path = bundle_root.join(format!(
+        ".ai/config/{ENVIRONMENT_BUNDLE}/environments/trusted-lane.yaml"
+    ));
+    std::fs::create_dir_all(path.parent().context("item path has no parent")?)?;
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&item)?,
+            &fixture.publisher,
+            "#",
+            None,
+            common::fast_fixture::FAST_FIXTURE_TIME,
+        ),
+    )?;
+    common::fast_fixture::register_fixture_bundle(
+        state_path,
+        ENVIRONMENT_BUNDLE,
+        &bundle_root,
+        fixture,
+    )
+}
+
 async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
     DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
-            plant_claude_code(state_path, fixture)
+            plant_claude_code(state_path, fixture)?;
+            plant_stub_environment(state_path, fixture)
         },
         |_| {},
     )
@@ -633,6 +679,7 @@ async fn start_node_with_short_turn() -> Result<(DaemonHarness, FastFixture)> {
     DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)?;
+            plant_stub_environment(state_path, fixture)?;
             plant_short_turn(state_path, fixture)
         },
         |_| {},
@@ -839,7 +886,7 @@ requires:
   capabilities:
     declared:
       - ryeos.execute.worker_execution.{capability}
-      - ryeos.execute.config.claude-code/environments/trusted-lane
+      - ryeos.execute.config.claude-code-stub-environment-fixture/environments/trusted-lane
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
       - ryeos.runtime.dedicated_session.terminate

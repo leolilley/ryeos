@@ -1,0 +1,32 @@
+# ryeos:signed:2026-11-27T16:11:42Z:84e0039f2922b61a87b39422c5d5d479e61ffb774aa7b0c9ab711fed2216bd49:GYhgx02VUFTtFdB8dCxdX2uPLRqXzTiTVp+r+fjwY9Lj/cVyGats3mmGDJOOv6r0OcVglMWID7RACXPWd8uXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: claude-code/activation
+schema: ryeos.external_content_activation.v3
+consumer_ref: config:claude-code/environments/subscription
+sources:
+  - id: claude-code-package
+    url: https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.332.tgz
+    archive_format: tar_gzip
+    sha256: 1c89f2f1e0bee93742cff8de9181fc07c702ce0651f1492bb3b97487d3a84af1
+    maximum_compressed_bytes: 201326592
+    maximum_expanded_bytes: 419430400
+    maximum_entries: 8
+    members:
+      - path: package/claude
+        disposition: import
+        sha256: a2df1f41bb00250992926420d0063f89b127cb81abdd284dbefb80c50ff1d026
+        maximum_bytes: 411041792
+        executable: true
+      - path: package/package.json
+        disposition: verify_only
+        sha256: b323284c1d19b0dd4eeb2666ecf267f552a93df6b669953fc8a1e53f33839c8a
+        maximum_bytes: 4096
+        executable: false
+components:
+  - id: claude-code
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: claude-code-package
+          member: package/claude
+          target: bin/claude

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:47:10Z:65efc43aa2d8e861dec134cce5f7b734c305393908c8f63506566985a050838e:FnzgWm/7r1I6gXCGXY/qN0XYmuPPqloj1dBaRCDxXRsID6q5XIr3Fm01pFDgFHXW7M/MGX+2yCWp4eBnjaGaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T16:11:42Z:a37fcea813da5740918f0cbc3adb35b4fc6479b1fa53ee4c8c37712d949e87b1:uZqmOL+YgPupuqK17fqQ4m4HSgMXwi/3klV2QAN9ouZw2U7EO/JDfkOS6NlVW1nTWVMMFNrgbTUlcY3aPsz7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Claude Code
 
 Provider data for hosting Claude Code through RyeOS's generic
@@ -11,8 +11,10 @@ environments and a credential-profile command.
 speaks the bridge's stdio wire and drives the Claude Code CLI: one
 `claude -p --output-format stream-json` process per turn, under strict
 configuration, resuming the upstream session for later turns. Claude Code's own
-executable is not pinned yet: the environments carry a placeholder path (see the
-runbook).
+executable (version 2.1.332, linux-x64) is pinned by digest: each environment
+declares the activated `claude-code` tree, and the activation recipes under
+`.ai/config/claude-code/activation/` fetch the vendor's archive and verify it
+(see the runbook).
 
 ## Layout
 
@@ -23,6 +25,7 @@ runbook).
 | `.ai/workers/claude-code/lib/hosted/schema/` | one JSON schema per route request, response and notification |
 | `.ai/workers/claude-code/lib/hosted/settings.baseline.json` | the baseline written to `$CLAUDE_CONFIG_DIR/settings.json` |
 | `.ai/worker-executions/claude-code/` | `bounded-turn` (read-write), `bounded-turn-read-only`, `bounded-turn-recovery`, `bounded-turn-continue` (resumes a completed predecessor named by `continue_from`) |
+| `.ai/config/claude-code/activation/` | one `ryeos.external_content_activation.v3` recipe per environment: the pinned archive, its member digests and the `bin/claude` tree |
 | `.ai/config/claude-code/environments/` | `ryeos.worker_environment.v7` for each worker and auth path: a model key and gateway address, or a Claude subscription token, delivered as secrets |
 | `.ai/knowledge/claude-code/hosted-activation.md` | operator runbook |
 | `test_contract.py` | authored-contract checks |

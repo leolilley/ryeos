@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:47:10Z:fe64bad6b304636ba713f8677cf6d298fe7757ed970628ad486a373b5a373c4d:cGh7HzfHlFu4b4hi5b/srv91wd+JQVeNwMoEgs+bsdlvRAvOO00sGuei7qlL+P8/hYFirc/THsqjOpota1QeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T16:11:42Z:9ade7b624da31e5c65cef857e74bf88eaaf9556295c2ef64a6ad18adca4aa97b:Cvc3U3r0uzYf5G9ueWuUzKqJukdlaSYbK41PBIgUCexAfDdHeGP837UD39y2fRh1hwQDBLvpJTpwS3lRC6UnCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
@@ -12,8 +12,8 @@ description: >-
 
 `claude-code-adapter` is a worker driver: it speaks the structured-session
 wire and runs Claude Code, one `claude -p` process per turn (see "The live
-driver"). Claude Code's own executable is configured by path and not pinned
-yet, so set `CLAUDE_CODE_EXECUTABLE` before launching.
+driver"). Claude Code's own executable is pinned by digest: activate it on the
+node (see "The live driver") before launching.
 
 ## What is installed
 
@@ -84,11 +84,18 @@ its own end would hang the session, so each outcome still emits
 The adapter runs Claude Code, one `claude -p` process per turn, in its own
 process group. It needs:
 
-- `CLAUDE_CODE_EXECUTABLE`, an absolute path to Claude Code's executable. The
-  environment templates carry the placeholder `/path/to/claude-code/bin/claude`;
-  set it to the real location (later, the `realization_path` of a pinned file
-  realization). The digest is not pinned yet: the executable's redistribution
-  terms and storage are separate decisions.
+- `CLAUDE_CODE_EXECUTABLE`, the path of Claude Code's executable, a file
+  inside the pinned `claude-code` realization each environment declares. The
+  environment carries no path: the node resolves it at placement. Activate the
+  pinned executable once per node and environment, before the first session:
+  `ryeos external-content activate config:claude-code/activation/<environment> online`
+  (`default`, `trusted-lane`, `subscription` or `subscription-trusted-lane`).
+  The recipe downloads the vendor's linux-x64 archive for version 2.1.332 from
+  the npm registry, refuses redirects, and verifies the archive's sha256 and
+  the executable's own sha256 (`a2df1f41...1d026`, the digest Anthropic's
+  release manifest also publishes) before importing it; the bytes are not
+  redistributed with this bundle. Moving to another version is a new signed
+  recipe and environment digest, never an edit of the pin in place.
 - `CLAUDE_CONFIG_DIR`, the credential home the bridge provides. Claude Code's
   sessions are kept under `projects/` there, and the adapter's own files under
   `adapter/` (its session map and its MCP configuration).
@@ -116,8 +123,7 @@ Only the test bundle refresh (`populate-bundles.sh --build-profile test`, which
 `gate.sh --refresh-bundles` selects) builds the adapter with its `stub-driver`
 feature.
 
-## Not yet
+## Configuration absence
 
-Claude Code's executable storage and pinning arrive in a later slice.
 `configuration_absence` already refuses a workspace that carries Claude Code
 project settings, hooks or MCP definitions. The profile is schema 13.
