@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T03:32:53Z:a047df5de5ccb16b99744e8a472bae76783df78f5a3478e0bd7414880bd558b0:aaDzXccNS7Rvfc0ltqvYUZkxDysjzIWIC4i9eZ6+Fer96C22Mb6XZCFcc4o0zqMsu4cLii1qBFB9PU6Jyg2mDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T15:25:37Z:095309c2ec2de339bf9a84cbed08dce496c536546a7c8796bd91c1154bb71656:CWh2s1/JQrQtl/WBrYPdBcgSp0yKbj5Kht5yK4c1YPUXWj0EBzk6xwv6qImJ/NsvbWSHQxEQxXvzki2DYnxRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -316,6 +316,22 @@ every signable item is verified:
 
 If any check fails, the entire bundle install is refused with a clear
 error listing every failed item.
+
+## Publication Pull Verification
+
+A node pulling a published bundle from another node pins that node's key
+(its fingerprint, and the signing key that hashes to it) and verifies three
+signed documents: the publication record, the node's countersignature over it,
+and the bundle manifest. It does not compare the other node's build: the
+pinned key and the documents' own formats decide.
+
+- The record and the manifest each name a schema, compared exactly. One this
+  build does not know is refused `publication_schema_unknown`, naming the
+  document, the schema it carries and the schema expected.
+- A countersignature's format is fixed by the domain it is signed under
+  (`ryeos-publication-node-v1`). A countersignature of another format, like a
+  forged one, does not verify, and is refused with the signature code; the
+  refusal names the domain it was checked under.
 
 ## System Space Is Immutable
 
