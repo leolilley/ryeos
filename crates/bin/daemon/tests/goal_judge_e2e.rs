@@ -111,6 +111,21 @@ fn verdict(pass: bool, failed: &[&str]) -> MockResponse {
     }
 }
 
+/// A project copy of the shipped example graph with one signed value of its
+/// state replaced, planted as `graph:variant` and signed by the test publisher.
+fn plant_variant(project: &Path, signer: &SigningKey, from: &str, to: &str) {
+    let source =
+        repo_root().join("bundles/graph/.ai/graphs/ryeos/standard/examples/goal-judge.yaml");
+    let raw = std::fs::read_to_string(source).expect("shipped example graph");
+    let body = lillux::signature::strip_signature_lines(&raw);
+    assert!(body.contains(from), "the example holds `{from}`");
+    let body = body.replacen(from, to, 1);
+    let dir = project.join(".ai/graphs");
+    std::fs::create_dir_all(&dir).expect("graphs dir");
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join("variant.yaml"), signed).expect("write variant");
+}
+
 struct Run {
     events: Vec<(String, String, Value)>,
     bodies: Vec<Value>,
@@ -144,6 +159,17 @@ impl Run {
 /// Launch the example graph against a mock that serves `script` in order, and
 /// wait until the graph has either completed or failed.
 async fn run_goal(script: Vec<MockResponse>) -> Run {
+    run_goal_with(GRAPH, |_, _| {}, script).await
+}
+
+/// The same, for a graph named `graph` after `tweak` has planted anything the
+/// test needs in the project (a project copy of the example with one signed
+/// value changed, for instance).
+async fn run_goal_with(
+    graph: &str,
+    tweak: impl FnOnce(&Path, &SigningKey),
+    script: Vec<MockResponse>,
+) -> Run {
     let mock = MockProvider::start(script).await;
     let mock_url = mock.base_url.clone();
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
@@ -167,10 +193,11 @@ async fn run_goal(script: Vec<MockResponse>) -> Run {
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    tweak(project.path(), &fixture.publisher);
 
     let (status, body) = tokio::time::timeout(
         Duration::from_secs(60),
-        h.post_execute(GRAPH, project.path().to_str().unwrap(), json!({})),
+        h.post_execute(graph, project.path().to_str().unwrap(), json!({})),
     )
     .await
     .expect("execute timed out")
@@ -218,11 +245,65 @@ async fn run_goal(script: Vec<MockResponse>) -> Run {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_round_bound_outside_one_to_eight_ends_failed_before_any_directive_runs() {
+    let run = run_goal_with(
+        "graph:variant",
+        |project, signer| plant_variant(project, signer, "max_rounds: 3", "max_rounds: 9"),
+        vec![work("never asked")],
+    )
+    .await;
+    assert!(!run.completed(), "events={:#?}", run.events);
+    assert!(
+        run.failure_text().contains("goal_config_invalid"),
+        "failure={}",
+        run.failure_text()
+    );
+    assert!(run.bodies.is_empty(), "no directive ran");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_graphs_own_step_limit_ends_it_with_its_own_code_never_success() {
+    let mut script = Vec::new();
+    for round in 0..3 {
+        script.push(work(&format!("Draft {round}.")));
+        script.push(verdict(false, &["no_filler"]));
+    }
+    let run = run_goal_with(
+        "graph:variant",
+        |project, signer| plant_variant(project, signer, "max_steps: 100", "max_steps: 8"),
+        script,
+    )
+    .await;
+    assert!(!run.completed(), "events={:#?}", run.events);
+    let failure = run.failure_text();
+    assert!(failure.contains("exceeded max_steps"), "failure={failure}");
+    assert!(
+        !failure.contains("goal_rounds_exhausted"),
+        "the limit's own failure wins: {failure}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_judge_pass_in_the_first_round_completes_with_one_working_run() {
     let run = run_goal(vec![work("A tidy paragraph."), verdict(true, &[])]).await;
     assert!(run.completed(), "events={:#?}", run.events);
     assert_eq!(run.bodies.len(), 2, "one working run, one judge run");
     assert_eq!(run.requests_mentioning("You judge one deliverable"), 1);
+    // Each directive thread records the model it ran on in its own frame, so
+    // a reader can tell work from judge by the thread ids the graph returns.
+    let frames: Vec<&Value> = run
+        .events
+        .iter()
+        .filter(|(_, ty, _)| ty == "cognition_frame")
+        .map(|(_, _, payload)| payload)
+        .collect();
+    assert!(frames.len() >= 2, "a frame per directive thread");
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["request_options"]["model"] == "mock-model"),
+        "{frames:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

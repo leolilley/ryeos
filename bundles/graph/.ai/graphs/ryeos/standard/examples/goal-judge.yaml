@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-28T14:17:17Z:a76e7c04611e9d50dba684409ec084542ae5a58ce426824516e40ba5a95d84e4:j4gw6tyhGdICZWrcWPzk4itHKqzGTq3T7UzbAW/7jmfRko0I7/qNuCyOp8+AEcnKucTERtUPgyzsUMZOXuCTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T14:22:18Z:82f4d3b584f173b54ecec9f1ac0b8c9b1fbe9d54bc79693f488404249aba53f7:SO3nYhGLWOahVvMI8+AFN8p1qghAQXwV8l9erp01uG9eZJIXhJJEXZEZJHTXv0MpWvWuFBQdghGp71g6aqN1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/standard/examples
 description: "Example: run a working directive under a goal, check its deliverable with deterministic gates, let a tool-less judge that sees only the quoted deliverable add refusals, and repeat with the author's signed repair text for a signed number of rounds. Ends failed, never successful, when the rounds run out."
@@ -9,7 +9,7 @@ requires:
       - ryeos.execute.directive.ryeos/standard/examples/goal-judge
       - ryeos.execute.tool.ryeos/standard/examples/goal-fail
 config:
-  start: work
+  start: start_check
   max_steps: 100
   on_error: fail
   state:
@@ -33,6 +33,17 @@ config:
     checked: ""
     trail: ""
   nodes:
+    # The signed round bound must be a number from 1 to 8; anything else ends
+    # the graph failed before any directive runs.
+    start_check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: 'type(state.max_rounds) == "number" && state.max_rounds >= 1 && state.max_rounds <= 8'
+            to: work
+          - to: bad_config
+
     work:
       node_type: action
       follow: true
@@ -113,6 +124,14 @@ config:
       assign:
         repair_text: "${state.repair_text + state.repair[key] + \" \"}"
       next: {type: unconditional, to: work}
+
+    bad_config:
+      action:
+        item_id: "tool:ryeos/standard/examples/goal-fail"
+        params:
+          code: goal_config_invalid
+          rounds: 0
+      next: {type: unconditional, to: done}
 
     exhausted:
       action:
