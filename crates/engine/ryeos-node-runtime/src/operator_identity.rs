@@ -139,6 +139,14 @@ impl OperatorPublicIdentity {
         format!("fp:{}", self.fingerprint)
     }
 
+    /// Whether `key` (a principal id, `fp:<fingerprint>`) is this operator's
+    /// own key. The one comparison of a caller's key with the configured local
+    /// operator; it knows nothing of origin, so a forwarded remote operator is
+    /// decided by the caller, never here.
+    pub fn is_key(&self, key: &str) -> bool {
+        self.principal_id() == key
+    }
+
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.verifying_key
     }

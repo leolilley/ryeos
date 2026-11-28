@@ -87,3 +87,99 @@ fn only_the_operator_handler_takes_a_checkout_path_in_a_request() {
         "items/revised stays an operator-only call"
     );
 }
+
+/// Production source: everything before the first inline test module.
+fn production(relative: &str) -> String {
+    workspace_file(relative)
+        .split("#[cfg(test)]")
+        .next()
+        .expect("a source file has production code")
+        .to_owned()
+}
+
+#[test]
+fn every_announcing_producer_takes_the_identity_from_the_registry() {
+    // The three producers of a revised-item event: the operator's
+    // `items/revised` handler, the runtime author service's announcement
+    // (stamped where it is announced, in the daemon's UDS server) and the
+    // startup reconcile (resolved in the daemon's main).
+    for (file, required) in [
+        (
+            "crates/daemon/ryeos-api/src/handlers/items_revised.rs",
+            "registered_identity_for_checkout",
+        ),
+        (
+            "crates/bin/daemon/src/uds/server.rs",
+            "registered_identity_for_checkout",
+        ),
+        (
+            "crates/bin/daemon/src/main.rs",
+            "registered_checkout_identities",
+        ),
+    ] {
+        assert!(
+            workspace_file(file).contains(required),
+            "{file} no longer resolves the announced identity through `{required}`"
+        );
+    }
+}
+
+#[test]
+fn no_revision_producer_builds_an_identity_of_its_own() {
+    // `endorsed_project` derives the identity an endorsement records; that is
+    // not an announced event. Nothing else on the announce path may construct
+    // an identity, and the author service and the event module never do.
+    for file in [
+        "crates/daemon/ryeos-app/src/runtime_item_author_service.rs",
+        "crates/daemon/ryeos-app/src/item_revised.rs",
+        "crates/daemon/ryeos-ui/src/item_hints.rs",
+    ] {
+        let source = production(file);
+        for forbidden in [
+            "ProjectIdentity::new(",
+            "ProjectIdentity {",
+            "ProjectIdentity::from",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{file} builds a project identity with `{forbidden}`; announcements carry only the registry's"
+            );
+        }
+    }
+    let handler = production("crates/daemon/ryeos-api/src/handlers/items_revised.rs");
+    let constructions = handler.matches("ProjectIdentity::new(").count();
+    assert_eq!(
+        constructions, 1,
+        "items/revised may construct an identity only in endorsed_project"
+    );
+    let endorsed = handler
+        .split("fn endorsed_project")
+        .nth(1)
+        .expect("endorsed_project exists");
+    assert!(
+        endorsed.contains("ProjectIdentity::new("),
+        "the one identity construction must be inside endorsed_project"
+    );
+}
+
+#[test]
+fn the_operator_key_comparison_has_one_home_in_authority_code() {
+    // Whether a key is the configured local operator is decided by
+    // `OperatorPublicIdentity::is_key`; the authority module never compares a
+    // key with the operator's principal id by hand.
+    let source = production("crates/daemon/ryeos-app/src/operator_authority.rs");
+    for line in source.lines() {
+        let compares = line.contains("principal_id()")
+            && (line.contains("==") || line.contains("!="))
+            && line.contains("operator");
+        assert!(
+            !compares,
+            "operator_authority.rs compares a key with the operator's principal id by hand: `{}`",
+            line.trim()
+        );
+    }
+    assert!(
+        source.matches("operator.is_key(").count() >= 2,
+        "require_local_configured_operator and disclosure_class_for_key both use is_key"
+    );
+}

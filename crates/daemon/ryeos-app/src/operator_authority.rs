@@ -140,7 +140,7 @@ pub fn require_local_configured_operator(
     let operator =
         ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
             .context("load configured local operator identity")?;
-    if context.fingerprint != operator.principal_id() {
+    if !operator.is_key(&context.fingerprint) {
         return Err(not_operator(
             "local_operator_required",
             "local action requires the configured local operator",
@@ -191,7 +191,7 @@ pub fn disclosure_class_for_key(
     match ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
         &state.config.app_root,
     ) {
-        Ok(operator) if operator.principal_id() == key => DisclosureClass::Operator,
+        Ok(operator) if operator.is_key(key) => DisclosureClass::Operator,
         _ => DisclosureClass::Principal,
     }
 }
