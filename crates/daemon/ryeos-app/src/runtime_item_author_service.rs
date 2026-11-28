@@ -315,6 +315,7 @@ impl RuntimeItemAuthorService {
             params.format_ext.as_deref(),
             params.mode,
         )?;
+        require_item_name_within_cap(&canonical, &target)?;
         let source_format = kind_schema.resolved_format_for(&ext).ok_or_else(|| {
             anyhow!(
                 "kind `{}` does not declare extension `{ext}`",
@@ -1011,6 +1012,17 @@ fn validate_extension(
     Ok(())
 }
 
+/// Refuse, before anything is written or removed, an item whose file name
+/// (`<stem><ext>`) is longer than a quarantine name can record.
+fn require_item_name_within_cap(canonical: &CanonicalRef, target: &Path) -> Result<()> {
+    lillux::atomic_fs::require_name_within_quarantine_cap(target).with_context(|| {
+        format!(
+            "item `{canonical}` cannot be authored: its file name exceeds the {} byte cap",
+            lillux::QUARANTINE_ORIGINAL_NAME_MAX
+        )
+    })
+}
+
 fn resolve_author_target(
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     canonical: &CanonicalRef,
@@ -1542,6 +1554,25 @@ fn require_no_incumbent(target: &Path, prefix: &str, suffix: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_file_name_cap_is_enforced_at_authoring() {
+        let canonical = CanonicalRef::parse("graph:a/b").unwrap();
+        let cap = lillux::QUARANTINE_ORIGINAL_NAME_MAX;
+        let ext = ".yaml";
+        let dir = Path::new("/p/.ai/graphs/a");
+        let at_cap = dir.join(format!("{}{ext}", "x".repeat(cap - ext.len())));
+        require_item_name_within_cap(&canonical, &at_cap).unwrap();
+        let over = dir.join(format!("{}{ext}", "x".repeat(cap - ext.len() + 1)));
+        let err = require_item_name_within_cap(&canonical, &over).unwrap_err();
+        let typed = err
+            .downcast_ref::<lillux::atomic_fs::NameOverQuarantineCap>()
+            .unwrap();
+        assert_eq!(typed.cap, cap);
+        assert_eq!(typed.path, over);
+        let msg = format!("{err:#}");
+        assert!(msg.contains("graph:a/b") && msg.contains(&cap.to_string()), "{msg}");
+    }
 
     #[test]
     fn remove_params_parse_without_content() {

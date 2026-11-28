@@ -5412,7 +5412,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_form_leftover_refuses_start_with_a_typed_error_naming_the_path() {
+    fn an_plain_form_leftover_refuses_start_with_a_typed_error_naming_the_path() {
         let temp = tempfile::tempdir().unwrap();
         let _store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
         let old = pending_dir(temp.path()).join(format!(".ryeos-quarantine.{}.3", dead_pid()));
@@ -5420,7 +5420,7 @@ mod tests {
         let app = tempfile::tempdir().unwrap();
         let error = settle(app.path(), temp.path()).unwrap_err();
         let typed = error
-            .downcast_ref::<lillux::OldQuarantineLeftover>()
+            .downcast_ref::<lillux::PlainQuarantineLeftover>()
             .unwrap();
         assert_eq!(typed.path, old);
         assert!(error.to_string().contains("rename it back"), "{error}");
@@ -5444,7 +5444,7 @@ mod tests {
         for name in [
             format!(".ryeos-quarantine.{pid}.07.{encoded}"),
             format!(".ryeos-quarantine.{pid}.7.{encoded}="),
-            format!(".ryeos-quarantine.{pid}.7.{}", encoded.to_uppercase()),
+            format!(".ryeos-quarantine.{pid}.7.{encoded}+"),
             format!(".ryeos-quarantine.{pid}.7.{encoded}.x"),
             format!(".ryeos-quarantine.x.7.{encoded}"),
             format!("ryeos-quarantine.{pid}.7.{encoded}"),

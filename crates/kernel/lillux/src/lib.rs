@@ -174,8 +174,9 @@ pub use secure_fs::{
     PrefixWalkExhaustion,
 };
 pub use secure_fs::{
-    OldQuarantineLeftover, QUARANTINE_ORIGINAL_NAME_MAX, QuarantineLeftover, QuarantineNameTooLong,
-    QuarantineSettlement, is_quarantine_leftover_name, quarantine_name,
+    PlainQuarantineLeftover, QUARANTINE_ORIGINAL_NAME_MAX, QuarantineLeftover,
+    QuarantineNameTooLong, QuarantineNaming, QuarantineSettlement, is_quarantine_leftover_name,
+    quarantine_name,
 };
 pub use secure_fs::{
     SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,

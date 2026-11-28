@@ -6655,9 +6655,60 @@ impl PinnedDirectory {
     where
         V: FnOnce(&File) -> Result<()>,
     {
+        self.replace_regular_from_if_matches_named_atomic(
+            QuarantineNaming::Recorded,
+            target_name,
+            expected_target,
+            validate_expected_target,
+            source_directory,
+            source_name,
+            expected_source,
+        )
+    }
+
+    /// [`Self::replace_regular_from_if_matches_atomic`] for a person's own
+    /// content: any legal name is accepted and a leftover records nothing.
+    pub fn replace_regular_from_if_matches_plain_atomic<V>(
+        &self,
+        target_name: &OsStr,
+        expected_target: Option<&File>,
+        validate_expected_target: V,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
+        self.replace_regular_from_if_matches_named_atomic(
+            QuarantineNaming::Plain,
+            target_name,
+            expected_target,
+            validate_expected_target,
+            source_directory,
+            source_name,
+            expected_source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_regular_from_if_matches_named_atomic<V>(
+        &self,
+        naming: QuarantineNaming,
+        target_name: &OsStr,
+        expected_target: Option<&File>,
+        validate_expected_target: V,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (
+                naming,
                 target_name,
                 expected_target,
                 validate_expected_target,
@@ -6711,7 +6762,7 @@ impl PinnedDirectory {
             };
 
             let (quarantine_name, quarantine_name_c) =
-                self.move_regular_to_unique_quarantine(&target_name_c)?;
+                self.move_regular_to_unique_quarantine(naming, &target_name_c)?;
             let identity_check = ensure_entry_matches(
                 &self.directory,
                 &quarantine_name_c,
@@ -6805,10 +6856,12 @@ impl PinnedDirectory {
     #[cfg(target_os = "linux")]
     fn move_regular_to_unique_quarantine(
         &self,
+        naming: QuarantineNaming,
         source_name: &std::ffi::CStr,
     ) -> crate::atomic_fs::AtomicMutationResult<(OsString, std::ffi::CString)> {
         for _ in 0..16 {
             let name = QuarantineLeftover::new_name(
+                naming,
                 source_name.to_bytes(),
                 std::process::id(),
                 crate::atomic_fs::next_temp_sequence(),
@@ -6945,7 +6998,7 @@ impl PinnedDirectory {
     /// renamed back (never replacing anything). When the original name is now
     /// occupied, the leftover is removed only if the occupant is byte
     /// identical; otherwise this refuses naming both paths and keeps the
-    /// leftover. A short-form (old build) leftover refuses with [`OldQuarantineLeftover`]. Files over
+    /// leftover. A short-form (old build) leftover refuses with [`PlainQuarantineLeftover`]. Files over
     /// `max_bytes` are refused without being read whole. The caller proves no
     /// other process is using the directory.
     pub fn settle_quarantine_leftovers(&self, max_bytes: u64) -> Result<QuarantineSettlement> {
@@ -6953,7 +7006,7 @@ impl PinnedDirectory {
         for leftover in self.quarantine_leftovers()? {
             let path = self.path.join(leftover.name());
             let Some(original) = leftover.original() else {
-                return Err(anyhow::Error::new(OldQuarantineLeftover { path }));
+                return Err(anyhow::Error::new(PlainQuarantineLeftover { path }));
             };
             if self.restore_quarantine_leftover(&leftover, original)? {
                 report.restored.push(path);
@@ -7721,9 +7774,54 @@ impl PinnedDirectory {
     where
         V: FnOnce(&File) -> Result<()>,
     {
+        self.remove_if_same_validated_named_atomic(
+            QuarantineNaming::Recorded,
+            name,
+            expected,
+            validate_expected,
+        )
+    }
+
+    /// [`Self::remove_if_same_validated_atomic`] for a person's own content.
+    pub fn remove_if_same_validated_plain_atomic<V>(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        validate_expected: V,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
+        self.remove_if_same_validated_named_atomic(
+            QuarantineNaming::Plain,
+            name,
+            expected,
+            validate_expected,
+        )
+    }
+
+    /// [`Self::remove_if_same_atomic`] for a person's own content.
+    pub fn remove_if_same_plain_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        self.remove_if_same_validated_plain_atomic(name, expected, |_| Ok(()))
+    }
+
+    fn remove_if_same_validated_named_atomic<V>(
+        &self,
+        naming: QuarantineNaming,
+        name: &OsStr,
+        expected: &File,
+        validate_expected: V,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
         #[cfg(not(unix))]
         {
-            let _ = (name, expected);
+            let _ = (naming, name, expected);
             return Err(crate::atomic_fs::AtomicMutationError::before(
                 anyhow::anyhow!("secure file removal is unavailable on this platform"),
             ));
@@ -7739,7 +7837,7 @@ impl PinnedDirectory {
             ));
             #[cfg(target_os = "linux")]
             let (quarantine_name, quarantine_name_c) =
-                self.move_regular_to_unique_quarantine(&name_c)?;
+                self.move_regular_to_unique_quarantine(naming, &name_c)?;
             #[cfg(target_os = "linux")]
             if let Err(error) = ensure_entry_matches(
                 &self.directory,
@@ -9628,6 +9726,21 @@ fn rename_noreplace_between(
     Ok(())
 }
 
+/// How a quarantine move names the file it sets aside. The caller chooses,
+/// never the name's length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuarantineNaming {
+    /// `.ryeos-quarantine.<pid>.<seq>.<base64url original>`: the name carries
+    /// where the file came from, so node start can restore it. An original
+    /// longer than [`QUARANTINE_ORIGINAL_NAME_MAX`] is refused before the
+    /// move. For node-controlled name grammars.
+    Recorded,
+    /// `.ryeos-quarantine.<pid>.<seq>`: accepts any legal name, records
+    /// nothing, and is never settled by the node. For a person's own content,
+    /// whose recovery gate owns its leftovers.
+    Plain,
+}
+
 /// A file left under Lillux's quarantine name by a process that stopped
 /// between the quarantine move and the unlink.
 ///
@@ -9670,25 +9783,26 @@ impl std::fmt::Display for QuarantineNameTooLong {
 
 impl std::error::Error for QuarantineNameTooLong {}
 
-/// A quarantine leftover written by an older build, whose name does not
-/// record the original. Settlement refuses it so an operator decides.
+/// A plain quarantine leftover (an older build's, or a person's content a
+/// pull set aside) whose name records nothing. Node-start settlement never
+/// guesses at it, so in a node-controlled directory it refuses start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OldQuarantineLeftover {
+pub struct PlainQuarantineLeftover {
     pub path: PathBuf,
 }
 
-impl std::fmt::Display for OldQuarantineLeftover {
+impl std::fmt::Display for PlainQuarantineLeftover {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} was left by an older build and does not record the name it came from; \
+            "{} is a plain quarantine leftover that does not record the name it came from; \
              inspect it, then rename it back to its original name or delete it, and start again",
             self.path.display()
         )
     }
 }
 
-impl std::error::Error for OldQuarantineLeftover {}
+impl std::error::Error for PlainQuarantineLeftover {}
 
 /// True when `name` is exactly a quarantine leftover (either form). Scanners
 /// that run while the node is up skip such an entry, because a live removal
@@ -9703,18 +9817,27 @@ pub fn quarantine_name(
     pid: u32,
     sequence: u64,
 ) -> std::result::Result<OsString, QuarantineNameTooLong> {
-    QuarantineLeftover::new_name(original.as_bytes(), pid, sequence)
+    QuarantineLeftover::new_name(
+        QuarantineNaming::Recorded,
+        original.as_bytes(),
+        pid,
+        sequence,
+    )
 }
 
 impl QuarantineLeftover {
     const PREFIX: &'static str = ".ryeos-quarantine.";
 
     fn new_name(
+        naming: QuarantineNaming,
         original: &[u8],
         pid: u32,
         sequence: u64,
     ) -> std::result::Result<OsString, QuarantineNameTooLong> {
         use base64::Engine as _;
+        if naming == QuarantineNaming::Plain {
+            return Ok(OsString::from(format!("{}{pid}.{sequence}", Self::PREFIX)));
+        }
         if original.len() > QUARANTINE_ORIGINAL_NAME_MAX {
             return Err(QuarantineNameTooLong {
                 original_len: original.len(),
@@ -9811,6 +9934,60 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recorded_naming_refuses_a_long_name_and_plain_naming_removes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let long = "n".repeat(QUARANTINE_ORIGINAL_NAME_MAX + 40);
+        std::fs::write(temp.path().join(&long), b"x").unwrap();
+        let file = directory
+            .open_regular(OsStr::new(&long), false)
+            .unwrap()
+            .unwrap();
+        let error = directory
+            .remove_if_same_atomic(OsStr::new(&long), &file)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("quarantine name can record"));
+        assert!(temp.path().join(&long).exists(), "nothing moved");
+        directory
+            .remove_if_same_plain_atomic(OsStr::new(&long), &file)
+            .unwrap();
+        assert!(!temp.path().join(&long).exists());
+    }
+
+    #[test]
+    fn quarantine_names_parse_exactly_and_plain_leftovers_are_never_settled() {
+        let recorded = quarantine_name(OsStr::new("a.json"), 4242, 1).unwrap();
+        assert_eq!(recorded, OsStr::new(".ryeos-quarantine.4242.1.YS5qc29u"));
+        let parsed = QuarantineLeftover::parse(&recorded).unwrap();
+        assert_eq!(parsed.original(), Some(OsStr::new("a.json")));
+        for near_miss in [
+            ".ryeos-quarantine.4242.01.YS5qc29u",
+            ".ryeos-quarantine.4242.1.YS5qc29u=",
+            ".ryeos-quarantine.4242.1.YS5qc29u+",
+            ".ryeos-quarantine.4242.1.YS5qc29u.x",
+            ".ryeos-quarantine.4242.1.",
+            ".ryeos-quarantine.x.1",
+            "ryeos-quarantine.4242.1",
+        ] {
+            assert!(
+                QuarantineLeftover::parse(OsStr::new(near_miss)).is_none(),
+                "{near_miss}"
+            );
+        }
+        let plain = QuarantineLeftover::parse(OsStr::new(".ryeos-quarantine.4242.1")).unwrap();
+        assert!(plain.original().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        std::fs::write(temp.path().join(".ryeos-quarantine.4242.1"), b"x").unwrap();
+        let error = directory.settle_quarantine_leftovers(1024).unwrap_err();
+        assert!(
+            error.downcast_ref::<PlainQuarantineLeftover>().is_some(),
+            "{error:#}"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

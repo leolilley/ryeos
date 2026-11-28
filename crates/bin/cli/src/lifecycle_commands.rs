@@ -3733,7 +3733,7 @@ fn quarantine_leftovers_check(
             .join("pending"),
     );
     let mut settle = Vec::new();
-    let mut old_form = Vec::new();
+    let mut plain_form = Vec::new();
     let mut errors = Vec::new();
     for root in roots {
         match lillux::PinnedDirectory::open(&root) {
@@ -3744,7 +3744,7 @@ fn quarantine_leftovers_check(
                         if leftover.original().is_some() {
                             settle.push(path.display().to_string());
                         } else {
-                            old_form.push(path.display().to_string());
+                            plain_form.push(path.display().to_string());
                         }
                     }
                 }
@@ -3753,7 +3753,7 @@ fn quarantine_leftovers_check(
             Err(error) => errors.push(format!("{}: {error:#}", root.display())),
         }
     }
-    let status = if !old_form.is_empty() || !errors.is_empty() {
+    let status = if !plain_form.is_empty() || !errors.is_empty() {
         FAIL
     } else if !settle.is_empty() {
         WARN
@@ -3765,9 +3765,9 @@ fn quarantine_leftovers_check(
         status,
         serde_json::json!({
             "settled_at_next_start": settle,
-            "old_form_refuse_start": old_form,
+            "plain_refuse_start": plain_form,
             "errors": errors,
-            "fix": "a settled leftover needs nothing; for an old-form one, inspect it, rename it back to its original name or delete it, then start again",
+            "fix": "a settled leftover needs nothing; for a plain one, inspect it, rename it back to its original name or delete it, then start again",
         }),
     )
 }
