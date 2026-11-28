@@ -198,6 +198,16 @@ impl NodePolicySnapshot {
     }
 }
 
+impl NodePolicySnapshot {
+    /// This snapshot with one test record replacing the record of the same
+    /// section, or added when the section is absent.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_test_record(mut self, record: Arc<dyn ErasedNodePolicy>) -> Self {
+        self.records.insert(record.section_name(), record);
+        self
+    }
+}
+
 /// The shipped `launch_trust` policy record, admitting nothing beyond each
 /// kind's default. Exact test snapshots include it wherever a launch is judged.
 pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {

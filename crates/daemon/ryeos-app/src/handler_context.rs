@@ -190,6 +190,14 @@ pub struct HandlerContext {
     /// caller input.
     #[serde(skip)]
     pub delegated_via: Option<String>,
+    /// Membership class of the caller, when its grant was issued by an
+    /// admission token and the key is not the operator by key. The request
+    /// verifier resolves it once from the node's membership policy and the
+    /// retained token record; the caller's scopes are already narrowed by the
+    /// class ceiling. `None` for every other caller. Local dispatch context
+    /// only: never serialized and never caller input.
+    #[serde(skip)]
+    pub member_class: Option<String>,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -237,6 +245,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            member_class: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -260,6 +269,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            member_class: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -284,6 +294,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            member_class: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -309,6 +320,7 @@ impl HandlerContext {
             authenticated_grant_authority: Some(authenticated_grant_authority),
             signed_request_digest: None,
             delegated_via: None,
+            member_class: None,
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -374,6 +386,13 @@ impl HandlerContext {
     /// delegation.
     pub fn with_delegated_via(mut self, site_id: Option<String>) -> Self {
         self.delegated_via = site_id;
+        self
+    }
+
+    /// Record the membership class the request verifier resolved for the
+    /// caller.
+    pub fn with_member_class(mut self, class: Option<String>) -> Self {
+        self.member_class = class;
         self
     }
 

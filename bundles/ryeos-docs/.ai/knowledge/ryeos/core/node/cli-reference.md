@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:44:16Z:e74a2031156942d2886c18c89c048b60ccb34f4178fe3ef80acb62ce18789b15:zIZs0wpaqAU+YeSZJi7aWKfmt6KUPjlZ2FxkdkYQANZyN1eUAOZc4MhDVd41oTmj4Xv3xedJXbr6w4HPRnvDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:35:01Z:6de65926672269551117c9e2454b3bd935c08c45af94ab86456b4d6f9f22e5f0:dYsXt1qxiuQPMMUHSLBRUUibiy5i7K5tTcuKoqammCfpkG8XbfX/Hn8Y6FNXPHMpFkWMBxq8S7j7LyYT4m0RAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -1001,7 +1001,7 @@ until the external snapshot driver is retired.
 - `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
 - `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
-- `ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]` — mint a one-time local admission token file that admits one grant class. `--origin-site-id` is required for `remote_principal` and refused otherwise.
+- `ryeos admission-token --class <local_client|remote_node|remote_principal> --membership-class <class id> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]` — mint a one-time local admission token file that admits one grant class into one membership class. `--membership-class` is required and must name a class of the node's membership policy, or the mint is refused `membership_class_unknown`. `--origin-site-id` is required for `remote_principal` and refused otherwise.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
 ## Endorsement verbs

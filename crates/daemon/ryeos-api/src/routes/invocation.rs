@@ -62,6 +62,10 @@ pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_dige
 /// node that forwarded a delegated request.
 pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
 
+/// Metadata key under which the `ryeos_signed` verifier records the
+/// membership class it resolved for the caller.
+pub(crate) const MEMBER_CLASS_METADATA_KEY: &str = "member_class";
+
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
     pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
@@ -111,6 +115,7 @@ impl RoutePrincipal {
             .with_minted_session_grant(self.minted_session_grant.clone())
             .with_signed_request_digest(signed_request_digest)
             .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
+            .with_member_class(self.metadata.get(MEMBER_CLASS_METADATA_KEY).cloned())
     }
 }
 

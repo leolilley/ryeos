@@ -21,6 +21,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("admitted_binding_owner_authority_for_principal(", 1),
     ("retained_admitted_operator_authority(", 5),
     ("retained_admitted_operator_authority_digest(", 1),
+    ("key_acts_for_operator(", 1),
 ];
 
 fn sources(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {

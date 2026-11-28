@@ -15,6 +15,7 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy;
+use ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy;
 
 pub type Request = ryeos_core_tools::actions::authorize::MintAdmissionTokenRequest;
 
@@ -26,6 +27,34 @@ pub async fn handle(
     ryeos_app::operator_authority::require_local_configured_operator(&state, &context)
         .context("admission-token minting requires the configured local operator")?;
     let params = request.into_params(state.config.app_root.clone())?;
+    let membership = state
+        .node_policy
+        .require::<MembershipPolicy>()
+        .context("load retained membership policy")?
+        .clone();
+    if !membership.classes.contains_key(&params.membership_class) {
+        return Err(anyhow::Error::new(ryeos_app::handler_error::typed_refusal(
+            "membership_class_unknown",
+            400,
+            format!(
+                "membership class `{}` is not a class of this node's membership policy; {}",
+                params.membership_class,
+                if membership.classes.is_empty() {
+                    "the policy names no class, so no admission token can be minted".to_owned()
+                } else {
+                    format!(
+                        "it names {}",
+                        membership
+                            .classes
+                            .keys()
+                            .map(|id| format!("`{id}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ),
+        )));
+    }
     let policy = state
         .node_policy
         .require::<HostedNodePolicy>()
@@ -41,6 +70,7 @@ pub async fn handle(
             params,
             &policy,
             &policy_source,
+            &membership,
         )?;
         serde_json::to_value(result).map_err(Into::into)
     })

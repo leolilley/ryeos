@@ -121,6 +121,21 @@ fn require_speaks_for_operator_owner(state: &AppState, key: &str) -> anyhow::Res
     ))
 }
 
+/// Whether `key` (`fp:<hex>` or bare hex) is the operator by key alone: the
+/// node's configured local operator key, or a key that speaks for the owner
+/// that key acts for. Judged from the key and the node registry only, never
+/// from who issued the key's grant or from the kind of client holding it. A
+/// key whose owner cannot be resolved is not the operator.
+pub fn key_acts_for_operator(state: &AppState, key: &str) -> anyhow::Result<bool> {
+    let operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .context("load configured local operator identity")?;
+    if key.strip_prefix("fp:").unwrap_or(key) == operator.fingerprint() {
+        return Ok(true);
+    }
+    Ok(require_speaks_for_operator_owner(state, key).is_ok())
+}
+
 /// Require the app root's exact local configured operator.
 pub fn require_local_configured_operator(
     state: &AppState,

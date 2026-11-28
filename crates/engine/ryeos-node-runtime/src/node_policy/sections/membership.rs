@@ -35,6 +35,17 @@ const LAUNCH_CAPABILITY_NAMESPACES: [&str; 3] = [
 
 const MAX_CLASS_ID_LEN: usize = 64;
 
+/// Whether `scope`, a literal capability or a pattern, names a launch
+/// capability or covers one.
+pub fn names_launch_capability(scope: &str) -> bool {
+    LAUNCH_CAPABILITY_NAMESPACES
+        .iter()
+        .any(|namespace| scope.starts_with(namespace))
+        || LAUNCH_CAPABILITY_PROBES
+            .iter()
+            .any(|probe| ryeos_runtime::authorizer::cap_matches(scope, probe))
+}
+
 /// How a key is placed in a class. A closed set: only the admission-token
 /// path makes a member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

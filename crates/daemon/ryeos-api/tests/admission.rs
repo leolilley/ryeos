@@ -169,12 +169,71 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
         &lillux::cas::sha256_hex(token.as_bytes())[..12]
     )));
 
+    // The claimed token file keeps the membership class the key was admitted
+    // into; request authentication reads it back from there.
+    let retained = std::fs::read_to_string(token_file_paths(&state, token).1).unwrap();
+    assert!(retained.contains("version = 3"), "{retained}");
+    assert!(
+        retained.contains("membership_class = \"guest\""),
+        "{retained}"
+    );
+
     let reused = admission_claim::handle(
         signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine")),
         state,
     )
     .await;
     assert!(matches!(reused, Err(HandlerError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn minting_refuses_a_membership_class_the_node_policy_does_not_name() {
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_hosted_policy(600);
+    test_state::set_membership_classes(&mut state, &[("guest", &["ryeos.fetch.item.*"])]);
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    let context = ryeos_app::handler_context::HandlerContext::new_with_authority(
+        operator.principal_id(),
+        vec![],
+        true,
+        Some(AuthorizedKeyPrincipalClass::LocalClient),
+        None,
+    );
+    let state = Arc::new(state);
+    for unknown in ["nobody", "Guest", ""] {
+        let error = ryeos_api::handlers::admission_token::handle(
+            ryeos_core_tools::actions::authorize::MintAdmissionTokenRequest {
+                scopes: "ryeos.fetch.item.read".to_owned(),
+                label: None,
+                ttl_secs: 60,
+                class: AuthorizedKeyPrincipalClass::LocalClient,
+                membership_class: unknown.to_owned(),
+                origin_site_id: None,
+                grant_lifetime_secs: None,
+            },
+            context.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("a class the policy does not name must not mint");
+        match ryeos_api::handler_error::extract_handler_error(&error) {
+            Some(HandlerError::Structured { code, status, .. }) => {
+                assert_eq!(code, "membership_class_unknown", "{unknown:?}");
+                assert_eq!(status, 400);
+            }
+            other => panic!("expected a typed refusal for {unknown:?}, got {other:?}: {error:#}"),
+        }
+    }
+    let tokens = state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/admission/tokens");
+    assert!(
+        !tokens.exists() || std::fs::read_dir(tokens).unwrap().next().is_none(),
+        "a refused mint must leave no token file"
+    );
 }
 
 #[tokio::test]
@@ -356,7 +415,7 @@ fn write_admission_token_file_with_issued_at(
     std::fs::create_dir_all(&token_dir).unwrap();
     let expires_at_unix = issued_at_unix + ttl_secs;
     let mut doc = format!(
-        "version = 2\nclass = \"remote_node\"\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nissued_at_unix = {issued_at_unix}\nttl_secs = {ttl_secs}\nexpires_at_unix = {expires_at_unix}\n",
+        "version = 3\nclass = \"remote_node\"\nmembership_class = \"guest\"\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nissued_at_unix = {issued_at_unix}\nttl_secs = {ttl_secs}\nexpires_at_unix = {expires_at_unix}\n",
         scopes
             .iter()
             .map(|scope| format!("\"{scope}\""))
@@ -556,8 +615,9 @@ fn write_class_token(state: &ryeos_app::state::AppState, fixture: &ClassFixture,
         PUSH_SCOPES[0],
         issued_at_unix + 600,
     );
-    if version == 2 {
+    if version == 3 {
         doc.push_str(&format!("class = \"{}\"\n", fixture.class));
+        doc.push_str("membership_class = \"guest\"\n");
     }
     if let Some(origin) = fixture.origin {
         doc.push_str(&format!("origin_site_id = \"{origin}\"\n"));
@@ -685,7 +745,7 @@ const PRINCIPAL_TOKEN: ClassFixture = ClassFixture {
 #[tokio::test]
 async fn principal_token_requires_principal_and_node_cosignature() {
     let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
-    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 3);
     let token = PRINCIPAL_TOKEN.token;
     let (toml, _) = token_file_paths(&state, token);
     let principal = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -788,8 +848,8 @@ async fn node_token_cannot_admit_principal_class_and_the_reverse() {
         origin: None,
         grant_lifetime_secs: None,
     };
-    write_class_token(&state, &node_token, 2);
-    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    write_class_token(&state, &node_token, 3);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 3);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let state = Arc::new(state);
 
@@ -833,7 +893,7 @@ async fn node_token_cannot_admit_principal_class_and_the_reverse() {
 #[tokio::test]
 async fn principal_token_refuses_a_claim_for_another_origin_site() {
     let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
-    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 3);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let forwarder = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     admit_forwarding_node(&state, &forwarder, "site:elsewhere", &attestation_scopes());
@@ -859,7 +919,7 @@ async fn principal_token_refuses_a_claim_for_another_origin_site() {
 #[tokio::test]
 async fn forwarding_node_without_attestation_scope_cannot_cosign() {
     let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
-    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 3);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let forwarder = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     admit_forwarding_node(
@@ -922,7 +982,7 @@ async fn token_grant_lifetime_is_bounded_by_the_authorization_policy() {
         origin: None,
         grant_lifetime_secs: Some(10_000_000_000),
     };
-    write_class_token(&state, &long, 2);
+    write_class_token(&state, &long, 3);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let req = class_claim(
         &state,
@@ -949,7 +1009,7 @@ async fn local_client_token_admits_a_local_client_grant_without_origin_site() {
         origin: None,
         grant_lifetime_secs: Some(3600),
     };
-    write_class_token(&state, &local, 2);
+    write_class_token(&state, &local, 3);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let state = Arc::new(state);
 

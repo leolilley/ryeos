@@ -1,9 +1,9 @@
-# ryeos:signed:2026-11-13T19:53:53Z:b7ef3c8ebef441d89419943358f934ea91ce7f6868c75135b4ba831e74169375:W0rLrLwx5lHP95PlBhRZWvYLngEHcFS6dCrJWfTpThc8h5ulFWJe9crU1f6YmM1xvhOEboVN+pOtDRwrINczDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T00:35:01Z:6f917c83bf3bcb4a8da0eb53a9b3f8064d0fbc13592b755ac94d5f9aec1b4a55:0SJeF81uXC+uFHQF7IchCj0WDvSP3cI8HQAoKYxKQXxSrr1USppNy55b3IV1IXHEKHEelhNvtgOcTZFnB9AuBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - admission-token
-description: Mint a one-time node-local admission token that admits one grant class (local_client, remote_node, or remote_principal bound to an origin site)
+description: Mint a one-time node-local admission token that admits one grant class (local_client, remote_node, or remote_principal bound to an origin site) into one membership class of the node's membership policy
 help:
-  usage: "ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]"
+  usage: "ryeos admission-token --class <local_client|remote_node|remote_principal> --membership-class <class id> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]"
 parameter_binding:
   mode: tail_object
   flag_key_normalization: hyphen_to_underscore

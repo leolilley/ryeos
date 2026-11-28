@@ -35,6 +35,10 @@ pub struct Principal {
     /// Site of the node that forwarded this request under the principal's
     /// delegation, when it did. The principal is then the delegator.
     pub delegated_via: Option<String>,
+    /// Membership class of a key admitted through an admission token, when
+    /// the key is not the operator by key. `scopes` is then already narrowed
+    /// by the class ceiling.
+    pub member_class: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +125,45 @@ pub(crate) enum RequestAuthError {
     /// presented is refused for a reason the node is entitled to be told, with
     /// its cure.
     Delegation(ryeos_node_runtime::remote_delegation::DelegationError),
+    /// The caller proved it holds the key, and the node's membership policy
+    /// refuses the grant; the holder is entitled to be told why, with its cure.
+    Membership(MembershipRefusal),
+}
+
+/// Why the membership policy refuses a token-admitted key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MembershipRefusal {
+    /// The grant names no class the node's membership policy holds: the
+    /// retained admission token record is missing, altered or classless, or
+    /// its class is not in the policy.
+    ClassUnknown { reason: String },
+    /// The member's effective scopes hold a launch capability on a hosted
+    /// node.
+    LaunchCapabilityRefused { class: String, scope: String },
+}
+
+impl MembershipRefusal {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::ClassUnknown { .. } => "membership_class_unknown",
+            Self::LaunchCapabilityRefused { .. } => "membership_launch_capability_refused",
+        }
+    }
+}
+
+impl std::fmt::Display for MembershipRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClassUnknown { reason } => write!(
+                formatter,
+                "this key was admitted through an admission token whose membership class this node does not hold: {reason}; ask the operator to mint a new admission token with a membership class the node's membership policy names"
+            ),
+            Self::LaunchCapabilityRefused { class, scope } => write!(
+                formatter,
+                "membership class `{class}` would give this key the launch capability `{scope}`, which a member of a hosted node never holds; ask the operator to remove it from the class scope ceiling"
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for RequestAuthError {
@@ -129,6 +172,7 @@ impl std::fmt::Display for RequestAuthError {
             Self::Refused(reason) => formatter.write_str(reason),
             Self::Grant(error) => write!(formatter, "{error}"),
             Self::Delegation(error) => write!(formatter, "{error}"),
+            Self::Membership(refusal) => write!(formatter, "{refusal}"),
         }
     }
 }
@@ -359,6 +403,78 @@ pub(crate) fn verify_source_node_cosignature(
     Ok((forwarding_fingerprint.to_owned(), forwarding_key))
 }
 
+/// The host class whose members never hold a launch capability.
+const HOSTED_HOST_CLASS: &str = "hosted";
+
+/// Refuse a member's effective scopes that hold a launch capability when the
+/// node's host class is `hosted`. The policy compiler already refuses a class
+/// ceiling that covers one on every host class; this judges the scopes
+/// actually granted, at the intersection.
+fn refuse_member_launch_capability(
+    host_class: &str,
+    class: &str,
+    scopes: &[String],
+) -> Result<(), MembershipRefusal> {
+    if host_class != HOSTED_HOST_CLASS {
+        return Ok(());
+    }
+    match scopes.iter().find(|scope| {
+        ryeos_node_runtime::node_policy::sections::membership::names_launch_capability(scope)
+    }) {
+        Some(scope) => Err(MembershipRefusal::LaunchCapabilityRefused {
+            class: class.to_owned(),
+            scope: scope.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Judge a grant issued by an admission token against the node's membership
+/// policy. Returns the member class and the effective scopes: the grant
+/// narrowed by the class scope ceiling. A grant not issued by an admission
+/// token, and a key that is the operator by key, are never judged by
+/// membership and keep their scopes exactly.
+fn judge_membership(
+    state: &AppState,
+    grant: &ryeos_node_runtime::identity::VerifiedAuthorizedKeyGrant,
+    fingerprint: &str,
+    scopes: Vec<String>,
+) -> Result<(Option<String>, Vec<String>), RequestAuthError> {
+    if !grant.granted_by.starts_with("admission:") {
+        return Ok((None, scopes));
+    }
+    if ryeos_app::operator_authority::key_acts_for_operator(state, fingerprint)
+        .map_err(|error| format!("judge operator by key: {error:#}"))?
+    {
+        return Ok((None, scopes));
+    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy>()
+        .map_err(|error| format!("load membership policy: {error:#}"))?;
+    let unknown =
+        |reason: String| RequestAuthError::Membership(MembershipRefusal::ClassUnknown { reason });
+    let class_id = crate::handlers::admission_claim::retained_membership_class(
+        &state.config.app_root,
+        &grant.granted_by,
+    )
+    .map_err(unknown)?;
+    let class = policy.classes.get(&class_id).ok_or_else(|| {
+        unknown(format!(
+            "class `{class_id}` is not a class of the membership policy"
+        ))
+    })?;
+    let effective =
+        ryeos_node_runtime::remote_delegation::intersect_scopes(&scopes, &class.scope_ceiling);
+    refuse_member_launch_capability(
+        &state.isolation.inspection().host_class,
+        &class_id,
+        &effective,
+    )
+    .map_err(RequestAuthError::Membership)?;
+    Ok((Some(class_id), effective))
+}
+
 pub(crate) fn verify_request(
     state: &AppState,
     method: &str,
@@ -568,6 +684,9 @@ pub(crate) fn verify_request(
         }
     };
 
+    let (member_class, scopes) =
+        judge_membership(state, &auth_key.grant, fingerprint, auth_key.scopes.clone())?;
+
     // Replay check
     {
         let mut guard = match REPLAY_GUARD.lock() {
@@ -585,7 +704,8 @@ pub(crate) fn verify_request(
     Ok(Principal {
         request_digest: content_hash,
         fingerprint: fingerprint.to_string(),
-        scopes: auth_key.scopes,
+        scopes,
+        member_class,
         owner: auth_key.owner,
         principal_class: auth_key.principal_class,
         authenticated_site_id,
@@ -722,6 +842,8 @@ fn verify_delegated(
     }
 
     let scopes = delegation_lib::intersect_scopes(&principal_grant.scopes, &signed.body.scopes);
+    let (member_class, scopes) =
+        judge_membership(state, &principal_grant.grant, delegator_fingerprint, scopes)?;
 
     {
         let mut guard = match REPLAY_GUARD.lock() {
@@ -741,6 +863,7 @@ fn verify_delegated(
         request_digest: request.request_digest.clone(),
         fingerprint: delegator_fingerprint.to_owned(),
         scopes,
+        member_class,
         owner: principal_grant.owner,
         principal_class: AuthorizedKeyPrincipalClass::RemotePrincipal,
         authenticated_site_id: Some(forwarding_site_id.to_owned()),
@@ -2313,5 +2436,324 @@ mod tests {
             .verify("nonce-delegated-inbound-only", Some(&delegation), true)
             .expect("an inbound-only pin of the origin does not stop inbound verification");
         assert_eq!(principal.fingerprint, node.user_fp);
+    }
+
+    // -----------------------------------------------------------------------
+    // Membership
+    // -----------------------------------------------------------------------
+
+    const MEMBER_SCOPES: [&str; 2] = ["ryeos.execute.service.vault/list", "ryeos.fetch.item.read"];
+
+    /// Write a grant for `key` whose issuer is `granted_by`, through the
+    /// canonical writer. Returns the key's fingerprint.
+    fn grant_issued_by(
+        state: &ryeos_app::state::AppState,
+        key: &SigningKey,
+        scopes: &[&str],
+        granted_by: &str,
+    ) -> String {
+        let vk = key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        ryeos_node_runtime::identity::create_authorized_key_toml(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &base64::engine::general_purpose::STANDARD.encode(vk.as_bytes()),
+            &scopes
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>(),
+            "member-test",
+            granted_by,
+            "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+            state.identity.signing_key(),
+        )
+        .unwrap();
+        fp
+    }
+
+    /// Write the claimed token record a claim retains, with `extra` lines
+    /// after the format version and hash. Returns the `granted_by` it names.
+    fn retain_claimed_token(
+        state: &ryeos_app::state::AppState,
+        token: &str,
+        version: u32,
+        stored_hash: Option<&str>,
+        extra: &str,
+    ) -> String {
+        let hash = lillux::cas::sha256_hex(token.as_bytes());
+        let dir = state.config.app_root.join(".ai/node/admission/tokens");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{hash}.claimed")),
+            format!(
+                "version = {version}\ntoken_hash = \"{}\"\nscopes = [\"ryeos.fetch.item.read\"]\nexpires_at_unix = 4102444800\nclass = \"local_client\"\n{extra}",
+                stored_hash.unwrap_or(&hash)
+            ),
+        )
+        .unwrap();
+        format!("admission:{}", &hash[..12])
+    }
+
+    fn token_format_version() -> u32 {
+        ryeos_core_tools::actions::authorize::ADMISSION_TOKEN_FORMAT_VERSION
+    }
+
+    fn verify_as(
+        state: &ryeos_app::state::AppState,
+        key: &SigningKey,
+        fp: &str,
+        nonce: &str,
+    ) -> Result<Principal, RequestAuthError> {
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+        let headers = signed_headers(
+            key,
+            fp,
+            "POST",
+            &uri,
+            b"{}",
+            unix_now(),
+            nonce,
+            &state.identity.principal_id(),
+        );
+        verify_request(state, "POST", &uri, &headers, b"{}")
+    }
+
+    fn membership_code(error: &RequestAuthError) -> Option<&'static str> {
+        match error {
+            RequestAuthError::Membership(refusal) => Some(refusal.code()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn with_no_class_an_operator_issued_grant_and_a_remote_node_keep_their_scopes() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
+
+        // A worker-style grant authorize-key writes: issued by the operator.
+        let worker = SigningKey::from_bytes(&[101u8; 32]);
+        let worker_fp = grant_issued_by(&state, &worker, &MEMBER_SCOPES, &operator.principal_id());
+        let principal = verify_as(&state, &worker, &worker_fp, "nonce-member-worker")
+            .expect("an operator-issued grant is never judged by membership");
+        assert_eq!(principal.member_class, None);
+        assert_eq!(principal.scopes, MEMBER_SCOPES);
+
+        // The operator's own bootstrap grant form: the bare fingerprint.
+        let bare = SigningKey::from_bytes(&[102u8; 32]);
+        let bare_fp = grant_issued_by(&state, &bare, &MEMBER_SCOPES, operator.fingerprint());
+        let principal = verify_as(&state, &bare, &bare_fp, "nonce-member-bare")
+            .expect("a bootstrap-issued grant is never judged by membership");
+        assert_eq!(principal.member_class, None);
+        assert_eq!(principal.scopes, MEMBER_SCOPES);
+
+        // A remote node's grant, written by the node's own authorize path.
+        let node_key = SigningKey::from_bytes(&[103u8; 32]);
+        let node_fp = register_remote_node_key(&state, &node_key, "site:peer");
+        let principal = verify_as(&state, &node_key, &node_fp, "nonce-member-node")
+            .expect("a remote node's grant is never judged by membership");
+        assert_eq!(principal.member_class, None);
+        assert_eq!(
+            principal.scopes,
+            [ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE]
+        );
+    }
+
+    #[test]
+    fn a_token_grant_whose_retained_record_has_no_class_is_refused() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        let key = SigningKey::from_bytes(&[104u8; 32]);
+        // A token minted before a class existed: its record has no class and
+        // an older format.
+        let granted_by = retain_claimed_token(&state, "token-classless", 2, None, "");
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &key, &fp, "nonce-member-classless")
+            .expect_err("a token grant with no class is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+
+        // The same record in the current format but with no class line.
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-classless-current",
+            token_format_version(),
+            None,
+            "",
+        );
+        let other = SigningKey::from_bytes(&[105u8; 32]);
+        let fp = grant_issued_by(&state, &other, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &other, &fp, "nonce-member-classless-current")
+            .expect_err("a record that keeps no class is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+    }
+
+    #[test]
+    fn a_token_grant_with_a_class_is_admitted_with_scopes_cut_by_the_ceiling() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(
+            &mut state,
+            &[("guest", &["ryeos.fetch.item.*"])],
+        );
+        let key = SigningKey::from_bytes(&[106u8; 32]);
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-guest",
+            token_format_version(),
+            None,
+            "membership_class = \"guest\"\n",
+        );
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        let principal = verify_as(&state, &key, &fp, "nonce-member-guest")
+            .expect("a token grant with a class the policy holds is admitted");
+        assert_eq!(principal.member_class.as_deref(), Some("guest"));
+        assert_eq!(principal.scopes, ["ryeos.fetch.item.read"]);
+    }
+
+    #[test]
+    fn a_key_that_speaks_for_the_operator_owner_is_never_judged_by_membership() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
+        let linked = SigningKey::from_bytes(&[107u8; 32]);
+        let operator_owner = state
+            .engine
+            .trust_store
+            .owner_for(&operator.principal_id())
+            .unwrap()
+            .principal
+            .to_string();
+        let link = ryeos_engine::trust::pin_link_for_tests(
+            &state.config.app_root,
+            state.identity.signing_key(),
+            operator.signing_key(),
+            &linked,
+            &operator_owner,
+            3600,
+        )
+        .unwrap();
+        let mut engine = (*state.engine).clone();
+        engine.trust_store = engine.trust_store.with_key_links(vec![link]);
+        state.engine = std::sync::Arc::new(engine);
+
+        // Admitted by a token whose record has no class, and the policy names
+        // no class at all: the key still acts as the operator's owner.
+        let granted_by = retain_claimed_token(&state, "token-linked", 2, None, "");
+        let fp = grant_issued_by(&state, &linked, &MEMBER_SCOPES, &granted_by);
+        let principal = verify_as(&state, &linked, &fp, "nonce-member-linked")
+            .expect("a key speaking for the operator owner is not refused by membership");
+        assert_eq!(principal.member_class, None);
+        assert_eq!(principal.scopes, MEMBER_SCOPES);
+
+        // A key that does not speak for the owner, admitted the same way, is.
+        let stranger = SigningKey::from_bytes(&[108u8; 32]);
+        let fp = grant_issued_by(&state, &stranger, &MEMBER_SCOPES, &granted_by);
+        let error = verify_as(&state, &stranger, &fp, "nonce-member-stranger")
+            .expect_err("a key outside the operator owner is judged by membership");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+    }
+
+    #[test]
+    fn an_altered_removed_or_missing_record_is_refused() {
+        let (_tmp, _store_owner, mut state) = crate::test_support::build_test_state();
+        crate::test_support::set_membership_classes(
+            &mut state,
+            &[("guest", &["ryeos.fetch.item.*"])],
+        );
+        let version = token_format_version();
+        let altered_hash = "ab".repeat(32);
+        let cases: [(&str, Option<&str>, &str, &str); 3] = [
+            // The class was altered to one the policy does not hold.
+            (
+                "token-altered-class",
+                None,
+                "membership_class = \"admin\"\n",
+                "altered class",
+            ),
+            // The class line was removed.
+            ("token-removed-class", None, "", "removed class"),
+            // The stored hash no longer matches the record's file name.
+            (
+                "token-altered-hash",
+                Some(altered_hash.as_str()),
+                "membership_class = \"guest\"\n",
+                "altered hash",
+            ),
+        ];
+        for (index, (token, stored_hash, extra, label)) in cases.into_iter().enumerate() {
+            let key = SigningKey::from_bytes(&[110 + index as u8; 32]);
+            let granted_by = retain_claimed_token(&state, token, version, stored_hash, extra);
+            let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+            let error = verify_as(&state, &key, &fp, &format!("nonce-member-record-{index}"))
+                .expect_err(label);
+            assert_eq!(
+                membership_code(&error),
+                Some("membership_class_unknown"),
+                "{label}"
+            );
+        }
+
+        // No claimed record at all.
+        let key = SigningKey::from_bytes(&[120u8; 32]);
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, "admission:0123456789ab");
+        let error = verify_as(&state, &key, &fp, "nonce-member-no-record")
+            .expect_err("a grant whose token record is gone is refused");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+
+        // The class existed when the token was claimed and was later removed
+        // from the policy.
+        let key = SigningKey::from_bytes(&[121u8; 32]);
+        let granted_by = retain_claimed_token(
+            &state,
+            "token-class-withdrawn",
+            version,
+            None,
+            "membership_class = \"guest\"\n",
+        );
+        let fp = grant_issued_by(&state, &key, &MEMBER_SCOPES, &granted_by);
+        verify_as(&state, &key, &fp, "nonce-member-before-withdrawal").expect("the class is held");
+        crate::test_support::set_membership_classes(&mut state, &[]);
+        let error = verify_as(&state, &key, &fp, "nonce-member-after-withdrawal")
+            .expect_err("a withdrawn class refuses its members");
+        assert_eq!(membership_code(&error), Some("membership_class_unknown"));
+    }
+
+    #[test]
+    fn a_hosted_member_never_holds_a_launch_capability() {
+        let launch = [
+            "ryeos.execute.directive.ryeos/core/hello".to_owned(),
+            "ryeos.execute.graph.*".to_owned(),
+            "ryeos.execute.tool.x".to_owned(),
+            "ryeos.execute.*".to_owned(),
+        ];
+        for scope in &launch {
+            let refusal = refuse_member_launch_capability(
+                "hosted",
+                "guest",
+                &["ryeos.fetch.item.read".to_owned(), scope.clone()],
+            )
+            .expect_err(scope);
+            assert_eq!(refusal.code(), "membership_launch_capability_refused");
+            assert!(refusal.to_string().contains(scope.as_str()), "{refusal}");
+            // The assertion belongs to the hosted host class.
+            assert!(refuse_member_launch_capability("local", "guest", &launch).is_ok());
+        }
+        assert!(
+            refuse_member_launch_capability(
+                "hosted",
+                "guest",
+                &[
+                    "ryeos.fetch.item.read".to_owned(),
+                    "ryeos.execute.service.ui/*".to_owned()
+                ],
+            )
+            .is_ok()
+        );
     }
 }

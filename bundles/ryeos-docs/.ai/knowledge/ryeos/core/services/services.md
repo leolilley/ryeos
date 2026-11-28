@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-24T08:39:15Z:ab249c0ff7f1bcb76b467f44500e335fb09b6ab9b80a4fc57f44b1c3a4c96de1:F7g4yIWXXsM0r2amCU/cy7jWZQwisIygOZVo+DMpRiDtC4zY875PZ8tGy0TCI6xB4epd1o63oWDMAsg29J1wDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:35:01Z:6bff7ba41b162a8025b5394686001e62b1a2c55b7e35641521563f5b7ca95eb7:ZnNtP723q5EhzSnenlR76VmakfiwfWyaSSH9ftyRKgiHVZEWBXyRh8hXuU1OROuST+Al/bXqTPXOB26Nb+oFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -111,7 +111,14 @@ and an expiry bounded by the node's signed authorization policy. Its
 `authorized_by` is the claimant and the digest of its signed claim, and its
 `granted_by` names the token. Tokens are a stored format with no reader for
 older versions: a token of any other version is refused with
-`admission_token_stale`, and the cure is to mint a new one.
+`admission_token_stale`, and the cure is to mint a new one. Version 3 tokens
+record the membership class the admitted key belongs to
+(`membership_class`, required at mint and naming a class of the node's
+membership policy); the claimed token file keeps it, and request
+authentication reads it back through the grant's `granted_by`. A token grant
+whose retained record is missing, altered or classless, or whose class the
+policy no longer names, is refused `membership_class_unknown`; a key that
+speaks for the operator's owner is never judged by membership.
 
 The claim signature covers:
 

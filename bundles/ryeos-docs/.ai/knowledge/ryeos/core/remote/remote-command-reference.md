@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T16:25:38Z:4a4908c189f79ec55ffe57bf92a6195ab37fe2e9b177316499d6d20dbcca076b:btENwBlvChRF5TXr4HJB9Ptlyi9hgpzdI0a8WIGc4I9XrxnBtI6mF0EIEHiEV5RiZCQL0o2crJdrmTobFzA7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:35:01Z:9558186ce9b3fce3161ee8c5e29c414d034b2f9d29e65c3f9622fb983c013087:Ak8Nraw85uvGnRS6ibQUVpDpup3+e21LaRPbr7prX7UEFDYohBAeedb8BP51s4XkxJ/M76w0XOH2Efe3K8B5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -253,6 +253,7 @@ Mint a one-time, node-local bootstrap token file on the target node.
 ```bash
 ryeos admission-token \
   --class remote_node \
+  --membership-class guest \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
@@ -272,6 +273,16 @@ the claimant must also sign the claim with the key being admitted.
 | `remote_node` | another RyeOS node's key | the claimant signature and its own `origin_site_id` |
 | `remote_principal` | a principal key forwarded by its home site | the principal signature and a co-signature by an admitted node of the token's origin site |
 
+`--membership-class` is required and names a class of the node's membership
+policy (`guest` above). The token file records it and keeps it after the claim,
+and the admitted key is a member of that class: whatever scopes the claim
+holds, its effective scopes are cut by the class scope ceiling on every
+request. A class the policy does not name is refused at mint with
+`membership_class_unknown`. The class ceiling must therefore cover the scopes
+the token grants, including `ryeos.attest.request.forwarded-operator` for a
+forwarding node. A key that speaks for the node operator's owner, and a key the
+operator authorizes directly (`authorize-key`), is never a member.
+
 A `remote_principal` token also needs `--origin-site-id "site:<home>"`; no
 other class accepts one. `--grant-lifetime-secs` optionally shortens the
 admitted grant; the node's authorization policy still bounds it by the class
@@ -282,6 +293,7 @@ admitted on this node as a `remote_node` of that site holding the
 ```bash
 ryeos admission-token \
   --class remote_principal \
+  --membership-class guest \
   --origin-site-id "site:home" \
   --scopes "ryeos.execute.service.remote/run"
 ```
@@ -290,7 +302,12 @@ Claims are refused with a typed code that names the cure:
 `admission_class_mismatch`, `admission_origin_site_mismatch`,
 `admission_cosignature_missing`, `admission_cosignature_invalid`, and
 `admission_token_invalid`. A token minted by an earlier release is refused
-with `admission_token_stale`; tokens are not converted, so mint a new one.
+with `admission_token_stale` at claim; tokens are not converted, so mint a new
+one with `--membership-class`. A key admitted by a token minted before
+membership classes existed has no class, and its requests are refused
+`membership_class_unknown` until its grant is revoked and the key is admitted
+again by a new token; so are the requests of a key whose class the policy no
+longer names.
 
 ## `ryeos remote admit`
 

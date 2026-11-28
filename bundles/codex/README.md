@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:47:10Z:69bbb35794e81bf4b42d0898d817df08194750ade5ea0000d48923616b0b10ab:0mZYY7iQILMN6lzOovqFV49ZaYPMTX86gj5ak2QWcg9r8PF5zF2fyEVnz7mxKNbAGj4RgT0o5RwVIS1yY45yAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:35:01Z:7661753f6abea2ec8c8e413238f3aa73fba2e71a65bc35ae074cc6261e2ba3ab:oHSZ/we5bJqNtYXkWr7itoTS+K/EcCs+w4Me8XIs97/+wBacanoEH8ju7g95en4xjnD6RJIGaJ+hiUhQ6tx0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -110,7 +110,8 @@ forwarding-attestation scope:
 ```sh
 FORWARDING_SCOPE='ryeos.attest.request.forwarded-operator'
 # Hosted target, while its daemon is still locally maintainable:
-ryeos admission-token --class remote_node --label 'hosted operator forwarding node' \
+ryeos admission-token --class remote_node --membership-class '<class id>' \
+  --label 'hosted operator forwarding node' \
   --scopes "$FORWARDING_SCOPE" --ttl-secs 600
 # Source node, using the one-time token printed above:
 ryeos remote admit --remote hosted --token '<one-time-token>' \

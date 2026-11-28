@@ -66,6 +66,17 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
                         thread_id: None,
                     }
                 }
+                crate::auth::RequestAuthError::Membership(refusal) => {
+                    RouteDispatchError::Structured {
+                        code: refusal.code().to_owned(),
+                        status: 403,
+                        body: serde_json::json!({
+                            "error": refusal.to_string(),
+                            "error_code": refusal.code(),
+                        }),
+                        thread_id: None,
+                    }
+                }
                 crate::auth::RequestAuthError::Refused(_) => RouteDispatchError::Unauthorized,
             }
         })?;
@@ -78,6 +89,12 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             metadata.insert(
                 crate::routes::invocation::DELEGATED_VIA_METADATA_KEY.to_owned(),
                 site,
+            );
+        }
+        if let Some(class) = principal.member_class {
+            metadata.insert(
+                crate::routes::invocation::MEMBER_CLASS_METADATA_KEY.to_owned(),
+                class,
             );
         }
         Ok(RouteInvocationResult::Principal(RoutePrincipal {

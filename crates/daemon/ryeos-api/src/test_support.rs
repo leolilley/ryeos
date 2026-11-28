@@ -219,9 +219,69 @@ fn build_test_state_with_hosted_policy_choices(
                     allow_loopback_http: true,
                 },
             ),
+            empty_membership_record(),
         ]),
     );
     (tmpdir, store_owner, state)
+}
+
+/// The membership policy every shipped profile carries: no class.
+pub fn empty_membership_record() -> Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy> {
+    Arc::new(
+        ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy {
+            schema: 1,
+            classes: Default::default(),
+        },
+    )
+}
+
+/// Replace the state's membership policy with one that names each `(id,
+/// scope ceiling)` as a class. Every other field of a class is stated, as the
+/// policy requires.
+pub fn set_membership_classes(state: &mut AppState, classes: &[(&str, &[&str])]) {
+    let classes = classes
+        .iter()
+        .map(|(id, ceiling)| {
+            (
+                (*id).to_owned(),
+                serde_json::json!({
+                    "admitted_through": ["admission_token"],
+                    "scope_ceiling": ceiling,
+                    "surface": "member-home",
+                    "execute_allowlist": [],
+                    "runtime_cap_bundles_reviewed": [],
+                    "interpreter_products": [],
+                    "quotas": {
+                        "sessions": 2,
+                        "requests_per_minute": 60,
+                        "max_request_bytes": 1_048_576,
+                        "max_response_bytes": 1_048_576,
+                        "enrolled_keys": 3,
+                        "storage_bytes": null,
+                        "live_threads": 0,
+                        "schedules": 0,
+                        "provider_contacts_per_day": 0
+                    },
+                    "lifetime": {
+                        "session_sliding_days": 7,
+                        "retention_days_after_last_renewal": 90,
+                        "purge_after_retention": true
+                    },
+                    "directory_listed_by_default": false,
+                    "self_enrolment": {"enabled": false}
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let policy: ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy =
+        serde_json::from_value(serde_json::json!({"schema": 1, "classes": classes}))
+            .expect("test membership classes parse");
+    policy.validate().expect("test membership classes validate");
+    state.node_policy = Arc::new(
+        (*state.node_policy)
+            .clone()
+            .with_test_record(Arc::new(policy)),
+    );
 }
 
 // Test fixture: one argument per AppState component under test.
@@ -298,6 +358,7 @@ fn build_app_state(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),
                 Arc::new(test_object_closure_policy()),
+                empty_membership_record(),
             ]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),

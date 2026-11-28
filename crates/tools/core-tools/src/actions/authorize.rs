@@ -24,7 +24,7 @@ use crate::actions::hosted_policy::load_hosted_policy;
 const DEFAULT_ADMISSION_TOKEN_TTL_SECS: u64 = 600;
 /// Format version of stored admission tokens. The admission claim handler
 /// refuses every other version and names re-minting as the cure.
-pub const ADMISSION_TOKEN_FORMAT_VERSION: u32 = 2;
+pub const ADMISSION_TOKEN_FORMAT_VERSION: u32 = 3;
 
 /// Shared input for node-owned grant reconciliation. The target app root and
 /// signing authority come from the host entrypoint, never from this payload.
@@ -264,6 +264,9 @@ pub struct MintAdmissionTokenParams {
     pub ttl_secs: u64,
     /// Class of the grant redeeming this token writes.
     pub class: AuthorizedKeyPrincipalClass,
+    /// Membership class the redeemed key belongs to. It names a class of the
+    /// node's membership policy and is recorded on the token.
+    pub membership_class: String,
     /// Site the redeemed grant is bound to. Required for `remote_principal`,
     /// whose claim a node of this site must co-sign; refused for other classes.
     pub origin_site_id: Option<String>,
@@ -287,6 +290,9 @@ pub struct MintAdmissionTokenRequest {
     /// Class of the grant the token admits: `local_client`, `remote_node` or
     /// `remote_principal`.
     pub class: AuthorizedKeyPrincipalClass,
+    /// Membership class the redeemed key belongs to: a class of the node's
+    /// membership policy, chosen by the operator. Required.
+    pub membership_class: String,
     /// Origin site of a `remote_principal` token (`site:<name>`).
     #[serde(default)]
     pub origin_site_id: Option<String>,
@@ -317,6 +323,7 @@ impl MintAdmissionTokenRequest {
             label: self.label,
             ttl_secs: self.ttl_secs,
             class: self.class,
+            membership_class: self.membership_class,
             origin_site_id: self.origin_site_id,
             grant_lifetime_secs: self.grant_lifetime_secs,
         })
@@ -343,14 +350,17 @@ pub struct MintAdmissionTokenResult {
     pub label: Option<String>,
     /// Class of the grant the token admits.
     pub class: AuthorizedKeyPrincipalClass,
+    /// Membership class the token places the admitted key in.
+    pub membership_class: String,
     /// Origin site a `remote_principal` token is bound to.
     pub origin_site_id: Option<String>,
     /// Lifetime requested for the admitted grant, in seconds.
     pub grant_lifetime_secs: Option<u64>,
 }
 
-/// Stored admission token format. Version 2 carries the class of the grant it
-/// admits; the claim side refuses any other version as stale.
+/// Stored admission token format. Version 3 carries the class of the grant it
+/// admits and the membership class of the key it admits; the claim side
+/// refuses any other version as stale.
 #[derive(serde::Serialize)]
 struct AdmissionTokenFile<'a> {
     version: u32,
@@ -362,6 +372,7 @@ struct AdmissionTokenFile<'a> {
     ttl_secs: u64,
     expires_at_unix: u64,
     class: AuthorizedKeyPrincipalClass,
+    membership_class: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin_site_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,7 +515,8 @@ pub fn run_mint_admission_token(
         bail!("ttl_secs must be greater than zero");
     }
     let policy = load_hosted_policy(&params.app_root)?;
-    mint_admission_token_with_policy(params, &policy.policy, &policy.source_file)
+    let membership = crate::actions::hosted_policy::load_membership_policy(&params.app_root)?;
+    mint_admission_token_with_policy(params, &policy.policy, &policy.source_file, &membership)
 }
 
 /// Mint through the daemon-owned service using its already-loaded, exact
@@ -514,6 +526,7 @@ pub fn mint_admission_token_with_policy(
     params: MintAdmissionTokenParams,
     policy: &ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy,
     policy_source: &std::path::Path,
+    membership: &ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy,
 ) -> Result<MintAdmissionTokenResult> {
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
@@ -533,6 +546,23 @@ pub fn mint_admission_token_with_policy(
             params.ttl_secs,
             maximum_token_ttl_secs,
             policy_source.display()
+        );
+    }
+
+    if !membership.classes.contains_key(&params.membership_class) {
+        bail!(
+            "membership_class_unknown: membership class `{}` is not a class of this node's membership policy; it names {}",
+            params.membership_class,
+            if membership.classes.is_empty() {
+                "no class".to_owned()
+            } else {
+                membership
+                    .classes
+                    .keys()
+                    .map(|id| format!("`{id}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         );
     }
 
@@ -610,6 +640,7 @@ pub fn mint_admission_token_with_policy(
         ttl_secs: params.ttl_secs,
         expires_at_unix,
         class: params.class,
+        membership_class: &params.membership_class,
         origin_site_id: params.origin_site_id.as_deref(),
         grant_lifetime_secs: params.grant_lifetime_secs,
     })?;
@@ -636,6 +667,7 @@ pub fn mint_admission_token_with_policy(
         scopes,
         label,
         class: params.class,
+        membership_class: params.membership_class,
         origin_site_id: params.origin_site_id,
         grant_lifetime_secs: params.grant_lifetime_secs,
     })
@@ -742,7 +774,8 @@ admission_enabled: {admission_enabled}
     fn admission_token_request_has_no_node_root_input() {
         let request: MintAdmissionTokenRequest = serde_json::from_value(serde_json::json!({
             "scopes": "ryeos.attest.request.forwarded-operator",
-            "class": "remote_node"
+            "class": "remote_node",
+            "membership_class": "guest"
         }))
         .expect("signed service input must decode");
         let params = request.into_params(PathBuf::from("/node")).unwrap();
@@ -959,6 +992,7 @@ admission_enabled: {admission_enabled}
             label: None,
             ttl_secs: 600,
             class: AuthorizedKeyPrincipalClass::RemoteNode,
+            membership_class: "guest".to_owned(),
             origin_site_id: None,
             grant_lifetime_secs: None,
         }) {
@@ -984,6 +1018,7 @@ admission_enabled: {admission_enabled}
             label: None,
             ttl_secs: 60,
             class: AuthorizedKeyPrincipalClass::RemoteNode,
+            membership_class: "guest".to_owned(),
             origin_site_id: None,
             grant_lifetime_secs: None,
         })
@@ -1049,19 +1084,74 @@ admission_enabled: {admission_enabled}
         );
     }
 
+    /// Replace the node's membership policy with one that names `ids`, each a
+    /// class with a non-launch ceiling.
+    fn write_membership_policy(
+        app_root: &std::path::Path,
+        ids: &[&str],
+        key: &lillux::crypto::SigningKey,
+    ) {
+        let class = r#"
+    admitted_through: [admission_token]
+    scope_ceiling: ["ryeos.fetch.item.*"]
+    surface: member-home
+    execute_allowlist: []
+    runtime_cap_bundles_reviewed: []
+    interpreter_products: []
+    quotas:
+      sessions: 2
+      requests_per_minute: 60
+      max_request_bytes: 1048576
+      max_response_bytes: 1048576
+      enrolled_keys: 3
+      storage_bytes: null
+      live_threads: 0
+      schedules: 0
+      provider_contacts_per_day: 0
+    lifetime:
+      session_sliding_days: 7
+      retention_days_after_last_renewal: 90
+      purge_after_retention: true
+    directory_listed_by_default: false
+    self_enrolment:
+      enabled: false
+"#;
+        let classes = if ids.is_empty() {
+            " {}\n".to_owned()
+        } else {
+            ids.iter()
+                .map(|id| format!("\n  {id}:{class}"))
+                .collect::<String>()
+        };
+        let body = format!("schema: 1\nclasses:{classes}");
+        let path = app_root.join(".ai/node/policies/membership.yaml");
+        std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
+    }
+
     fn mint_for(
         tmp: &std::path::Path,
         class: AuthorizedKeyPrincipalClass,
         origin_site_id: Option<&str>,
     ) -> Result<MintAdmissionTokenResult> {
+        mint_for_membership_class(tmp, class, origin_site_id, "guest")
+    }
+
+    fn mint_for_membership_class(
+        tmp: &std::path::Path,
+        class: AuthorizedKeyPrincipalClass,
+        origin_site_id: Option<&str>,
+        membership_class: &str,
+    ) -> Result<MintAdmissionTokenResult> {
         let fixture = HostedPolicyFixture::new(tmp);
         write_hosted_policy(tmp, true, 600, &fixture.key);
+        write_membership_policy(tmp, &["guest"], &fixture.key);
         run_mint_admission_token(MintAdmissionTokenParams {
             app_root: tmp.to_path_buf(),
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 60,
             class,
+            membership_class: membership_class.to_owned(),
             origin_site_id: origin_site_id.map(str::to_owned),
             grant_lifetime_secs: None,
         })
@@ -1077,8 +1167,9 @@ admission_enabled: {admission_enabled}
         )
         .unwrap();
         let stored = std::fs::read_to_string(&minted.path).unwrap();
-        assert!(stored.contains("version = 2"), "{stored}");
+        assert!(stored.contains("version = 3"), "{stored}");
         assert!(stored.contains("class = \"remote_principal\""), "{stored}");
+        assert!(stored.contains("membership_class = \"guest\""), "{stored}");
         assert!(
             stored.contains("origin_site_id = \"site:home\""),
             "{stored}"
@@ -1127,10 +1218,42 @@ admission_enabled: {admission_enabled}
     #[test]
     fn token_request_requires_a_class() {
         let error = serde_json::from_value::<MintAdmissionTokenRequest>(serde_json::json!({
-            "scopes": "ryeos.execute.service.threads"
+            "scopes": "ryeos.execute.service.threads",
+            "membership_class": "guest"
         }))
         .expect_err("a token without a class must not decode");
         assert!(error.to_string().contains("class"), "{error}");
+    }
+
+    #[test]
+    fn token_request_requires_a_membership_class() {
+        let error = serde_json::from_value::<MintAdmissionTokenRequest>(serde_json::json!({
+            "scopes": "ryeos.execute.service.threads",
+            "class": "remote_node"
+        }))
+        .expect_err("a token without a membership class must not decode");
+        assert!(error.to_string().contains("membership_class"), "{error}");
+    }
+
+    #[test]
+    fn minting_refuses_a_membership_class_the_policy_does_not_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = mint_for_membership_class(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemoteNode,
+            None,
+            "nobody",
+        )
+        .expect_err("an unknown membership class must not mint");
+        assert!(
+            format!("{error:#}").contains("membership_class_unknown"),
+            "{error:#}"
+        );
+        let tokens = tmp.path().join(".ai/node/admission/tokens");
+        assert!(
+            !tokens.exists() || std::fs::read_dir(tokens).unwrap().next().is_none(),
+            "a refused mint must leave no token file"
+        );
     }
 
     #[test]
@@ -1140,6 +1263,7 @@ admission_enabled: {admission_enabled}
             label: None,
             ttl_secs: 60,
             class: AuthorizedKeyPrincipalClass::RemoteNode,
+            membership_class: "guest".to_owned(),
             origin_site_id: None,
             grant_lifetime_secs: None,
         };

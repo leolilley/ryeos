@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T16:25:38Z:a66cc937ed0c20a26f2c7689cc503ea2ffda5ef5648317615c294e06d2fc2d61:eNJi78g+P4OBEcOcWU87aDEzHLOenm8DsXqipYwkNbvryHQqPGhVq43a9viN2BFpV9UY5y8oMyaiHjmuLF5kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:35:01Z:63f3c0f8372d1f15428f2034b8653b8f5913e71eb4640330eabe44e196b26cd3:d1Q+M+R+xdBOW7Gg5cISku0Ksq8gPlL911JwHQOBbn3NpR0MgUhzCiz1f9Fl88SlEeqoNrHVQvBUDPcgkU2/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -74,8 +74,8 @@ A principal that has no grant on the remote yet is admitted with a
    band.
 
    ```bash
-   ryeos admission-token --class remote_principal --origin-site-id "site:home" \
-     --scopes "ryeos.execute.service.remote/run,ryeos.execute.service.vault/list"
+   ryeos admission-token --class remote_principal --membership-class guest \
+     --origin-site-id "site:home" --scopes "ryeos.execute.service.remote/run,ryeos.execute.service.vault/list"
    ```
 
    B must already admit the home node (A) as a `remote_node` of `site:home`
@@ -233,6 +233,7 @@ principal's grant ends all of them, and `not_after` bounds the rest.
    ```bash
    ryeos admission-token \
      --class remote_node \
+     --membership-class guest \
      --label "dev-machine" \
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
      --ttl-secs 600
@@ -572,6 +573,7 @@ ryeos remote-descriptor \
 
 ryeos admission-token \
   --class remote_node \
+  --membership-class guest \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600

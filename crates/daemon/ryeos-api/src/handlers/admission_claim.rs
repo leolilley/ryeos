@@ -92,6 +92,10 @@ struct AdmissionTokenFile {
     expires_at_unix: u64,
     /// Class of the grant redeeming this token writes.
     class: AuthorizedKeyPrincipalClass,
+    /// Membership class the redeemed key belongs to. The claimed token file
+    /// keeps it, and request authentication reads it back from there.
+    #[serde(rename = "membership_class")]
+    _membership_class: String,
     /// Site a `remote_principal` token is bound to.
     #[serde(default)]
     origin_site_id: Option<String>,
@@ -301,13 +305,89 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
-fn admission_token_path(app_root: &Path, token_hash: &str) -> PathBuf {
+fn admission_tokens_dir(app_root: &Path) -> PathBuf {
     app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("admission")
         .join("tokens")
-        .join(format!("{token_hash}.toml"))
+}
+
+fn admission_token_path(app_root: &Path, token_hash: &str) -> PathBuf {
+    admission_tokens_dir(app_root).join(format!("{token_hash}.toml"))
+}
+
+/// What request authentication reads from a claimed token file: its format,
+/// its hash and the membership class it kept.
+#[derive(serde::Deserialize)]
+struct RetainedTokenRecord {
+    version: u32,
+    token_hash: String,
+    #[serde(default)]
+    membership_class: Option<String>,
+}
+
+/// The membership class retained on the claimed admission token that a
+/// grant's `granted_by` (`admission:<first 12 hex of the token hash>`) names.
+/// Exactly one claimed token file must carry that hash prefix, in the current
+/// token format, with its stored hash matching its file name and a class.
+/// Anything else is refused with the reason, so a missing, altered, ambiguous
+/// or classless record never yields a class.
+pub(crate) fn retained_membership_class(
+    app_root: &Path,
+    granted_by: &str,
+) -> Result<String, String> {
+    let prefix = granted_by
+        .strip_prefix("admission:")
+        .filter(|prefix| !prefix.is_empty() && prefix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("grant issuer `{granted_by}` does not name an admission token"))?;
+    let entries = std::fs::read_dir(admission_tokens_dir(app_root))
+        .map_err(|_| format!("no claimed admission token `{prefix}` is retained"))?;
+    let mut named = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("read the retained admission tokens: {error}"))?
+            .path();
+        let is_named = path
+            .extension()
+            .is_some_and(|extension| extension == "claimed")
+            && path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.starts_with(prefix));
+        if is_named {
+            named.push(path);
+        }
+    }
+    let [path] = named.as_slice() else {
+        return Err(if named.is_empty() {
+            format!("no claimed admission token `{prefix}` is retained")
+        } else {
+            format!("more than one claimed admission token carries the hash prefix `{prefix}`")
+        });
+    };
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("read the claimed admission token `{prefix}`: {error}"))?;
+    let record: RetainedTokenRecord = toml::from_str(&raw).map_err(|error| {
+        format!("the claimed admission token `{prefix}` is unreadable: {error}")
+    })?;
+    if record.version != ADMISSION_TOKEN_FORMAT_VERSION {
+        return Err(format!(
+            "the claimed admission token `{prefix}` is format version {}, which predates membership classes",
+            record.version
+        ));
+    }
+    if path.file_stem().and_then(|stem| stem.to_str()) != Some(record.token_hash.as_str()) {
+        return Err(format!(
+            "the claimed admission token `{prefix}` does not match its file name"
+        ));
+    }
+    match record.membership_class {
+        Some(class) if !class.is_empty() => Ok(class),
+        _ => Err(format!(
+            "the claimed admission token `{prefix}` records no membership class"
+        )),
+    }
 }
 
 fn read_token_file(path: &Path) -> HandlerResult<AdmissionTokenFile> {

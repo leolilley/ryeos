@@ -62,6 +62,24 @@ pub fn load_authorization_policy(
     Ok(*snapshot.require::<ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy>()?)
 }
 
+/// Load the required membership policy (the classes a token-admitted key can
+/// belong to) for `app_root`.
+pub fn load_membership_policy(
+    app_root: &Path,
+) -> Result<ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy> {
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("membership policy: load trust store")?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &NodePolicyTable::new(),
+    )
+    .context("membership policy: load verified node policy generation")?;
+    Ok(snapshot
+        .require::<ryeos_node_runtime::node_policy::sections::membership::MembershipPolicy>()?
+        .clone())
+}
+
 #[cfg(test)]
 pub(crate) fn write_required_non_hosted_test_policies(
     app_root: &Path,
