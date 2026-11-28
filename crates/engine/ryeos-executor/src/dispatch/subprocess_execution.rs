@@ -838,6 +838,11 @@ fn validate_managed_effective_program(
         &prepared.resolved.resolved_item,
         resolution.effective_trust_class,
         engine,
+        ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+            &state.config.app_root,
+            &engine.trust_store,
+            &ctx.principal_fingerprint,
+        ),
     )
     .map_err(|reason| DispatchError::CapabilityRejected { reason })?;
     let effective_caps = declared_caps
@@ -1166,6 +1171,11 @@ async fn dispatch_tool_subprocess(
             &resolved.item_ref,
             ctx,
             &request.params,
+            ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+                &state.config.app_root,
+                &ctx.engine.trust_store,
+                &ctx.principal_fingerprint,
+            ),
         )?;
         let admission_ready = source
             .as_ref()
@@ -1193,6 +1203,11 @@ async fn dispatch_tool_subprocess(
         &resolved.item_ref,
         ctx,
         &request.params,
+        ryeos_app::runtime_capability_admission::ProjectMint::for_requesting_key(
+            &state.config.app_root,
+            &ctx.engine.trust_store,
+            &ctx.principal_fingerprint,
+        ),
     )?;
 
     let parent_thread_id = request

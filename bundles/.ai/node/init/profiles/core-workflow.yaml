@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T22:28:39Z:a9a18e9447d0ca00a1c5bae390c09ceebc246e3c945806a21a5aa124287582a5:ArtYkRA9XbnD2tNqKsm1uqdd6v6DXNz7kmk6TSJik46vATts+HVRN9sexkMy88C+vNrdE5dkWb7SMLfillU9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T08:59:26Z:5fb51d5725762cf1b794f3fdebe4f21b501d90a62a9a8d35c33a2f626cfb253d:YrvnO6lHCoEj0G5pWKcD2YIoHjg5ZcTRIW0DRJmkAvD2HYpeHL0e+sxEYQVbNKFtXnOtsHzpfP4KUOxsrIXlBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -536,6 +536,10 @@ policies:
     reads:
       - target: service:node/status
       - target: service:bundle/list
+        # The staged list is the operator's node administration: no seat
+        # sees it, the operator's own seat included.
+        keep:
+        - /bundles
       - target: service:projects/list
       - target: service:commands/list
       - target: service:threads/list

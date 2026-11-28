@@ -120,6 +120,7 @@ pub mod scoped_producer_process;
 pub mod scoped_producer_start;
 pub mod scoped_producer_stop;
 pub mod seat_authority;
+pub mod secret_floor;
 mod selected_invocation_bookkeeping;
 pub mod stale_publication_report;
 pub use selected_invocation_bookkeeping::{

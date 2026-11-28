@@ -30,6 +30,19 @@ name: Remote cargo
 #
 #   gh workflow run remote-cargo.yml --ref work/<branch> \
 #     -f workspace=rune -f command=clippy -f args="--all-targets -- -D warnings"
+#
+# command=browser-package builds the browser renderer's package on the runner
+# (the local wasm build is not run on the dev machine). It installs the
+# wasm-bindgen CLI the renderer's lock names, runs
+# .ai/tools/ryeos/development/browser-assets-production/publish.sh --publish
+# on the branch, prints the recorded source_digest, and uploads the
+# `browser-package-<sha>` artifact: crates/clients/rune/pkg/,
+# crates/daemon/ryeos-ui/web-assets.json and
+# crates/daemon/ryeos-ui/src/generated_web_assets.rs. Pass args=publish (it is
+# not used); download the artifact and commit those files on the branch:
+#
+#   gh workflow run remote-cargo.yml --ref work/<branch> \
+#     -f command=browser-package -f args=publish
 on:
   workflow_dispatch:
     inputs:
@@ -45,6 +58,7 @@ on:
           - check
           - build
           - fmt
+          - browser-package
       args:
         description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings. gate passes them to scripts/gate.sh (nextest, one process per test, the merge gate's composition features), e.g. -p ryeosd --test node_journal_e2e; plain test is cargo test, all tests as threads of one process, so suites sharing the in-process TestNativeHost lock need -- --test-threads 1 there"
         required: true
@@ -249,7 +263,43 @@ jobs:
           GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
         run: ./scripts/gate.sh --refresh-bundles --no-tests
 
+      - name: Install the wasm-bindgen CLI the renderer's lock names
+        if: ${{ inputs.command == 'browser-package' }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' crates/clients/rune/Cargo.lock)"
+          echo "wasm-bindgen-cli $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked --root "$RUNNER_TEMP/wasm-bindgen"
+          echo "$RUNNER_TEMP/wasm-bindgen/bin" >> "$GITHUB_PATH"
+
+      - name: Build and publish the browser package
+        if: ${{ inputs.command == 'browser-package' }}
+        run: |
+          set -euo pipefail
+          before="$(python3 -I -c 'import json; print(json.load(open("crates/daemon/ryeos-ui/web-assets.json"))["source_digest"])')"
+          ./.ai/tools/ryeos/development/browser-assets-production/publish.sh --publish
+          after="$(python3 -I -c 'import json; print(json.load(open("crates/daemon/ryeos-ui/web-assets.json"))["source_digest"])')"
+          echo "source_digest recorded before: $before"
+          echo "source_digest recorded now:    $after"
+          {
+            echo "### Browser package"
+            echo "branch \`${GITHUB_SHA}\`; recorded source_digest \`$after\` (was \`$before\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the browser package
+        if: ${{ inputs.command == 'browser-package' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: browser-package-${{ github.sha }}
+          path: |
+            crates/clients/rune/pkg/
+            crates/daemon/ryeos-ui/web-assets.json
+            crates/daemon/ryeos-ui/src/generated_web_assets.rs
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Run cargo
+        if: ${{ inputs.command != 'browser-package' }}
         env:
           CARGO_SUBCOMMAND: ${{ inputs.command }}
           CARGO_ARGS: ${{ inputs.args }}
