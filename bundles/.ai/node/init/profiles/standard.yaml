@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T00:52:06Z:cb6d3eed042a2b7ef6e610bc691527dc83c55d8c7119025c816d87f5babb7477:ReJTt66nrO5JlcvK2wMNjDom5x1MrWVtpFm0gdoraf4PoLde50/3qEQI6S1ZgXt2/xYKK4dGMY0+rbVxIN3yCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T04:38:52Z:409e793839dc568efd11802b9632b16b56f0c1839ddc0b046b27693c184c7abd:fIb0dOsTFfTY3SEzO/mgCU6VdI4MbFjzlqqjAxqY9rM3uyqL49Fiuf2axvmYr3dxwDdzA0grlRITYeE/UQ6PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -223,6 +223,25 @@ policies:
     # Most /published requests worked at once, node-wide; one past it is
     # answered publication_busy before any read.
     max_in_flight: 16
+  publication_lane:
+    schema: 1
+    # What a bundle pulled from a publication may carry. admit_activations
+    # accepts only `invoked`, meaning items that act only when a caller invokes
+    # them, under that caller's own grants. named_bundles lifts more for one
+    # bundle by name, namely `kinds` (exact node-loaded kinds) and `facets`
+    # (manifest declarations a policy can lift). Nothing else can be lifted.
+    admit_activations: [invoked]
+    # The manifest facets an operator may lift for a named bundle. Only these
+    # five exist to lift; provided kinds, the operator vault, state homes,
+    # route capabilities, isolation backends, external providers and adapters,
+    # bin trees and executors can never be listed.
+    liftable_facets:
+      - bundle_events
+      - item_authoring
+      - owns_namespaces
+      - project_snapshots
+      - runtime_vault
+    named_bundles: {}
   thread_attachments:
     schema: 1
     max_bytes_per_attachment: 4194304
@@ -602,6 +621,10 @@ policies:
     reads:
       - target: service:node/status
       - target: service:bundle/list
+        # The staged list is the operator's node administration: no seat
+        # sees it, the operator's own seat included.
+        keep:
+        - /bundles
       - target: service:projects/list
       - target: service:commands/list
       - target: service:threads/list

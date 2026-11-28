@@ -248,40 +248,6 @@ pub fn build_route_table_with_extensions(
     })
 }
 
-pub fn build_route_table_from_snapshot(
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    kinds: &ryeos_engine::kind_registry::KindRegistry,
-) -> Result<RouteTable, Vec<RouteConfigError>> {
-    let mode_registry = ResponseModeRegistry::with_builtins(Arc::new(kinds.clone()));
-    build_route_table(&snapshot.routes, &mode_registry)
-}
-
-pub fn build_route_table_from_snapshot_with_extensions(
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    mode_registry: &ResponseModeRegistry,
-    extensions: &RouteExtensionRegistry,
-) -> Result<RouteTable, Vec<RouteConfigError>> {
-    build_route_table_with_extensions(&snapshot.routes, mode_registry, extensions)
-}
-
-pub fn build_route_table_or_bail(
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    kinds: &ryeos_engine::kind_registry::KindRegistry,
-) -> anyhow::Result<RouteTable> {
-    build_route_table_from_snapshot(snapshot, kinds).map_err(|errors| {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        anyhow::anyhow!(
-            "route table build failed at startup ({} error(s)): {}",
-            errors.len(),
-            msgs.join("; ")
-        )
-    })
-}
-
-pub fn swap(state: &crate::api_state::ApiState, new_table: Arc<RouteTable>) {
-    state.route_table.store(new_table);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +262,10 @@ mod tests {
             methods: methods.iter().map(|s| s.to_string()).collect(),
             auth: auth.to_string(),
             auth_config: None,
-            limits: RawLimits::default(),
+            limits: RawLimits {
+                body_bytes_max: 0,
+                ..RawLimits::default()
+            },
             response: RawResponseSpec {
                 mode: mode.to_string(),
                 source: None,
@@ -343,7 +312,8 @@ mod tests {
 
     #[test]
     fn hook_prefix_allowed_for_config_routes() {
-        let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
+        // A keyless static route serves GET only; the path prefix is what is tested.
+        let raw = make_raw("r1", "/hook/stripe", &["GET"], "none", "static");
         let table =
             build_table(&[raw]).expect("/hook/* must be admitted by the route table builder");
         assert_eq!(table.all.len(), 1);

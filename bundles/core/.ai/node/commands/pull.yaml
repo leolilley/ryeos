@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-26T17:01:26Z:0241fa2604d9a4e0cd877068bb5bceabd844a3230d4f28e4d721d027fe541be2:H7vkMzDm8wWEF/uhEMMFqMkgoiieAAsxai9xpzSe5bPAJhBdbecvdCRk1cpOq51I9Q4TsXQSBqGeJar//xJhAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-27T04:25:49Z:9045e7fd57fbc0b5e4b60a454830b627b674d97270f73acc4bdf82065cacf73b:IkRasfnYdtdkyfFUcupyu+5EkvrbRVWaNGYZyYx7zMbevIhKPjW0voDiXxQE1XpDMKkI0zcU0WSP5bvwgtMjBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - pull
-description: Fetch, verify and stage a published bundle from a link, checking the node key and record hash you were given. The bundle is staged, not installed; it takes effect at the next start by a signed operation. A host that is, or resolves to, a loopback, private, link-local or metadata address is refused, and so is a host an egress proxy would carry (its address cannot be checked from here; list it in NO_PROXY). --allow-internal true accepts both, for a node pulling from inside its own network
+description: Fetch, verify and stage a published bundle from a link, checking the node key and record hash you were given. The bundle is staged, not installed; it takes effect at the next start by a signed operation. A host that is, or resolves to, a loopback, private, link-local or metadata address is refused, and so is a host an egress proxy would carry (its address cannot be checked from here; list it in NO_PROXY). --allow-internal true accepts both, for a node pulling from inside its own network. The publisher key to pin is the one the pull prints, never a PUBLISHER_TRUST.toml inside the pulled bundle
 help:
   usage: "ryeos pull <https://host/published/id> --node fp:<node key fingerprint> --expect <record hash> [--allow-internal true]"
   examples:

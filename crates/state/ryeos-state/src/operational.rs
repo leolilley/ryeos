@@ -218,6 +218,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
         tables: &[
             sqlite_schema::TableSpec {
                 name: "cas_entries",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "hash",
@@ -277,6 +278,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "sync_jobs",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "job_id",
@@ -384,6 +386,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "sync_job_attempts",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "attempt_id",
@@ -455,6 +458,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "admission_attestations",
+                class: sqlite_schema::StoreClass::Identity,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "attestation_hash",
@@ -520,6 +524,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "replay_records",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "namespace",
@@ -561,6 +566,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "replay_index_epoch",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "singleton",
@@ -578,6 +584,7 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "credential_profiles",
+                class: sqlite_schema::StoreClass::Identity,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "profile_id",

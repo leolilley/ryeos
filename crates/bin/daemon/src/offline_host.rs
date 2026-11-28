@@ -99,6 +99,7 @@ impl OfflineHost for DaemonOfflineHost<'_> {
         let lease = request.state_lock.retain();
         ryeos_api::handlers::bundle_install::install_staged(
             request.staged,
+            request.evidence,
             request.replace,
             &composed.authority(request.app_root, request.node, &lease),
         )
@@ -124,6 +125,7 @@ impl ComposedForInstall {
             app_root,
             node_signing_key: node.signing_key(),
             node_trust_store: &self.engine.node_trust_store,
+            kinds: &self.engine.kinds,
             prospective_validator: &self.validator,
             isolation: Arc::clone(&self.isolation),
             state_lock: lease,

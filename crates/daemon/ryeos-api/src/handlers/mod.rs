@@ -152,6 +152,7 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
+pub(crate) mod stage_lane;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;

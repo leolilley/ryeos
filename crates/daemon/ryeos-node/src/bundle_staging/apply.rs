@@ -53,11 +53,25 @@ pub enum ApplyRefusalCode {
     /// Signer trust, node configuration or definition admission refused the
     /// bundle as the node stands now.
     AdmissionRefused,
+    /// The publication lane's audit of the install's own copy refused the
+    /// bundle: the detail starts with the audit's stable code.
+    LaneRefused,
+    /// The publication evidence the stage carries does not verify again, or
+    /// disagrees with the signed record or the tree, or its publisher is no
+    /// longer a signer this node trusts, or the record names a source this
+    /// build does not know.
+    LaneEvidenceInvalid,
+    /// The node's `publication_lane` policy could not be loaded as it stands
+    /// now. A missing section means the lane is off, never a default.
+    LanePolicyUnavailable,
+    /// The name may not be taken by a publication stage: it is `core`, it is
+    /// held by a native install, or it is held by a laned bundle.
+    LaneNameRefused,
 }
 
 impl ApplyRefusalCode {
     /// Every code, in the order the documentation lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::StageNotFound,
         Self::StageRecordUnverified,
         Self::StageEvidenceMismatch,
@@ -68,6 +82,10 @@ impl ApplyRefusalCode {
         Self::TreeDigestMismatch,
         Self::TreeChangedDuringInstall,
         Self::AdmissionRefused,
+        Self::LaneRefused,
+        Self::LaneEvidenceInvalid,
+        Self::LanePolicyUnavailable,
+        Self::LaneNameRefused,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -82,6 +100,10 @@ impl ApplyRefusalCode {
             Self::TreeDigestMismatch => "tree_digest_mismatch",
             Self::TreeChangedDuringInstall => "tree_changed_during_install",
             Self::AdmissionRefused => "admission_refused",
+            Self::LaneRefused => "lane_refused",
+            Self::LaneEvidenceInvalid => "lane_evidence_invalid",
+            Self::LanePolicyUnavailable => "lane_policy_unavailable",
+            Self::LaneNameRefused => "lane_name_refused",
         }
     }
 
@@ -358,7 +380,7 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", code.as_str()));
         }
         assert_eq!(ApplyRefusalCode::parse("signers_not_trusted"), None);
-        assert_eq!(ApplyRefusalCode::parse("lane_refused"), None);
+        assert_eq!(ApplyRefusalCode::parse("lane_unknown"), None);
     }
 
     #[test]

@@ -71,7 +71,7 @@ pub async fn route_dispatcher_from_ingress(
     mut request: Request,
     ingress_started_at: Instant,
 ) -> Response {
-    let table = api_state.route_table.load_full();
+    let table = Arc::clone(&api_state.route_table);
     let publication = api_state.publication.clone();
     let app = publication
         .as_ref()

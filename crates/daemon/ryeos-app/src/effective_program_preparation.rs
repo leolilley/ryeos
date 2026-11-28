@@ -42,6 +42,7 @@ pub fn prepare_preselection_effective_program(
         &std::path::Path,
         &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
     )>,
+    project_mint: crate::runtime_capability_admission::ProjectMint,
 ) -> anyhow::Result<Option<LaunchConfigSnapshotSet>> {
     anyhow::ensure!(
         resolution.root.resolved_ref == resolved.canonical_ref.to_string()
@@ -70,6 +71,7 @@ pub fn prepare_preselection_effective_program(
             resolved,
             resolution.effective_trust_class,
             engine,
+            project_mint,
         )
         .map_err(anyhow::Error::msg)?;
         let caps = declared

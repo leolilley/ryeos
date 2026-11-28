@@ -893,6 +893,8 @@ struct PreflightNodeBundleRecord {
     #[serde(rename = "kind")]
     _kind: Option<String>,
     path: PathBuf,
+    #[serde(default)]
+    lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1389,6 +1391,10 @@ fn validate_node_bundle_record(file_path: &Path, body: &serde_json::Value) -> Re
         .context("failed to parse bundle node-config record")?;
     if !record.path.is_absolute() {
         bail!("bundle record missing absolute 'path' field");
+    }
+    if let Some(lane) = &record.lane {
+        lane.validate_shape()
+            .map_err(|error| anyhow::anyhow!("bundle record has an invalid lane: {error}"))?;
     }
     if file_path
         .parent()
@@ -2732,6 +2738,7 @@ strict_fields: warn
             project_shadowing: Default::default(),
             runtime_authoring: Default::default(),
             standing_endorsement: Default::default(),
+            activation: Default::default(),
         }
     }
 

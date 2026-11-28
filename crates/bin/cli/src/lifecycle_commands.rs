@@ -3468,6 +3468,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
                     }),
                 ));
+                checks.extend(snapshot.bundles.iter().filter_map(lane_marker_check));
+                if let Ok(trust) =
+                    ryeos_engine::trust::TrustStore::load_node_registry(&config.app_root)
+                    && let Ok((_, skipped)) =
+                        (ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+                            app_root: &config.app_root,
+                            trust_store: &trust,
+                        })
+                        .load_bundle_section_reporting_skipped()
+                {
+                    checks.extend(skipped.iter().map(skipped_lane_check));
+                }
                 if !args.no_bundles {
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
@@ -5802,6 +5814,44 @@ fn key_link_row(
     }
 }
 
+/// The doctor row for a loaded bundle that was installed through a
+/// publication: where its bytes came from, and that no release evidence chain
+/// exists for it.
+fn lane_marker_check(
+    record: &ryeos_node_runtime::node_config_source::BundleRecord,
+) -> Option<ryeos_core_tools::actions::doctor::CheckResult> {
+    let lane = record.lane.as_ref()?;
+    Some(check(
+        &format!("bundle_lane:{}", record.name),
+        ryeos_core_tools::actions::doctor::OK,
+        serde_json::json!({
+            "lane": lane.name,
+            "publisher_fingerprint": lane.publisher_fingerprint,
+            "node_fingerprint": lane.node_fingerprint,
+            "record_hash": lane.record_hash,
+            "note": "installed from a publication, not a release; no release evidence chain exists for this bundle",
+        }),
+    ))
+}
+
+/// The doctor row for a laned bundle the node did not load because it no
+/// longer passes what the node admits: its stable code, the audit's message,
+/// and the way out.
+fn skipped_lane_check(
+    bundle: &ryeos_node_runtime::bundle_bootstrap::SkippedLaneBundle,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    check(
+        "bundle_lane_not_loaded",
+        ryeos_core_tools::actions::doctor::FAIL,
+        serde_json::json!({
+            "bundle": bundle.name,
+            "code": bundle.code,
+            "error": bundle.message,
+            "note": "this publication-lane bundle does not pass what this node admits and is not loaded; remove it with bundle remove and pull the publication again",
+        }),
+    )
+}
+
 fn check(
     name: &str,
     status: &str,
@@ -6526,6 +6576,64 @@ fn policy_carry_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skipped_laned_bundle_is_a_failing_doctor_row_with_its_code_and_the_way_out() {
+        let skipped = ryeos_node_runtime::bundle_bootstrap::SkippedLaneBundle {
+            name: "pulled".to_owned(),
+            code: "publication_lane_never_admitted",
+            message:
+                "publication_lane_never_admitted: bin/tool is in a native executable directory"
+                    .to_owned(),
+        };
+        let row = skipped_lane_check(&skipped);
+        assert_eq!(row.name, "bundle_lane_not_loaded");
+        assert_eq!(row.status, ryeos_core_tools::actions::doctor::FAIL);
+        assert_eq!(row.detail["bundle"], "pulled");
+        assert_eq!(row.detail["code"], "publication_lane_never_admitted");
+        assert!(
+            row.detail["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("publication_lane_never_admitted:")
+        );
+        assert!(
+            row.detail["note"]
+                .as_str()
+                .unwrap()
+                .contains("remove it with bundle remove"),
+            "{}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn a_loaded_laned_bundle_is_an_ok_doctor_row_naming_its_provenance_and_a_native_one_has_none() {
+        let lane = ryeos_engine::trust::BundleLane::publication(
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "1.0.0",
+        );
+        let record = |lane| ryeos_node_runtime::node_config_source::BundleRecord {
+            name: "pulled".to_owned(),
+            lane,
+            path: std::path::PathBuf::from("/b"),
+            source_file: std::path::PathBuf::new(),
+        };
+        let row = lane_marker_check(&record(Some(lane))).expect("a laned bundle has a row");
+        assert_eq!(row.name, "bundle_lane:pulled");
+        assert_eq!(row.status, ryeos_core_tools::actions::doctor::OK);
+        assert_eq!(row.detail["lane"], "publication");
+        assert_eq!(row.detail["record_hash"], "b".repeat(64));
+        assert!(
+            row.detail["note"]
+                .as_str()
+                .unwrap()
+                .contains("not a release")
+        );
+        assert!(lane_marker_check(&record(None)).is_none());
+    }
 
     #[test]
     fn doctor_reports_retired_bindings_as_failing_with_their_fix() {

@@ -84,6 +84,7 @@ impl NodePolicyTable {
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
             Box::new(sections::provider_environment::ProviderEnvironmentPolicySection),
             Box::new(sections::publication::PublicationPolicySection),
+            Box::new(sections::publication_lane::PublicationLanePolicySection),
             Box::new(sections::sealed_vault_names::SealedVaultNamesPolicySection),
             Box::new(sections::thread_attachments::ThreadAttachmentsPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
@@ -228,6 +229,13 @@ pub fn shipped_bundle_staging_record() -> Arc<dyn ErasedNodePolicy> {
         max_key_bytes: 512 * 1024 * 1024,
         max_key_stages: 16,
     })
+}
+
+/// The shipped `publication_lane` policy record. Test snapshots include it
+/// wherever a publication-lane bundle is staged or applied.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shipped_publication_lane_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::publication_lane::PublicationLanePolicy::as_shipped())
 }
 
 /// The shipped `thread_attachments` policy record. Exact test snapshots

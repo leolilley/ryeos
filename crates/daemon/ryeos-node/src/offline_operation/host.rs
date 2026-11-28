@@ -73,6 +73,9 @@ pub struct StagedBundleApply<'a> {
     /// name and tree digest are used, and the install re-derives both from
     /// the bytes.
     pub staged: &'a crate::bundle_staging::StagedBundle,
+    /// The evidence bytes that were verified against the record's digests. An
+    /// audit of the evidence reads these and never the evidence files.
+    pub evidence: &'a std::collections::BTreeMap<String, Vec<u8>>,
     /// Install over an installed bundle of that name.
     pub replace: bool,
 }
