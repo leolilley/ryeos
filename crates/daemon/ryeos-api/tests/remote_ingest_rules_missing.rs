@@ -76,7 +76,12 @@ async fn push_to_a_remote_pinned_without_ingest_rules_is_refused_before_any_netw
     )
     .await
     .expect_err("a push to a remote with no ingest rules is refused");
-    let text = format!("{error:#} {error:?}");
-    assert!(text.contains("remote_ingest_rules_missing"), "{text}");
-    assert!(text.contains("--descriptor"), "{text}");
+    let Some(ryeos_api::handler_error::HandlerError::Structured { code, body, .. }) =
+        error.downcast_ref::<ryeos_api::handler_error::HandlerError>()
+    else {
+        panic!("expected a structured refusal, got {error:#}");
+    };
+    assert_eq!(code, REMOTE_PINNED_WITHOUT_INGEST_RULES);
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(message.contains("--descriptor"), "{body}");
 }
