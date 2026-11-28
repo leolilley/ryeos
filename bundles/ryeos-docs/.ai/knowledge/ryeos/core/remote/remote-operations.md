@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T07:30:20Z:b66b02fb2c8f88e6bebb0151ee7b25dcc75fe3bcff3c5b5a5872ffa2c325cfe1:dIkbtr0ERSom6D1VGxETis8aeIlpk23b8KVMFA+RcQvRLnUjTL7S8orDUgB0BhF9v30hT1ki4Brey07OFx/1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T16:25:38Z:a66cc937ed0c20a26f2c7689cc503ea2ffda5ef5648317615c294e06d2fc2d61:eNJi78g+P4OBEcOcWU87aDEzHLOenm8DsXqipYwkNbvryHQqPGhVq43a9viN2BFpV9UY5y8oMyaiHjmuLF5kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -110,6 +110,11 @@ ryeos remote delegate --remote hosted \
   --scopes ryeos.execute.service.remote/run,ryeos.execute.service.remote/push \
   --lifetime-secs 3600
 ```
+
+The delegation lends the caller's own scopes: with it, `remote/push` and
+`remote/run` act as the caller, never as the node. Asking either for
+`outbound_principal: node` is the node's admitted operator's alone; any other
+caller is refused `outbound_principal_node_operator_only`.
 
 The CLI asks the node for the identities of both parties, signs the statement
 with the caller's own key, and hands it to the node, which stores it

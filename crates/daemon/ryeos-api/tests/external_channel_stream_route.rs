@@ -7,7 +7,6 @@ use ryeos_api::test_support as test_state;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use ryeos_api::api_state::ApiState;
 use ryeos_api::routes::dispatcher::route_dispatcher;
 use ryeos_api::routes::response_modes::ResponseModeRegistry;
@@ -56,7 +55,8 @@ async fn signed_stream_route_keeps_the_upgrade_through_the_dispatcher_and_refuse
         .unwrap_or_else(|errors| panic!("signed stream route does not compile: {errors:?}"));
     let api_state = ApiState {
         app: Arc::new(state.clone()),
-        route_table: Arc::new(ArcSwap::from_pointee(table)),
+        route_table: Arc::new(table),
+        public_routes: Arc::new(ryeos_api::routes::public_limits::PublicRouteLimiter::empty()),
         publication: None,
         webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
     };

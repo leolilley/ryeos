@@ -461,6 +461,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
         tables: &[
             sqlite_schema::TableSpec {
                 name: "projection_meta",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "chain_root_id",
@@ -484,6 +485,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "projection_recovery_identity",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "singleton",
@@ -501,6 +503,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "threads",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -638,6 +641,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "chain_retention",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "chain_root_id",
@@ -661,6 +665,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "events",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "event_id",
@@ -738,6 +743,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "event_replay_index",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -761,6 +767,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "event_operation_index",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "event_hash",
@@ -796,6 +803,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_edges",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "edge_id",
@@ -849,6 +857,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_results",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -896,6 +905,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_artifacts",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "artifact_id",
@@ -943,6 +953,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_facets",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "facet_id",
@@ -978,6 +989,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_usage_latest",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -1079,6 +1091,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_attempt_budget_latest",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "attempt_id",
@@ -1234,6 +1247,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_attempt_budget_transition_once",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "transition_id",
@@ -1269,6 +1283,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_budget_latest",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -1382,6 +1397,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "resource_budget_transition_once",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "transition_id",
@@ -1417,6 +1433,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "project_observation_once",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "observation_id",
@@ -1482,6 +1499,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "provider_call_observation_once",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "observation_id",
@@ -1559,6 +1577,7 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_usage_subjects",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "chain_root_id",

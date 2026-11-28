@@ -4013,10 +4013,14 @@ fn install_target_project_head(
     target.verify_project_snapshot_closure(snapshot_hash)?;
     let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project)?
         .context("the target checkout declares a project name")?;
-    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &fixture_key_principal(owner_principal),
-        &name,
-    );
+    // The target resolves `owner_principal`'s key through its registry, where a
+    // pinned key link makes it the principal of the owner it is linked to.
+    let target_trust = ryeos_engine::trust::TrustStore::load_node_registry(target_state_path)?;
+    let head_owner = target_trust
+        .owner_for(owner_principal)
+        .map_err(|error| anyhow::anyhow!("target owner of {owner_principal}: {error}"))?
+        .principal;
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(&head_owner, &name);
     let signer = NodeIdentitySigner::from_identity(&daemon_identity(target_state_path)?);
     target.with_state_db(|db| {
         db.write_project_head_ref(

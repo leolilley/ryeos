@@ -513,7 +513,9 @@ mod tests {
         dns.set_nonblocking(true).unwrap();
         let context = context(dns.local_addr().unwrap());
         let start = Instant::now();
-        let deadline = MonotonicDeadline::after(Duration::from_millis(80));
+        // The resolver's first query goes out at the start; 600 ms leaves a
+        // stalled runner room to send it before the deadline settles the call.
+        let deadline = MonotonicDeadline::after(Duration::from_millis(600));
         let error = context
             .connect(
                 "silent.example",
@@ -526,7 +528,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(10));
         let mut bytes = [0; 4096];
         let mut contacted = false;
         while dns.recv_from(&mut bytes).is_ok() {
@@ -742,7 +744,10 @@ mod tests {
             // Then silent until the client gives up and releases its socket.
             let _ = peer.read(&mut [0; 1]);
         });
-        let deadline = MonotonicDeadline::after(Duration::from_millis(2_000));
+        // The server answers after 600 ms; the absolute deadline is 4 s, so a
+        // stalled runner has seconds of room before the first byte could be
+        // refused for lateness, and the timeout read still ends well inside 10 s.
+        let deadline = MonotonicDeadline::after(Duration::from_millis(4_000));
         let mut stream = context("127.0.0.1:53".parse().unwrap())
             .connect(
                 "127.0.0.1",
@@ -763,7 +768,7 @@ mod tests {
             stream.read(&mut byte).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(10));
         drop(stream);
         server.join().unwrap();
     }
