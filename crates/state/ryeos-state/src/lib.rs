@@ -133,15 +133,15 @@ pub use provider_call_observation::{
     ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
-    settle_pending_quarantine_leftovers_at_node_start, QuarantineSettlement,
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
     DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, EvidenceValidator,
     HeadOperation, PendingChainHeadTransition, PendingTransitionCursor,
-    ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredChainClosure,
-    RetiredChainClosureDraft, RetiredChainFence, RetiredThreadHistoryDiscardMarker,
-    RetirementEvidenceDiscard, StagedCasRootHashes, StagedCasRootLease,
-    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
-    read_retired_chain_closure,
+    ProjectionRecoveryGeneration, QuarantineSettlement, RECOVERY_PROTOCOL_GENERATION,
+    RecoveryStore, RetiredChainClosure, RetiredChainClosureDraft, RetiredChainFence,
+    RetiredThreadHistoryDiscardMarker, RetirementEvidenceDiscard, StagedCasRootHashes,
+    StagedCasRootLease, ThreadHistoryDiscardAcknowledgementRefused,
+    ThreadHistoryDiscardOperationRef, TransitionPhase, read_retired_chain_closure,
+    settle_pending_quarantine_leftovers_at_node_start,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

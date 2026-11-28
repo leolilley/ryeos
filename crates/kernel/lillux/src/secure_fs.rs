@@ -6839,7 +6839,7 @@ impl PinnedDirectory {
                 found.push(leftover);
             }
         }
-        found.sort_by(|a, b| (a.pid, a.sequence).cmp(&(b.pid, b.sequence)));
+        found.sort_by_key(|leftover| (leftover.pid, leftover.sequence));
         Ok(found)
     }
 
