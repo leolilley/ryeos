@@ -4386,9 +4386,15 @@ async fn run(
     ));
     let shutdown = shutdown_signal();
     let mut http_task = tokio::spawn(async move {
-        serve(tcp_listener, startup::build_outer_router(http_state))
-            .with_graceful_shutdown(shutdown)
-            .await
+        // Connect info carries the TCP peer to the request dispatcher; the
+        // unix sockets are served elsewhere and never reach it.
+        serve(
+            tcp_listener,
+            startup::build_outer_router(http_state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
     });
     let progress_task = tokio::spawn(startup::progress_ticker(startup.clone()));
     // Give both spawned servers a scheduling turn before any synchronous

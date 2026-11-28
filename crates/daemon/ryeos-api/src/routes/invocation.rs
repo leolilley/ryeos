@@ -62,6 +62,10 @@ pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_dige
 /// node that forwarded a delegated request.
 pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
 
+/// Metadata key under which the dispatcher records the resolved source
+/// address of the request, after authentication.
+pub(crate) const SOURCE_ADDRESS_METADATA_KEY: &str = "source_address";
+
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
     pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
@@ -111,6 +115,14 @@ impl RoutePrincipal {
             .with_minted_session_grant(self.minted_session_grant.clone())
             .with_signed_request_digest(signed_request_digest)
             .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
+            .with_source_address(
+                self.metadata
+                    .get(SOURCE_ADDRESS_METADATA_KEY)
+                    .and_then(|text| {
+                        ryeos_node_runtime::node_policy::sections::client_address::SourceAddress::from_text(text)
+                    })
+                    .unwrap_or_default(),
+            )
     }
 }
 
@@ -421,5 +433,28 @@ mod origin_tests {
         let mut unrecorded = axum::Json(serde_json::json!({"ok": true})).into_response();
         attach_recorded_thread_header(&mut unrecorded, None).unwrap();
         assert!(unrecorded.headers().get("x-ryeos-thread-id").is_none());
+    }
+}
+
+#[cfg(test)]
+mod source_address_tests {
+    use super::*;
+    use ryeos_node_runtime::node_policy::sections::client_address::SourceAddress;
+
+    #[test]
+    fn handler_context_carries_the_recorded_source_address() {
+        let mut principal = RoutePrincipal::anonymous("anon".into(), "none");
+        assert_eq!(
+            principal.handler_context().source_address,
+            SourceAddress::Local
+        );
+        principal.metadata.insert(
+            SOURCE_ADDRESS_METADATA_KEY.to_string(),
+            SourceAddress::Network("203.0.113.9".parse().unwrap()).to_text(),
+        );
+        assert_eq!(
+            principal.handler_context().source_address,
+            SourceAddress::Network("203.0.113.9".parse().unwrap())
+        );
     }
 }

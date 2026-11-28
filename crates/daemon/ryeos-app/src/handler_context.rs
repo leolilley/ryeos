@@ -190,6 +190,12 @@ pub struct HandlerContext {
     /// caller input.
     #[serde(skip)]
     pub delegated_via: Option<String>,
+    /// Where the request came from, resolved once at admission from the TCP
+    /// peer and the node's client-address policy. `Local` for requests that
+    /// did not arrive over TCP. Local dispatch context only: never serialized
+    /// and never caller input.
+    #[serde(skip)]
+    pub source_address: ryeos_node_runtime::node_policy::sections::client_address::SourceAddress,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -237,6 +243,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            source_address: Default::default(),
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -260,6 +267,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            source_address: Default::default(),
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -284,6 +292,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             signed_request_digest: None,
             delegated_via: None,
+            source_address: Default::default(),
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -309,6 +318,7 @@ impl HandlerContext {
             authenticated_grant_authority: Some(authenticated_grant_authority),
             signed_request_digest: None,
             delegated_via: None,
+            source_address: Default::default(),
             recorded_service_root_id: None,
             launch_origin_chain: None,
             original_execution_budget: None,
@@ -374,6 +384,15 @@ impl HandlerContext {
     /// delegation.
     pub fn with_delegated_via(mut self, site_id: Option<String>) -> Self {
         self.delegated_via = site_id;
+        self
+    }
+
+    /// Record where the request came from.
+    pub fn with_source_address(
+        mut self,
+        address: ryeos_node_runtime::node_policy::sections::client_address::SourceAddress,
+    ) -> Self {
+        self.source_address = address;
         self
     }
 

@@ -231,6 +231,17 @@ pub fn default_authorization_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::authorization::NodeAuthorizationPolicy::standard())
 }
 
+/// A `client_address` policy record that trusts no proxy: the socket peer is
+/// the address. Exact test snapshots include it wherever a request is
+/// dispatched.
+pub fn shipped_client_address_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::client_address::ClientAddressPolicy {
+        schema: 1,
+        trusted_proxies: Vec::new(),
+        header: sections::client_address::ClientAddressHeader::Forwarded,
+    })
+}
+
 /// Compile one already validated raw generation through every registered
 /// policy compiler. Missing, duplicate, or unknown sections fail closed.
 pub fn compile_generation(

@@ -12,6 +12,17 @@ use crate::routes::invocation::{
     InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
 };
 use crate::routes::limits::RouteLimiter;
+use ryeos_node_runtime::node_policy::sections::client_address::ClientAddressPolicy;
+
+/// All values of a header, joined with a comma as the list syntax allows.
+/// `None` when the header is absent or any line is not text.
+fn join_header_values(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let mut values = Vec::new();
+    for value in headers.get_all(name) {
+        values.push(value.to_str().ok()?);
+    }
+    (!values.is_empty()).then(|| values.join(", "))
+}
 
 fn dispatcher_timeout_is_disabled(timeout: Duration) -> bool {
     timeout == Duration::ZERO
@@ -181,6 +192,13 @@ pub async fn route_dispatcher_from_ingress(
         return resp;
     }
 
+    // The socket peer exists only for requests served over TCP; the local
+    // unix socket carries no connect info and resolves to `Local`.
+    let socket_peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+
     let (parts, body) = request.into_parts();
 
     let body_bytes = match limiter.read_bounded_body(body).await {
@@ -232,6 +250,27 @@ pub async fn route_dispatcher_from_ingress(
         // caught as an Internal error by the enforcement layer.
         _ => unreachable!("invoke_checked enforces Principal for auth"),
     };
+    // Resolved after authentication so no verifier can set it, and only from
+    // the node's loaded policy: a forwarding header is read solely when the
+    // socket peer is a configured trusted proxy.
+    let source_address = match app_state.node_policy.require::<ClientAddressPolicy>() {
+        Ok(policy) => {
+            let header_value = join_header_values(&parts.headers, policy.header_name());
+            policy.resolve_source(socket_peer, header_value.as_deref())
+        }
+        Err(error) => {
+            tracing::error!(%error, "client address policy unavailable");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "client address policy unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    principal.metadata.insert(
+        crate::routes::invocation::SOURCE_ADDRESS_METADATA_KEY.to_string(),
+        source_address.to_text(),
+    );
     // A route with no human caller lends its principal the authority its
     // signed declaration states, once its bundle's signed manifest backs it.
     if let Err(error) =
