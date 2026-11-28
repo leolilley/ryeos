@@ -1,0 +1,138 @@
+# ryeos:signed:2026-11-28T14:17:17Z:a76e7c04611e9d50dba684409ec084542ae5a58ce426824516e40ba5a95d84e4:j4gw6tyhGdICZWrcWPzk4itHKqzGTq3T7UzbAW/7jmfRko0I7/qNuCyOp8+AEcnKucTERtUPgyzsUMZOXuCTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/standard/examples
+description: "Example: run a working directive under a goal, check its deliverable with deterministic gates, let a tool-less judge that sees only the quoted deliverable add refusals, and repeat with the author's signed repair text for a signed number of rounds. Ends failed, never successful, when the rounds run out."
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.ryeos/standard/examples/goal-work
+      - ryeos.execute.directive.ryeos/standard/examples/goal-judge
+      - ryeos.execute.tool.ryeos/standard/examples/goal-fail
+config:
+  start: work
+  max_steps: 100
+  on_error: fail
+  state:
+    goal: "Write one short paragraph that states what a signed item is."
+    max_rounds: 3
+    max_chars: 4000
+    criteria:
+      - {key: states_the_point, text: "The paragraph states what a signed item is in its first sentence."}
+      - {key: no_filler, text: "The paragraph contains no preamble or closing remark."}
+    repair:
+      gate_length: "Your last deliverable was empty or too long. Return one paragraph of at most 4000 characters."
+      states_the_point: "Your last deliverable did not state the point in its first sentence. Start with it."
+      no_filler: "Your last deliverable had a preamble or a closing remark. Return the paragraph only."
+    gate_failed_keys: ["gate_length"]
+    round: 0
+    deliverable: ""
+    gate_ok: false
+    verdict_pass: false
+    failed: []
+    repair_text: ""
+    checked: ""
+    trail: ""
+  nodes:
+    work:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:ryeos/standard/examples/goal-work"
+        params:
+          goal: "${state.goal}"
+          round: "${state.round + 1}"
+          repair: "${state.repair_text}"
+      assign:
+        deliverable: "${result.deliverable}"
+        round: "${state.round + 1}"
+        gate_ok: "${type(result.deliverable) == \"string\" && length(result.deliverable) > 0 && length(result.deliverable) <= state.max_chars}"
+        failed: []
+        repair_text: ""
+        trail: "${state.trail + \"work:\" + string(state.round + 1) + \"=\" + (dispatch.child_thread_id ?? \"none\") + \";\"}"
+      next: {type: unconditional, to: gate}
+
+    # Deterministic checks come first and a failure here is final for the
+    # round: the judge is not asked, so it can never override a gate.
+    gate:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: "state.gate_ok"
+            to: judge
+          - to: bound
+
+    judge:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:ryeos/standard/examples/goal-judge"
+        params:
+          goal: "${state.goal}"
+          criteria: "${state.criteria}"
+          deliverable: "${state.deliverable}"
+      assign:
+        verdict_pass: "${result.pass}"
+        failed: "${result.failed}"
+        trail: "${state.trail + \"judge:\" + string(state.round) + \"=\" + (dispatch.child_thread_id ?? \"none\") + \";\"}"
+      next:
+        type: conditional
+        branches:
+          - when: 'type(state.verdict_pass) != "bool" || type(state.failed) != "array"'
+            to: bad_verdict
+          - when: "state.verdict_pass && length(state.failed) == 0"
+            to: done
+          - when: "!state.verdict_pass && length(state.failed) > 0"
+            to: check
+          - to: bad_verdict
+
+    # Every key the judge names must be a signed criterion with repair text:
+    # a key outside the list fails this node and routes to the typed failure.
+    check:
+      node_type: foreach
+      over: "${state.failed}"
+      as: key
+      assign:
+        checked: "${state.repair[key]}"
+      on_error: bad_verdict
+      next: {type: unconditional, to: bound}
+
+    bound:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: "state.round >= state.max_rounds"
+            to: exhausted
+          - to: repair
+
+    repair:
+      node_type: foreach
+      over: "${state.gate_ok ? state.failed : state.gate_failed_keys}"
+      as: key
+      assign:
+        repair_text: "${state.repair_text + state.repair[key] + \" \"}"
+      next: {type: unconditional, to: work}
+
+    exhausted:
+      action:
+        item_id: "tool:ryeos/standard/examples/goal-fail"
+        params:
+          code: goal_rounds_exhausted
+          rounds: "${state.round}"
+      next: {type: unconditional, to: done}
+
+    bad_verdict:
+      action:
+        item_id: "tool:ryeos/standard/examples/goal-fail"
+        params:
+          code: judge_result_invalid
+          rounds: "${state.round}"
+      next: {type: unconditional, to: done}
+
+    done:
+      node_type: return
+      output:
+        deliverable: "${state.deliverable}"
+        rounds: "${state.round}"
+        trail: "${state.trail}"
