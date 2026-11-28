@@ -2021,7 +2021,8 @@ mod tests {
     struct InstalledFixture {
         _tmp: tempfile::TempDir,
         system: PathBuf,
-        key: SigningKey,
+        /// The node's own key: registrations are written only with it.
+        node_key: SigningKey,
     }
 
     impl InstalledFixture {
@@ -2036,17 +2037,17 @@ mod tests {
                 ryeos_engine::trust::SignerRole::Operator,
                 ryeos_engine::trust::SignerScope::everywhere(),
             );
+            let node_key = lillux::crypto::load_signing_key(
+                &system
+                    .join(ryeos_engine::AI_DIR)
+                    .join("node/identity/private_key.pem"),
+            )
+            .unwrap();
             Self {
                 _tmp: tmp,
                 system,
-                key,
+                node_key,
             }
-        }
-
-        fn write_signed(&self, path: &Path, body: &str) {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let signed = lillux::signature::sign_content(body, &self.key, "#", None);
-            std::fs::write(path, signed).unwrap();
         }
 
         fn write_broken_installed_registration(&self, name: &str) -> PathBuf {
@@ -2062,10 +2063,17 @@ mod tests {
                 .join("node")
                 .join("bundles")
                 .join(format!("{name}.yaml"));
-            self.write_signed(
+            std::fs::create_dir_all(registration.parent().unwrap()).unwrap();
+            std::fs::write(
                 &registration,
-                &format!("kind: node\npath: {}\n", bundle.display()),
-            );
+                lillux::signature::sign_content(
+                    &format!("kind: node\npath: {}\n", bundle.display()),
+                    &self.node_key,
+                    "#",
+                    None,
+                ),
+            )
+            .unwrap();
             bundle
         }
     }
@@ -2105,7 +2113,7 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("bundle verify: load installed bundle registrations")
+            msg.contains("bundle verify: load verified installed bundle graph")
                 && msg.contains("manifest"),
             "unexpected error: {msg}"
         );
