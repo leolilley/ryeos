@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T19:52:45Z:c653345fd7e229b0313d18ce2e6893c2d666fe58ffded5a5b298a13f6f98fe92:TG7KvXCieVgfJ12vRGfkJqgLlfdreRvsHT0m1ptOcGmVltv7DaxBdWGf7kFTPiQ8GmXFeM6OFJKrBhsU/5NvDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:16:29Z:5d81ccf452fe59a55499f28607126d8e528006dfc643f8098380f321dd58098d:Kx1p0dJJrdqgopIjVoEU2WS8ggMH4bYF67UROxS8yHlN617vCGdKXVtFT5msqvYPj9zqdBsJtzMtXp1JiszuBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -96,6 +96,9 @@ Notes:
 - `outbound_principal` on `service:remote/push` and `service:remote/run` is
   `delegated` (the caller under its signed delegation, the default) or `node`
   (the source node key alone, the default when the caller is the node itself).
+  A delegated caller pushes and runs as itself. `node` makes the node key sign,
+  so it is the node's admitted operator's alone: any other caller asking for it
+  is refused `outbound_principal_node_operator_only`, with no fallback.
   A retained-current-HEAD accepted launch is always delegated. The target grant
   and independently admitted source-node co-signature preserve remote origin,
   so these calls do not satisfy local-only operator checks. Their remote HEAD
@@ -143,7 +146,8 @@ ryeos remote delegate --remote prod \
 ```
 
 Signs, with the caller's own key, a bounded delegation that lets this node act
-for the caller on one remote, and stores it (node-signed) under
+for the caller, as the caller, on one remote (a delegated caller pushes and runs
+as itself; `outbound_principal: node` stays the operator's alone), and stores it (node-signed) under
 `.ai/node/auth/delegations/<fingerprint>/<remote>.toml`. A later delegation for
 the same remote replaces it. `--scopes` is required: the capabilities lent to
 the remote, a subset of what the caller's grant on the remote allows. The

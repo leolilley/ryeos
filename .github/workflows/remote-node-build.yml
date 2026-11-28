@@ -15,6 +15,10 @@ name: Remote node build
 # commands; the same steps are in .ai/knowledge/ryeos/development/build-and-test.md.
 #
 # Inputs beyond the bundle set:
+#   build_profile=release (default)  what ships. `test` is release optimisation
+#                          plus the claude-code adapter's test-only stub driver;
+#                          it is for throwaway test nodes only. The manifest always
+#                          records `build_profile`, release included.
 #   base=runner (default)  build on the ubuntu-latest runner itself; binaries
 #                          link against the runner's glibc (2.39).
 #   base=bookworm          run the populate (and so every Rust build) inside the
@@ -56,6 +60,14 @@ on:
         options:
           - runner
           - bookworm
+      build_profile:
+        description: "Build profile passed to populate-bundles.sh: release (what ships) or test (release optimisation plus the claude-code adapter's test-only stub driver; for throwaway test nodes only)"
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - test
       extra_bins:
         description: "Space-separated cargo packages to build and ship beside the node binaries (e.g. ryeos-chat-stub)"
         required: false
@@ -67,7 +79,7 @@ on:
         default: ""
         type: string
 
-run-name: "remote node build ${{ inputs.bundle_set }} ${{ inputs.label }} (${{ github.ref_name }})"
+run-name: "remote node build ${{ inputs.bundle_set }} ${{ inputs.build_profile }} ${{ inputs.label }} (${{ github.ref_name }})"
 
 permissions:
   contents: read
@@ -115,12 +127,13 @@ jobs:
         if: ${{ inputs.base != 'bookworm' }}
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
           ./scripts/populate-bundles.sh \
             --key .dev-keys/PUBLISHER_DEV.pem \
             --owner "RyeOS Development" \
-            --bundle-set "$BUNDLE_SET" --all
+            --bundle-set "$BUNDLE_SET" --build-profile "$BUILD_PROFILE" --all
 
       # base=bookworm: the same populate call, run as root inside the pinned
       # Debian 12 Rust image with the checkout and target directory mounted.
@@ -129,6 +142,7 @@ jobs:
         if: ${{ inputs.base == 'bookworm' }}
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
           EXTRA_BINS: ${{ inputs.extra_bins }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
@@ -153,7 +167,7 @@ jobs:
           ./scripts/populate-bundles.sh \
             --key .dev-keys/PUBLISHER_DEV.pem \
             --owner "RyeOS Development" \
-            --bundle-set "$BUNDLE_SET" --all
+            --bundle-set "$BUNDLE_SET" --build-profile "$BUILD_PROFILE" --all
           for pkg in $EXTRA_BINS; do
             cargo build --release -p "$pkg"
             test -x "$CARGO_TARGET_DIR/release/$pkg" || {
@@ -167,7 +181,7 @@ jobs:
             -v "$CARGO_TARGET_DIR:$CARGO_TARGET_DIR" \
             -v "${TMPDIR:-/tmp}:${TMPDIR:-/tmp}" \
             -v "$script:/bookworm-build.sh:ro" \
-            -e BUNDLE_SET -e EXTRA_BINS -e CARGO_TARGET_DIR \
+            -e BUNDLE_SET -e BUILD_PROFILE -e EXTRA_BINS -e CARGO_TARGET_DIR \
             -e TMPDIR="${TMPDIR:-/tmp}" \
             -e CARGO_TERM_COLOR -e RUST_BACKTRACE -e CARGO_INCREMENTAL \
             -e RYEOS_VCS_REF="$(git rev-parse --short=12 HEAD)" \
@@ -199,6 +213,7 @@ jobs:
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
           BASE: ${{ inputs.base }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
           EXTRA_BINS: ${{ inputs.extra_bins }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
@@ -239,8 +254,8 @@ jobs:
           (cd "$stage/target/release" && sha256sum -- *) > "$stage/binaries.sha256"
           jq -n --arg sha "$sha" --arg set "$BUNDLE_SET" --arg ref "$GITHUB_REF_NAME" \
             --arg run "$GITHUB_RUN_ID" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --rawfile sums "$stage/binaries.sha256" \
-            '{commit:$sha, bundle_set:$set, ref:$ref, run_id:$run, built_utc:$built,
+            --arg profile "$BUILD_PROFILE" --rawfile sums "$stage/binaries.sha256" \
+            '{commit:$sha, bundle_set:$set, build_profile:$profile, ref:$ref, run_id:$run, built_utc:$built,
               binaries:($sums | split("\n") | map(select(length>0) | split("  ") | {(.[1]): .[0]}) | add)}' \
             > "$stage/manifest.json"
           if [[ "$BASE" != runner || -n "$EXTRA_BINS" ]]; then
