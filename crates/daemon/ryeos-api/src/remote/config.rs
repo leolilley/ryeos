@@ -154,9 +154,9 @@ pub enum Reachability {
 /// Stable refusal code: the remote is pinned inbound-only, so this node never
 /// dials it.
 pub const REMOTE_INBOUND_ONLY: &str = "remote_inbound_only";
-/// Stable refusal code: the remote was pinned from a descriptor that carried
-/// no ingest rules, so nothing may be pushed to it.
-pub const REMOTE_PINNED_WITHOUT_INGEST_RULES: &str = "remote_pinned_without_ingest_rules";
+/// Stable refusal code: the remote was pinned without its signed descriptor,
+/// so it has no ingest rules and nothing may be pushed to or executed on it.
+pub const REMOTE_PINNED_WITHOUT_INGEST_RULES: &str = "remote_ingest_rules_missing";
 
 impl RemoteConfig {
     /// The URL this node dials, or the typed refusal
@@ -184,7 +184,7 @@ impl RemoteConfig {
                 body: serde_json::json!({
                     "code": REMOTE_PINNED_WITHOUT_INGEST_RULES,
                     "message": format!(
-                        "remote '{}' was pinned from a descriptor without ingest rules, so this node pushes nothing to it; run `ryeos remote configure {} --url <url> --expect-fingerprint <fingerprint>` once the remote is reachable, or pin a descriptor that carries them",
+                        "remote '{}' was pinned without its signed descriptor, so it has no ingest rules and this node pushes nothing to it; re-pin it from the descriptor with `ryeos remote configure {} --descriptor <file>`",
                         self.name, self.name
                     ),
                     "remote": self.name,
