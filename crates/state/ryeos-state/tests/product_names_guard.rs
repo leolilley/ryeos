@@ -35,7 +35,104 @@ struct Pin {
     row: &'static str,
 }
 
-const PINS: &[Pin] = &[];
+const PINS: &[Pin] = &[
+    Pin {
+        path: "crates/bin/cli/src/codex_device_login.rs",
+        word: "codex",
+        count: 10,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/cli/src/dispatcher.rs",
+        word: "codex",
+        count: 4,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/cli/src/help.rs",
+        word: "codex",
+        count: 5,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/cli/src/lib.rs",
+        word: "codex",
+        count: 1,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/cli/src/lifecycle_commands.rs",
+        word: "codex",
+        count: 5,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/cli/src/tty/help_flow.rs",
+        word: "codex",
+        count: 2,
+        row: "W-8",
+    },
+    Pin {
+        path: "crates/bin/daemon/src/test_support/fast_fixture.rs",
+        word: "claude",
+        count: 1,
+        row: "W-49",
+    },
+    Pin {
+        path: "crates/bin/daemon/src/test_support/fast_fixture.rs",
+        word: "codex",
+        count: 2,
+        row: "W-49",
+    },
+    Pin {
+        path: "crates/kinds/directive-definition/src/lib.rs",
+        word: "anthropic",
+        count: 5,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/messages.rs",
+        word: "anthropic",
+        count: 1,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/messages.rs",
+        word: "openai",
+        count: 7,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/streaming.rs",
+        word: "anthropic",
+        count: 3,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/streaming.rs",
+        word: "claude",
+        count: 1,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/streaming.rs",
+        word: "openai",
+        count: 3,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/runtimes/directive/src/provider_adapter/tools.rs",
+        word: "openai",
+        count: 3,
+        row: "Q-20",
+    },
+    Pin {
+        path: "crates/state/ryeos-state/src/external_execution/admission.rs",
+        word: "codex",
+        count: 5,
+        row: "W-50",
+    },
+];
 
 /// One allowed dependency of a shared crate on a product crate.
 struct EdgePin {
