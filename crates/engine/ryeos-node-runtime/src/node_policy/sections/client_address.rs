@@ -232,7 +232,7 @@ impl ClientAddressPolicy {
             .into_iter()
             .flatten()
             .rev()
-            .map(IpAddr::to_canonical)
+            .map(|ip| ip.to_canonical())
             .find(|ip| !self.is_trusted(*ip));
         SourceAddress::Network(client.unwrap_or(peer))
     }
