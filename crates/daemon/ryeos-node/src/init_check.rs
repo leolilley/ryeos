@@ -22,7 +22,24 @@ pub struct InitDiagnostics {
 pub enum InitDiagnosticCode {
     SystemSpaceMissing,
     BundleRegistrationsMissing,
-    NoBundleRegistrations,
+    BundleRegistrationsEmpty,
+}
+
+impl InitDiagnosticCode {
+    /// The stable code. The two registration codes are the bundle
+    /// registration validator's own, so a node refuses a missing or empty
+    /// registration directory with one code whichever check reaches it first.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SystemSpaceMissing => "system_space_missing",
+            Self::BundleRegistrationsMissing => {
+                ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_MISSING
+            }
+            Self::BundleRegistrationsEmpty => {
+                ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_EMPTY
+            }
+        }
+    }
 }
 
 pub fn init_state(app_root: &Path) -> Result<InitState> {
@@ -74,7 +91,7 @@ pub fn init_state(app_root: &Path) -> Result<InitState> {
             diagnostics: InitDiagnostics {
                 app_root: app_root.to_path_buf(),
                 bundles_dir: bundles_dir.clone(),
-                code: InitDiagnosticCode::NoBundleRegistrations,
+                code: InitDiagnosticCode::BundleRegistrationsEmpty,
                 message: format!(
                     "no signed bundle registrations at {}",
                     bundles_dir.display()
@@ -90,7 +107,8 @@ pub fn require_initialized(app_root: &Path) -> Result<()> {
     match init_state(app_root)? {
         InitState::Initialized => Ok(()),
         InitState::NotInitialized { diagnostics } => bail!(
-            "RyeOS is not initialized: {}\nRun: ryeos init",
+            "RyeOS is not initialized ({}): {}\nRun: ryeos init",
+            diagnostics.code.as_str(),
             diagnostics.message
         ),
     }
@@ -99,6 +117,31 @@ pub fn require_initialized(app_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_registration_codes_are_the_validators_and_match_their_serialized_names() {
+        for code in [
+            InitDiagnosticCode::SystemSpaceMissing,
+            InitDiagnosticCode::BundleRegistrationsMissing,
+            InitDiagnosticCode::BundleRegistrationsEmpty,
+        ] {
+            assert_eq!(
+                serde_json::to_value(&code).unwrap(),
+                serde_json::Value::String(code.as_str().to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_registration_directory_refuses_with_the_validators_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = require_initialized(tmp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains(ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_MISSING),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn missing_app_root_is_not_initialized() {
