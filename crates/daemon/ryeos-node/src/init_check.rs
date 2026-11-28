@@ -42,6 +42,11 @@ impl InitDiagnosticCode {
     }
 }
 
+/// Whether a node is here: presence only. It admits nothing: every path that
+/// uses the registrations reads them through the bundle registration
+/// validator (`ryeos_node_runtime::bundle_bootstrap`) afterwards. It is
+/// strictly looser than that validator, so it never refuses a node the
+/// validator would load.
 pub fn init_state(app_root: &Path) -> Result<InitState> {
     let bundles_dir = app_root
         .join(ryeos_engine::AI_DIR)
@@ -141,6 +146,52 @@ mod tests {
                 .contains(ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_MISSING),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn the_probe_accepts_every_registration_set_the_validator_accepts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ai/node/identity")).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &root.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: identity.signing_key().verifying_key(),
+                label: None,
+            },
+        ]);
+        let registrations = root.join(".ai/node/bundles");
+        std::fs::create_dir_all(&registrations).unwrap();
+        // One registration, then two, each accepted by the validator.
+        for name in ["core", "extra"] {
+            let bundle = root.join(".ai/bundles").join(name);
+            std::fs::create_dir_all(&bundle).unwrap();
+            let body =
+                serde_yaml::to_string(&serde_json::json!({ "kind": "node", "path": bundle }))
+                    .unwrap();
+            std::fs::write(
+                registrations.join(format!("{name}.yaml")),
+                lillux::signature::sign_content(&body, identity.signing_key(), "#", None),
+            )
+            .unwrap();
+
+            let loaded = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+                app_root: root,
+                trust_store: &trust,
+            }
+            .load_registrations()
+            .expect("the validator accepts the registrations");
+            assert!(!loaded.is_empty());
+            assert_eq!(
+                init_state(root).unwrap(),
+                InitState::Initialized,
+                "the probe must accept what the validator accepts"
+            );
+        }
     }
 
     #[test]
