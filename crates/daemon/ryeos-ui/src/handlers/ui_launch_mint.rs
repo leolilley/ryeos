@@ -862,7 +862,7 @@ fn launch_path_for_token(state: &AppState, token: &str) -> Result<String> {
 }
 
 fn launch_path_from_routes(
-    routes: &[ryeos_app::route_raw::RawRouteSpec],
+    routes: &[ryeos_engine::route_raw::RawRouteSpec],
     token: &str,
 ) -> Result<String> {
     let route = routes
@@ -901,7 +901,7 @@ fn path_capture_name(template: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use ryeos_app::route_raw::{
+    use ryeos_engine::route_raw::{
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 

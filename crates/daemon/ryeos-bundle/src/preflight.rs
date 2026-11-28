@@ -899,116 +899,6 @@ struct PreflightNodeBundleRecord {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PreflightNodeRouteRecord {
-    id: String,
-    path: String,
-    methods: std::collections::HashSet<String>,
-    auth: String,
-    #[serde(default)]
-    #[serde(rename = "auth_config")]
-    _auth_config: Option<serde_json::Value>,
-    #[serde(default)]
-    #[serde(rename = "limits")]
-    _limits: PreflightRawLimits,
-    response: PreflightRawResponseSpec,
-    #[serde(default)]
-    execute: Option<PreflightRawExecute>,
-    #[serde(default)]
-    #[serde(rename = "request")]
-    _request: PreflightRawRequest,
-    /// Signed `public: true`: served under the node's `public_routes` policy.
-    /// Install admission checks it against that policy.
-    #[serde(default)]
-    #[serde(rename = "public")]
-    _public: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightRawLimits {
-    #[serde(default = "default_body_max")]
-    #[serde(rename = "body_bytes_max")]
-    _body_bytes_max: u64,
-    #[serde(default = "default_timeout")]
-    #[serde(rename = "timeout_ms")]
-    _timeout_ms: u64,
-    #[serde(default = "default_concurrent_max")]
-    #[serde(rename = "concurrent_max")]
-    _concurrent_max: u32,
-}
-
-impl Default for PreflightRawLimits {
-    fn default() -> Self {
-        Self {
-            _body_bytes_max: default_body_max(),
-            _timeout_ms: default_timeout(),
-            _concurrent_max: default_concurrent_max(),
-        }
-    }
-}
-
-fn default_body_max() -> u64 {
-    1_048_576
-}
-
-fn default_timeout() -> u64 {
-    30_000
-}
-
-fn default_concurrent_max() -> u32 {
-    100
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightRawResponseSpec {
-    mode: String,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "source_config")]
-    _source_config: serde_json::Value,
-    #[serde(default)]
-    #[serde(rename = "status")]
-    _status: Option<u16>,
-    #[serde(default)]
-    #[serde(rename = "content_type")]
-    _content_type: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "body_b64")]
-    _body_b64: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightRawExecute {
-    item_ref: String,
-    #[serde(default)]
-    #[serde(rename = "params")]
-    _params: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct PreflightRawRequest {
-    #[serde(default)]
-    #[serde(rename = "body")]
-    _body: PreflightRawRequestBody,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum PreflightRawRequestBody {
-    #[default]
-    None,
-    Raw,
-    Text,
-    Json,
-    ObjectsPutV1,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PreflightCommandRecord {
     tokens: Vec<String>,
     description: String,
@@ -1413,7 +1303,9 @@ fn validate_node_bundle_record(file_path: &Path, body: &serde_json::Value) -> Re
 }
 
 fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
-    let record: PreflightNodeRouteRecord =
+    // The node's own route item type: every route the node can load passes
+    // here, and a field the node reads cannot be refused by a second reader.
+    let record: ryeos_engine::route_raw::RawRouteSpec =
         serde_json::from_value(body.clone()).context("failed to parse route node-config record")?;
     if record.id.is_empty() {
         bail!("route record missing non-empty 'id'");
@@ -2341,6 +2233,30 @@ description: "fixed parser handler for preflight tests"
             "public": true
         });
         validate_node_route_record(&public_route).expect("a public route passes preflight");
+    }
+
+    #[test]
+    fn validate_route_accepts_a_route_carrying_authority() {
+        // Preflight reads routes with the node's own route item type, so a
+        // field the node loads, such as the authority a keyless route lends
+        // its launches, is not refused by preflight.
+        let route = serde_json::json!({
+            "id": "hook/deploy",
+            "path": "/hook/deploy",
+            "methods": ["POST"],
+            "auth": "none",
+            "response": {
+                "mode": "launch",
+                "source": "directive:deploy/run"
+            },
+            "authority": { "capabilities": ["ryeos.execute.directive.deploy/run"] }
+        });
+        validate_node_route_record(&route).expect("a route carrying authority passes preflight");
+
+        // A field the node does not read is still refused.
+        let mut unknown = route.clone();
+        unknown["not_a_route_field"] = serde_json::Value::Bool(true);
+        assert!(validate_node_route_record(&unknown).is_err());
     }
 
     #[test]

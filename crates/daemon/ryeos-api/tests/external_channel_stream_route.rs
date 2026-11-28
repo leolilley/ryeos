@@ -11,7 +11,7 @@ use ryeos_api::api_state::ApiState;
 use ryeos_api::routes::dispatcher::route_dispatcher;
 use ryeos_api::routes::response_modes::ResponseModeRegistry;
 use ryeos_api::routes::webhook_dedupe::WebhookDedupeStore;
-use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_engine::route_raw::{RawRequestBody, RawRouteSpec};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const ROUTE_YAML: &str = concat!(

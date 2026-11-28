@@ -1911,7 +1911,7 @@ async fn signed_transfer_preparation_does_not_consume_a_producer_sequence() {
 
 /// The compiled route shape the stream source accepts, without the signed
 /// bundle document that deploys it.
-fn history_route() -> ryeos_app::route_raw::RawRouteSpec {
+fn history_route() -> ryeos_engine::route_raw::RawRouteSpec {
     serde_yaml::from_str(
         "id: ui/api/session/seat/history\npath: /ui/api/session/seat/history\nmethods: [POST]\nauth: browser_session\nlimits: { body_bytes_max: 16384, timeout_ms: 0, concurrent_max: 8 }\nrequest: { body: json }\nresponse: { mode: event_stream, source: ui_seat_history }\n",
     )

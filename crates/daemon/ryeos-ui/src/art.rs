@@ -32,7 +32,6 @@ use ryeos_api::route_error::{RouteConfigError, RouteDispatchError};
 use ryeos_api::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
-use ryeos_app::route_raw::RawRouteSpec;
 use ryeos_bundle::pictures::{
     MAX_PICTURE_BYTES, PictureEntry, inspect_image, picture_manifest_ref_path,
     verify_bundle_pictures,
@@ -41,6 +40,7 @@ use ryeos_client_base::art::{
     ART_MEDIA_TYPES, ArtRef, PictureBinding, PictureBindingError, is_art_hash,
 };
 use ryeos_engine::engine::Engine;
+use ryeos_engine::route_raw::RawRouteSpec;
 use ryeos_engine::trust::TrustStore;
 
 use crate::browser_session::BrowserSession;

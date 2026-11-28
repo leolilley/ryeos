@@ -52,9 +52,9 @@ use crate::routes::invokers::dispatch_invocation::{
     CompiledDispatchInvoker, DispatchAuthority, FIXED_PRINCIPAL_REFUSAL, FixedPrincipalConfinement,
     PinnedDispatchSubject,
 };
-use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
+use ryeos_engine::route_raw::{RawRequestBody, RawRouteSpec};
 
 pub struct HandlerMode;
 
@@ -1087,7 +1087,7 @@ fn validate_response_header(name: &HeaderName) -> Result<(), RouteDispatchError>
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+    use ryeos_engine::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
     use std::fs;
 
     #[test]

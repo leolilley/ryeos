@@ -5,7 +5,7 @@ use crate::node_config::{
     CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
     SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
 };
-use crate::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 pub const SECTION_NAME: &str = "routes";
 

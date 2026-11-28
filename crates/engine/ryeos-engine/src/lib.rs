@@ -31,6 +31,7 @@ pub mod protocol_vocabulary;
 pub mod registry;
 pub mod roots;
 pub mod route_fixed_params;
+pub mod route_raw;
 pub mod runtime;
 pub mod scheduled_fire_context;
 pub mod scope;

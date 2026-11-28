@@ -35,7 +35,7 @@ use crate::routes::invocation::{
     RouteInvocationResult,
 };
 use crate::routes::stream_envelope::envelope_to_sse;
-use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_engine::route_raw::{RawRequestBody, RawRouteSpec};
 
 // ── Shared constants ────────────────────────────────────────────────────
 // (Constants used by compile functions are defined near their usage.)
@@ -567,7 +567,7 @@ mod tests {
     use crate::routes::invokers::gateway_stream_invocation::LaunchRequest;
     use crate::routes::invokers::stream_helpers::is_terminal_status;
     use crate::routes::invokers::subscription_stream_invocation::parse_last_event_id;
-    use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+    use ryeos_engine::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
     // ── Last-Event-ID tests ────────────────────
 
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_execute_block() {
-        use ryeos_app::route_raw::RawExecute;
+        use ryeos_engine::route_raw::RawExecute;
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.execute = Some(RawExecute {
             item_ref: "tool:x/y".into(),

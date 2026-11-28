@@ -19,7 +19,7 @@ use ryeos_api::routes::invocation::{
 use ryeos_api::routes::response_modes::event_stream_mode::{
     EventStreamStrategy, StreamSourceCompiler, validate_and_extract_path_capture,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 use tokio_stream::Stream;
 
 use crate::seat_stream_policy::{FrameMode, admit_open, shape_events};

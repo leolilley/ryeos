@@ -995,10 +995,10 @@ fn build_app_state(
     (tmpdir, store_owner, state)
 }
 
-fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
+fn test_ui_routes() -> Vec<ryeos_engine::route_raw::RawRouteSpec> {
     use std::collections::HashSet;
 
-    use ryeos_app::route_raw::{
+    use ryeos_engine::route_raw::{
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 

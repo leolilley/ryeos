@@ -5,7 +5,7 @@ use axum::http::Method;
 
 use super::invocation::{CompiledRouteInvocation, RoutePrincipal};
 use crate::route_error::RouteConfigError;
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 pub struct CompiledRoute {
     pub id: String,

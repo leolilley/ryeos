@@ -8,7 +8,7 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
-use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_engine::route_raw::{RawRequestBody, RawRouteSpec};
 
 // ── Generic static asset provider trait ────────────────────────────────────
 
@@ -555,7 +555,7 @@ impl CompiledResponseMode for CompiledStaticMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::{
+    use ryeos_engine::route_raw::{
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 
@@ -1016,11 +1016,11 @@ mod tests {
         let mut body = base();
         body.request.body = RawRequestBody::Json;
         let mut authority = base();
-        authority.authority = Some(ryeos_app::route_raw::RawRouteAuthority {
+        authority.authority = Some(ryeos_engine::route_raw::RawRouteAuthority {
             capabilities: Vec::new(),
         });
         let mut execute = base();
-        execute.execute = Some(ryeos_app::route_raw::RawExecute {
+        execute.execute = Some(ryeos_engine::route_raw::RawExecute {
             item_ref: "tool:demo/run".into(),
             params: serde_json::Value::Null,
         });

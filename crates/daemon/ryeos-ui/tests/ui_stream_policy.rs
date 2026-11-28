@@ -67,7 +67,7 @@ fn policy(entries: Vec<Value>) -> Value {
     json!({"schema": 1, "reads": entries})
 }
 
-fn route(file: &str) -> ryeos_app::route_raw::RawRouteSpec {
+fn route(file: &str) -> ryeos_engine::route_raw::RawRouteSpec {
     let path = ryeos_engine::test_support::workspace_root()
         .join("bundles/ryeos-ui/.ai/node/routes/ui/events")
         .join(file);

@@ -653,8 +653,8 @@ fn raw_route(auth: &str, methods: &[&str], path: &str) -> RawRouteSpec {
         methods: methods.iter().map(|method| (*method).to_owned()).collect(),
         auth: auth.into(),
         auth_config: None,
-        limits: ryeos_app::route_raw::RawLimits::default(),
-        response: ryeos_app::route_raw::RawResponseSpec {
+        limits: ryeos_engine::route_raw::RawLimits::default(),
+        response: ryeos_engine::route_raw::RawResponseSpec {
             mode: MODE_KEY.into(),
             source: None,
             source_config: serde_json::Value::Null,
@@ -663,7 +663,7 @@ fn raw_route(auth: &str, methods: &[&str], path: &str) -> RawRouteSpec {
             body_b64: None,
         },
         execute: None,
-        request: ryeos_app::route_raw::RawRequest::default(),
+        request: ryeos_engine::route_raw::RawRequest::default(),
         source_file: std::path::PathBuf::new(),
         authority: None,
         public: false,

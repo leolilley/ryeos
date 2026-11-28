@@ -23,7 +23,7 @@ use compile::CompiledRoute;
 use invokers::AuthInvokerRegistry;
 use matcher::PathMatcher;
 use response_modes::ResponseModeRegistry;
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 #[derive(Clone)]
 pub struct RouteExtensionRegistry {
@@ -252,7 +252,7 @@ pub fn build_route_table_with_extensions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::{
+    use ryeos_engine::route_raw::{
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 

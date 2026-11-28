@@ -78,11 +78,11 @@ pub(crate) const PUBLIC_ROUTE_NOT_KEYLESS_STATIC: &str = "public_route_not_keyle
 /// one the node's current `public_routes` policy does not name. Every such
 /// route is named in the refusal; an incomplete list is refused whole.
 fn refuse_unadmitted_public_routes(
-    routes: &[ryeos_app::route_raw::RawRouteSpec],
+    routes: &[ryeos_engine::route_raw::RawRouteSpec],
     candidate_root: &Path,
     policy: &ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy,
 ) -> Result<()> {
-    let candidate: Vec<&ryeos_app::route_raw::RawRouteSpec> = routes
+    let candidate: Vec<&ryeos_engine::route_raw::RawRouteSpec> = routes
         .iter()
         .filter(|route| route.public && route.source_file.starts_with(candidate_root))
         .collect();
@@ -2586,8 +2586,8 @@ mod tests {
         );
     }
 
-    fn public_route(id: &str, root: &str) -> ryeos_app::route_raw::RawRouteSpec {
-        let mut raw: ryeos_app::route_raw::RawRouteSpec = serde_yaml::from_str(&format!(
+    fn public_route(id: &str, root: &str) -> ryeos_engine::route_raw::RawRouteSpec {
+        let mut raw: ryeos_engine::route_raw::RawRouteSpec = serde_yaml::from_str(&format!(
             "id: {id}\npath: /{id}\nmethods: [GET]\nauth: none\nlimits:\n  body_bytes_max: 0\nresponse:\n  mode: static\n  status: 200\n  content_type: text/plain\n  body_b64: aGVsbG8=\npublic: true\n"
         ))
         .unwrap();

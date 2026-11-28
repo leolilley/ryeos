@@ -21,7 +21,7 @@ use crate::routes::invocation::{
     CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
     RouteInvocationResult, attach_recorded_thread_header,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 pub struct BrowserLaunchMode {
     pub service_descriptors: &'static [crate::registry::ServiceDescriptor],

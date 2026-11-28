@@ -26,7 +26,7 @@ use crate::routes::invocation::{
     CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
     RouteInvocationResult, attach_recorded_thread_header,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 pub struct JsonMode {
     /// Service descriptors used to validate `service:` refs at compile time.
@@ -105,7 +105,7 @@ impl ResponseMode for JsonMode {
             )?;
 
         let raw_objects_put_v1 =
-            raw.request.body == ryeos_app::route_raw::RawRequestBody::ObjectsPutV1;
+            raw.request.body == ryeos_engine::route_raw::RawRequestBody::ObjectsPutV1;
         if raw_objects_put_v1 {
             let expected_methods = std::collections::HashSet::from(["POST".to_string()]);
             let valid = raw.id == "objects/put"
@@ -180,8 +180,8 @@ impl ResponseMode for JsonMode {
             source_config_template: raw.response.source_config.clone(),
             body_is_json: matches!(
                 raw.request.body,
-                ryeos_app::route_raw::RawRequestBody::Json
-                    | ryeos_app::route_raw::RawRequestBody::ObjectsPutV1
+                ryeos_engine::route_raw::RawRequestBody::Json
+                    | ryeos_engine::route_raw::RawRequestBody::ObjectsPutV1
             ),
             raw_objects_put_v1,
         }))
@@ -369,7 +369,7 @@ fn extract_path_captures(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+    use ryeos_engine::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
     fn make_raw(
         path: &str,
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_static_fields() {
-        use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+        use ryeos_engine::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
         let mode = api_mode();
         let raw = RawRouteSpec {
             id: "test-route".into(),
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_execute_block() {
-        use ryeos_app::route_raw::{
+        use ryeos_engine::route_raw::{
             RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec,
         };
         let mode = api_mode();

@@ -187,7 +187,7 @@ mod tests {
     fn make_route(id: &str, path: &str, methods: &[&str]) -> Arc<CompiledRoute> {
         use crate::routes::compile::ResponseMode;
         use crate::routes::response_modes::static_mode::StaticMode;
-        use ryeos_app::route_raw::{
+        use ryeos_engine::route_raw::{
             RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
         };
 

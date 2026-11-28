@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::route_raw::RawRouteSpec;
 use ryeos_app::state::AppState;
+use ryeos_engine::route_raw::RawRouteSpec;
 use ryeos_executor::executor::ServiceAvailability;
 
 /// Canonical ids of the SSE routes the descriptor points at, defined in
@@ -209,7 +209,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::RawResponseSpec;
+    use ryeos_engine::route_raw::RawResponseSpec;
 
     /// A route matching the expected `thread/events-stream` contract.
     fn valid_route() -> RawRouteSpec {

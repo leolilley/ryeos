@@ -13,7 +13,7 @@
 use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::CompiledRoute;
 use crate::routes::invocation::RoutePrincipal;
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 
 /// Stable public code of a route whose declared authority its bundle's signed
 /// manifest does not back.
@@ -160,7 +160,7 @@ pub(crate) fn lend_route_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::{RawRouteAuthority, RawRouteSpec};
+    use ryeos_engine::route_raw::{RawRouteAuthority, RawRouteSpec};
 
     fn route(auth: &str, mode: &str, capabilities: Option<Vec<&str>>) -> RawRouteSpec {
         let mut value = serde_json::json!({

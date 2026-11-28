@@ -31,7 +31,7 @@ use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
     SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
-use crate::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 use ryeos_node_runtime::node_config_source::{
     VerifiedNodeConfigItem, check_bundle_collisions, scan_yaml_files, scan_yaml_files_recursive,
     verify_and_parse_in_space,

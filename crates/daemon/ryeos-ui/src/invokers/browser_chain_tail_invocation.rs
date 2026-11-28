@@ -22,7 +22,7 @@ use ryeos_api::routes::invokers::chain_tail_invocation::CompiledChainTailInvocat
 use ryeos_api::routes::response_modes::event_stream_mode::{
     EventStreamStrategy, StreamSourceCompiler, validate_and_extract_path_capture,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_engine::route_raw::RawRouteSpec;
 use serde_json::Value;
 
 use crate::seat_auth::SeatCaller;
