@@ -260,13 +260,18 @@ async fn a_followed_directives_reads_are_projected_from_the_daemons_own_records(
         1,
         "one launch table for the directive: {events:#?}"
     );
-    assert_eq!(table[0].2["tools"][0]["item_ref"], "tool:reader/reader");
-    assert_eq!(table[0].2["tools"][0]["argument"], "path");
-    assert_eq!(table[0].2["tools"][0]["space"], "project");
-    assert_eq!(
-        table[0].2["tools"].as_array().map(Vec::len),
-        Some(1),
-        "the undeclared tool is not in it"
+    let tools = table[0].2["tools"].as_array().expect("tools array");
+    let entry = |item_ref: &str| tools.iter().find(|tool| tool["item_ref"] == item_ref);
+    let reader = entry("tool:reader/reader").expect("the project reader is in the table");
+    assert_eq!(reader["argument"], "path");
+    assert_eq!(reader["space"], "project");
+    // The bundle's own read tools are in it too, each in the bundle space.
+    let fetch = entry("tool:ryeos/core/fetch").expect("the bundle fetch tool is in the table");
+    assert_eq!(fetch["argument"], "item_ref");
+    assert_eq!(fetch["space"], "bundle");
+    assert!(
+        entry("tool:other/other").is_none(),
+        "the undeclared tool is not in it: {tools:?}"
     );
 
     let (get_status, get_body) = h
