@@ -893,6 +893,8 @@ struct PreflightNodeBundleRecord {
     #[serde(rename = "kind")]
     _kind: Option<String>,
     path: PathBuf,
+    #[serde(default)]
+    lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,6 +916,11 @@ struct PreflightNodeRouteRecord {
     #[serde(default)]
     #[serde(rename = "request")]
     _request: PreflightRawRequest,
+    /// Signed `public: true`: served under the node's `public_routes` policy.
+    /// Install admission checks it against that policy.
+    #[serde(default)]
+    #[serde(rename = "public")]
+    _public: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1389,6 +1396,10 @@ fn validate_node_bundle_record(file_path: &Path, body: &serde_json::Value) -> Re
         .context("failed to parse bundle node-config record")?;
     if !record.path.is_absolute() {
         bail!("bundle record missing absolute 'path' field");
+    }
+    if let Some(lane) = &record.lane {
+        lane.validate_shape()
+            .map_err(|error| anyhow::anyhow!("bundle record has an invalid lane: {error}"))?;
     }
     if file_path
         .parent()
@@ -2312,6 +2323,27 @@ description: "fixed parser handler for preflight tests"
     }
 
     #[test]
+    fn validate_route_accepts_a_route_signed_public() {
+        // A public route is checked against the node's public_routes policy at
+        // install admission; generic preflight must read the field, not refuse it.
+        let public_route = serde_json::json!({
+            "id": "public/front",
+            "path": "/",
+            "methods": ["GET"],
+            "auth": "none",
+            "limits": { "body_bytes_max": 0 },
+            "response": {
+                "mode": "static",
+                "status": 200,
+                "content_type": "text/plain",
+                "body_b64": "aGVsbG8="
+            },
+            "public": true
+        });
+        validate_node_route_record(&public_route).expect("a public route passes preflight");
+    }
+
+    #[test]
     fn validate_route_accepts_registry_source_names_without_canonical_ref() {
         // `response.source` semantics are owned by the route compiler /
         // ResponseModeRegistry, not by generic bundle preflight. Registry-backed
@@ -2732,6 +2764,7 @@ strict_fields: warn
             project_shadowing: Default::default(),
             runtime_authoring: Default::default(),
             standing_endorsement: Default::default(),
+            activation: Default::default(),
         }
     }
 

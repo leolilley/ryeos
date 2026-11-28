@@ -430,3 +430,53 @@ fn only_live_publications_pin_their_manifest() {
         vec!["1".repeat(64)]
     );
 }
+
+fn manifest_with_mode(mode: u32) -> PublicationManifest {
+    PublicationManifest {
+        kind: PUBLICATION_MANIFEST_KIND.to_owned(),
+        schema: PUBLICATION_MANIFEST_SCHEMA.to_owned(),
+        bundle_name: "fixture".to_owned(),
+        bundle_version: "1.2.3".to_owned(),
+        bundle_manifest_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        file_count: 1,
+        total_bytes: 1,
+        entries: vec![ManifestEntry {
+            path: "a.txt".to_owned(),
+            hash: lillux::sha256_hex(b"x"),
+            size: 1,
+            mode,
+        }],
+    }
+}
+
+#[test]
+fn the_export_mode_is_the_executable_bit_and_nothing_else() {
+    for source in [0o644, 0o664, 0o600, 0o444, 0o666, 0o4644] {
+        assert_eq!(normalised_file_mode(source), 0o644, "{source:#o}");
+    }
+    for source in [0o755, 0o775, 0o700, 0o744, 0o100, 0o4755] {
+        assert_eq!(normalised_file_mode(source), 0o755, "{source:#o}");
+    }
+}
+
+#[test]
+fn a_manifest_records_only_the_two_normalised_modes_in_format_version_2() {
+    assert!(PUBLICATION_MANIFEST_SCHEMA.ends_with("/v2"));
+    assert_ne!(
+        PUBLICATION_MANIFEST_SCHEMA,
+        PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED
+    );
+    for mode in [0o644, 0o755] {
+        manifest_with_mode(mode).validate_shape().unwrap();
+    }
+    for mode in [0o600, 0o664, 0o4755, 0o775, 0o444, 0o000] {
+        assert!(
+            manifest_with_mode(mode).validate_shape().is_err(),
+            "{mode:#o}"
+        );
+    }
+    let mut old = manifest_with_mode(0o644);
+    old.schema = PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED.to_owned();
+    assert!(old.validate_shape().is_err());
+}

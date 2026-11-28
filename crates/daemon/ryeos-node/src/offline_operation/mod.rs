@@ -21,6 +21,7 @@
 //! signs what the operation produces. Receipts are signed with the node key.
 
 pub mod apply;
+pub mod bundle_apply;
 pub mod contract;
 pub mod deliver;
 mod envelope;
@@ -38,4 +39,6 @@ pub use apply::{
     read_node_fingerprint, read_receipts,
 };
 pub use envelope::{WildcardGrant, authorized_keys_dir, local_operator};
-pub use host::{BareHost, BundleReplace, ImageSeed, OfflineHost, RemotePin, TypedReport};
+pub use host::{
+    BareHost, BundleReplace, ImageSeed, OfflineHost, RemotePin, StagedBundleApply, TypedReport,
+};

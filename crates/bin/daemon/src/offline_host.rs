@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant;
-use ryeos_node::offline_operation::{BundleReplace, ImageSeed, OfflineHost, RemotePin};
+use ryeos_node::offline_operation::{
+    BundleReplace, ImageSeed, OfflineHost, RemotePin, StagedBundleApply,
+};
 use ryeos_node::provider_env::StartupProviderEnvironment;
 use serde_json::Value;
 
@@ -79,41 +81,94 @@ impl OfflineHost for DaemonOfflineHost<'_> {
         request
             .state_lock
             .ensure_protects_app_root(request.app_root)?;
-        let provider_environment = self
-            .provider_environment
-            .context("this start has no provider environment, which composing the node's configuration for a bundle replacement needs")?;
-        let config = Config::load(&self.config_sources)?;
-        if config.app_root != request.app_root {
-            bail!(
-                "the daemon's configuration names another app root than the one being applied to"
-            );
-        }
-        // The node's configuration composed exactly as `run-service` composes
-        // it for a stopped-node `bundle/install`, so the replacement is
-        // verified as a local `bundle install --replace` is.
-        let (engine, _, _, isolation, _) =
-            ryeosd::bootstrap::load_node_config_two_phase_standalone(&config, provider_environment)
-                .context("compose the node's configuration to verify the replacement bundle")?;
-        let validator = crate::prospective_node_config_validator(
-            Arc::new(ryeos_ui::UiState::new()),
-            Arc::clone(&engine),
-        );
+        let composed = self.compose(request.app_root)?;
         let lease = request.state_lock.retain();
         ryeos_api::handlers::bundle_install::replace_from_archive(
             request.name,
             request.archive,
             request.preserve_runtime_artifacts,
-            &ryeos_api::handlers::bundle_install::InstallAuthority {
-                app_root: request.app_root,
-                node_signing_key: request.node.signing_key(),
-                node_trust_store: &engine.node_trust_store,
-                prospective_validator: &validator,
-                isolation,
-                state_lock: &lease,
-                // Nothing caches engines yet: the daemon has not started.
-                generation_changed: &|_| {},
-            },
+            &composed.authority(request.app_root, request.node, &lease),
         )
+    }
+
+    fn apply_staged_bundle(&self, request: StagedBundleApply<'_>) -> Result<Value> {
+        request
+            .state_lock
+            .ensure_protects_app_root(request.app_root)?;
+        let composed = self.compose(request.app_root)?;
+        let lease = request.state_lock.retain();
+        ryeos_api::handlers::bundle_install::install_staged(
+            request.staged,
+            request.evidence,
+            request.replace,
+            &composed.authority(request.app_root, request.node, &lease),
+        )
+    }
+}
+
+/// The node's configuration composed for a bundle install, with what an
+/// install authority borrows from it.
+struct ComposedForInstall {
+    engine: Arc<ryeos_engine::engine::Engine>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    validator: Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>,
+}
+
+impl ComposedForInstall {
+    fn authority<'b>(
+        &'b self,
+        app_root: &'b Path,
+        node: &'b ryeos_node_runtime::identity::NodeIdentity,
+        lease: &'b ryeos_node_runtime::state_lock::StateLockLease,
+    ) -> ryeos_api::handlers::bundle_install::InstallAuthority<'b> {
+        ryeos_api::handlers::bundle_install::InstallAuthority {
+            app_root,
+            node_signing_key: node.signing_key(),
+            node_trust_store: &self.engine.node_trust_store,
+            kinds: &self.engine.kinds,
+            prospective_validator: &self.validator,
+            isolation: Arc::clone(&self.isolation),
+            state_lock: lease,
+            // Nothing caches engines yet: the daemon has not started.
+            generation_changed: &no_generation_change,
+        }
+    }
+}
+
+fn no_generation_change(_: &str) {}
+
+impl DaemonOfflineHost<'_> {
+    /// The node's configuration composed exactly as `run-service` composes it
+    /// for a stopped-node `bundle/install`, so a bundle is verified here as a
+    /// local `bundle install` verifies it.
+    fn compose(&self, app_root: &Path) -> Result<ComposedForInstall> {
+        let provider_environment = self
+            .provider_environment
+            .context("this start has no provider environment, which composing the node's configuration for a bundle install needs")?;
+        let config = Config::load(&self.config_sources)?;
+        if config.app_root != app_root {
+            bail!(
+                "the daemon's configuration names another app root than the one being applied to"
+            );
+        }
+        let (engine, _, policy, isolation, _) =
+            ryeosd::bootstrap::load_node_config_two_phase_standalone(&config, provider_environment)
+                .context("compose the node's configuration to verify the bundle")?;
+        let public_routes = Arc::new(
+            policy
+                .require::<ryeos_node_runtime::node_policy::sections::public_routes::PublicRoutesPolicy>()?
+                .clone(),
+        );
+        let validator = crate::prospective_node_config_validator(
+            Arc::new(ryeos_ui::UiState::new()),
+            Arc::clone(&engine),
+            public_routes,
+        );
+        Ok(ComposedForInstall {
+            engine,
+            isolation,
+            validator,
+        })
     }
 }
 

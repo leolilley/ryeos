@@ -417,8 +417,8 @@ fn load_node_config_two_phase_with_socket(
         trust_store: &bootstrap_trust_store,
     };
 
-    let bundle_records = bootstrap_loader
-        .load_bundle_section()
+    let (bundle_records, skipped_lane_bundles) = bootstrap_loader
+        .load_bundle_section_reporting_skipped()
         .context("Phase 1: failed to load bundle section from node config")?;
 
     let generation = Arc::new(
@@ -437,6 +437,7 @@ fn load_node_config_two_phase_with_socket(
             ryeos_node_runtime::engine_init::validate_installed_bundle_plan(
                 app_root,
                 &generation,
+                &skipped_lane_bundles,
                 &bootstrap_trust_store,
             )
         })

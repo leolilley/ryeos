@@ -159,6 +159,17 @@ pub async fn route_dispatcher_from_ingress(
             })
     });
 
+    // A public route takes its own permit first, held until its response
+    // body has been sent or dropped (released by `charge` below).
+    let public_permit = if route.raw_response.public {
+        match api_state.public_routes.admit(&route.id) {
+            Ok(permit) => Some(permit),
+            Err(refused) => return refused,
+        }
+    } else {
+        None
+    };
+
     let _permit = match route.semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(tokio::sync::TryAcquireError::NoPermits) => {
@@ -283,7 +294,17 @@ pub async fn route_dispatcher_from_ingress(
     // still working toward success. A zero timeout waits for the response-mode
     // contract instead; accepted execution uses that to return its durable
     // root handoff before the HTTP response can finish.
-    await_handler_response(task, limiter.timeout).await
+    let response = await_handler_response(task, limiter.timeout).await;
+    match public_permit {
+        Some(permit) => api_state.public_routes.charge(
+            &route.id,
+            &method,
+            response,
+            permit,
+            lillux::time::timestamp_millis(),
+        ),
+        None => response,
+    }
 }
 
 #[cfg(test)]

@@ -403,6 +403,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
             authority: None,
+            public: false,
         }
     }
 
@@ -607,6 +608,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
             authority: None,
+            public: false,
         };
         let result = mode.compile(&raw);
         let err = match result {
@@ -650,6 +652,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
             authority: None,
+            public: false,
         };
         let result = mode.compile(&raw);
         let err = match result {

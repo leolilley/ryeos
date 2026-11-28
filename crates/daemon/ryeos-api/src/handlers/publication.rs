@@ -198,6 +198,23 @@ pub async fn freeze(
             HandlerError::Internal("the bundle walk returned a malformed entry".into())
         })?;
     entries.sort_by(|a, b| a.path.cmp(&b.path));
+    // A bundle whose item directories its own manifest does not declare would
+    // be refused by every lane that checks it; refuse it where it is published.
+    let kind_of_directory = |directory: &str| {
+        state
+            .engine
+            .kinds
+            .kind_in_directory(directory)
+            .map(|(kind, activation)| (kind.to_string(), activation))
+    };
+    ryeos_bundle::lane::refuse_undeclared_kinds(
+        entries.iter().map(|entry| entry.path.as_str()),
+        &kind_of_directory,
+        &verified.manifest,
+    )
+    .map_err(|refusal| {
+        ryeos_app::handler_error::typed_refusal(refusal.code(), 422, refusal.to_string())
+    })?;
     let largest = entries.iter().map(|entry| entry.size).max().unwrap_or(0);
     let manifest = PublicationManifest {
         kind: PUBLICATION_MANIFEST_KIND.to_owned(),

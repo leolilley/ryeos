@@ -222,6 +222,25 @@ pub fn accept(
     Ok(accepted)
 }
 
+/// [`accept`] for a request the node's own operator signed, queued into the
+/// inbox of the node on this machine, running or not. The operator's key is
+/// the delivering key: a delivery cannot name another.
+pub fn accept_local(
+    app_root: &Path,
+    request: &SignedRequest,
+    inputs: &BTreeMap<String, Vec<u8>>,
+) -> Result<Accepted, DeliveryError> {
+    let node = local_node(app_root).map_err(DeliveryError::Failed)?;
+    accept(
+        app_root,
+        &node,
+        &request.body.signer_fingerprint,
+        request,
+        inputs,
+        lillux::time::unix_secs_now(),
+    )
+}
+
 fn local_node(app_root: &Path) -> Result<NodeIdentity> {
     super::apply::node_identity(app_root)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -390,6 +409,11 @@ pub fn status_report(app_root: &Path, node: &NodeIdentity) -> Result<Value> {
                 "request_digest": receipt.body.request_digest,
                 "operation": receipt.body.request.body.operation,
                 "recorded_at": receipt.body.recorded_at,
+                // An operation may record a refusal as its result: the request
+                // was consumed and nothing was done. The outcome and its closed
+                // code are the first things a reader of the status needs.
+                "outcome": receipt.body.result.get("outcome").and_then(Value::as_str),
+                "code": receipt.body.result.get("code").and_then(Value::as_str),
             })
         })
         .collect();
