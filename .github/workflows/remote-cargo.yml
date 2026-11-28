@@ -293,9 +293,9 @@ jobs:
           {
             echo "### Browser package"
             echo "branch \`${GITHUB_SHA}\`; recorded source_digest \`$after\` (was \`$before\`)."
-            wasm_sha="$(sha256sum crates/clients/rune/pkg/*.wasm | awk '{print $1}' | paste -sd, -)"
+            wasm_sha="$(gzip -dc crates/clients/rune/pkg/ryeos_rune_bg.wasm.gz | sha256sum | awk '{print $1}')"
             echo "rust-src installed: ${{ inputs.rust_src }}; wasm sha256 \`$wasm_sha\`."
-            echo "wasm path strings: \`.rustup\` $(cat crates/clients/rune/pkg/*.wasm | grep -a -c '\.rustup' || true), \`rustlib/src\` $(cat crates/clients/rune/pkg/*.wasm | grep -a -c 'rustlib/src' || true)."
+            echo "wasm path strings: \`.rustup\` $(gzip -dc crates/clients/rune/pkg/ryeos_rune_bg.wasm.gz | grep -a -c '\.rustup' || true), \`rustlib/src\` $(gzip -dc crates/clients/rune/pkg/ryeos_rune_bg.wasm.gz | grep -a -c 'rustlib/src' || true)."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the browser package
