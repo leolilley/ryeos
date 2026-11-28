@@ -3,8 +3,8 @@
 //! Runtime phase names are opaque to the daemon. A qualifying parent selects
 //! one bounded name and supplies one exact inherited Lillux channel. When the
 //! authenticated runtime reports that name, the daemon writes one record and
-//! parks the callback forever so the parent can SIGKILL the process at a proven
-//! boundary. No production build serves this RPC.
+//! parks the callback until the daemon is stopped, so the parent can SIGKILL the
+//! process at a proven boundary or stop it in order with the request in flight. No production build serves this RPC.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +106,17 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
             .flush()
             .context("flush runtime phase-cut evidence")?;
     }
-    std::future::pending::<()>().await;
-    Ok(json!({"reached": true}))
+    // Park the callback while the daemon runs. A SIGKILL ends it with the
+    // process; an orderly stop ends it with an error so the request task
+    // returns and shutdown can join it before the Store closes.
+    let mut shutdown = crate::subscribe_shutdown();
+    if !crate::shutdown_requested() {
+        match shutdown.as_mut() {
+            Some(receiver) => {
+                let _ = receiver.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+    bail!("runtime phase-cut callback ended by daemon shutdown")
 }

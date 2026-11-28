@@ -5859,6 +5859,22 @@ async fn run(
             }, |(state, _)| recheck_registry_legs(state, &recheck_latch, &mut recheck_mode))
             .await;
             drop(custody);
+            // Every request task still holds the application state, and with it
+            // a clone of the live Store and a possible scheduler gate. Join them
+            // (the listeners are already settled, so no new request arrives)
+            // before the scheduler database and the live Store close.
+            let request_owners_left = startup
+                .uds_state()
+                .join_request_owners(Duration::from_secs(
+                    process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+                ))
+                .await;
+            if request_owners_left != 0 {
+                tracing::error!(
+                    request_owners_left,
+                    "in-flight UDS request tasks outlived the shutdown grace and still hold the application state"
+                );
+            }
             #[cfg(feature = "scheduling")]
             {
                 let scheduler_service = state
@@ -5893,15 +5909,19 @@ async fn run(
                         }
                         composition.release_app_state_after_drain();
                     }
-                    Err(_error) => {
+                    Err(error) => {
                         drop(scheduler_service);
                         drop(state);
                         composition.mark_services_drained_with_scheduler_close_pending();
+                        // Keep the real refusal: the generic text alone cannot say
+                        // whether a scheduler gate, its database lock or its terminal
+                        // owner was still held.
                         if result.is_ok() {
                             result =
-                                Err(anyhow::anyhow!("scheduler database close did not complete"));
+                                Err(error.context("scheduler database close did not complete"));
                         } else {
                             tracing::error!(
+                                error = %format!("{error:#}"),
                                 "scheduler database close failed while preserving its owner"
                             );
                         }
