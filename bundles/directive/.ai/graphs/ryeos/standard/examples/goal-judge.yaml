@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-28T16:39:11Z:d6f9be21f3363bc87a4010566669f74ed2990a0574077ab7efc164750ef378f3:q41kaRbJsRAVsmHXjhXDPAEMEJINZqfB9kpBoMRlhFsSSjsQfmKORFWlT3/n9scxnSgDrk12rCja86VI/MeRAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T16:40:48Z:af5878a731f44e9d5d1b8aa7c87d603cf915d4e7533617166b4fa4dd64b90880:AKELF73qpF+dqDvwKE3Qpp7r9Pc3xsBWyP4Kr8r7lbXkrkOULnxZexkfdZqUGw4WAWLAHvOHsgmh94SenUK4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/standard/examples
 description: "Example: run a working directive under a goal, check its deliverable with deterministic gates, let a tool-less judge that sees only the quoted deliverable add refusals, and repeat with the author's signed repair text for a signed number of rounds. Ends failed, never successful, when the rounds run out."
@@ -21,9 +21,10 @@ config:
       - {key: states_the_point, text: "The paragraph states what a signed item is in its first sentence."}
       - {key: no_filler, text: "The paragraph contains no preamble or closing remark."}
     repair:
-      gate_length: "Your last deliverable was empty or too long. Return one paragraph of at most 4000 characters."
       states_the_point: "Your last deliverable did not state the point in its first sentence. Start with it."
       no_filler: "Your last deliverable had a preamble or a closing remark. Return the paragraph only."
+    gate_repair:
+      gate_length: "Your last deliverable was empty or too long. Return one paragraph of at most 4000 characters."
     gate_failed_keys: ["gate_length"]
     round: 0
     deliverable: ""
@@ -71,7 +72,7 @@ config:
         branches:
           - when: "state.gate_ok"
             to: judge
-          - to: gate_repair
+          - to: gate_repair_text
 
     judge:
       node_type: action
@@ -111,12 +112,12 @@ config:
         repair_text: "${result.text}"
       next: {type: unconditional, to: bound}
 
-    gate_repair:
+    gate_repair_text:
       action:
         item_id: "tool:ryeos/standard/examples/goal-repair"
         params:
           failed: "${state.gate_failed_keys}"
-          repair: "${state.repair}"
+          repair: "${state.gate_repair}"
       assign:
         repair_text: "${result.text}"
       next: {type: unconditional, to: bound}

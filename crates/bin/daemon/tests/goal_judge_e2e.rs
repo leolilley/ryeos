@@ -388,6 +388,20 @@ async fn a_judge_result_outside_the_closed_shape_fails_typed_and_its_text_goes_n
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_judge_cannot_name_the_gate_key_as_a_criterion() {
+    // `gate_length` has signed text, but only for the gate; it is not a
+    // criterion, so a judge naming it is outside the closed shape.
+    let run = run_goal(vec![work("A paragraph."), verdict(false, &["gate_length"])]).await;
+    assert!(!run.completed(), "events={:#?}", run.events);
+    assert!(
+        run.failure_text().contains("judge_result_invalid"),
+        "failure={}",
+        run.failure_text()
+    );
+    assert_eq!(run.bodies.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_gate_failure_is_final_for_the_round_and_the_judge_is_not_asked() {
     // The empty deliverable fails the length gate. The scripted judge would
     // pass, but it is only asked about the second, gate-clean deliverable.
