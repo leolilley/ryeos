@@ -130,6 +130,15 @@ impl Envelope<'_> {
                     format!("the grant does not name the scope `{}`", spec.scope()),
                 );
             }
+            // The local form is exactly the key whose fingerprint is the
+            // node's operator genesis, signing with no grant (`admit_signer`
+            // returns `None` for it and for nothing else). Every other signer
+            // reaches this point holding a verified `remote_principal` grant,
+            // and that includes a key the operator has linked or delegated
+            // from another machine: a grant never satisfies the local form, so
+            // an operation marked `local_signer_only` is refused to all of
+            // them whatever scope they hold. The scope check above runs first,
+            // so a grant without the scope is told `ScopeNotGranted`.
             if spec.local_signer_only {
                 return refuse(
                     RefusalReason::LocalSignerOnly,

@@ -1,5 +1,7 @@
-# ryeos:signed:2026-11-25T05:41:27Z:86bdc460c4fa4524a0172a43ba83e7571272919e4fb19e8e768f4903d6c29134:6UQWbCa5O7lT4L0N6+KSkGxXCxiXnLdqBNM5MWiCXAmninAWpcZhkJKf4B6ub6k4awhGj1jPODZ0ZrusWMBnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-26T04:14:00Z:589dfc368bab20ce5cb46976985aa9b1a7a7f5c1b41bceb7821aefd63207f4cf:mjNk0GwsUkerZhzIGcSSB/F/yjF2+RXd7sA4VM4HbZ3zxlMRVhjfTCMGEwrxqvF+9pv+HSstSSaLHkC1cjEWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
+# Items of this kind act only when a caller invokes them, under that caller's own grants.
+activation: invoked
 inventory_policy:
   admission:
     capability_template: "ryeos.execute.{kind}.{bare_id}"

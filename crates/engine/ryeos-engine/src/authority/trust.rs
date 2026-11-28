@@ -28,11 +28,13 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
+mod bundle_lane;
 mod endorsement;
 mod key_link;
 mod ownership;
 mod publication;
 mod registry;
+pub use bundle_lane::*;
 pub use endorsement::*;
 pub use key_link::*;
 pub use ownership::*;
