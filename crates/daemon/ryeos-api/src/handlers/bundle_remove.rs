@@ -162,7 +162,6 @@ fn build_prospective_remove_plan(app_root: &Path, bundle_name: &str) -> Result<B
     let registrations = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &node_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_registrations()
     .context("load verified installed bundle registrations")?;
@@ -201,7 +200,6 @@ fn admit_prospective_remove(
     let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     // A laned bundle that fails its boot audit is not loaded, so it is not in
     // the set this node will load after the removal either; removing another

@@ -316,7 +316,6 @@ fn load_registered_generation_under_lock(
     let loader = crate::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &trust_store,
-        cardinality: crate::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let (records, skipped) = loader
         .load_bundle_section_reporting_skipped()
@@ -1062,7 +1061,6 @@ pub fn validate_installed_bundle_plan(
     let (registrations, _skipped) = crate::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
-        cardinality: crate::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section_reporting_skipped()
     .context("load signed installed bundle registrations")?;

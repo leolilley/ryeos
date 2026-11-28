@@ -38,7 +38,6 @@ pub fn load_verified_snapshot_with_trust(
     let bootstrap = BundleBootstrapLoader {
         app_root,
         trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let bundles = bootstrap
         .load_bundle_section()

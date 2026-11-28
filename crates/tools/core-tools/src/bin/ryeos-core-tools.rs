@@ -1385,16 +1385,29 @@ fn bundle_verify_dependency_roots(
             ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
                 app_root,
                 trust_store: &trust_store,
-                cardinality:
-                    ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
             }
             .load_bundle_section_reporting_skipped()
             .context("bundle verify: load installed bundle registrations")?;
-        let installed_roots = registrations
+        // The dependency set install would plan with: the audited
+        // registrations, each bundle's manifest checked by the same planner
+        // step, so verify answers what install would.
+        let registrations: Vec<_> = registrations
             .into_iter()
             .filter(|r| r.path != source_path && Some(&r.name) != source_name.as_ref())
-            .map(|r| r.path);
-        dependency_roots.extend(installed_roots);
+            .map(|r| ryeos_bundle::installed::RegisteredBundle {
+                name: r.name,
+                registration_path: r.source_file,
+                bundle_root: r.path,
+            })
+            .collect();
+        let installed =
+            ryeos_bundle::installed::plan_inputs_from_registrations(&registrations, &trust_store)
+                .context("bundle verify: load verified installed bundle graph")?;
+        dependency_roots.extend(
+            installed
+                .into_iter()
+                .map(|input| input.source.root_path().clone()),
+        );
     }
     Ok(dependency_roots)
 }
@@ -1899,6 +1912,52 @@ mod tests {
         assert_eq!(
             registration_refusal(&error),
             ryeos_node_runtime::bundle_bootstrap::BUNDLE_REGISTRATIONS_MISSING
+        );
+    }
+
+    #[test]
+    fn bundle_verify_refuses_a_dependency_whose_manifest_no_longer_verifies_as_install_does() {
+        let (node, source) = node_and_source();
+        let node_key = lillux::crypto::load_signing_key(
+            &node.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        // An installed bundle, registered by the node, whose manifest is no
+        // longer signed.
+        let bundle = node.path().join(".ai/bundles/dep");
+        std::fs::create_dir_all(bundle.join(".ai")).unwrap();
+        std::fs::write(
+            bundle.join(".ai/manifest.yaml"),
+            "name: dep\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        )
+        .unwrap();
+        let registrations = node.path().join(".ai/node/bundles");
+        std::fs::create_dir_all(&registrations).unwrap();
+        let body =
+            serde_yaml::to_string(&serde_json::json!({ "kind": "node", "path": bundle })).unwrap();
+        std::fs::write(
+            registrations.join("dep.yaml"),
+            lillux::signature::sign_content(&body, &node_key, "#", None),
+        )
+        .unwrap();
+
+        // What install planning answers for the same registration.
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(node.path()).unwrap();
+        let install = ryeos_bundle::installed::plan_inputs_from_registrations(
+            &[ryeos_bundle::installed::RegisteredBundle {
+                name: "dep".into(),
+                registration_path: registrations.join("dep.yaml"),
+                bundle_root: bundle.canonicalize().unwrap(),
+            }],
+            &trust,
+        )
+        .unwrap_err();
+
+        let verify =
+            bundle_verify_dependency_roots(source.path(), Vec::new(), node.path()).unwrap_err();
+        assert!(
+            format!("{verify:#}").contains(&install.root_cause().to_string()),
+            "verify must refuse as install does: verify said {verify:#}, install said {install:#}"
         );
     }
 

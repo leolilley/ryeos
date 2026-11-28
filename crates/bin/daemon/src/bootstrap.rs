@@ -415,7 +415,6 @@ fn load_node_config_two_phase_with_socket(
     let bootstrap_loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
 
     let (bundle_records, skipped_lane_bundles) = bootstrap_loader

@@ -269,7 +269,6 @@ fn refuse_name_held(name: &str, authority: &InstallAuthority<'_>) -> Result<()> 
     let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root: authority.app_root,
         trust_store: authority.node_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_registrations()
     .context("load current bundle registrations to check the name")?;

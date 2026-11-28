@@ -9,17 +9,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
 
-/// How many registrations the node's bundle directory must hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegistrationCardinality {
-    /// An initialised node: a missing `.ai/node/bundles` directory or zero
-    /// registrations is a typed refusal.
-    AtLeastOne,
-    /// Only `init` before its first registration is written: a missing or
-    /// empty directory loads as no registrations.
-    Any,
-}
-
 pub const BUNDLE_REGISTRATIONS_MISSING: &str = "bundle_registrations_missing";
 pub const BUNDLE_REGISTRATIONS_EMPTY: &str = "bundle_registrations_empty";
 pub const BUNDLE_REGISTRATION_NOT_NODE_SIGNED: &str = "bundle_registration_not_node_signed";
@@ -58,7 +47,6 @@ impl std::error::Error for BundleRegistrationRefusal {}
 pub struct BundleBootstrapLoader<'a> {
     pub app_root: &'a Path,
     pub trust_store: &'a TrustStore,
-    pub cardinality: RegistrationCardinality,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +120,7 @@ impl<'a> BundleBootstrapLoader<'a> {
     ) -> Result<(Vec<BundleRecord>, Vec<SkippedLaneBundle>)> {
         let records = self.load_registrations()?;
         let (records, skipped) = self.audit_laned_bundles(records);
-        if records.is_empty() && self.cardinality == RegistrationCardinality::AtLeastOne {
+        if records.is_empty() {
             return Err(BundleRegistrationRefusal::new(
                 BUNDLE_REGISTRATIONS_EMPTY,
                 "no bundle registration remains after the publication-lane audit",
@@ -156,12 +144,12 @@ impl<'a> BundleBootstrapLoader<'a> {
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("bundles");
-        if self.cardinality == RegistrationCardinality::AtLeastOne
-            && matches!(
-                std::fs::symlink_metadata(&node_dir),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            )
-        {
+        // A node always holds at least one registration (core), so a missing
+        // directory or an empty one is a refusal, never an empty set.
+        if matches!(
+            std::fs::symlink_metadata(&node_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
             return Err(BundleRegistrationRefusal::new(
                 BUNDLE_REGISTRATIONS_MISSING,
                 format!(
@@ -175,7 +163,7 @@ impl<'a> BundleBootstrapLoader<'a> {
         let files = scan_yaml_files(&node_dir, false).map_err(|error| {
             BundleRegistrationRefusal::new(BUNDLE_REGISTRATION_ENTRY_REFUSED, format!("{error:#}"))
         })?;
-        if files.is_empty() && self.cardinality == RegistrationCardinality::AtLeastOne {
+        if files.is_empty() {
             return Err(BundleRegistrationRefusal::new(
                 BUNDLE_REGISTRATIONS_EMPTY,
                 format!(
@@ -390,17 +378,16 @@ mod tests {
             self.register_signed_by(name, &bundle, self.identity.signing_key());
         }
 
-        fn loader(&self, cardinality: RegistrationCardinality) -> BundleBootstrapLoader<'_> {
+        fn loader(&self) -> BundleBootstrapLoader<'_> {
             BundleBootstrapLoader {
                 app_root: self.root.path(),
                 trust_store: &self.trust,
-                cardinality,
             }
         }
 
         /// The refusal code each load path gives for the node as it is.
-        fn refusal_codes(&self, cardinality: RegistrationCardinality) -> [&'static str; 2] {
-            let loader = self.loader(cardinality);
+        fn refusal_codes(&self) -> [&'static str; 2] {
+            let loader = self.loader();
             [
                 loader.load_registrations().unwrap_err(),
                 loader.load_bundle_section().unwrap_err(),
@@ -417,10 +404,7 @@ mod tests {
     fn a_node_signed_registration_loads() {
         let node = Node::new();
         node.register("core");
-        let loaded = node
-            .loader(RegistrationCardinality::AtLeastOne)
-            .load_bundle_section()
-            .unwrap();
+        let loaded = node.loader().load_bundle_section().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "core");
     }
@@ -431,7 +415,7 @@ mod tests {
         let bundle = node.bundle_dir("core");
         node.register_signed_by("core", &bundle, &node.publisher);
         assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
+            node.refusal_codes(),
             [BUNDLE_REGISTRATION_NOT_NODE_SIGNED; 2]
         );
     }
@@ -441,10 +425,7 @@ mod tests {
         let node = Node::new();
         node.register("core");
         std::fs::write(node.registrations().join("notes.txt"), b"x").unwrap();
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]
-        );
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]);
     }
 
     #[test]
@@ -452,10 +433,7 @@ mod tests {
         let node = Node::new();
         node.register("core");
         std::fs::create_dir_all(node.registrations().join("nested")).unwrap();
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]
-        );
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]);
     }
 
     #[test]
@@ -467,10 +445,7 @@ mod tests {
             &node.registrations().join("alias.yaml"),
         )
         .unwrap();
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]
-        );
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATION_ENTRY_REFUSED; 2]);
     }
 
     #[test]
@@ -479,35 +454,20 @@ mod tests {
         let bundle = node.bundle_dir("core");
         node.register_signed_by("core", &bundle, node.identity.signing_key());
         node.register_signed_by("alias", &bundle, node.identity.signing_key());
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATION_COLLISION; 2]
-        );
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATION_COLLISION; 2]);
     }
 
     #[test]
-    fn a_missing_directory_is_refused_unless_any_is_allowed() {
+    fn a_missing_directory_is_refused() {
         let node = Node::new();
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATIONS_MISSING; 2]
-        );
-        let loader = node.loader(RegistrationCardinality::Any);
-        assert!(loader.load_registrations().unwrap().is_empty());
-        assert!(loader.load_bundle_section().unwrap().is_empty());
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATIONS_MISSING; 2]);
     }
 
     #[test]
-    fn an_empty_directory_is_refused_unless_any_is_allowed() {
+    fn an_empty_directory_is_refused() {
         let node = Node::new();
         std::fs::create_dir_all(node.registrations()).unwrap();
-        assert_eq!(
-            node.refusal_codes(RegistrationCardinality::AtLeastOne),
-            [BUNDLE_REGISTRATIONS_EMPTY; 2]
-        );
-        let loader = node.loader(RegistrationCardinality::Any);
-        assert!(loader.load_registrations().unwrap().is_empty());
-        assert!(loader.load_bundle_section().unwrap().is_empty());
+        assert_eq!(node.refusal_codes(), [BUNDLE_REGISTRATIONS_EMPTY; 2]);
     }
 
     fn ctx() -> NodeItemContext {

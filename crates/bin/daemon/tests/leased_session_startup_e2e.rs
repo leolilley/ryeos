@@ -466,8 +466,6 @@ mod real_adapter {
             let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
                 app_root: state,
                 trust_store: &trust,
-                cardinality:
-                    ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
             };
             let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
             let policy = ryeos_node_runtime::node_policy::load_snapshot(state, &trust, &table)?;

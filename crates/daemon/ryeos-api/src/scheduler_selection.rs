@@ -125,7 +125,6 @@ pub fn scheduler_selected_for_app_root(
     let bundles = BundleBootstrapLoader {
         app_root,
         trust_store: &trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section()
     .context("load verified node bundle registrations for scheduler selection")?;

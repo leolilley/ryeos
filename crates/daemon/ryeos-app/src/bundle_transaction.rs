@@ -81,7 +81,6 @@ pub fn refuse_laned_replacement(
     let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_registrations()
     .context("load current bundle registrations to check lane markers")?;
@@ -115,7 +114,6 @@ pub fn refuse_native_holder(
     let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_registrations()
     .context("load current bundle registrations to check who holds the name")?;
@@ -759,7 +757,6 @@ mod tests {
         let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
             app_root: root.path(),
             trust_store: &trust,
-            cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
         };
 
         // The boot loader leaves the laned bundle out and says why; the node

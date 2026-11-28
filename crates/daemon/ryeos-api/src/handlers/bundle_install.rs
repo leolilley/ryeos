@@ -898,7 +898,6 @@ pub(crate) fn build_prospective_bundle_plan(
     let (registrations, _skipped) = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &node_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     }
     .load_bundle_section_reporting_skipped()
     .context("load verified installed bundle registrations")?;
@@ -1010,7 +1009,6 @@ pub(crate) fn admit_completed_staging(
     let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
-        cardinality: ryeos_node_runtime::bundle_bootstrap::RegistrationCardinality::AtLeastOne,
     };
     let mut current_records: std::collections::BTreeMap<
         String,
