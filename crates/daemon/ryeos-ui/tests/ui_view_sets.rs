@@ -107,7 +107,10 @@ fn yaml_value(path: &Path) -> Value {
 #[tokio::test]
 async fn narrowed_surfaces_refuse_no_view_source_as_outside_their_ceiling() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
-    for surface_ref in ["surface:ryeos/ui/base-observe"] {
+    for surface_ref in [
+        "surface:ryeos/ui/base-observe",
+        "surface:ryeos/ui/assistant-observe",
+    ] {
         let (session_id, _ctx, _producer, coordinate) =
             test_state::live_presentation_with_surface(&state, surface_ref).await;
         let attachment = attachment(&state, &session_id, &coordinate.binding_attachment_id);
