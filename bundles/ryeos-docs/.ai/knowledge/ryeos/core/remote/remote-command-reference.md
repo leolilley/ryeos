@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T00:16:29Z:5d81ccf452fe59a55499f28607126d8e528006dfc643f8098380f321dd58098d:Kx1p0dJJrdqgopIjVoEU2WS8ggMH4bYF67UROxS8yHlN617vCGdKXVtFT5msqvYPj9zqdBsJtzMtXp1JiszuBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:20:41Z:85605dd3038a693da56b09c71e30171d5c20d67bc457f1a6484faad80cbc8123:SDhH5QW2o/TLrclZlJnV7oYvj5CF3440GqebySmYvTMZ5/V/KngFKuTCkUCiNHuXFPIK9RkEJ0d3N1SvF3atDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -131,7 +131,7 @@ node-signed record under `.ai/node/remotes/` with `pin_source:
 descriptor_without_contact`. Descriptors exported by `ryeos remote-descriptor`
 carry the node's `ingest_ignore` rules; a remote pinned without them is one this
 node never pushes to: push, execute and project sync refuse with
-`remote_pinned_without_ingest_rules`. A descriptor without a `url` pins an
+`remote_ingest_rules_missing`. A descriptor without a `url` pins an
 inbound-only remote, which every outbound command refuses with
 `remote_inbound_only`. Pinning again replaces the record and keeps its project
 bindings. A hosted node applies the same pin through the signed offline

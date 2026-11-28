@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-27T16:25:38Z:a66cc937ed0c20a26f2c7689cc503ea2ffda5ef5648317615c294e06d2fc2d61:eNJi78g+P4OBEcOcWU87aDEzHLOenm8DsXqipYwkNbvryHQqPGhVq43a9viN2BFpV9UY5y8oMyaiHjmuLF5kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T00:20:41Z:489a8cec837597a6a17fe697018a6504da9ab5dad3cc9b68e7752b8d93763c25:ehVhTk0GfD0mMoYV9yKPXN8ilhFbLunVuA9DC0qEtf4RHFmAXqTtrA1FKxCm/F+Zx+DTbJJxozY+2aXVcmmHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -443,7 +443,7 @@ descriptor_without_contact`). The descriptor is the trust anchor, so it must
 reach the pinning node through a channel its operator trusts. A version 1 or
 unsigned descriptor is refused with `remote_descriptor_unsigned`. One without
 ingest rules pins a remote this node never pushes to: push, execute and project
-sync to it refuse with `remote_pinned_without_ingest_rules` until `remote
+sync to it refuse with `remote_ingest_rules_missing` until `remote
 configure` (or a pin with the rules) replaces the entry.
 
 **Inbound-only peers.** A descriptor without a `url` pins an inbound-only

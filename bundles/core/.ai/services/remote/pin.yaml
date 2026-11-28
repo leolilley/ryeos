@@ -1,10 +1,10 @@
-# ryeos:signed:2026-11-24T20:26:06Z:adfb9b38c03b32bdb514f4053669720eb6ed5d9797bf157ec183834dd77bfd4d:BSpRpcBs96WGG/p99tjhS0ftDsbVezP7cxlDUsXGmTqmZ/y71O23M31mHjsykh/NZVrcdjsdDar00DEWHidEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T00:20:41Z:deebf7ceafad85a7a5ca599f866f7c73d094be1bd2c0f888e6148b407e0008d4:7S1W37O8orNdEhXrBRd0fZWeUThBU6MJjKL7tPQDJCU+icpDXiOUqsFyjRkQSKu9XWT/7BS4VWP/Qf+XkzunAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pin
 required_caps: ["ryeos.execute.service.remote/pin"]
 schema:
   remote: string?
   descriptor: string
-description: "Pin a remote node from its exported signed v2 descriptor without contacting it, as a node-signed pin record. A descriptor without a URL pins an inbound-only remote. A descriptor without ingest rules pins a remote this node never pushes to (push refuses with remote_pinned_without_ingest_rules)."
+description: "Pin a remote node from its exported signed v2 descriptor without contacting it, as a node-signed pin record. A descriptor without a URL pins an inbound-only remote. A descriptor without ingest rules pins a remote this node never pushes to (push refuses with remote_ingest_rules_missing)."
 # Pinning a remote decides whose signatures the node accepts and requires the local configured operator.
 disclosure: {}
