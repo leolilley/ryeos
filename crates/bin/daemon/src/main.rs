@@ -11019,14 +11019,20 @@ mod node_capability_report_reader_tests {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/rust_source_text.rs"]
+mod rust_source_text;
+
+#[cfg(test)]
 mod quarantine_settlement_order_tests {
     /// Both start paths hold the state lock, then settle node-config
-    /// quarantine leftovers, and only then load node configuration.
+    /// quarantine leftovers, and only then load node configuration. The
+    /// production text excludes comments, strings and test modules, so the
+    /// markers match code only.
     #[test]
     fn node_config_leftovers_settle_before_the_first_node_config_load() {
-        let source = include_str!("main.rs");
-        let production = &source[..source.rfind("#[cfg(test)]").unwrap()];
-        let settle = ["settle_node_config", "_quarantine_leftovers("].concat();
+        let production =
+            super::rust_source_text::production_text("daemon main", include_str!("main.rs"));
+        let settle = "settle_node_config_quarantine_leftovers(";
         let lock_markers = [
             "let state_lock = state_lock::StateLock::acquire_with_timeout(",
             "let standalone_state_lock = Arc::new(",
@@ -11038,7 +11044,7 @@ mod quarantine_settlement_order_tests {
         for (lock, load) in lock_markers.iter().zip(load_markers) {
             let lock_at = production.find(lock).expect(lock);
             let settle_at = production[lock_at..]
-                .find(&settle)
+                .find(settle)
                 .expect("settle after lock")
                 + lock_at;
             let load_at = production.find(load).expect(load);
