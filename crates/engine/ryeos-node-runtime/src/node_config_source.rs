@@ -104,6 +104,16 @@ pub fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<lillux::Pinned
         ),
     )?
     .unwrap_or_default();
+    // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|file| {
+            !file
+                .path()
+                .file_name()
+                .is_some_and(lillux::is_quarantine_leftover_name)
+        })
+        .collect();
     for file in &files {
         let path = file.path();
         let ext = path.extension().and_then(|extension| extension.to_str());
@@ -324,4 +334,38 @@ pub fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
         by_path.insert(record.path.as_path(), record);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod quarantine_skip_tests {
+    use super::*;
+
+    #[test]
+    fn scan_skips_exact_quarantine_name_but_refuses_near_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.yaml"), "x: 1\n").unwrap();
+        std::fs::write(dir.path().join(".ryeos-quarantine.4242.1.YS5qc29u"), "q").unwrap();
+        let files = scan_yaml_files(dir.path(), false).unwrap();
+        assert_eq!(files.len(), 1);
+        std::fs::write(dir.path().join(".ryeos-quarantine.4242.01.YS5qc29u"), "q").unwrap();
+        assert!(scan_yaml_files(dir.path(), false).is_err());
+    }
+
+    #[test]
+    fn a_section_left_in_quarantine_is_back_before_the_scan_that_composes_policy() {
+        let app = tempfile::tempdir().unwrap();
+        let routes = app.path().join(".ai").join("node").join("routes");
+        std::fs::create_dir_all(&routes).unwrap();
+        let name = lillux::quarantine_name(std::ffi::OsStr::new("a.yaml"), 4242, 1).unwrap();
+        std::fs::write(routes.join(name), "x: 1\n").unwrap();
+        assert!(
+            scan_yaml_files(&routes, false).unwrap().is_empty(),
+            "the scan alone leaves the quarantined section out"
+        );
+        let settled = ryeos_state::settle_node_config_quarantine_leftovers(app.path()).unwrap();
+        assert_eq!(settled.restored.len(), 1);
+        let files = scan_yaml_files(&routes, false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].path().ends_with("a.yaml"));
+    }
 }

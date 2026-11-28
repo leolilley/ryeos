@@ -1644,6 +1644,14 @@ pub(crate) fn bind_retained_qualification_isolated_realizations(
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.
+/// Refuse, when a mount is declared or planned, a destination whose last
+/// component is longer than a quarantine name can record: that component is
+/// removed or replaced through the quarantine calls later.
+pub(crate) fn require_mount_within_quarantine_cap(mount: &str) -> anyhow::Result<()> {
+    lillux::atomic_fs::require_name_within_quarantine_cap(Path::new(mount))
+        .map_err(|error| error.context(format!("mount `{mount}` cannot be admitted")))
+}
+
 pub(crate) fn admitted_realization_mounts(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> anyhow::Result<Vec<String>> {
@@ -1660,6 +1668,9 @@ pub(crate) fn admitted_realization_mounts(
         .filter(|entry| entry.mount_root == ryeos_state::objects::ExternalContentMountRoot::Project)
         .map(|entry| entry.mount.clone())
         .collect::<Vec<_>>();
+    for mount in &mounts {
+        require_mount_within_quarantine_cap(mount)?;
+    }
     mounts.sort();
     mounts.dedup();
     Ok(mounts)
@@ -2733,6 +2744,20 @@ fn verify_materialized_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_name_cap_is_enforced_when_the_mount_is_planned() {
+        let cap = lillux::QUARANTINE_ORIGINAL_NAME_MAX;
+        require_mount_within_quarantine_cap(&format!("a/{}", "x".repeat(cap))).unwrap();
+        let over = format!("a/{}", "x".repeat(cap + 1));
+        let err = require_mount_within_quarantine_cap(&over).unwrap_err();
+        let typed = err
+            .downcast_ref::<lillux::atomic_fs::NameOverQuarantineCap>()
+            .unwrap();
+        assert_eq!(typed.cap, cap);
+        assert_eq!(typed.path, Path::new(&over));
+        assert!(format!("{err:#}").contains(&over));
+    }
 
     #[test]
     fn prepared_content_mount_support_preserves_private_project_execution() {

@@ -1102,6 +1102,10 @@ fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
                 entry.path().display()
             ),
             lillux::SecureTempOwnership::NotTemp => {
+                // A live remove_if_same may own a file under Lillux's quarantine name; skip it.
+                if lillux::is_quarantine_leftover_name(entry.name()) {
+                    continue;
+                }
                 bail!("managed activation cache contains an unexpected entry")
             }
         }
@@ -3293,6 +3297,27 @@ mod tests {
         );
         assert!(cache.open_regular(retired_format, false).unwrap().is_some());
         assert!(cache.open_regular(foreign_name, false).unwrap().is_some());
+    }
+
+    #[test]
+    fn cache_reconciliation_skips_exact_quarantine_name_but_refuses_near_miss() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let exact = OsStr::new(".ryeos-quarantine.4242.1.YS5qc29u");
+        cache.open_regular_create(exact, true, true, 0o600).unwrap();
+        reconcile_activation_cache(&cache).unwrap();
+        assert!(cache.open_regular(exact, false).unwrap().is_some());
+
+        cache
+            .open_regular_create(
+                OsStr::new(".ryeos-quarantine.4242.01.YS5qc29u"),
+                true,
+                true,
+                0o600,
+            )
+            .unwrap();
+        let error = reconcile_activation_cache(&cache).unwrap_err();
+        assert!(error.to_string().contains("unexpected entry"), "{error:#}");
     }
 
     #[test]

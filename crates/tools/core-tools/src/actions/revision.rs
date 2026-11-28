@@ -152,6 +152,8 @@ pub fn remove_item(
         );
     }
 
+    lillux::atomic_fs::require_name_within_quarantine_cap(&file_path)
+        .with_context(|| format!("item `{item_ref}` cannot be removed"))?;
     let parent_path = file_path
         .parent()
         .ok_or_else(|| anyhow!("item file has no parent directory"))?;
