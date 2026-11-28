@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-27T04:25:49Z:03cfe13e9a2a2da7b5b9b18a6b204e53328aba766a956b3050dbcb66124a6b3e:J1Q3HOOT4poW44gpKScgRMx7P6Zs1/ESGqFI0bLVeoxb//BeK682zrUdm3Oz1IgudtsfdvJoDRCEpzMerFpdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-28T04:38:52Z:b3a0cd6d221e3a1da7323b3dc90bb51b654834a6f67f45323b4cb2d9a0e1ac49:nDVvetWPEJSivffWACVaNOle5ryI9ObsH/c1kdhYGUaG03KCeeHoVXmxRMTCiMtvNojTnqRhEUrBtv6wu1D1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -614,6 +614,10 @@ policies:
     reads:
       - target: service:node/status
       - target: service:bundle/list
+        # The staged list is the operator's node administration: no seat
+        # sees it, the operator's own seat included.
+        keep:
+        - /bundles
       - target: service:projects/list
       - target: service:commands/list
       - target: service:threads/list
