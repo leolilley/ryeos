@@ -311,7 +311,7 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
 /// The last `lines` lines of a daemon's stderr with the backtrace frames
 /// removed. A panic or error run with `RUST_BACKTRACE` set ends in dozens of
 /// frame lines (`  16: symbol` and `             at /path:line`) after a
-/// `stack backtrace:` line; a plain tail shows only those and loses the line
+/// `Stack backtrace:` line (anyhow's spelling; the panic hook's is lower case); a plain tail shows only those and loses the line
 /// that names the error. Only the lines of that section are dropped, so an
 /// error's own `Caused by:` list (`    0: message`) stays.
 pub fn stderr_digest(log: &str, lines: usize) -> String {
@@ -326,7 +326,7 @@ pub fn stderr_digest(log: &str, lines: usize) -> String {
     let mut in_backtrace = false;
     let mut kept: Vec<&str> = Vec::new();
     for line in log.lines() {
-        if line.trim() == "stack backtrace:" {
+        if line.trim().eq_ignore_ascii_case("stack backtrace:") {
             in_backtrace = true;
             continue;
         }
@@ -2564,7 +2564,7 @@ mod stderr_digest_tests {
         let mut log = String::from(
             "INFO started\nError: state lock held by another process\n\nCaused by:\n    0: refused\n",
         );
-        log.push_str("stack backtrace:\n");
+        log.push_str("Stack backtrace:\n");
         for frame in 0..60 {
             log.push_str(&format!(
                 "{frame:>4}: ryeosd::frame_{frame}\n             at /src/lib.rs:{frame}\n"
@@ -2585,5 +2585,20 @@ mod stderr_digest_tests {
     fn a_log_without_frames_keeps_its_last_lines() {
         let log = "a\nb\nc\nd\n";
         assert_eq!(stderr_digest(log, 2), "c\nd");
+    }
+}
+
+#[cfg(test)]
+mod stderr_digest_spelling_tests {
+    use super::stderr_digest;
+
+    #[test]
+    fn both_backtrace_spellings_are_recognised() {
+        for header in ["stack backtrace:", "Stack backtrace:"] {
+            let log = format!(
+                "Error: boom\n\n{header}\n   0: a::b\n             at /x.rs:1\n   1: c::d\n"
+            );
+            assert_eq!(stderr_digest(&log, 10), "Error: boom\n", "{header}");
+        }
     }
 }
