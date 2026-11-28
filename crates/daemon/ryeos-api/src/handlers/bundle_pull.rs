@@ -17,7 +17,7 @@
 //!    that verifies under the node key, and has not passed `not_after`;
 //! 3. the served manifest hashes to the record's `manifest_hash` and names the
 //!    record's bundle; the record and the manifest each carry a schema this
-//!    build knows (an unknown one is `publication_schema_unknown`), and the
+//!    build knows (an unknown one is `publication_format_unsupported`), and the
 //!    countersignature's format is fixed by the domain it is signed under;
 //! 4. the manifest's publisher is a signer this node trusts.
 //!
@@ -76,8 +76,6 @@ const DESCRIBE_MAX_BYTES: u64 = MAX_PUBLICATION_MANIFEST_BYTES + 256 * 1024;
 pub enum PullRefusal {
     #[error("publication_malformed: {0}")]
     Malformed(String),
-    #[error("publication_schema_unknown: {0}")]
-    SchemaUnknown(String),
     #[error("publication_insecure_url: {0}")]
     InsecureUrl(String),
     #[error("publication_fetch_failed: {0}")]
@@ -111,11 +109,14 @@ pub enum PullRefusal {
     #[error("publication_manifest_mismatch: {0}")]
     ManifestMismatch(String),
     #[error(
-        "publication_format_unsupported: the export is format {found}; this node reads only \
-         {supported}. Older formats recorded the host's raw file modes and are not read; \
-         publish again from a node on this release"
+        "publication_format_unsupported: the {document} is format {found}; this node reads only \
+         {supported}"
     )]
-    FormatUnsupported { found: String, supported: String },
+    FormatUnsupported {
+        document: &'static str,
+        found: String,
+        supported: String,
+    },
     #[error("publication_blob_mismatch: {0}")]
     BlobMismatch(String),
     #[error(
@@ -132,7 +133,6 @@ impl PullRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "publication_malformed",
-            Self::SchemaUnknown(_) => "publication_schema_unknown",
             Self::InsecureUrl(_) => "publication_insecure_url",
             Self::FetchFailed(_) => "publication_fetch_failed",
             Self::HostInternal { .. } => "publication_host_internal",
@@ -150,7 +150,7 @@ impl PullRefusal {
 
     fn status(&self) -> u16 {
         match self {
-            Self::Malformed(_) | Self::SchemaUnknown(_) | Self::InsecureUrl(_) => 400,
+            Self::Malformed(_) | Self::InsecureUrl(_) => 400,
             Self::FetchFailed(_) => 502,
             _ => 422,
         }
@@ -380,11 +380,19 @@ pub(crate) struct VerifiedPublication {
     pub manifest: PublicationManifest,
 }
 
-/// A record shape refusal as the pull reports it: an unknown schema keeps its
-/// typed code, anything else is a malformed document.
+/// A record shape refusal as the pull reports it: an unreadable format keeps
+/// its typed code, anything else is a malformed document.
 fn shape_refusal(what: &str, error: PublicationRefusal) -> PullRefusal {
     match error {
-        PublicationRefusal::SchemaUnknown(text) => PullRefusal::SchemaUnknown(text),
+        PublicationRefusal::FormatUnsupported {
+            document,
+            found,
+            supported,
+        } => PullRefusal::FormatUnsupported {
+            document,
+            found,
+            supported,
+        },
         other => PullRefusal::Malformed(format!("{what}: {other}")),
     }
 }
@@ -464,13 +472,34 @@ pub(crate) fn verify_publication_at(
         ));
     }
     if manifest.schema != ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA {
+        // The first format recorded the publishing host's raw file modes; say
+        // so, since that is why it is not read.
+        let found =
+            if manifest.schema == ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA_V1_REFUSED {
+                format!(
+                    "{} (it recorded the host's raw file modes; publish again from a node on this \
+                 release)",
+                    manifest.schema
+                )
+            } else {
+                manifest.schema.clone()
+            };
         return Err(PullRefusal::FormatUnsupported {
-            found: manifest.schema.clone(),
+            document: "publication manifest",
+            found,
             supported: ryeos_engine::trust::PUBLICATION_MANIFEST_SCHEMA.to_owned(),
         });
     }
     manifest.validate_shape().map_err(|error| match error {
-        PublicationRefusal::SchemaUnknown(text) => PullRefusal::SchemaUnknown(text),
+        PublicationRefusal::FormatUnsupported {
+            document,
+            found,
+            supported,
+        } => PullRefusal::FormatUnsupported {
+            document,
+            found,
+            supported,
+        },
         other => PullRefusal::ManifestMismatch(other.to_string()),
     })?;
     if manifest.bundle_name != record.bundle_name {

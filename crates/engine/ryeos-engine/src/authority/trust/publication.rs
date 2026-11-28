@@ -114,10 +114,17 @@ pub const MAX_PUBLICATION_MANIFEST_ENTRIES: usize = 10_000;
 pub enum PublicationRefusal {
     #[error("publication_malformed: {0}")]
     Malformed(String),
-    /// A signed document names a schema this build does not know. The text
-    /// names the document and both schema identifiers.
-    #[error("publication_schema_unknown: {0}")]
-    SchemaUnknown(String),
+    /// This build cannot read the document: it names a format other than the
+    /// one this build reads.
+    #[error(
+        "publication_format_unsupported: the {document} is format {found}; this node reads only \
+         {supported}"
+    )]
+    FormatUnsupported {
+        document: &'static str,
+        found: String,
+        supported: String,
+    },
     #[error(
         "publication_bad_signature: the record does not verify under the operator key. Sign it \
          again with the operator key"
@@ -149,7 +156,7 @@ impl PublicationRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "publication_malformed",
-            Self::SchemaUnknown(_) => "publication_schema_unknown",
+            Self::FormatUnsupported { .. } => "publication_format_unsupported",
             Self::BadSignature => "publication_bad_signature",
             Self::SignerNotOperator => "publication_signer_not_operator",
             Self::Expired => "publication_expired",
@@ -288,10 +295,11 @@ impl PublicationRecord {
     pub fn validate_shape(&self) -> Result<(), PublicationRefusal> {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
         if self.schema != PUBLICATION_SCHEMA {
-            return Err(PublicationRefusal::SchemaUnknown(format!(
-                "the publication record has schema `{}`, expected `{PUBLICATION_SCHEMA}`",
-                self.schema
-            )));
+            return Err(PublicationRefusal::FormatUnsupported {
+                document: "publication record",
+                found: self.schema.clone(),
+                supported: PUBLICATION_SCHEMA.to_owned(),
+            });
         }
         if !is_publication_id(&self.id) {
             return malformed("id is not 32 lowercase hex digits");
@@ -543,11 +551,13 @@ impl PublicationManifest {
     pub fn validate_shape(&self) -> Result<(), PublicationRefusal> {
         let malformed = |text: &str| Err(PublicationRefusal::Malformed(text.to_owned()));
         if self.kind != PUBLICATION_MANIFEST_KIND || self.schema != PUBLICATION_MANIFEST_SCHEMA {
-            return Err(PublicationRefusal::SchemaUnknown(format!(
-                "the publication manifest has kind `{}` and schema `{}`, expected kind \
-                 `{PUBLICATION_MANIFEST_KIND}` and schema `{PUBLICATION_MANIFEST_SCHEMA}`",
-                self.kind, self.schema
-            )));
+            return Err(PublicationRefusal::FormatUnsupported {
+                document: "publication manifest",
+                found: format!("kind `{}`, schema `{}`", self.kind, self.schema),
+                supported: format!(
+                    "kind `{PUBLICATION_MANIFEST_KIND}`, schema `{PUBLICATION_MANIFEST_SCHEMA}`"
+                ),
+            });
         }
         if !is_bundle_version(&self.bundle_version) {
             return malformed("bundle_version must be 1 to 64 bytes of [0-9A-Za-z.+_-]");

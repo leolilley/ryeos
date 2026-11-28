@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T15:25:37Z:095309c2ec2de339bf9a84cbed08dce496c536546a7c8796bd91c1154bb71656:CWh2s1/JQrQtl/WBrYPdBcgSp0yKbj5Kht5yK4c1YPUXWj0EBzk6xwv6qImJ/NsvbWSHQxEQxXvzki2DYnxRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T18:42:50Z:bcf4ae6261b6c778141b40e339ef544847ee18c44be64342f553a69873658875:Xq3uJbmsZdKseZfTPVnfxB8qdVx9l3mJJ1GlQQLoEpRLsMLO0p6IedRaI4eytEBk0rMnr5XlEthN71qP4qiGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -325,9 +325,10 @@ signed documents: the publication record, the node's countersignature over it,
 and the bundle manifest. It does not compare the other node's build: the
 pinned key and the documents' own formats decide.
 
-- The record and the manifest each name a schema, compared exactly. One this
-  build does not know is refused `publication_schema_unknown`, naming the
-  document, the schema it carries and the schema expected.
+- The record and the manifest each name a format, compared exactly. One this
+  build does not read is refused `publication_format_unsupported`, naming the
+  document (the record or the manifest), the format it carries and the
+  format this node reads.
 - A countersignature's format is fixed by the domain it is signed under
   (`ryeos-publication-node-v1`). A countersignature of another format, like a
   forged one, does not verify, and is refused with the signature code; the

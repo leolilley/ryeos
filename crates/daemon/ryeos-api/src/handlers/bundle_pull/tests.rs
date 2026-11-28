@@ -252,40 +252,46 @@ fn the_public_key_must_be_the_pinned_node() {
 }
 
 #[test]
-fn a_record_with_an_unknown_schema_is_refused_naming_both_schemas() {
+fn a_record_with_an_unknown_schema_is_refused_as_an_unsupported_format() {
     let mut published = published();
     published.body["record"]["schema"] = json!("ryeos.publication/v9");
     let refusal = verify(&published, NOW).unwrap_err();
-    assert_eq!(refusal.code(), "publication_schema_unknown");
+    assert_eq!(refusal.code(), "publication_format_unsupported");
     let text = refusal.to_string();
-    assert!(text.contains("record"), "{text}");
+    assert!(text.contains("the publication record"), "{text}");
     assert!(text.contains("ryeos.publication/v9"), "{text}");
     assert!(text.contains("ryeos.publication/v1"), "{text}");
 }
 
 #[test]
-fn a_manifest_with_an_unknown_kind_or_schema_is_refused_naming_both() {
+fn a_manifest_with_an_unknown_kind_is_refused_as_an_unsupported_format() {
     // The record must name the tampered manifest's hash for the check to be
     // reached, so build the publication around the tampered manifest.
+    let mut manifest = manifest_for("demo", BODY);
+    manifest.kind = "ryeos.some-other-manifest".to_owned();
+    let published = published_with("demo", &manifest, NOW + 3600, &node_key());
+    let refusal = verify(&published, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publication_format_unsupported");
+    let text = refusal.to_string();
+    assert!(text.contains("the publication manifest"), "{text}");
+    assert!(text.contains("ryeos.some-other-manifest"), "{text}");
+    assert!(
+        text.contains(ryeos_engine::trust::PUBLICATION_MANIFEST_KIND),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_manifest_with_an_unknown_schema_is_refused_as_an_unsupported_format() {
     let mut manifest = manifest_for("demo", BODY);
     manifest.schema = "ryeos.publication.bundle-export-manifest/v9".to_owned();
     let published = published_with("demo", &manifest, NOW + 3600, &node_key());
     let refusal = verify(&published, NOW).unwrap_err();
     assert_eq!(refusal.code(), "publication_format_unsupported");
     let text = refusal.to_string();
+    assert!(text.contains("the publication manifest"), "{text}");
     assert!(text.contains("bundle-export-manifest/v9"), "{text}");
     assert!(text.contains("bundle-export-manifest/v1"), "{text}");
-
-    // A manifest of the current schema but another kind is a document this
-    // build does not know either, refused naming the document and both kinds.
-    let mut manifest = manifest_for("demo", BODY);
-    manifest.kind = "ryeos.some-other-manifest".to_owned();
-    let published = published_with("demo", &manifest, NOW + 3600, &node_key());
-    let refusal = verify(&published, NOW).unwrap_err();
-    assert_eq!(refusal.code(), "publication_schema_unknown");
-    let text = refusal.to_string();
-    assert!(text.contains("manifest"), "{text}");
-    assert!(text.contains("ryeos.some-other-manifest"), "{text}");
 }
 
 #[test]
@@ -833,7 +839,9 @@ fn a_manifest_in_the_old_format_is_refused_with_a_typed_code() {
     let published = published_with("demo", &manifest, NOW + 3600, &node_key());
     let refused = verify(&published, NOW).unwrap_err();
     assert_eq!(refused.code(), "publication_format_unsupported");
-    assert!(refused.to_string().contains("not read"));
+    let text = refused.to_string();
+    assert!(text.contains("the publication manifest"), "{text}");
+    assert!(text.contains("raw file modes"), "{text}");
 }
 
 #[test]

@@ -363,14 +363,14 @@ fn a_record_and_a_manifest_need_an_identifier_version() {
 }
 
 #[test]
-fn an_unknown_record_or_manifest_schema_is_a_typed_refusal_naming_both() {
+fn an_unknown_record_or_manifest_format_is_a_typed_refusal_naming_the_document_and_both() {
     let node = Node::new();
     let mut record = node.record('1', NOW + 3600);
     record.schema = "ryeos.publication/v9".to_owned();
     let refusal = record.validate_shape().unwrap_err();
-    assert_eq!(refusal.code(), "publication_schema_unknown");
+    assert_eq!(refusal.code(), "publication_format_unsupported");
     let text = refusal.to_string();
-    assert!(text.contains("publication record"), "{text}");
+    assert!(text.contains("the publication record"), "{text}");
     assert!(text.contains("ryeos.publication/v9"), "{text}");
     assert!(text.contains(PUBLICATION_SCHEMA), "{text}");
 
@@ -379,9 +379,9 @@ fn an_unknown_record_or_manifest_schema_is_a_typed_refusal_naming_both() {
     manifest.kind = "other_kind".to_owned();
     manifest.schema = "ryeos.publication.bundle-export-manifest/v9".to_owned();
     let refusal = manifest.validate_shape().unwrap_err();
-    assert_eq!(refusal.code(), "publication_schema_unknown");
+    assert_eq!(refusal.code(), "publication_format_unsupported");
     let text = refusal.to_string();
-    assert!(text.contains("publication manifest"), "{text}");
+    assert!(text.contains("the publication manifest"), "{text}");
     assert!(text.contains("other_kind"), "{text}");
     assert!(text.contains("bundle-export-manifest/v9"), "{text}");
     assert!(text.contains(PUBLICATION_MANIFEST_KIND), "{text}");
