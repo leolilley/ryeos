@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-26T02:47:10Z:97a458940bbd7d4e9393285f7019167e0595449264719b1f5ac1de87fddb031d:bmfJyo+lxQTIP+2lM8PdVkO6p8bqQw8I3zL2FaFbqIsghTbCdt0gPt85odxGwaV9ruIOJWAQMpcRrkylgm74Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-27T16:25:38Z:e89c7e0e218085c33622cda45e2d2d0c77db2a4c9fc8c5daed14d927404af4fa:VH1U4I8sV1HTBaee1nWrlcvy6NmJKRs7oR66VMaxboYZmSiwvhnTBANzlDmq+BK+a/8HJeQyZSGG5jH7cNKPBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -347,7 +347,10 @@ configured-operator forwarding route to inspect profiles on a remote node.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
    `service:remote/push` with `outbound_principal: delegated` (the operator signs a delegation for the
-   hosted remote with `ryeos remote delegate`). A
+   hosted remote with `ryeos remote delegate`; a delegated caller pushes and
+   runs as itself, and `outbound_principal: node` is the node's admitted
+   operator's alone, refused `outbound_principal_node_operator_only` to any
+   other caller). A
    local launch uses `--current-head`; a client with a different absolute path
    uses `service:remote/run`, whose configured project binding supplies the
    destination path, preserves that configured-operator principal, and

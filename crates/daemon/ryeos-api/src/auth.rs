@@ -17,6 +17,10 @@ use ryeos_node_runtime::remote_delegation::DelegationError;
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 
+/// Refusal of a signed request whose timestamp is earlier than this daemon's
+/// start: the in-memory nonce record cannot rule out its replay.
+pub const REQUEST_PREDATES_NODE_START: &str = "request_predates_node_start";
+
 // ---------------------------------------------------------------------------
 // Principal
 // ---------------------------------------------------------------------------
@@ -415,6 +419,17 @@ pub(crate) fn verify_request(
         .as_secs();
     if now.abs_diff(req_time) > TIMESTAMP_MAX_AGE_SECS {
         return Err("request expired".into());
+    }
+    // The remembered nonces live in memory and are gone after a restart, so
+    // a request signed before this daemon started could be replayed inside
+    // the freshness window. Any such request is refused: the client signs
+    // again.
+    let started_at = now.saturating_sub(state.started_at.elapsed().as_secs());
+    if req_time < started_at {
+        return Err(format!(
+            "{REQUEST_PREDATES_NODE_START}: the request was signed before this node started; sign it again"
+        )
+        .into());
     }
 
     // Load authorized key file. Expiry is judged only after the signature
@@ -1590,6 +1605,55 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    /// A request signed before the daemon started is refused even inside the
+    /// freshness window, because the nonce record did not survive the
+    /// restart; one signed after the start verifies.
+    #[test]
+    fn a_request_signed_before_the_node_started_is_refused() {
+        let (_tmp, _store_owner, mut state) = build_test_state();
+        // This node started 60 seconds ago.
+        state.started_at = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("the clock reaches back a minute");
+        let client_key = SigningKey::from_bytes(&[22u8; 32]);
+        let fp = register_client_key(&state, &client_key);
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/api/v1/status".parse().unwrap();
+
+        let before_start = unix_now() - 90;
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &uri,
+            b"",
+            before_start,
+            "nonce-before-start-test",
+            &audience,
+        );
+        let err = verify_request(&state, "GET", &uri, &headers, b"")
+            .expect_err("a request signed before the node started must be refused");
+        assert!(
+            err.to_string().contains(REQUEST_PREDATES_NODE_START),
+            "got: {err}"
+        );
+
+        let after_start = unix_now() - 30;
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &uri,
+            b"",
+            after_start,
+            "nonce-after-start-test",
+            &audience,
+        );
+        let principal = verify_request(&state, "GET", &uri, &headers, b"")
+            .expect("a request signed after the node started must verify");
+        assert_eq!(principal.fingerprint, fp);
     }
 
     /// A request whose timestamp is older than TIMESTAMP_MAX_AGE_SECS

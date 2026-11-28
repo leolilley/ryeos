@@ -39,6 +39,7 @@ pub mod subordinate_process;
 pub mod task;
 pub mod test_hooks;
 pub mod time;
+pub mod tree_entry;
 pub mod vault;
 
 pub use character_device::{
@@ -85,9 +86,12 @@ pub use sandbox::{
 
 pub use atomic_fs::{
     AtomicMutationError, AtomicMutationResult, atomic_exchange_paths, atomic_write,
-    atomic_write_private, atomic_write_with_mode, remove_dir_all_durable, remove_file_durable,
-    rename_path_durable, rename_path_noreplace_durable, sync_tree_durable,
+    atomic_write_private, atomic_write_with_mode, create_dir_exact_mode, open_append_exact_mode,
+    remove_dir_all_durable, remove_file_durable, rename_path_durable,
+    rename_path_noreplace_durable, sync_tree_durable,
 };
+#[cfg(all(unix, feature = "test-support"))]
+pub use atomic_fs::{permission_mode_for_test, set_process_umask_for_test};
 pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
     atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
@@ -129,6 +133,10 @@ pub use subordinate_process::{
     SubordinateDiagnosticDrainEnd, SubordinateProcess, SubordinateProcessDiagnostics,
     SubordinateProcessError, SubordinateProcessExit, SubordinateProcessInput,
     SubordinateProcessOutput, SubordinateProcessRequest,
+};
+pub use tree_entry::{
+    TreeEntryKind, TreeEntryObservation, create_directory_exact_mode, observe_tree_entry_no_follow,
+    open_tree_regular_file_no_follow, set_tree_directory_modes,
 };
 
 #[cfg(target_os = "linux")]

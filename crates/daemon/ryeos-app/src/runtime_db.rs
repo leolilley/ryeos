@@ -2995,6 +2995,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
         tables: &[
             sqlite_schema::TableSpec {
                 name: "scoped_child_attempt",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "attempt_id",
@@ -3102,6 +3103,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "scoped_child_input_operation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "attempt_id",
@@ -3155,6 +3157,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_binding_generation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "binding_hash",
@@ -3184,6 +3187,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_revocation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "binding_digest",
@@ -3207,6 +3211,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_import",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "binding_digest",
@@ -3248,6 +3253,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_no_occurrence",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3265,6 +3271,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_supervisor_activation_intent",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3282,6 +3289,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_supervisor_activation_observation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3299,6 +3307,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_lease_budget",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3340,6 +3349,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_lease",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3447,6 +3457,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_relay_bootstrap",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3464,6 +3475,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_termination_intent",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3481,6 +3493,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_terminal_observation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3498,6 +3511,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_channel",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -3551,6 +3565,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_frame",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "binding_digest",
@@ -3610,6 +3625,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3675,6 +3691,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap_authority",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3692,6 +3709,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap_artifacts",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3709,6 +3727,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap_readiness",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3732,6 +3751,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap_termination",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3779,6 +3799,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_bootstrap_recovery_cursor",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "singleton",
@@ -3802,6 +3823,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_operation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3873,6 +3895,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_stage",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -3956,6 +3979,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_qualification",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -4003,6 +4027,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_qualification_authority",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -4032,6 +4057,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_snapshot_qualification_termination",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -4079,6 +4105,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "restored_verifier_attempt",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -4138,6 +4165,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_guard",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "singleton",
@@ -4161,6 +4189,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_allocation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4208,6 +4237,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_relay_application",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4273,6 +4303,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_relay_transfer",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4356,6 +4387,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_guest_scratch",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4397,6 +4429,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_local_start",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4480,6 +4513,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_fixture_receiver",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4539,6 +4573,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_worker_transcript",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4574,6 +4609,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_execution_connector",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4669,6 +4705,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_worker_observation_batch",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4734,6 +4771,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_worker_command",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -4919,6 +4957,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "external_qualification_worker_process",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -5008,6 +5047,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "execution_lifetime_fence",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "singleton",
@@ -5031,6 +5071,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_runtime",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5144,6 +5185,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "process_resource_owner",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "owner_incarnation",
@@ -5215,6 +5257,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "process_resource_reservation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "reservation_id",
@@ -5256,6 +5299,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_process_scope_reservation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5291,6 +5335,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "in_process_handler_reservation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5320,6 +5365,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_commands",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "command_id",
@@ -5385,6 +5431,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "hook_dispatch_ledger",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "dispatch_key",
@@ -5462,6 +5509,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "runtime_action_intent",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -5599,6 +5647,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_recovery_wait",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5634,6 +5683,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_launch_claim",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5675,6 +5725,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_launch_epoch",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "thread_id",
@@ -5692,6 +5743,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "execution_workspace",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "workspace_id",
@@ -5799,6 +5851,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "follow_waiter",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "follow_key",
@@ -5888,6 +5941,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "follow_waiter_child",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "follow_key",
@@ -5965,6 +6019,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "thread_child_link",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "child_thread_id",
@@ -6024,6 +6079,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "launch_window",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "child_chain_root_id",
@@ -6065,6 +6121,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "seat_lease",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "seat_thread_id",
@@ -6106,6 +6163,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "launch_planning",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "launch_id",
@@ -6171,6 +6229,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "worker_process",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "worker_instance_id",
@@ -6254,6 +6313,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "dedicated_session",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -6481,6 +6541,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "dedicated_session_command",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -6552,6 +6613,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "dedicated_session_approval",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -6659,6 +6721,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "dedicated_session_observation_batch",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "placement_thread_id",
@@ -6730,6 +6793,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "credential_profile",
+                class: sqlite_schema::StoreClass::Derived,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "profile_id",
@@ -6825,6 +6889,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
             sqlite_schema::TableSpec {
                 name: "credential_profile_reservation",
+                class: sqlite_schema::StoreClass::Work,
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "reservation_id",

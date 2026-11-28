@@ -22,6 +22,8 @@ pub struct InstalledBundleRecord {
     pub name: String,
     pub registration_path: PathBuf,
     pub bundle_root: PathBuf,
+    /// Lane marker the node recorded at registration, if any.
+    pub lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
 impl InstalledBundleRecord {
@@ -41,6 +43,8 @@ impl InstalledBundleRecord {
 struct BundleRegistrationBody {
     kind: String,
     path: PathBuf,
+    #[serde(default)]
+    lane: Option<ryeos_engine::trust::BundleLane>,
 }
 
 /// Load installed bundles from signed node bundle registrations.
@@ -129,6 +133,16 @@ pub fn load_installed_bundle_records_with_trust(
             );
         }
 
+        if let Some(lane) = &body.lane {
+            lane.validate_shape().map_err(|error| {
+                anyhow::anyhow!(
+                    "bundle '{}' registration {} has an invalid lane: {error}",
+                    name,
+                    path.display()
+                )
+            })?;
+        }
+
         let canonical = body.path.canonicalize().with_context(|| {
             format!(
                 "failed to canonicalize bundle '{}' path '{}'",
@@ -144,6 +158,7 @@ pub fn load_installed_bundle_records_with_trust(
             name,
             registration_path: path,
             bundle_root: canonical,
+            lane: body.lane,
         });
     }
 
@@ -456,5 +471,59 @@ mod tests {
             msg.contains("provides_kinds mismatch"),
             "expected provides mismatch: {msg}"
         );
+    }
+    fn write_laned_registration(layout: &Layout, name: &str, bundle: &Path, lane: &str) {
+        let dir = layout.system.join(".ai/node/bundles");
+        fs::create_dir_all(&dir).unwrap();
+        let body = format!("kind: node\npath: {}\nlane:\n{lane}", bundle.display());
+        let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
+        fs::write(dir.join(format!("{name}.yaml")), signed).unwrap();
+    }
+
+    fn lane_yaml(record_hash: &str) -> String {
+        format!(
+            "  name: publication\n  publisher_fingerprint: {a}\n  record_hash: {record_hash}\n  node_fingerprint: {c}\n  bundle_version: '1.0'\n",
+            a = "a".repeat(64),
+            c = "c".repeat(64)
+        )
+    }
+
+    #[test]
+    fn laned_registration_loads_and_carries_the_lane() {
+        let layout = Layout::new();
+        let bundle = layout.write_bundle("pulled");
+        write_laned_registration(&layout, "pulled", &bundle, &lane_yaml(&"b".repeat(64)));
+
+        let records =
+            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+                .unwrap();
+        let lane = records[0].lane.as_ref().expect("lane");
+        assert_eq!(lane.name, "publication");
+        assert_eq!(lane.record_hash, "b".repeat(64));
+    }
+
+    #[test]
+    fn malformed_lane_fails_the_load() {
+        let layout = Layout::new();
+        let bundle = layout.write_bundle("pulled");
+        write_laned_registration(&layout, "pulled", &bundle, &lane_yaml("nothex"));
+
+        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("record_hash"), "{error:#}");
+    }
+
+    #[test]
+    fn native_registration_may_ship_a_native_executable() {
+        let layout = Layout::new();
+        let bundle = layout.write_bundle("core");
+        layout.write_registration("core", &bundle);
+        fs::create_dir_all(bundle.join("bin")).unwrap();
+        fs::write(bundle.join("bin/tool"), b"x").unwrap();
+
+        let records =
+            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+                .unwrap();
+        assert!(records[0].lane.is_none());
     }
 }
