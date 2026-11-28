@@ -140,7 +140,8 @@ pub use recovery::{
     RetiredChainClosureDraft, RetiredChainFence, RetiredThreadHistoryDiscardMarker,
     RetirementEvidenceDiscard, StagedCasRootHashes, StagedCasRootLease,
     ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
-    read_retired_chain_closure, settle_quarantine_leftovers_at_node_start,
+    read_retired_chain_closure, settle_node_config_quarantine_leftovers,
+    settle_pending_quarantine_leftovers, settle_quarantine_leftovers_at_node_start,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

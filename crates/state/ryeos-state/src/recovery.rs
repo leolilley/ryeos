@@ -2495,11 +2495,31 @@ pub fn settle_quarantine_leftovers_at_node_start(
     app_root: &Path,
     runtime_state_dir: &Path,
 ) -> Result<lillux::QuarantineSettlement> {
-    let mut report = lillux::QuarantineSettlement::default();
-    let mut merge = |part: lillux::QuarantineSettlement| {
-        report.restored.extend(part.restored);
-        report.removed.extend(part.removed);
-    };
+    let mut report = settle_node_config_quarantine_leftovers(app_root)?;
+    let pending = settle_pending_quarantine_leftovers(runtime_state_dir)?;
+    report.restored.extend(pending.restored);
+    report.removed.extend(pending.removed);
+    Ok(report)
+}
+
+/// The node-config half of start settlement: every directory under
+/// `<app>/.ai/node`. The caller holds the node's exclusive state lock and
+/// calls this before the first read of node configuration, so a section that
+/// a failed removal left in quarantine is back in place before the policy is
+/// composed.
+pub fn settle_node_config_quarantine_leftovers(
+    app_root: &Path,
+) -> Result<lillux::QuarantineSettlement> {
+    match lillux::PinnedDirectory::open(&app_root.join(".ai").join("node"))? {
+        Some(node) => Ok(node.settle_quarantine_leftovers_tree(MAX_RECOVERY_RECORD_BYTES)?),
+        None => Ok(lillux::QuarantineSettlement::default()),
+    }
+}
+
+/// The pending-transition half of start settlement, same exclusion rule.
+pub fn settle_pending_quarantine_leftovers(
+    runtime_state_dir: &Path,
+) -> Result<lillux::QuarantineSettlement> {
     let mut directory = lillux::PinnedDirectory::open(runtime_state_dir)?;
     for child in ["recovery", "thread-projection", "pending"] {
         directory = match directory {
@@ -2507,13 +2527,10 @@ pub fn settle_quarantine_leftovers_at_node_start(
             None => None,
         };
     }
-    if let Some(pending) = directory {
-        merge(pending.settle_quarantine_leftovers(MAX_RECOVERY_RECORD_BYTES)?);
+    match directory {
+        Some(pending) => Ok(pending.settle_quarantine_leftovers(MAX_RECOVERY_RECORD_BYTES)?),
+        None => Ok(lillux::QuarantineSettlement::default()),
     }
-    if let Some(node) = lillux::PinnedDirectory::open(&app_root.join(".ai").join("node"))? {
-        merge(node.settle_quarantine_leftovers_tree(MAX_RECOVERY_RECORD_BYTES)?);
-    }
-    Ok(report)
 }
 
 impl RecoveryStore {

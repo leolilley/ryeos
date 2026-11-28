@@ -346,4 +346,22 @@ mod quarantine_skip_tests {
         std::fs::write(dir.path().join(".ryeos-quarantine.4242.01.YS5qc29u"), "q").unwrap();
         assert!(scan_yaml_files(dir.path(), false).is_err());
     }
+
+    #[test]
+    fn a_section_left_in_quarantine_is_back_before_the_scan_that_composes_policy() {
+        let app = tempfile::tempdir().unwrap();
+        let routes = app.path().join(".ai").join("node").join("routes");
+        std::fs::create_dir_all(&routes).unwrap();
+        let name = lillux::quarantine_name(std::ffi::OsStr::new("a.yaml"), 4242, 1).unwrap();
+        std::fs::write(routes.join(name), "x: 1\n").unwrap();
+        assert!(
+            scan_yaml_files(&routes, false).unwrap().is_empty(),
+            "the scan alone leaves the quarantined section out"
+        );
+        let settled = ryeos_state::settle_node_config_quarantine_leftovers(app.path()).unwrap();
+        assert_eq!(settled.restored.len(), 1);
+        let files = scan_yaml_files(&routes, false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].path().ends_with("a.yaml"));
+    }
 }

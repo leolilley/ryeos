@@ -4193,6 +4193,11 @@ async fn run(
         .as_ref()
         .context("daemon state lock is absent")?
         .ensure_protects_app_root(&selected_app_root)?;
+    // The state lock proves no earlier incarnation is still writing, so a
+    // section a failed removal left in quarantine goes back under its own
+    // name now, before the first read of node configuration composes policy.
+    ryeos_state::settle_node_config_quarantine_leftovers(&selected_app_root)
+        .context("settle node-config quarantine leftovers before loading node config")?;
 
     // Mark the attempt before complete config decoding. The explicit app root
     // is already fenced by StateLock, so a malformed bootstrap document now
@@ -8938,6 +8943,8 @@ async fn run_service_standalone(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?,
     );
+    ryeos_state::settle_node_config_quarantine_leftovers(&config.app_root)
+        .context("settle node-config quarantine leftovers before loading node config")?;
     bootstrap::verify_initialized(config)?;
 
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
@@ -10957,5 +10964,34 @@ mod node_capability_report_reader_tests {
             ryeos_app::node_requirement_admission::is_report_unreadable(&error),
             "{error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod quarantine_settlement_order_tests {
+    /// Both start paths hold the state lock, then settle node-config
+    /// quarantine leftovers, and only then load node configuration.
+    #[test]
+    fn node_config_leftovers_settle_before_the_first_node_config_load() {
+        let source = include_str!("main.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        let settle = ["settle_node_config", "_quarantine_leftovers("].concat();
+        let lock_markers = [
+            "StateLock::acquire_with_timeout(",
+            "StateLock::acquire(&state_lock::default_lock_path(&config",
+        ];
+        let load_markers = [
+            "bootstrap::load_node_config_two_phase_with_host_runtime(",
+            "bootstrap::load_node_config_two_phase_standalone(",
+        ];
+        for (lock, load) in lock_markers.iter().zip(load_markers) {
+            let lock_at = production.find(lock).expect(lock);
+            let settle_at = production[lock_at..]
+                .find(&settle)
+                .expect("settle after lock")
+                + lock_at;
+            let load_at = production.find(load).expect(load);
+            assert!(lock_at < settle_at && settle_at < load_at, "{load}");
+        }
     }
 }
