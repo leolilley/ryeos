@@ -46,6 +46,11 @@ on:
         required: false
         default: ""
         type: string
+      long_e2e:
+        description: "Run the daemon e2e that the other jobs never run (the 21 capacity rollovers, about 14 minutes), on its own"
+        required: true
+        default: false
+        type: boolean
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -1459,6 +1464,73 @@ jobs:
           --nextest-run-archive "$RUNNER_TEMP/e2e-archive/e2e.tar.zst"
           --partition "hash:${{ matrix.shard }}/$SHARDS"
           --no-tests=pass
+
+  # G-11: the 21 capacity rollovers are `#[ignore]` and return early unless
+  # RYEOS_LONG_E2E=1, so no other job ever ran them. This runs them on request
+  # (a dispatch with long_e2e=true), sets the variable, passes `--ignored`, and
+  # fails unless exactly that one test passed and nothing skipped.
+  long-e2e:
+    name: Long daemon e2e (21 capacity rollovers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.long_e2e }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache (plain rustc if it is down)
+        uses: ./.github/actions/sccache-or-plain
+        with:
+          off: ${{ vars.SCCACHE_OFF == 'true' }}
+
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Restore or refresh the bundle state
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: "false"
+          github-token: ${{ github.token }}
+
+      - name: Run the 21 rollovers
+        env:
+          RYEOS_LONG_E2E: "1"
+          RUST_MIN_STACK: 8388608
+        run: |
+          log="$RUNNER_TEMP/long-e2e.log"
+          cargo test -p ryeosd --locked --features scheduling,model-provider-setup \
+            --test capacity_rollover_e2e -- --ignored --exact \
+            twenty_one_rollovers_renew_the_epoch_without_exhausting --test-threads 1 --nocapture 2>&1 | tee "$log"
+          [[ "${PIPESTATUS[0]}" == 0 ]] || { echo "FAIL: the rollover test failed" >&2; exit 1; }
+          if grep -qi 'skipped' "$log"; then
+            echo "FAIL: the rollover test printed a skip, so the proof did not run" >&2; exit 1
+          fi
+          grep -q '^test result: ok\. 1 passed; 0 failed' "$log" || { echo "FAIL: expected exactly one passed test" >&2; exit 1; }
+          # The loop prints "rollover N completed" after each rollover's checks:
+          # exactly 21, in order, or the loop did not run (a pass in 0.00 s with no
+          # marker is a skip; the run on a hosted runner took about 14 minutes).
+          # The marker can share a line with libtest's own "test ... " prefix (stderr
+          # and stdout interleave), so it is matched anywhere on a line, not anchored.
+          markers="$(grep -o 'rollover [0-9][0-9]* completed' "$log" | sed 's/^rollover \([0-9][0-9]*\) completed$/\1/' | tr '\n' ' ')"
+          expected="$(seq -s ' ' 1 21) "
+          [[ "$markers" == "$expected" ]] || { echo "FAIL: expected the rollover markers 1 to 21, saw: ${markers:-none}" >&2; exit 1; }
 
   test:
     name: Workspace tests
