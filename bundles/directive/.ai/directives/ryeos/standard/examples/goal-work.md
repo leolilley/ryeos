@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T14:15:53Z:7360e3b5f68e123727a790f1306cba04f9f355c5b64d800f6a564fe9961d5f74:6vUF4sl+GS+hPzefxWwFJsj+ChkobsRXOvNk0Ec0WMslSerDlO76gnF0pQ4izGDLY2y/4zZtBd9dWA/1qr5NCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T20:01:13Z:fe58f433f9f967630f16622821fe4bdc6318ec48e8f01ae8ddd61f5c642392a9:ER0jdwLWGlwEgv9IhtphNTCCZD7SL2GD6dyScCKBLD6WambjHUWykCtX8/8+y4Bjd+RaB78NrSdGzHb7eVhODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example working directive for the goal-and-judge graph: does the task and returns one deliverable. It is told only the goal, the round number and the author's repair text for criteria it failed."
 version: "1.0.0"
@@ -7,7 +7,6 @@ model:
 limits:
   turns: 12
   tokens: 120000
-  spend_usd: "1"
 inputs:
   - name: goal
     type: string

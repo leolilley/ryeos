@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T16:39:11Z:f79e53a2eb199fa06f7b3f307a905097e10e38b48c2c8a3c1e4075857acd44fc:rfqqsQjxcW78tkvYf4fp8suD1w+BSSBu/DCjxx0Ow82PQF1H8e+uRksJJRnTJISAt69jeUzdfXjD1O/+lbm5Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T20:01:13Z:7387b30b943f03ca8cbffe32892e5b120956cc6f3facf7fd2280cfd6bb1077cb:7iSB2As+rI6Py7i+d22fLoPygvPJlhPIvErah+2Th+8caJ2XbMsNApBbHJOSOWTy29o5lBSaJhN1aiQLiRgZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
@@ -39,6 +39,8 @@ What it does, each stage a followed child with a fresh context:
 4. A result outside that shape ends the graph failed with `judge_result_invalid`: a wrong type, or a key that is not a signed criterion (the signed repair tool refuses it, in every round including the last). A judge's own words never reach the working directive; it is only ever given the author's signed repair text for the failed keys.
 5. `max_rounds` is signed state. A start gate ends the graph failed with `goal_config_invalid` before any directive runs unless it is a whole number from 1 to 8 (2.5, 0 and 9 are refused). After `max_rounds` rounds the graph ends failed with `goal_rounds_exhausted`, never successful. Rounds count against the graph's own limits (here `max_steps`; the time and spend limits of the launch apply as they do to any graph), and a limit's own failure wins: a graph stopped by `max_steps` fails with `exceeded max_steps`, not with the example's code, and never completes.
 6. The graph returns the working and judge thread ids of every round in `trail` (`work:<round>=<thread>;`, `judge:<round>=<thread>;`). Each of those threads records the model it ran on in its own `cognition_frame` event (`request_options.model`) beside the hash of the provider configuration that route resolved to, so a reader tells work from judge by the thread id. The judge may use the same route as the working directive; that is recorded, not forbidden.
+
+The example directives declare turn and token limits but no `spend_usd`: a hard spend limit is refused at launch (`hard_spend_bound_ineligible`) on a route whose spend is only advisory, so add one to your copy when your route is priced.
 
 The three failure codes come from a signed tool that exits non-zero, so the run's failure carries the code in its diagnostic. A graph cannot yet end failed with its own code from a return node; that is a known gap (`fail: {code, message}` on the return node, Q-19).
 

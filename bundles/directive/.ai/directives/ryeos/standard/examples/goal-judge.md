@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-28T14:15:53Z:ba2caeb37d7b51acc3cd332e1b84c507a82d51a57a9637082e9ab2b8dfae1916:X+Zq9aW8egx/o+SvpkRKtGD20jGR3bOJbJBjgSoX9QGcZkA6mtTLa78DUNm81tNGKF/ALdsmzCPrmF/rNoH/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-28T20:01:13Z:aafac924c16e7b7b816c192767220aa4f45e941249cb377598512555614df87d:pzPlCauukjd8bwg3T2soWjNnd/5QpVUNuXxUlW4y8/uQlqfuWe8xNFFJRa3Ue+9nIv2izRwadO+tprBL0ThQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example judge directive for the goal-and-judge graph: holds no tool, sees the goal, the author's criteria and the quoted deliverable only, and returns a closed result."
 version: "1.0.0"
@@ -7,7 +7,6 @@ model:
 limits:
   turns: 2
   tokens: 40000
-  spend_usd: "0.5"
 inputs:
   - name: goal
     type: string
