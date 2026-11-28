@@ -120,13 +120,32 @@ async fn narrowed_surfaces_refuse_no_view_source_as_outside_their_ceiling() {
                 entry
                     .reason
                     .contains(ryeos_ui::compiled_binding::REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING)
-                    && !entry.coordinate.starts_with("affordance:")
+                    && entry.reason.contains("source lane")
             })
             .collect();
         assert!(
             refused.is_empty(),
             "{surface_ref}: sources refused by the ceiling: {refused:?}"
         );
+        // Every other ceiling refusal is an act (an affordance or the
+        // Surface's route) refused because the act lane is empty; nothing
+        // else may be refused by the ceiling.
+        for entry in attachment
+            .compiled_binding
+            .binding
+            .attenuated
+            .iter()
+            .filter(|entry| {
+                entry
+                    .reason
+                    .contains(ryeos_ui::compiled_binding::REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING)
+            })
+        {
+            assert!(
+                entry.reason.contains("affordance lane"),
+                "{surface_ref}: {entry:?} is refused by the ceiling but is not an act"
+            );
+        }
     }
 }
 
