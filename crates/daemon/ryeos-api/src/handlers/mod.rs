@@ -30,6 +30,7 @@ pub mod bundle_release;
 pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
 pub mod bundle_smoke;
+pub mod bundle_stage_clear;
 pub mod bundle_verify;
 pub mod commands_dispatch;
 pub mod commands_get;
@@ -151,6 +152,7 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
+pub(crate) mod stage_lane;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
@@ -314,6 +316,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_pull::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    bundle_stage_clear::DESCRIPTOR,
     trust_list::LIST_DESCRIPTOR,
     records::GET_DESCRIPTOR,
     records::LIST_DESCRIPTOR,

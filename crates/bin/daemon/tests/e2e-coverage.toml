@@ -89,6 +89,14 @@ covers = ["ryeos-directive-definition"]
 [tests.bundle_parity]
 covers = ["ryeos-bundle", "ryeos-directive-definition", "ryeos-engine", "ryeos-graph-definition", "ryeos-handler-bins", "ryeos-handler-protocol", "ryeos-parser-bins"]
 
+[tests.bundle_staging_apply_e2e]
+covers = ["ryeos-api", "ryeos-engine", "ryeos-http-egress", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_install.rs", "crates/daemon/ryeos-api/src/handlers/bundle_list.rs", "crates/daemon/ryeos-api/src/handlers/bundle_stage_clear.rs", "crates/daemon/ryeos-api/src/handlers/remote_bundle_install.rs"]
+
+[tests.bundle_staging_lane_e2e]
+covers = ["ryeos-api", "ryeos-bundle", "ryeos-engine", "ryeos-http-egress", "ryeos-node", "ryeos-node-runtime"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_install.rs", "crates/daemon/ryeos-api/src/handlers/stage_lane.rs", "crates/daemon/ryeos-api/src/handlers/bundle_pull.rs", "crates/daemon/ryeos-app/src/bundle_transaction.rs", "crates/engine/ryeos-node-runtime/src/bundle_bootstrap.rs"]
+
 [tests.bundle_state_home_e2e]
 covers = ["ryeos-bundle"]
 paths = ["crates/daemon/ryeos-app/src/bundle_state_home.rs", "crates/daemon/ryeos-app/src/bundle_state_transfer.rs"]
@@ -375,6 +383,18 @@ paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeo
 [tests.provider_bad_turn_e2e]
 covers = ["ryeos-accounting", "ryeos-chat-stub", "ryeos-directive-definition", "ryeos-directive-runtime", "ryeos-http-egress", "ryeos-provider-contract", "ryeos-runtime"]
 paths = ["crates/daemon/ryeos-app/src/accounting_anchor.rs", "crates/daemon/ryeos-app/src/accounting_db/**"]
+
+[tests.public_page_e2e]
+covers = ["ryeos-ui"]
+paths = ["bundles/ryeos-public/**", "crates/daemon/ryeos-api/src/routes/**"]
+
+[tests.public_route_gating_e2e]
+covers = ["ryeos-cli", "ryeos-ui"]
+paths = ["crates/daemon/ryeos-api/src/handlers/system_routes.rs", "crates/daemon/ryeos-api/src/published.rs", "crates/daemon/ryeos-api/src/routes/**", "crates/daemon/ryeos-app/src/route_diagnostics.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
+
+[tests.public_route_install_e2e]
+covers = ["ryeos-bundle"]
+paths = ["crates/daemon/ryeos-api/src/handlers/bundle_install.rs", "crates/daemon/ryeos-app/src/route_raw.rs", "crates/engine/ryeos-node-runtime/src/node_policy/sections/public_routes.rs"]
 
 [tests.publication_e2e]
 covers = ["ryeos-api", "ryeos-engine", "ryeos-node", "ryeos-node-runtime"]

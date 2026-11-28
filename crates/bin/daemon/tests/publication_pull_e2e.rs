@@ -5,8 +5,9 @@
 //! configured and no copy of the bundle. B's operator runs `bundle/pull` with
 //! A's `/published` URL, A's node key fingerprint and the record hash. The
 //! pull refuses a wrong node pin, a wrong record hash and a non-https URL
-//! without moving a blob, then installs the bundle through B's own admission:
-//! every installed file hashes to its manifest entry.
+//! without moving a blob, then fetches, verifies and stages the bundle in B's
+//! staging area. Nothing is installed or registered, the node still boots, and
+//! bundle/list shows the stage as `staged`.
 
 use ryeosd::test_support as common;
 
@@ -166,41 +167,87 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
         "a refused pull left a bundle behind"
     );
 
-    // The right pins reach the install and are refused there: a live install
-    // would change the registrations the signed init completion record pins,
-    // so it is refused until live installs are staged. Nothing is written.
-    let (status, refused) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
-    assert_eq!(status, 501, "{refused:#}");
+    // The right pins fetch, verify and stage the bundle. Nothing is installed
+    // or registered: a live install cannot change the registrations the signed
+    // init completion record pins.
+    let journal = b.state_path.join(".ai/state/node-journal");
+    let journal_before = dir_listing(&journal);
+    let (status, staged) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
+    // The 200 answer is the pull thread's terminal write succeeding: the
+    // pinned completion record was not touched.
+    assert_eq!(status, 200, "{staged:#}");
+    let result = &staged["result"];
+    assert_eq!(result["status"], "staged", "{staged:#}");
+    assert_eq!(result["installed"], false, "{staged:#}");
     assert_eq!(
-        refused["code"], "live_install_staged_unavailable",
-        "{refused:#}"
+        result["receipt"],
+        "fetched and verified; staged; takes effect at the next start by a signed operation",
+        "{staged:#}"
     );
     assert!(
-        refused["error"].as_str().is_some_and(
-            |text| text.contains("live installs are staged; staging is not available yet")
-        ),
-        "{refused:#}"
+        !staged.to_string().contains("installed to"),
+        "the answer must not say installed: {staged:#}"
     );
+    let digest = result["tree_digest"]
+        .as_str()
+        .expect("tree digest")
+        .to_owned();
     assert!(
         !b.state_path.join(".ai/bundles").join(BUNDLE).exists(),
-        "a refused pull left a bundle behind"
+        "a staged pull put a bundle in the bundle root"
     );
     assert!(
         !b.state_path
             .join(".ai/node/bundles")
             .join(format!("{BUNDLE}.yaml"))
             .exists(),
-        "a refused pull left a registration behind"
+        "a staged pull registered a bundle"
     );
+    assert_eq!(
+        dir_listing(&journal),
+        journal_before,
+        "a staged pull wrote to the offline ledger"
+    );
+    let stage_dir = b.state_path.join(".ai/state/bundle-staging").join(&digest);
+    assert!(stage_dir.join("stage.record").is_file());
+    assert!(stage_dir.join("tree").is_dir());
+    assert!(stage_dir.join("publication.json").is_file());
+    assert!(stage_dir.join("manifest.json").is_file());
+    assert!(stage_dir.join("origin-public-key.json").is_file());
 
-    // The refused pull was recorded as a thread whose terminal write
-    // succeeded (the 501 answer above), the node answers, and it boots again.
-    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
-    assert_eq!(status, 200, "{listed:#}");
-    b.restart()
-        .await
-        .expect("the node boots after the refusals");
-    let (status, listed) = service(&b, "service:bundle/list", json!({})).await;
+    // bundle/list shows it as staged and not installed, with what it declares.
+    assert_staged_not_installed(&b, &digest).await;
+
+    // The node still boots, the stage survives, and it is still not installed.
+    b.restart().await.expect("the node boots with a stage held");
+    assert_staged_not_installed(&b, &digest).await;
+
+    // The same bytes pulled again are the same stage.
+    let (status, again) = pull(&b, &publication.url, &node_pin, &publication.record_hash).await;
+    assert_eq!(status, 200, "{again:#}");
+    assert_eq!(again["result"]["tree_digest"], digest, "{again:#}");
+    assert_eq!(again["result"]["already_staged"], true, "{again:#}");
+}
+
+fn dir_listing(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let mut entries: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .map(|read| {
+            read.map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.metadata().unwrap().len(),
+                )
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    entries
+}
+
+async fn assert_staged_not_installed(b: &DaemonHarness, digest: &str) {
+    let (status, listed) = service(b, "service:bundle/list", json!({})).await;
     assert_eq!(status, 200, "{listed:#}");
     assert!(
         !listed["result"]["bundles"]
@@ -208,8 +255,17 @@ async fn a_second_node_pulls_a_published_bundle_with_the_pins_and_only_with_the_
             .expect("bundles")
             .iter()
             .any(|entry| entry["name"] == BUNDLE),
-        "{listed:#}"
+        "a staged bundle is listed as installed: {listed:#}"
     );
+    let staged = listed["result"]["staged"].as_array().expect("staged");
+    let entry = staged
+        .iter()
+        .find(|entry| entry["name"] == BUNDLE)
+        .unwrap_or_else(|| panic!("the stage is not listed: {listed:#}"));
+    assert_eq!(entry["status"], "staged", "{listed:#}");
+    assert_eq!(entry["tree_digest"], digest, "{listed:#}");
+    assert!(entry["declared"]["provides_kinds"].is_array(), "{listed:#}");
+    assert!(entry.get("lane").is_none(), "{listed:#}");
 }
 
 /// The unpinned publisher: A holds a bundle whose manifest is signed by a key
