@@ -111,6 +111,10 @@ jobs:
       # crates/bin/daemon/tests/e2e-coverage.toml; ERROR fails the e2e archive job.
       e2e_tests: ${{ steps.classify.outputs.e2e_tests || 'ERROR' }}
       e2e_shards: ${{ steps.classify.outputs.e2e_shards || '[1]' }}
+      # JSON list of {suite, test} real-isolation smoke tests the Process-scope e2e job runs in a
+      # merge gate: non-empty only when the branch touches operator authority or the trust store
+      # (the [authority] table of the coverage map). ERROR fails that job.
+      process_scope_suites: ${{ steps.classify.outputs.process_scope_suites || 'ERROR' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -137,7 +141,7 @@ jobs:
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages|e2e_tests|e2e_shards|process_scope_suites)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
           # A changed package no coverage-map entry names runs no daemon e2e test; say so.
           sed -n 's/^e2e_uncovered=//p' "$RUNNER_TEMP/classification" | jq -r '.[]?' | while IFS= read -r package; do
             echo "::warning title=No daemon e2e coverage::$package changed, but no entry in crates/bin/daemon/tests/e2e-coverage.toml covers it, so no daemon e2e test runs for it."
@@ -163,6 +167,13 @@ jobs:
 
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
+      # The helper's failure path (exit 1 after four attempts) and removal path
+      # (a packages.microsoft.com source is deleted) cannot be forced on a
+      # runner, so they run here against a stub apt-get and a temporary
+      # sources directory.
+      - name: Check the apt-update helper's failure and removal paths
+        run: ./.ai/tools/ryeos/development/runner-host/lib/test-apt-update.sh
 
       - name: Check signed files match their signed content hash
         # Mirrors lillux::signature::content_hash_after_signature
@@ -366,6 +377,7 @@ jobs:
         run: python3 .ai/tools/ryeos/development/repository-validation/cli-presentation.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check shell terminal presentation
+        timeout-minutes: 3
         run: ./scripts/pkg/test-ryeos-terminal.sh
 
       - name: Check configured-remote qualification contract
@@ -413,7 +425,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -478,7 +490,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -587,7 +599,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -642,7 +654,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -693,7 +705,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -788,7 +800,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -853,7 +865,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -921,7 +933,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Show the coreutils under test
@@ -977,7 +989,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1068,7 +1080,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1110,7 +1122,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1179,7 +1191,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1307,7 +1319,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1394,7 +1406,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1476,7 +1488,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1554,7 +1566,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1642,7 +1654,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1861,22 +1873,31 @@ jobs:
   # nonzero number of tests with none skipped.
   process-scope-e2e:
     name: Process-scope e2e (real isolation)
-    needs: [bundles]
+    needs: [bundles, classify]
     runs-on: ubuntu-24.04
     # The handoff acceptance matrix alone runs 55 to 90 minutes depending on
     # the runner, and the claude follow suite runs after it.
     timeout-minutes: 180
-    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    # A merge gate runs this job only for a branch that touches operator authority or the trust
+    # store (classify's process_scope_suites), and then only the named smoke test; the full
+    # matrix stays on next.
+    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) || (inputs.merge_gates && needs.classify.outputs.process_scope_suites != '[]')) }}
     env:
       RUST_MIN_STACK: 8388608
       E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
     steps:
+      - name: Refuse an unreadable authority classification
+        if: ${{ inputs.merge_gates && needs.classify.outputs.process_scope_suites == 'ERROR' }}
+        run: |
+          echo "::error::The classifier could not decide the authority smoke tests; refusing to treat that as none."
+          exit 1
+
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -1908,7 +1929,7 @@ jobs:
       # The enclosure's pid 1 is tini, the init the shipped image runs.
       - name: Install the enclosure init
         run: |
-          sudo -n apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo -n apt-get install -y --no-install-recommends tini
           test -x /usr/bin/tini
 
@@ -1933,19 +1954,26 @@ jobs:
           echo "delegated child cgroup.controllers: $(cat /sys/fs/cgroup/ryeos-controller-evidence/cgroup.controllers)"
           sudo -n rmdir /sys/fs/cgroup/ryeos-controller-evidence
 
+      - name: Restore or refresh the bundle state (merge gate)
+        if: ${{ inputs.merge_gates }}
+        uses: ./.github/actions/restore-bundle-state
+        with:
+          bundles-changed: ${{ needs.classify.outputs.bundles_changed }}
+          github-token: ${{ github.token }}
+
       - name: Download the refreshed bundle state
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.bundles.result == 'success' && !inputs.merge_gates }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: bundle-state-${{ github.sha }}
           path: ${{ runner.temp }}/bundle-state
 
       - name: Restore the refreshed bundles
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.bundles.result == 'success' && !inputs.merge_gates }}
         run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
 
       - name: Restore next's bundle state (no bundles job in this run)
-        if: ${{ needs.bundles.result != 'success' }}
+        if: ${{ needs.bundles.result != 'success' && !inputs.merge_gates }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Restores the bundle state of the newest next CI run whose bundles job succeeded and
@@ -2022,9 +2050,12 @@ jobs:
         run: ./scripts/ci/check-test-support-feature-leak.sh
 
       - name: Build the e2e test binaries
+        env:
+          # A merge gate builds only the suites its smoke tests name.
+          SUITES: ${{ inputs.merge_gates && join(fromJSON(needs.classify.outputs.process_scope_suites).*.suite, ' ') || 'session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e' }}
         run: |
           set -euo pipefail
-          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
+          for suite in $SUITES; do
             build_json="$RUNNER_TEMP/build-$suite.jsonl"
             if ! cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json > "$build_json"; then
               # The JSON stream holds the compiler's own error text, which
@@ -2046,12 +2077,13 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/run-suite" <<'RUN'
           #!/bin/bash
-          # run-suite SUITE PASSED IGNORED: run one e2e test binary as an
-          # administrator under the real process-scope mode and fail unless
-          # exactly PASSED tests passed, none failed and exactly IGNORED are
-          # ignored. The mode turns every unqualified-host skip into a failure.
+          # run-suite SUITE PASSED IGNORED [TEST]: run one e2e test binary (or,
+          # with TEST, that one test by exact name) as an administrator under the
+          # real process-scope mode and fail unless exactly PASSED tests passed,
+          # none failed and exactly IGNORED are ignored. The mode turns every
+          # unqualified-host skip into a failure.
           set -euo pipefail
-          suite="$1"; passed_expected="$2"; ignored_expected="$3"
+          suite="$1"; passed_expected="$2"; ignored_expected="$3"; only="${4:-}"
           exe="$(sed -n "s/^$suite=//p" "$RUNNER_TEMP/e2e-executables")"
           log="$RUNNER_TEMP/$suite.log"
           set +e
@@ -2062,7 +2094,7 @@ jobs:
             "RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1" \
             "RYEOS_TEST_SCOPE_ACCOUNT=$(id -u):$(id -g)" \
             ${RYEOS_TEST_HANDLER_BIN_DIR:+"RYEOS_TEST_HANDLER_BIN_DIR=$RYEOS_TEST_HANDLER_BIN_DIR"} \
-            "$exe" --test-threads=1 2>&1 | tee "$log"
+            "$exe" ${only:+"$only" --exact} --test-threads=1 2>&1 | tee "$log"
           status="${PIPESTATUS[0]}"
           set -e
           result="$(grep -E '^test result: ' "$log" | tail -n 1)"
@@ -2080,18 +2112,30 @@ jobs:
           staged="$GITHUB_WORKSPACE/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
           if [[ -d "$staged" ]]; then echo "RYEOS_TEST_HANDLER_BIN_DIR=$staged" >> "$GITHUB_ENV"; fi
 
+      # A merge gate runs each named smoke test once and requires exactly one test run and
+      # passed; run-suite fails a skip, so a smoke test that skips fails the job.
+      - name: Authority smoke tests (merge gate)
+        if: ${{ inputs.merge_gates }}
+        env:
+          SMOKE: ${{ needs.classify.outputs.process_scope_suites }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SMOKE" | jq -r '.[] | "\(.suite) \(.test)"' | while read -r suite test; do
+            "$RUNNER_TEMP/run-suite" "$suite" 1 0 "$test"
+          done
+
       - name: Session secret delivery (real isolation)
-        if: ${{ !inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e' }}
+        if: ${{ !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e') }}
         run: |
           "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 7 0
 
       - name: Handoff crash recovery (real isolation)
-        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
+        if: ${{ !cancelled() && !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
         run: |
           "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
 
       - name: Claude Code worker follow (real isolation)
-        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
+        if: ${{ !cancelled() && !inputs.merge_gates && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
         # The suite's development-hosted nodes start as the only child of tini,
         # pid 1 of their own user, pid, mount and cgroup namespace (the
         # enclosure placement, the shipped image's shape).
@@ -2153,7 +2197,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
@@ -2196,7 +2240,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
@@ -2262,7 +2306,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
@@ -2328,7 +2372,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          ./.ai/tools/ryeos/development/runner-host/lib/apt-update.sh
           sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
