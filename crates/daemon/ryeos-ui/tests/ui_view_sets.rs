@@ -110,6 +110,7 @@ async fn narrowed_surfaces_refuse_no_view_source_as_outside_their_ceiling() {
     for surface_ref in [
         "surface:ryeos/ui/base-observe",
         "surface:ryeos/ui/assistant-observe",
+        "surface:ryeos/ui/lens-observe",
     ] {
         let (session_id, _ctx, _producer, coordinate) =
             test_state::live_presentation_with_surface(&state, surface_ref).await;

@@ -9,14 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-const STILL_WILDCARD: &[&str] = &[
-    "lens",
-    "lens-observe",
-    "project",
-    "thread",
-    "thread-crystal",
-    "workbench",
-];
+const STILL_WILDCARD: &[&str] = &["lens", "project", "thread", "thread-crystal", "workbench"];
 
 const SERVICE_PREFIX: &str = "ryeos.execute.service.";
 
