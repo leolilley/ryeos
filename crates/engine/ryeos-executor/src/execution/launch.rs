@@ -10038,6 +10038,23 @@ async fn prepare_successor_launch(
     .await
 }
 
+/// A successor whose live project root is no longer admitted to the key that
+/// launched it is a typed launch-policy refusal (403) carrying
+/// `resume_project_not_admitted`; every other preparation failure stays
+/// internal.
+fn successor_preparation_error(error: anyhow::Error) -> BuildAndLaunchError {
+    match error.downcast_ref::<crate::execution::runner::ResumeProjectNotAdmitted>() {
+        Some(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: crate::execution::runner::RESUME_PROJECT_NOT_ADMITTED.to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
+        None => BuildAndLaunchError::Internal(error),
+    }
+}
+
 /// Successor preparation with the managed pass's explicit re-prepare mode.
 /// `rebind_names` is set only for the first preparation of an operator
 /// rebind successor.
@@ -10065,7 +10082,8 @@ async fn prepare_successor_launch_in_mode(
         resume,
         sealed_request,
         None,
-    )?;
+    )
+    .map_err(successor_preparation_error)?;
     let project_path = execution.provenance.effective_path().to_path_buf();
     let (suppress_stimulus, capability_policy, checkpoint_resume_mode) = match mode {
         SuccessorMode::Machine => (
@@ -13486,6 +13504,27 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unadmitted_resume_project_is_a_typed_forbidden_launch_refusal() {
+        // Context added on the way up must not hide the refusal.
+        let error = anyhow::Error::new(crate::execution::runner::ResumeProjectNotAdmitted(
+            "checkout is not registered".to_owned(),
+        ))
+        .context("prepare successor");
+        match successor_preparation_error(error) {
+            BuildAndLaunchError::LaunchPreparation(inner) => {
+                assert_eq!(inner.code(), "resume_project_not_admitted");
+                assert_eq!(inner.http_status(), axum::http::StatusCode::FORBIDDEN);
+                assert!(inner.to_string().contains("checkout is not registered"));
+            }
+            other => panic!("expected a typed launch refusal, got {other}"),
+        }
+        assert!(matches!(
+            successor_preparation_error(anyhow::anyhow!("unrelated")),
+            BuildAndLaunchError::Internal(_)
+        ));
+    }
 
     #[test]
     fn operator_reachable_financial_refusals_are_typed_launch_policy_refusals() {

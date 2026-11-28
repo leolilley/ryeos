@@ -1534,7 +1534,14 @@ async fn handle_request_continuation(
         &resume_context,
         &params.thread_id,
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        // A typed refusal keeps its type so the caller sees its code.
+        ryeos_executor::execution::launch::BuildAndLaunchError::LaunchPreparation(refusal) => {
+            anyhow::Error::new(*refusal)
+        }
+        other => anyhow::Error::new(other),
+    })?;
     let initial_events = prepared.initial_audit_events()?;
     let result = state.threads.request_continuation_with_events(
         &params,
